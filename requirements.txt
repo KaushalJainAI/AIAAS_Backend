@@ -1,0 +1,50 @@
+# Django Core
+Django>=5.0
+djangorestframework>=3.14
+django-cors-headers>=4.3
+
+# Authentication & Security
+djangorestframework-simplejwt>=5.3
+django-ratelimit>=4.1
+cryptography>=41.0
+python-dotenv>=1.0
+
+# Async & Real-time
+channels>=4.0
+channels-redis>=4.2
+daphne>=4.0
+
+# Task Queue
+celery>=5.3
+redis>=5.0
+
+# LangChain & LangGraph (Workflow Execution)
+langchain>=0.1
+langgraph>=0.0.40
+langchain-openai>=0.0.5
+langchain-google-genai>=0.0.6
+langchain-community>=0.0.20
+
+# Vector Store (for Inference Engine)
+chromadb>=0.4
+sentence-transformers>=2.2
+
+# HTTP & API
+httpx>=0.26
+aiohttp>=3.9
+requests>=2.31
+
+# Database
+psycopg2-binary>=2.9  # PostgreSQL
+
+# Utilities
+pydantic>=2.5
+python-dateutil>=2.8
+
+# Testing
+pytest>=7.4
+pytest-django>=4.7
+pytest-asyncio>=0.23
+
+# Code Execution Sandbox (for Code nodes)
+RestrictedPython>=7.0
