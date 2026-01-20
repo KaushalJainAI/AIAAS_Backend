@@ -150,6 +150,41 @@
 
 ---
 
+## 🌐 Frontend-Driven APIs (NEW)
+
+### AI Chat API
+- [ ] Chat message endpoint with streaming
+- [ ] Conversation history storage
+- [ ] History retrieval endpoint
+- [ ] Context-aware responses (workflow/node)
+
+### Documents API
+- [ ] Document upload endpoint
+- [ ] Document list/retrieve endpoints
+- [ ] Document deletion
+- [ ] RAG search integration
+
+### Insights/Analytics API
+- [ ] Execution statistics endpoint
+- [ ] Per-workflow metrics
+- [ ] Cost breakdown endpoint
+- [ ] Credit usage tracking
+
+### Orchestrator Streaming API
+- [ ] WebSocket connection handler
+- [ ] Real-time event broadcasting
+- [ ] Pending HITL requests endpoint
+- [ ] HITL response endpoint
+- [ ] Thought history retrieval
+
+### Audit Trail API
+- [ ] Audit entry model
+- [ ] Audit logging middleware
+- [ ] Audit retrieval endpoints
+- [ ] Audit export (CSV/JSON)
+
+---
+
 ## 📊 Summary
 
 | Phase | Items | Priority | Est. Hours |
@@ -166,5 +201,7 @@
 | Error Handling | 5 | High | 3h |
 | **Security** | **30** | **Critical** | **25.5h** |
 | Testing | 7 | High | 4h |
+| **Frontend APIs** | **18** | **Medium** | **16.5h** |
 
-**Total: ~67.5 hours**
+**Total: ~84 hours**
+
