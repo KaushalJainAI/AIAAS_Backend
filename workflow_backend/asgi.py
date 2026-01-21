@@ -1,7 +1,7 @@
 """
 ASGI config for workflow_backend project.
 
-It exposes the ASGI callable as a module-level variable named ``application``.
+Exposes the ASGI callable with WebSocket support via Django Channels.
 
 For more information on this file, see
 https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
@@ -10,7 +10,27 @@ https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
 import os
 
 from django.core.asgi import get_asgi_application
+from channels.routing import ProtocolTypeRouter, URLRouter
+from channels.auth import AuthMiddlewareStack
+from channels.security.websocket import AllowedHostsOriginValidator
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'workflow_backend.settings')
 
-application = get_asgi_application()
+# Initialize Django ASGI application early to populate AppRegistry
+django_asgi_app = get_asgi_application()
+
+# Import routing after Django setup
+from streaming.routing import websocket_urlpatterns
+
+application = ProtocolTypeRouter({
+    # HTTP requests handled by Django
+    "http": django_asgi_app,
+    
+    # WebSocket connections with authentication
+    "websocket": AllowedHostsOriginValidator(
+        AuthMiddlewareStack(
+            URLRouter(websocket_urlpatterns)
+        )
+    ),
+})
+

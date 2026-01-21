@@ -4,6 +4,53 @@
 
 ---
 
+# Technical Decisions (Confirmed)
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Graph Execution** | LangGraph (LangChain) | Production-ready graph orchestration library |
+| **Task Queue** | Celery + Redis | Long workflows async, short ones sync |
+| **Schema Authority** | Backend-defined | Frontend adapts to backend node schemas |
+| **Local LLM** | Ollama (localhost) | Credential mapping, local inference |
+| **Real-time HITL** | Django Channels (WebSocket) | Already configured, real-time communication |
+| **Timeouts** | Per-node adjustable | Default 60s, configurable in node settings |
+
+## Execution Strategy
+```
+┌─────────────────────────────────────────────────────────┐
+│  Workflow Received                                       │
+│     │                                                    │
+│     ├──▶ Quick (< 5 nodes, no LLM) ─▶ Sync execution    │
+│     │                                                    │
+│     └──▶ Long (5+ nodes or LLM)   ─▶ Celery async task  │
+│               │                                          │
+│               ▼                                          │
+│          Redis Queue ──▶ Worker ──▶ LangGraph executor  │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Node Timeout Configuration
+```python
+# Each node can specify its own timeout
+class NodeConfig:
+    timeout_seconds: int = 60      # Default 60s
+    retry_count: int = 0           # Number of retries
+    retry_delay_seconds: int = 5   # Delay between retries
+```
+
+## Ollama Integration (Local LLM)
+```python
+# Used for:
+# 1. Credential mapping (placeholder → real credential)
+# 2. AI workflow generation/modification
+# 3. Local inference nodes (no cloud API needed)
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL = "llama3.2"  # or mistral, codellama, etc.
+```
+
+---
+
 # Part 1: The System Components
 
 *What exists in the architecture*
@@ -155,56 +202,161 @@ Only valid workflows get compiled into LangGraph execution plans.
 
 The executor walks through the graph, running each node in order. Data flows from one node to the next. Errors are caught and logged. Conditional nodes (IF, Switch) change the path.
 
-## 🤖 Orchestrator
-*"The supervisor that can ask for help"*
+## 🤖 Orchestrator Agent (JARVIS)
+*"Your AI assistant for workflow automation"*
 
-While workflows run, the orchestrator watches and **actively communicates with humans when needed**:
+The Orchestrator is a **LangGraph ReAct agent** that uses your workflow system as its toolkit. It can create, run, modify, and combine automations via natural language.
+
+### Architecture
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    🤖 JARVIS ORCHESTRATOR AGENT                          │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │                    MEMORY SYSTEMS                                    │ │
+│  │  📝 Conversation    🗂️ Knowledge      📚 Workflow       👤 User     │ │
+│  │     Memory             Base            Templates       Preferences   │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │                    AGENT TOOLS                                       │ │
+│  │  create_workflow │ execute_workflow │ modify_workflow │ pause       │ │
+│  │  combine_workflows │ list_workflows │ schedule │ ask_human (HITL)   │ │
+│  │  query_knowledge_base │ find_similar_templates                      │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Core Capabilities
-- **Supervise**: Monitor workflow execution, detect issues
-- **Generate**: Create workflows from natural language
-- **Modify**: Adapt existing workflows dynamically
-- **Control**: Stop, pause, resume at any point
+
+| Capability | Description | Priority |
+|------------|-------------|----------|
+| **Create** | Generate workflows from natural language | 🟢 P0 |
+| **Execute** | Run workflows, return results | 🟢 P0 |
+| **Modify** | Change existing workflows via chat | 🟢 P0 |
+| **Pause/Resume** | Control running executions | 🟢 P0 |
+| **HITL** | Ask human for approval/clarification | 🟢 P0 |
+| **Combine** | Merge or chain multiple workflows | 🟡 P1 |
+| **Templates** | Suggest from learned patterns | 🟡 P1 |
+| **Knowledge Base** | Query organizational docs | 🟡 P1 |
+| **Schedule** | Set up recurring executions | 🟡 P1 |
+| ~~Real-time Monitor~~ | ~~Watch running workflows~~ | 🔴 Deferred |
+
+### Memory Systems
+
+**1. Conversation Memory** (Easy)
+```python
+# Store all chats, summarize when > 20 messages
+class ConversationMemory:
+    def add_message(self, role, content)
+    def get_context(self) -> list  # Returns relevant history
+    def summarize_if_needed()      # LLM summarizes old messages
+```
+
+**2. Workflow Templates** (Medium)
+```python
+# Learn from successful workflows + n8n community
+class WorkflowTemplate:
+    name, description, nodes, edges
+    source: 'user' | 'n8n' | 'system'
+    embedding: vector for similarity search
+    usage_count: int
+```
+
+**3. Knowledge Base** (Medium)
+- Uses existing Document + DocumentChunk models
+- RAG for organizational docs
+- Agent tool: `query_knowledge_base(question)`
+
+### Learning from n8n Workflows
+
+```
+n8n JSON ─▶ Parse ─▶ Map node types ─▶ Generate description ─▶ Embed ─▶ Store
+```
+
+**Node Type Mapping:**
+```python
+N8N_TO_OURS = {
+    "n8n-nodes-base.httpRequest": "http_request",
+    "n8n-nodes-base.slack": "slack",
+    "n8n-nodes-base.openAi": "openai",
+    # ... 200+ mappings
+}
+```
+
+**Template Search:**
+```python
+@tool
+def find_similar_templates(user_request: str) -> list:
+    """Find workflow templates matching user's description"""
+    # Embed request → search templates → return top 5
+```
 
 ### Human Feedback Triggers
 
 **1. Approval Requests** (Blocking)
 ```
-Orchestrator: "This workflow will delete 500 records from the database. 
-              Approve or Cancel?"
+Agent: "This will delete 500 records. Approve?"
 User: "APPROVE" / "CANCEL"
 ```
 
-**2. Clarification Questions** (Blocking)
+**2. Clarification** (Blocking)
 ```
-Orchestrator: "I found 3 matching APIs. Which one should I use?
-              1. OpenAI GPT-4
-              2. Anthropic Claude
-              3. Google Gemini"
+Agent: "Which API: 1) OpenAI 2) Claude 3) Gemini?"
 User: "2"
 ```
 
-**3. Error Recovery** (Optional blocking)
+**3. Error Recovery** (Blocking)
 ```
-Orchestrator: "Node 'HTTP Request' failed with 429 Rate Limited.
-              Options:
-              1. Retry after 60 seconds
-              2. Skip this node
-              3. Stop workflow"
-User: "1"
+Agent: "HTTP failed with 429. Retry/Skip/Stop?"
+User: "Retry"
 ```
 
-**4. Progress Updates** (Non-blocking)
-```
-Orchestrator: "✅ Step 3/5 complete. Scraped 150 products.
-              Proceeding to data transformation..."
-```
+### Implementation Phases
 
-### Implementation Requirements
-- WebSocket connection for real-time communication
-- Notification queue for async approvals (email/push)
-- Timeout handling (auto-proceed or auto-cancel)
-- Audit trail for all human decisions
+**Phase 1: Core Agent** (P0) ⏱️ ~2 weeks
+- [ ] Basic chat via WebSocket
+- [ ] Workflow tools (create, execute, pause, modify)
+- [ ] Simple conversation memory (last 20 messages)
+- [ ] HITL integration
+
+**Phase 2: Memory & Templates** (P1) ⏱️ ~1 week
+- [ ] Conversation summarization
+- [ ] WorkflowTemplate model
+- [ ] n8n workflow importer
+- [ ] Template similarity search
+
+**Phase 3: Knowledge Base** (P1) ⏱️ ~1 week
+- [ ] Document embedding pipeline
+- [ ] RAG query tool
+- [ ] Context injection
+
+### New Models Required
+
+```python
+# orchestrator/models.py - ADD THESE
+
+class WorkflowTemplate(models.Model):
+    """Learned workflow patterns from users and n8n"""
+    name = models.CharField(max_length=200)
+    description = models.TextField()
+    source = models.CharField(choices=[('user','User'),('n8n','n8n'),('system','System')])
+    nodes = models.JSONField()
+    edges = models.JSONField()
+    tags = models.JSONField(default=list)
+    usage_count = models.IntegerField(default=0)
+    embedding = models.BinaryField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+class ConversationSummary(models.Model):
+    """Summarized conversation context for long chats"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    conversation_id = models.UUIDField()
+    summary = models.TextField()
+    key_entities = models.JSONField(default=list)
+    embedding = models.BinaryField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+```
 
 ## 🔐 Credentials
 *"Secrets, safely stored"*
