@@ -43,7 +43,7 @@ class Document(models.Model):
         help_text='Original filename'
     )
     file = models.FileField(
-        upload_to='documents/'
+        upload_to=''
     )
     file_type = models.CharField(
         max_length=10,
@@ -97,6 +97,17 @@ class Document(models.Model):
         help_text='Virtual folder path for organization'
     )
     
+    # Platform Sharing - User can opt-in to share document with platform KB
+    is_shared = models.BooleanField(
+        default=False,
+        help_text='If True, document is shared with platform knowledge base'
+    )
+    shared_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text='When the document was shared with platform'
+    )
+    
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -110,6 +121,7 @@ class Document(models.Model):
             models.Index(fields=['user', 'status']),
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['file_type', 'status']),
+            models.Index(fields=['is_shared', 'status']),  # For platform KB queries
         ]
 
     def __str__(self):

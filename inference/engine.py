@@ -72,7 +72,7 @@ class KnowledgeBase:
         metadata: dict | None = None,
         chunk_size: int = 500,
         chunk_overlap: int = 50
-    ) -> list[str]:
+        ) -> list[str]:
         """
         Add a document to the knowledge base.
         
@@ -119,7 +119,7 @@ class KnowledgeBase:
         query: str,
         top_k: int = 5,
         min_score: float = 0.3
-    ) -> list[SearchResult]:
+        ) -> list[SearchResult]:
         """
         Search the knowledge base.
         
@@ -168,7 +168,7 @@ class KnowledgeBase:
         text: str,
         chunk_size: int,
         overlap: int
-    ) -> list[str]:
+        ) -> list[str]:
         """Split text into overlapping chunks."""
         chunks = []
         start = 0
@@ -265,14 +265,14 @@ class RAGPipeline:
         
         # Build prompt
         prompt = f"""Based on the following context, answer the user's question.
-If the answer cannot be found in the context, say so.
+    If the answer cannot be found in the context, say so.
 
-Context:
-{context_text}
+    Context:
+    {context_text}
 
-Question: {question}
+    Question: {question}
 
-Answer:"""
+    Answer:"""
         
         # Get LLM response
         from nodes.handlers.registry import get_registry
@@ -333,22 +333,118 @@ Answer:"""
             }
 
 
-# Global instances
-_knowledge_base: KnowledgeBase | None = None
-_rag_pipeline: RAGPipeline | None = None
+# User Knowledge Base Manager - Provides per-user isolation
+class UserKnowledgeBaseManager:
+    """
+    Manages per-user knowledge bases for data isolation.
+    
+    Each user has their own isolated FAISS index.
+    A separate platform KB exists for opted-in shared documents.
+    
+    Usage:
+        manager = get_kb_manager()
+        user_kb = manager.get_user_kb(user_id)
+        await user_kb.initialize()
+        await user_kb.add_document(...)
+    """
+    
+    def __init__(self):
+        self._user_kbs: dict[int, KnowledgeBase] = {}
+        self._platform_kb: KnowledgeBase | None = None
+        self._lock = None  # For thread safety in async context
+    
+    def get_user_kb(self, user_id: int) -> KnowledgeBase:
+        """
+        Get or create a knowledge base for a specific user.
+        
+        Args:
+            user_id: The user's ID
+            
+        Returns:
+            User-specific KnowledgeBase instance
+        """
+        if user_id not in self._user_kbs:
+            logger.info(f"Creating new knowledge base for user {user_id}")
+            self._user_kbs[user_id] = KnowledgeBase()
+        return self._user_kbs[user_id]
+    
+    def get_platform_kb(self) -> KnowledgeBase:
+        """
+        Get the shared platform knowledge base.
+        Contains documents that users have opted to share.
+        
+        Returns:
+            Platform-wide shared KnowledgeBase instance
+        """
+        if self._platform_kb is None:
+            logger.info("Creating platform knowledge base")
+            self._platform_kb = KnowledgeBase()
+        return self._platform_kb
+    
+    def clear_user_kb(self, user_id: int) -> bool:
+        """Clear a user's knowledge base (e.g., when they delete all documents)."""
+        if user_id in self._user_kbs:
+            self._user_kbs[user_id].clear()
+            del self._user_kbs[user_id]
+            logger.info(f"Cleared knowledge base for user {user_id}")
+            return True
+        return False
+    
+    def get_stats(self) -> dict:
+        """Get statistics about knowledge bases."""
+        return {
+            'user_count': len(self._user_kbs),
+            'user_ids': list(self._user_kbs.keys()),
+            'platform_kb_exists': self._platform_kb is not None,
+        }
 
 
+# Global manager instance
+_kb_manager: UserKnowledgeBaseManager | None = None
+
+
+def get_kb_manager() -> UserKnowledgeBaseManager:
+    """Get the global knowledge base manager instance."""
+    global _kb_manager
+    if _kb_manager is None:
+        _kb_manager = UserKnowledgeBaseManager()
+    return _kb_manager
+
+
+def get_user_knowledge_base(user_id: int) -> KnowledgeBase:
+    """Convenience function to get a user's knowledge base."""
+    return get_kb_manager().get_user_kb(user_id)
+
+
+def get_platform_knowledge_base() -> KnowledgeBase:
+    """Convenience function to get the platform knowledge base."""
+    return get_kb_manager().get_platform_kb()
+
+
+# Legacy compatibility - will use user_id=0 as fallback
+# DEPRECATED: Use get_user_knowledge_base(user_id) instead
 def get_knowledge_base() -> KnowledgeBase:
-    """Get global knowledge base instance."""
-    global _knowledge_base
-    if _knowledge_base is None:
-        _knowledge_base = KnowledgeBase()
-    return _knowledge_base
+    """
+    DEPRECATED: Use get_user_knowledge_base(user_id) for proper isolation.
+    This returns a fallback KB and logs a warning.
+    """
+    logger.warning("get_knowledge_base() is deprecated. Use get_user_knowledge_base(user_id) instead.")
+    return get_kb_manager().get_user_kb(0)  # Fallback to user 0
 
 
-def get_rag_pipeline() -> RAGPipeline:
-    """Get global RAG pipeline instance."""
-    global _rag_pipeline
-    if _rag_pipeline is None:
-        _rag_pipeline = RAGPipeline(get_knowledge_base())
-    return _rag_pipeline
+def get_rag_pipeline(user_id: int | None = None) -> RAGPipeline:
+    """
+    Get RAG pipeline for a specific user.
+    
+    Args:
+        user_id: User ID for user-specific KB. If None, uses platform KB.
+        
+    Returns:
+        RAGPipeline configured with appropriate knowledge base
+    """
+    if user_id is not None:
+        kb = get_user_knowledge_base(user_id)
+    else:
+        kb = get_platform_knowledge_base()
+    return RAGPipeline(kb)
+

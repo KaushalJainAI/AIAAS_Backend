@@ -37,5 +37,17 @@ urlpatterns = [
     
     # Inference (documents, RAG)
     path('api/inference/', include('inference.urls')),
+
+    # Credentials
+    path('api/credentials/', include('credentials.urls')),
 ]
+
+
+# Serve media files in development
+from django.conf import settings
+from django.conf.urls.static import static
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
 

@@ -82,7 +82,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 # ==================== Auth Serializers ====================
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """JWT token with additional user claims"""
+    """JWT token with additional user claims and user data in response"""
     
     @classmethod
     def get_token(cls, user):
@@ -93,12 +93,30 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['username'] = user.username
         
         # Add tier if profile exists
-        try:
+        if hasattr(user, 'profile') and user.profile:
             token['tier'] = user.profile.tier
-        except UserProfile.DoesNotExist:
+        else:
             token['tier'] = 'free'
         
         return token
+    
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        
+        # Get or create profile for user data
+        profile, _ = UserProfile.objects.get_or_create(user=self.user)
+        
+        # Add user data to response for frontend
+        data['user'] = {
+            'id': self.user.id,
+            'email': self.user.email,
+            'name': f"{self.user.first_name} {self.user.last_name}".strip() or self.user.username,
+            'tier': profile.tier,
+            'credits': profile.credits_remaining,
+            'createdAt': self.user.date_joined.isoformat(),
+        }
+        
+        return data
 
 
 class ChangePasswordSerializer(serializers.Serializer):

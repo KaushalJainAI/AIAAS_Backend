@@ -69,39 +69,62 @@ def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
     if errors:
         return errors
     
-    # Detect cycles using DFS
+    # Detect cycles using DFS, but allow cycles if they involve a loop node
+    # Loop nodes are allowed to be part of a cycle (back-edges)
+    LOOP_NODE_TYPES = {'split_in_batches', 'loop'}
+    
     visited = set()
     rec_stack = set()
-    cycle_node = None
+    path_nodes = [] # Track path to identify nodes in the current recursion stack
+    cycle_detected = False
     
-    def has_cycle(node_id: str) -> bool:
-        nonlocal cycle_node
+    def has_bad_cycle(node_id: str) -> bool:
         visited.add(node_id)
         rec_stack.add(node_id)
+        path_nodes.append(node_id)
         
         for neighbor in adjacency[node_id]:
             if neighbor not in visited:
-                if has_cycle(neighbor):
+                if has_bad_cycle(neighbor):
                     return True
             elif neighbor in rec_stack:
-                cycle_node = neighbor
-                return True
+                # Cycle detected!
+                # Check if any node in the current cycle path is a loop node
+                # The cycle consists of nodes from 'neighbor' to current 'node_id' in path_nodes
+                try:
+                    start_index = path_nodes.index(neighbor)
+                    cycle_path = path_nodes[start_index:]
+                    
+                    # Check if any node in the cycle is a loop node
+                    has_loop_node = any(node_types.get(nid) in LOOP_NODE_TYPES for nid in cycle_path)
+                    
+                    if not has_loop_node:
+                        errors.append(CompileError(
+                            node_id=neighbor,
+                            error_type="dag_cycle",
+                            message=f"Infinite cycle detected involving nodes: {', '.join(cycle_path)}"
+                        ))
+                        return True # Bad cycle found
+                    
+                    # If it has a loop node, it's a valid loop/cycle, so exclude it from being flagged
+                    # but we generally stop exploring this path to avoid infinite recursion in DFS
+                    # checks, though here we just return False to ignore *this* back-edge as an error.
+                    
+                except ValueError:
+                    # Should not happen if logic is correct
+                    pass
         
         rec_stack.remove(node_id)
+        path_nodes.pop()
         return False
     
     for node_id in node_ids:
         if node_id not in visited:
-            if has_cycle(node_id):
-                errors.append(CompileError(
-                    node_id=cycle_node,
-                    error_type="dag_cycle",
-                    message=f"Cycle detected involving node '{cycle_node}'"
-                ))
-                return errors  # Stop at first cycle
+            if has_bad_cycle(node_id):
+                return errors  # Stop at first bad cycle
     
     # Find trigger nodes (no incoming edges)
-    trigger_types = {'manual_trigger', 'webhook_trigger', 'schedule_trigger'}
+    trigger_types = {'manual_trigger', 'webhook_trigger', 'schedule_trigger', 'webhook'}
     triggers = [nid for nid in node_ids if in_degree[nid] == 0]
     
     if not triggers:
@@ -111,6 +134,7 @@ def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
         ))
     
     # Check for orphan nodes (not reachable from any trigger)
+    # Note: For orphan checking, we still traverse. Valid loops make everything reachable.
     reachable = set()
     
     def mark_reachable(node_id: str):
@@ -210,33 +234,60 @@ def validate_node_configs(nodes: list[dict]) -> list[CompileError]:
 
 def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
     """
-    Return nodes in topological order (dependencies first).
+    Return nodes in execution order.
     
-    Uses Kahn's algorithm.
+    For DAGs, this is topological sort.
+    For Cyclic graphs (loops), we break cycles at the loop node loop-back edge.
     """
     node_ids = {node['id'] for node in nodes}
+    node_types = {node['id']: node.get('type', '') for node in nodes}
+    LOOP_NODE_TYPES = {'split_in_batches', 'loop'}
+    
     in_degree: dict[str, int] = {nid: 0 for nid in node_ids}
     adjacency: dict[str, list[str]] = defaultdict(list)
     
     for edge in edges:
         source = edge.get('source')
         target = edge.get('target')
+        source_handle = edge.get('sourceHandle', 'output')
+        
         if source in node_ids and target in node_ids:
+            # If this is a back-edge from a loop node (i.e., 'loop' output), don't count it for dependency
+            # This allows the loop node to start without waiting for the loop body to finish (which would be impossible)
+            # Actually, standard topo sort waits for all inputs.
+            # In n8n execution model, we might not need strict topo sort for execution if we use a different runner.
+            # But for linearizing:
+            # Identifying back-edges is hard without DFS.
+            
+            # Simple heuristic: If source is a loop node and handle is 'loop', treat as weak dependency?
+            # Or just rely on standard Kahn's and if it fails (cycles), handle leftovers.
+            
             adjacency[source].append(target)
             in_degree[target] += 1
-    
+            
     # Start with nodes that have no dependencies
     queue = [nid for nid in node_ids if in_degree[nid] == 0]
     result = []
     
+    processed_count = 0
     while queue:
         node_id = queue.pop(0)
         result.append(node_id)
+        processed_count += 1
         
         for neighbor in adjacency[node_id]:
             in_degree[neighbor] -= 1
             if in_degree[neighbor] == 0:
                 queue.append(neighbor)
+                
+    # If we have nodes left (cycles), we need to handle them.
+    # This usually means picking a node to 'break' the cycle.
+    # In a loop, the entry to the loop is usually ready.
+    if processed_count < len(node_ids):
+        # Naive approach: find a node with minimum in-degree (likely the loop entry) and process it
+        remaining = list(node_ids - set(result))
+        # Just append remaining - the executor handles order dynamically anyway
+        result.extend(remaining)
     
     return result
 
@@ -247,12 +298,19 @@ NODE_OUTPUT_TYPES = {
     'manual_trigger': {'main': 'any'},
     'webhook_trigger': {'main': 'json'},
     'schedule_trigger': {'main': 'datetime'},
+    'webhook': {'main': 'json'},
     
     # Core nodes
     'http_request': {'success': 'json', 'error': 'error'},
     'code': {'success': 'any', 'error': 'error'},
     'set': {'output': 'json'},
     'if': {'true': 'passthrough', 'false': 'passthrough'},
+    'switch': {'output-0': 'passthrough', 'output-1': 'passthrough', 'output-2': 'passthrough', 'output-3': 'passthrough'},
+    'merge': {'output': 'any'},
+    
+    # Flow Control
+    'split_in_batches': {'loop': 'any', 'done': 'any'},
+    'loop': {'loop': 'any', 'done': 'any'},
     
     # LLM nodes produce text
     'openai': {'success': 'text', 'error': 'error'},
@@ -263,6 +321,11 @@ NODE_OUTPUT_TYPES = {
     'gmail': {'success': 'json', 'error': 'error'},
     'slack': {'success': 'json', 'error': 'error'},
     'google_sheets': {'success': 'json', 'error': 'error'},
+    'notion': {'success': 'json', 'error': 'error'},
+    'postgres': {'success': 'json', 'error': 'error'},
+    'mysql': {'success': 'json', 'error': 'error'},
+    'mongodb': {'success': 'json', 'error': 'error'},
+    'redis': {'success': 'json', 'error': 'error'},
 }
 
 # Input type expectations (what types a node can accept)
@@ -271,6 +334,11 @@ NODE_INPUT_TYPES = {
     'code': ['json', 'any', 'text', 'passthrough'],
     'set': ['json', 'any', 'text', 'passthrough'],
     'if': ['json', 'any', 'text', 'passthrough'],
+    'switch': ['json', 'any', 'text', 'passthrough'],
+    'merge': ['json', 'any', 'text', 'passthrough'],
+    'split_in_batches': ['json', 'any', 'list', 'passthrough'],
+    'loop': ['json', 'any', 'list', 'passthrough'],
+    
     'openai': ['json', 'any', 'text', 'passthrough'],
     'gemini': ['json', 'any', 'text', 'passthrough'],
     'ollama': ['json', 'any', 'text', 'passthrough'],

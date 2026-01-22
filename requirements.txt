@@ -28,6 +28,7 @@ langchain-community>=0.0.20
 # Vector Store (for Inference Engine)
 chromadb>=0.4
 sentence-transformers>=2.2
+faiss-cpu>=1.7  
 
 # HTTP & API
 httpx>=0.26
@@ -48,3 +49,5 @@ pytest-asyncio>=0.23
 
 # Code Execution Sandbox (for Code nodes)
 RestrictedPython>=7.0
+
+adrf

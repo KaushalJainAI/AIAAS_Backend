@@ -44,19 +44,40 @@ class UserRegistrationView(generics.CreateAPIView):
     
     Rate limited: 3 attempts per minute
     Creates user and associated UserProfile automatically.
+    Returns JWT tokens for immediate auth.
     """
     serializer_class = UserRegistrationSerializer
     permission_classes = [AllowAny]
     throttle_classes = [RegisterRateThrottle]
     
     def create(self, request, *args, **kwargs):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         
+        # Generate tokens for immediate login
+        refresh = RefreshToken.for_user(user)
+        
+        # Get profile
+        try:
+            profile = user.profile
+        except UserProfile.DoesNotExist:
+            profile = UserProfile.objects.create(user=user)
+        
         return Response({
-            'user': UserSerializer(user).data,
-            'message': 'User registered successfully. Please login to continue.'
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'name': f"{user.first_name} {user.last_name}".strip() or user.username,
+                'tier': profile.tier,
+                'credits': profile.credits_remaining,
+                'createdAt': user.date_joined.isoformat(),
+            },
+            'message': 'User registered successfully.'
         }, status=status.HTTP_201_CREATED)
 
 
