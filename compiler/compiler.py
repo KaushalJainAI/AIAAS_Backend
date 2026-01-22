@@ -17,6 +17,7 @@ from .validators import (
     validate_dag,
     validate_credentials,
     validate_node_configs,
+    validate_type_compatibility,
     topological_sort,
 )
 
@@ -96,6 +97,10 @@ class WorkflowCompiler:
         # Phase 3: Node Config Validation
         config_errors = validate_node_configs(self.nodes)
         errors.extend(config_errors)
+        
+        # Phase 4: Type Compatibility Validation
+        type_errors = validate_type_compatibility(self.nodes, self.edges)
+        errors.extend(type_errors)
         
         if errors:
             return CompileResult(

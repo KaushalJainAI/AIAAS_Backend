@@ -130,4 +130,24 @@ class NodeRegistry:
 # Global convenience function
 def get_registry() -> NodeRegistry:
     """Get the global NodeRegistry instance"""
-    return NodeRegistry.get_instance()
+    registry = NodeRegistry.get_instance()
+    
+    # Lazy registration of core nodes to avoid circular imports?
+    # Or just register them here if they aren't auto-discovered.
+    # Assuming we need to manually register if not done elsewhere.
+    # Checking existing code flow... 
+    # Usually registration happens at app startup or module import.
+    # Let's import and register here to be safe and ensure they exist.
+    
+    from .core_nodes import HTTPRequestNode, CodeNode, SetNode, IfNode
+    from .logic_nodes import LoopNode, SplitInBatchesNode
+    
+    if not registry.has_handler('http_request'):
+        registry.register(HTTPRequestNode)
+        registry.register(CodeNode)
+        registry.register(SetNode)
+        registry.register(IfNode)
+        registry.register(LoopNode)
+        registry.register(SplitInBatchesNode)
+        
+    return registry

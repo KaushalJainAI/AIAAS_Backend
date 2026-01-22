@@ -49,6 +49,7 @@ class ExecutionContext(BaseModel):
     execution_id: UUID = Field(..., description="Unique execution identifier")
     user_id: int = Field(..., description="User running the workflow")
     workflow_id: int = Field(..., description="Workflow being executed")
+    workflow_version_id: int | None = Field(default=None, description="Specific version ID if applicable")
     
     # Runtime state
     node_outputs: dict[str, Any] = Field(
@@ -65,6 +66,10 @@ class ExecutionContext(BaseModel):
     )
     
     # Execution tracking
+    loop_stats: dict[str, int] = Field(
+        default_factory=dict,
+        description="Iteration counts for loop nodes (node_id -> count)"
+    )
     executed_nodes: list[str] = Field(
         default_factory=list,
         description="List of node IDs that have been executed"

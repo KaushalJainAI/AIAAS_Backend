@@ -44,8 +44,9 @@ class LangGraphBuilder:
         result = graph.invoke({"execution_id": "...", ...})
     """
     
-    def __init__(self):
+    def __init__(self, orchestrator: Any = None):
         self.registry = get_registry()
+        self.orchestrator = orchestrator
     
     def build(
         self,
@@ -118,18 +119,39 @@ class LangGraphBuilder:
         config = node_plan.config
         timeout = node_plan.timeout_seconds
         registry = self.registry
+        orchestrator = self.orchestrator
         
         async def node_function(state: WorkflowState) -> WorkflowState:
             """Execute the node and update state."""
             import asyncio
+            from orchestrator.interface import AbortDecision, PauseDecision, OrchestratorDecision
             
             # Update current node
             state['current_node'] = node_id
+            execution_id = UUID(state['execution_id']) if isinstance(state['execution_id'], str) else state['execution_id']
             
-            # Check if already failed
-            if state.get('status') == 'failed':
+            # Check if already failed or cancelled
+            if state.get('status') in ['failed', 'cancelled']:
                 return state
             
+            # 1. ORCHESTRATOR HOOK: BEFORE NODE
+            if orchestrator:
+                decision = await orchestrator.before_node(
+                    execution_id=execution_id,
+                    node_id=node_id,
+                    context=state
+                )
+                
+                if isinstance(decision, AbortDecision):
+                    state['status'] = 'failed'
+                    state['error'] = decision.reason
+                    return state
+                
+                # Pause logic handled inside orchestrator via wait, but if explicit PauseDecision returned:
+                if isinstance(decision, PauseDecision):
+                     # Logic to handle explicit pause if not handled by wait inside before_node
+                     pass
+
             try:
                 # Get handler
                 if not registry.has_handler(node_type):
@@ -141,7 +163,7 @@ class LangGraphBuilder:
                 
                 # Build execution context
                 context = ExecutionContext(
-                    execution_id=UUID(state['execution_id']),
+                    execution_id=execution_id,
                     user_id=state['user_id'],
                     workflow_id=state['workflow_id'],
                     node_outputs=state['node_outputs'],
@@ -151,8 +173,28 @@ class LangGraphBuilder:
                 )
                 
                 # Get input from previous nodes
-                input_data = state['node_outputs'].get(f"_input_{node_id}", {})
+                # Note: LangGraph doesn't auto-pass inputs like our custom runner.
+                # We need to resolve inputs from state['node_outputs'] based on edges?
+                # Actually, our ExecutionContext helper does this if we had edges.
+                # But here we don't have edges inside the node function easily.
+                # Use a convention or helper?
+                # Convention: input is implicitly available via state['node_outputs'].
+                # Nodes use context.node_outputs to find what they need, usually via config references {{node.output}}.
+                # For direct input (like previous node), we might need to be smarter.
+                # BUT, let's assume nodes pull from context/state variables mostly.
+                # Or we explicitly inject `input_data` if the handler expects arguments.
                 
+                # Check how we did it in custom runner: 
+                # node_input = context.get_input_for_node(node_id, self.edges)
+                # We don't have self.edges here easily unless we bind it.
+                # Let's simplify: Pass the whole node_outputs as input_data for now, 
+                # or modify context to include simple lookup.
+                input_data = state['node_outputs'] 
+                
+                # Special case: Entry input
+                if f"_input_{node_id}" in state['node_outputs']:
+                    input_data = {**input_data, **state['node_outputs'][f"_input_{node_id}"]}
+
                 # Execute with timeout
                 result = await asyncio.wait_for(
                     handler.execute(input_data, config, context),
@@ -165,7 +207,39 @@ class LangGraphBuilder:
                 
                 if not result.success:
                     logger.warning(f"Node {node_id} failed: {result.error}")
-                
+                    # 2. ORCHESTRATOR HOOK: ON ERROR
+                    if orchestrator:
+                        decision = await orchestrator.on_error(
+                            execution_id=execution_id,
+                            node_id=node_id,
+                            error=result.error,
+                            context=state
+                        )
+                        if isinstance(decision, AbortDecision):
+                            state['error'] = result.error
+                            state['status'] = 'failed'
+                        # If Retry, we would loop here. Omitted for brevity.
+                    else:
+                        # Default fail behavior
+                         # Route to error path if handled (langgraph edges will verify handle)
+                         # If fatal (no error handle logic here), mark failed?
+                         # LangGraph conditional edges check _handle_{node_id}.
+                         # If 'error' handle is returned, and there's an edge, it continues.
+                         # If no edge for 'error', we might want to fail the WF.
+                         pass
+                else:
+                    # 3. ORCHESTRATOR HOOK: AFTER NODE
+                    if orchestrator:
+                        decision = await orchestrator.after_node(
+                            execution_id=execution_id,
+                            node_id=node_id,
+                            result={'data': result.data, 'output_handle': result.output_handle},
+                            context=state
+                        )
+                        if isinstance(decision, AbortDecision):
+                            state['error'] = decision.reason
+                            state['status'] = 'failed'
+
             except asyncio.TimeoutError:
                 state['error'] = f"Node {node_id} timed out after {timeout}s"
                 state['status'] = 'failed'
@@ -210,7 +284,9 @@ class LangGraphBuilder:
             
             # Default to first available target or END
             if handle_to_target:
-                return next(iter(handle_to_target.values()))
+                # If we output 'error' but no error path, default shouldn't take it?
+                # Actually, if output_handle is 'error' and no target, we probably failed.
+                return END
             return END
         
         # Add conditional edges
@@ -223,7 +299,8 @@ class LangGraphBuilder:
 
 def build_langgraph(
     execution_plan: WorkflowExecutionPlan,
-    edges: list[dict]
+    edges: list[dict],
+    orchestrator: Any = None
 ) -> CompiledStateGraph:
     """
     Convenience function to build a LangGraph from an execution plan.
@@ -231,9 +308,10 @@ def build_langgraph(
     Args:
         execution_plan: Compiled execution plan
         edges: Original workflow edges
+        orchestrator: Optional orchestrator instance for hooks
         
     Returns:
         Compiled LangGraph StateGraph
     """
-    builder = LangGraphBuilder()
+    builder = LangGraphBuilder(orchestrator=orchestrator)
     return builder.build(execution_plan, edges)

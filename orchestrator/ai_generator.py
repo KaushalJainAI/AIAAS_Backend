@@ -87,9 +87,11 @@ class AIWorkflowGenerator:
         
         descriptions = []
         for schema in schemas:
-            fields_desc = ", ".join([f.id for f in schema.fields[:5]]) if schema.fields else "none"
+            fields_list = schema.get('fields', [])
+            # fields are also dicts after model_dump
+            fields_desc = ", ".join([f.get('id') for f in fields_list[:5]]) if fields_list else "none"
             descriptions.append(
-                f"- {schema.type}: {schema.name} ({schema.category}) - fields: {fields_desc}"
+                f"- {schema.get('type')}: {schema.get('name')} ({schema.get('category')}) - fields: {fields_desc}"
             )
         
         return "\n".join(descriptions)

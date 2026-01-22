@@ -351,15 +351,18 @@ def respond_to_hitl(request, request_id: str):
 
 # ======================== AI Chat API ========================
 
-@api_view(['GET', 'POST'])
+@api_view(['GET', 'POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def conversation_messages(request, conversation_id: str = None):
     """
     GET: Get conversation history
     POST: Add a message (and get AI response)
+    DELETE: Delete a conversation
     """
     from uuid import uuid4
     
+    from django.db.models import Max
+
     if request.method == 'GET':
         if not conversation_id:
             # List recent conversations
@@ -367,8 +370,8 @@ def conversation_messages(request, conversation_id: str = None):
                 ConversationMessage.objects
                 .filter(user=request.user)
                 .values('conversation_id')
-                .distinct()
-                .order_by('-created_at')[:20]
+                .annotate(last_active=Max('created_at'))
+                .order_by('-last_active')[:20]
             )
             return Response({'conversations': list(conversations)})
         
@@ -412,6 +415,19 @@ def conversation_messages(request, conversation_id: str = None):
             'user_message': {'content': content, 'created_at': user_msg.created_at},
             'ai_response': {'content': ai_response, 'created_at': ai_msg.created_at},
         })
+    
+    elif request.method == 'DELETE':
+        if not conversation_id:
+            return Response({'error': 'Conversation ID required'}, status=400)
+            
+        deleted_count, _ = ConversationMessage.objects.filter(
+            user=request.user,
+            conversation_id=conversation_id
+        ).delete()
+        
+        return Response({'deleted': True, 'count': deleted_count})
+
+    return Response({'error': f'Method {request.method} not allowed'}, status=405)
 
 
 # ======================== Version History API ========================
@@ -494,6 +510,7 @@ def generate_workflow(request):
     
     description = request.data.get('description', '')
     credential_id = request.data.get('credential_id')
+    conversation_id = request.data.get('conversation_id')
     
     if not description:
         return Response({'error': 'Description is required'}, status=400)
@@ -524,6 +541,38 @@ def generate_workflow(request):
         )
         result['saved'] = True
         result['workflow_id'] = workflow.id
+
+    # Save to conversation history
+    from uuid import uuid4
+    conv_id = conversation_id or str(uuid4())
+    
+    # User message
+    ConversationMessage.objects.create(
+        user=request.user,
+        conversation_id=conv_id,
+        role='user',
+        content=f"Generate workflow: {description}",
+        metadata={'type': 'builder_generation'}
+    )
+    
+    # AI response
+    ai_content = f"I've created a workflow for you!\n\n**{result.get('name')}**\n\n{result.get('description')}"
+    if result.get('saved'):
+        ai_content += f"\n\nWorkflow ID: {result.get('workflow_id')}"
+        
+    ConversationMessage.objects.create(
+        user=request.user,
+        conversation_id=conv_id,
+        role='assistant',
+        content=ai_content,
+        metadata={
+            'type': 'builder_generation',
+            'workflow_id': result.get('workflow_id'),
+            'nodes_count': len(result.get('nodes', [])),
+        }
+    )
+    
+    result['conversation_id'] = conv_id
     
     return Response(result)
 
@@ -544,6 +593,7 @@ def modify_workflow(request, workflow_id: int):
     workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
     modification = request.data.get('modification', '')
     credential_id = request.data.get('credential_id')
+    conversation_id = request.data.get('conversation_id')
     
     if not modification:
         return Response({'error': 'Modification description is required'}, status=400)
@@ -578,6 +628,37 @@ def modify_workflow(request, workflow_id: int):
         workflow.edges = result.get('edges', workflow.edges)
         workflow.save()
         result['applied'] = True
+
+    # Save to conversation history
+    from uuid import uuid4
+    conv_id = conversation_id or str(uuid4())
+    
+    # User message
+    ConversationMessage.objects.create(
+        user=request.user,
+        conversation_id=conv_id,
+        workflow=workflow,
+        role='user',
+        content=f"Modify workflow: {modification}",
+        metadata={'type': 'builder_modification'}
+    )
+    
+    # AI response
+    ai_content = f"I've modified the workflow based on your request.\n\nChanges:\n{result.get('explanation', 'Workflow updated successfully.')}"
+    
+    ConversationMessage.objects.create(
+        user=request.user,
+        conversation_id=conv_id,
+        workflow=workflow,
+        role='assistant',
+        content=ai_content,
+        metadata={
+            'type': 'builder_modification',
+            'changes': result.get('changes', []),
+        }
+    )
+    
+    result['conversation_id'] = conv_id
     
     return Response(result)
 

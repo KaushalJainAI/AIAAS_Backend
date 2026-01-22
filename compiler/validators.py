@@ -35,7 +35,8 @@ def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
         return errors
     
     # Build node lookup and adjacency list
-    node_ids = {node['id'] for node in nodes}
+    node_ids = [node['id'] for node in nodes]  # preserve order
+
     node_types = {node['id']: node.get('type', '') for node in nodes}
     
     # Adjacency list: node_id -> list of downstream node_ids
@@ -83,7 +84,7 @@ def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
         rec_stack.add(node_id)
         path_nodes.append(node_id)
         
-        for neighbor in adjacency[node_id]:
+        for neighbor in sorted(adjacency[node_id]):
             if neighbor not in visited:
                 if has_bad_cycle(neighbor):
                     return True
@@ -218,6 +219,28 @@ def validate_node_configs(nodes: list[dict]) -> list[CompileError]:
             ))
             continue
         
+        # SPECIAL VALIDATION: Loop Nodes must have max_loop_count
+        if node_type in ['loop', 'split_in_batches']:
+            max_loop = config.get('max_loop_count')
+            if max_loop is None:
+                errors.append(CompileError(
+                    node_id=node_id,
+                    error_type="missing_config",
+                    message="Loop nodes must have 'max_loop_count' defined"
+                ))
+            elif not isinstance(max_loop, int) or max_loop <= 0:
+                errors.append(CompileError(
+                    node_id=node_id,
+                    error_type="invalid_config",
+                    message="'max_loop_count' must be a positive integer"
+                ))
+            elif max_loop > 1000: # Safe upper bound
+                errors.append(CompileError(
+                   node_id=node_id,
+                   error_type="invalid_config",
+                   message="'max_loop_count' cannot exceed 1000"
+                ))
+        
         # Validate config against handler's fields
         handler = registry.get_handler(node_type)
         config_errors = handler.validate_config(config)
@@ -234,44 +257,56 @@ def validate_node_configs(nodes: list[dict]) -> list[CompileError]:
 
 def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
     """
-    Return nodes in execution order.
+    Return nodes in strictly deterministic execution order.
     
-    For DAGs, this is topological sort.
+    For DAGs, this is topological sort with lexicographical tie-breaking.
     For Cyclic graphs (loops), we break cycles at the loop node loop-back edge.
     """
-    node_ids = {node['id'] for node in nodes}
+    # Use lists to preserve order and sorting for determinism
+    node_ids = sorted([node['id'] for node in nodes])
     node_types = {node['id']: node.get('type', '') for node in nodes}
     LOOP_NODE_TYPES = {'split_in_batches', 'loop'}
     
     in_degree: dict[str, int] = {nid: 0 for nid in node_ids}
     adjacency: dict[str, list[str]] = defaultdict(list)
     
-    for edge in edges:
+    # Process edges verify order (sort by source then target)
+    sorted_edges = sorted(
+        edges, 
+        key=lambda e: (e.get('source', ''), e.get('target', ''))
+    )
+    
+    for edge in sorted_edges:
         source = edge.get('source')
         target = edge.get('target')
-        source_handle = edge.get('sourceHandle', 'output')
         
         if source in node_ids and target in node_ids:
-            # If this is a back-edge from a loop node (i.e., 'loop' output), don't count it for dependency
-            # This allows the loop node to start without waiting for the loop body to finish (which would be impossible)
-            # Actually, standard topo sort waits for all inputs.
-            # In n8n execution model, we might not need strict topo sort for execution if we use a different runner.
-            # But for linearizing:
-            # Identifying back-edges is hard without DFS.
-            
-            # Simple heuristic: If source is a loop node and handle is 'loop', treat as weak dependency?
-            # Or just rely on standard Kahn's and if it fails (cycles), handle leftovers.
-            
+            # Deterministic adjacency build
             adjacency[source].append(target)
             in_degree[target] += 1
             
-    # Start with nodes that have no dependencies
-    queue = [nid for nid in node_ids if in_degree[nid] == 0]
+    # Sort adjacency lists for deterministic traversal
+    for nid in adjacency:
+        adjacency[nid].sort()
+            
+    # Start with nodes that have no dependencies, sort alphabetically for determinism
+    queue = sorted([nid for nid in node_ids if in_degree[nid] == 0])
     result = []
     
     processed_count = 0
     while queue:
+        # Pop from front (BFS-like) but queue is always sorted when adding
+        # Actually to maintain stable topo sort with tie breaking:
+        # 1. Pop first
+        # 2. Add children
+        # 3. Re-sort queue or insert in order? 
+        # Standard Kahn's Algo with Min-Heap/Priority Queue is best for determinism.
+        # Here we just sort the queue after every addition or just sort children before adding?
+        # If we append to end, it's BFS. If we sort, it's lexicographical topo sort.
+        # Let's simple-sort the queue to be safe.
+        queue.sort() 
         node_id = queue.pop(0)
+        
         result.append(node_id)
         processed_count += 1
         
@@ -280,13 +315,12 @@ def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
             if in_degree[neighbor] == 0:
                 queue.append(neighbor)
                 
-    # If we have nodes left (cycles), we need to handle them.
-    # This usually means picking a node to 'break' the cycle.
-    # In a loop, the entry to the loop is usually ready.
+    # Handle Cycles (Deterministically)
     if processed_count < len(node_ids):
-        # Naive approach: find a node with minimum in-degree (likely the loop entry) and process it
-        remaining = list(node_ids - set(result))
-        # Just append remaining - the executor handles order dynamically anyway
+        # Naive approach: find a node with minimum in-degree from remaining
+        # Tie-break by ID
+        remaining = sorted(list(set(node_ids) - set(result)))
+        # Append remaining in sorted order. Executor handles flow dynamically.
         result.extend(remaining)
     
     return result

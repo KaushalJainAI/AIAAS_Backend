@@ -196,11 +196,11 @@ class CodeNode(BaseNodeHandler):
             
             # Wrap code in function for return support
             wrapped_code = f"""
-def __execute():
-{chr(10).join('    ' + line for line in code.split(chr(10)))}
-    return locals().get('result', {{}})
-__result__ = __execute()
-"""
+    def __execute():
+    {chr(10).join('    ' + line for line in code.split(chr(10)))}
+        return locals().get('result', {{}})
+    __result__ = __execute()
+    """
             
             exec(wrapped_code, {"__builtins__": __builtins__}, local_vars)
             result = local_vars.get("__result__", {})
