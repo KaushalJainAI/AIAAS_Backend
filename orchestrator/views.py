@@ -102,6 +102,22 @@ def workflow_detail(request, workflow_id: int):
     elif request.method == 'PUT':
         data = request.data
         
+        # VERSIONING: Create a snapshot of the current state before update
+        # This ensures "Never mutate without versioning" rule
+        last_version = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number').first()
+        next_version_num = (last_version.version_number + 1) if last_version else 1
+        
+        WorkflowVersion.objects.create(
+            workflow=workflow,
+            version_number=next_version_num,
+            label=f"Auto-save v{next_version_num}",
+            nodes=workflow.nodes,
+            edges=workflow.edges,
+            workflow_settings=workflow.workflow_settings,
+            created_by=request.user,
+            change_summary="Auto-saved before modification",
+        )
+
         # Update fields
         if 'name' in data:
             workflow.name = data['name']
@@ -130,6 +146,7 @@ def workflow_detail(request, workflow_id: int):
             'id': workflow.id,
             'name': workflow.name,
             'updated_at': workflow.updated_at,
+            'version_created': next_version_num
         })
     
     elif request.method == 'DELETE':

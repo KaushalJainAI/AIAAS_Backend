@@ -43,13 +43,14 @@ async def execute_workflow(
     workflow_id: int,
     user,
     input_data: dict[str, Any] | None = None,
-    trigger_type: str = "manual"
+    trigger_type: str = "manual",
+    version_id: int | None = None
 ) -> dict[str, Any]:
     """
     Main entry point for workflow execution.
     
     This is the high-level service that:
-    1. Fetches the workflow from database
+    1. Fetches the workflow (or specific version) from database
     2. Validates and compiles to execution plan
     3. Creates execution log
     4. Runs via WorkflowExecutor
@@ -60,40 +61,47 @@ async def execute_workflow(
         user: User instance running the workflow
         input_data: Initial input data (e.g., webhook payload)
         trigger_type: How it was triggered ('manual', 'schedule', 'webhook', 'api')
+        version_id: Optional specific version number to execute
         
     Returns:
-        Dict with execution result:
-        {
-            "success": bool,
-            "execution_id": UUID string,
-            "status": "completed" | "failed" | "cancelled",
-            "output": dict,
-            "error": optional error message,
-            "duration_ms": int
-        }
+        Dict with execution result
     """
     input_data = input_data or {}
     execution_logger = get_execution_logger()
     
-    logger.info(f"Starting workflow execution: workflow_id={workflow_id}")
+    logger.info(f"Starting workflow execution: workflow_id={workflow_id}, version={version_id}")
     
     # Fetch workflow from database
     try:
         workflow = await sync_to_async(get_workflow)(workflow_id, user)
+        nodes = workflow.nodes or []
+        edges = workflow.edges or []
+        workflow_settings = workflow.workflow_settings or {}
+        
+        # If version_id specified, load that version
+        if version_id:
+            # We need to fetch the version
+            # Need to import locally to avoid circular imports potentially
+            from orchestrator.models import WorkflowVersion
+            version = await sync_to_async(WorkflowVersion.objects.get)(
+                workflow=workflow, 
+                version_number=version_id
+            )
+            nodes = version.nodes or []
+            edges = version.edges or []
+            workflow_settings = version.workflow_settings or {}
+            
     except Exception as e:
-        logger.error(f"Failed to fetch workflow {workflow_id}: {e}")
+        logger.error(f"Failed to fetch workflow {workflow_id} (v{version_id}): {e}")
         return {
             "success": False,
             "execution_id": None,
             "status": "failed",
-            "error": f"Workflow not found: {workflow_id}",
+            "error": f"Workflow not found: {workflow_id} v{version_id} ({e})",
             "output": {}
         }
     
     # Validate workflow
-    nodes = workflow.nodes or []
-    edges = workflow.edges or []
-    
     validation_errors = []
     validation_errors.extend(validate_dag(nodes, edges))
     validation_errors.extend(validate_node_configs(nodes))
@@ -118,11 +126,16 @@ async def execute_workflow(
     execution_plan = build_execution_plan(workflow_id, nodes, edges, execution_order)
     
     # Start execution log
+    # Include version metadata in input_data for audit (avoiding schema migration for now)
+    meta_input = input_data.copy()
+    if version_id:
+        meta_input['__execution_metadata__'] = {'version_id': version_id}
+        
     exec_log = await sync_to_async(execution_logger.start_execution)(
         workflow=workflow,
         user=user,
         trigger_type=trigger_type,
-        input_data=input_data
+        input_data=meta_input
     )
     
     # Load credentials for context
@@ -133,6 +146,7 @@ async def execute_workflow(
         execution_id=exec_log.execution_id,
         user_id=user.id,
         workflow_id=workflow_id,
+        workflow_version_id=version_id,
         credentials=credentials
     )
     

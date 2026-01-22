@@ -259,21 +259,24 @@ def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
     """
     Return nodes in strictly deterministic execution order.
     
-    For DAGs, this is topological sort with lexicographical tie-breaking.
-    For Cyclic graphs (loops), we break cycles at the loop node loop-back edge.
+    1. Preserves input order where possible.
+    2. Sorts zero-in-degree queues for determinism.
+    3. Breaks cycles at loop nodes.
     """
-    # Use lists to preserve order and sorting for determinism
-    node_ids = sorted([node['id'] for node in nodes])
+    # 1. Preserve input order for stability
+    node_ids = [node['id'] for node in nodes]
+    node_indices = {nid: i for i, nid in enumerate(node_ids)}
     node_types = {node['id']: node.get('type', '') for node in nodes}
     LOOP_NODE_TYPES = {'split_in_batches', 'loop'}
     
     in_degree: dict[str, int] = {nid: 0 for nid in node_ids}
     adjacency: dict[str, list[str]] = defaultdict(list)
     
-    # Process edges verify order (sort by source then target)
+    # Process edges - sort for determinism
+    # Sort by indices to allow stable processing relative to input order
     sorted_edges = sorted(
         edges, 
-        key=lambda e: (e.get('source', ''), e.get('target', ''))
+        key=lambda e: (node_indices.get(e.get('source', ''), -1), node_indices.get(e.get('target', ''), -1))
     )
     
     for edge in sorted_edges:
@@ -281,30 +284,30 @@ def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
         target = edge.get('target')
         
         if source in node_ids and target in node_ids:
-            # Deterministic adjacency build
             adjacency[source].append(target)
             in_degree[target] += 1
             
-    # Sort adjacency lists for deterministic traversal
+    # Sort adjacency lists by input order of children
     for nid in adjacency:
-        adjacency[nid].sort()
+        adjacency[nid].sort(key=lambda x: node_indices.get(x, -1))
             
-    # Start with nodes that have no dependencies, sort alphabetically for determinism
-    queue = sorted([nid for nid in node_ids if in_degree[nid] == 0])
+    # Start with nodes that have no dependencies
+    # Sort by input index to preserve original order
+    queue = sorted([nid for nid in node_ids if in_degree[nid] == 0], key=lambda x: node_indices[x])
     result = []
     
     processed_count = 0
     while queue:
-        # Pop from front (BFS-like) but queue is always sorted when adding
-        # Actually to maintain stable topo sort with tie breaking:
-        # 1. Pop first
-        # 2. Add children
-        # 3. Re-sort queue or insert in order? 
-        # Standard Kahn's Algo with Min-Heap/Priority Queue is best for determinism.
-        # Here we just sort the queue after every addition or just sort children before adding?
-        # If we append to end, it's BFS. If we sort, it's lexicographical topo sort.
-        # Let's simple-sort the queue to be safe.
-        queue.sort() 
+        # Lexicographical sort for strict determinism in case of parallel branches?
+        # User prompt says "Preserve node ordering from the input list".
+        # But also "Sort all zero-in-degree queues".
+        # Input order IS a deterministic sort.
+        # But if we have parallel branches A and B, and A comes before B in list, A should be processed first.
+        # Queue is already sorted by index.
+        
+        # However, to be extra safe against list reordering upstream, we can sort by (index, id).
+        # We already sorted by index.
+        
         node_id = queue.pop(0)
         
         result.append(node_id)
@@ -314,13 +317,21 @@ def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
             in_degree[neighbor] -= 1
             if in_degree[neighbor] == 0:
                 queue.append(neighbor)
+        
+        # Re-sort queue to maintain input order priority for newly added nodes
+        # Use simple sort by index
+        queue.sort(key=lambda x: node_indices[x])
                 
     # Handle Cycles (Deterministically)
     if processed_count < len(node_ids):
-        # Naive approach: find a node with minimum in-degree from remaining
-        # Tie-break by ID
-        remaining = sorted(list(set(node_ids) - set(result)))
-        # Append remaining in sorted order. Executor handles flow dynamically.
+        # Find remaining nodes
+        remaining = [nid for nid in node_ids if nid not in result]
+        # Sort by index
+        remaining.sort(key=lambda x: node_indices.get(x, -1))
+        
+        # In a cycle, we might want to just append them. 
+        # The executor handles flow, so order might not strictly matter if they are in a loop 
+        # provided entry to loop is correct.
         result.extend(remaining)
     
     return result

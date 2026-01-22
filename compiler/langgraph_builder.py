@@ -25,8 +25,9 @@ class WorkflowState(TypedDict):
     node_outputs: dict[str, Any]
     variables: dict[str, Any]
     credentials: dict[str, Any]
+    loop_stats: dict[str, int]  # Track loop iterations
     error: str | None
-    status: str  # 'running', 'completed', 'failed', 'cancelled'
+    status: str  # 'running', 'completed', 'failed', 'cancelled', 'paused'
 
 
 class LangGraphBuilder:
@@ -80,7 +81,7 @@ class LangGraphBuilder:
             graph.add_node(node_id, node_func)
         
         # Add edges based on execution order and conditionals
-        conditional_nodes = {'if', 'switch'}
+        conditional_nodes = {'if', 'switch', 'loop', 'split_in_batches'}
         
         for node_id, node_plan in execution_plan.nodes.items():
             downstream_edges = edge_index.get(node_id, [])
@@ -130,8 +131,12 @@ class LangGraphBuilder:
             state['current_node'] = node_id
             execution_id = UUID(state['execution_id']) if isinstance(state['execution_id'], str) else state['execution_id']
             
-            # Check if already failed or cancelled
-            if state.get('status') in ['failed', 'cancelled']:
+            # Ensure loop_stats exists
+            if 'loop_stats' not in state or state['loop_stats'] is None:
+                state['loop_stats'] = {}
+
+            # Check if already failed, cancelled, or paused
+            if state.get('status') in ['failed', 'cancelled', 'paused']:
                 return state
             
             # 1. ORCHESTRATOR HOOK: BEFORE NODE
@@ -147,10 +152,10 @@ class LangGraphBuilder:
                     state['error'] = decision.reason
                     return state
                 
-                # Pause logic handled inside orchestrator via wait, but if explicit PauseDecision returned:
                 if isinstance(decision, PauseDecision):
-                     # Logic to handle explicit pause if not handled by wait inside before_node
-                     pass
+                     # Pause execution before this node runs
+                     state['status'] = 'paused'
+                     return state
 
             try:
                 # Get handler
@@ -170,26 +175,12 @@ class LangGraphBuilder:
                     credentials=state['credentials'],
                     variables=state['variables'],
                     current_node_id=node_id,
+                    loop_stats=state['loop_stats'],
                 )
                 
-                # Get input from previous nodes
-                # Note: LangGraph doesn't auto-pass inputs like our custom runner.
-                # We need to resolve inputs from state['node_outputs'] based on edges?
-                # Actually, our ExecutionContext helper does this if we had edges.
-                # But here we don't have edges inside the node function easily.
-                # Use a convention or helper?
-                # Convention: input is implicitly available via state['node_outputs'].
-                # Nodes use context.node_outputs to find what they need, usually via config references {{node.output}}.
-                # For direct input (like previous node), we might need to be smarter.
-                # BUT, let's assume nodes pull from context/state variables mostly.
-                # Or we explicitly inject `input_data` if the handler expects arguments.
-                
-                # Check how we did it in custom runner: 
-                # node_input = context.get_input_for_node(node_id, self.edges)
-                # We don't have self.edges here easily unless we bind it.
-                # Let's simplify: Pass the whole node_outputs as input_data for now, 
-                # or modify context to include simple lookup.
-                input_data = state['node_outputs'] 
+                # Prepare input data (merged from previous nodes)
+                # For simplicity, we pass state['node_outputs'] as source of inputs
+                input_data = state['node_outputs']
                 
                 # Special case: Entry input
                 if f"_input_{node_id}" in state['node_outputs']:
@@ -205,6 +196,12 @@ class LangGraphBuilder:
                 state['node_outputs'][node_id] = result.data
                 state['node_outputs'][f"_handle_{node_id}"] = result.output_handle
                 
+                # Update Loop Stats in state (persistence)
+                # If this node is a loop or split_in_batches, increment its counter
+                if node_type in ['loop', 'split_in_batches']:
+                    usage_count = state['loop_stats'].get(node_id, 0)
+                    state['loop_stats'][node_id] = usage_count + 1
+                
                 if not result.success:
                     logger.warning(f"Node {node_id} failed: {result.error}")
                     # 2. ORCHESTRATOR HOOK: ON ERROR
@@ -218,14 +215,11 @@ class LangGraphBuilder:
                         if isinstance(decision, AbortDecision):
                             state['error'] = result.error
                             state['status'] = 'failed'
-                        # If Retry, we would loop here. Omitted for brevity.
+                        elif isinstance(decision, PauseDecision):
+                            state['status'] = 'paused'
+                        # Retry logic would need loop support or re-invocation
                     else:
-                        # Default fail behavior
-                         # Route to error path if handled (langgraph edges will verify handle)
-                         # If fatal (no error handle logic here), mark failed?
-                         # LangGraph conditional edges check _handle_{node_id}.
-                         # If 'error' handle is returned, and there's an edge, it continues.
-                         # If no edge for 'error', we might want to fail the WF.
+                         # Default behavior: fail on error unless handled by conditional edge
                          pass
                 else:
                     # 3. ORCHESTRATOR HOOK: AFTER NODE
@@ -239,6 +233,8 @@ class LangGraphBuilder:
                         if isinstance(decision, AbortDecision):
                             state['error'] = decision.reason
                             state['status'] = 'failed'
+                        elif isinstance(decision, PauseDecision):
+                            state['status'] = 'paused'
 
             except asyncio.TimeoutError:
                 state['error'] = f"Node {node_id} timed out after {timeout}s"
