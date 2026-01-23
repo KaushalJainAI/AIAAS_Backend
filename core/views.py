@@ -81,6 +81,96 @@ class UserRegistrationView(generics.CreateAPIView):
         }, status=status.HTTP_201_CREATED)
 
 
+class GoogleLoginView(APIView):
+    """
+    Exchange Google OAuth2 code for JWT tokens.
+    Creates user if they don't exist.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [LoginRateThrottle]
+
+    def post(self, request):
+        code = request.data.get('code')
+        if not code:
+             return Response({'error': 'Code is required'}, status=status.HTTP_400_BAD_REQUEST)
+             
+        from credentials.oauth import GoogleOAuthProvider
+        from django.conf import settings
+        from django.contrib.auth import get_user_model
+        from rest_framework_simplejwt.tokens import RefreshToken
+        
+        # 1. Exchange Code
+        # We need to make sure we use the LOGIN callback URI, not the default if they differ.
+        # But in settings we set GOOGLE_OAUTH_REDIRECT_URI.
+        # Frontend MUST use the same redirect_uri to initiate flow.
+        redirect_uri = request.data.get('redirect_uri', settings.GOOGLE_OAUTH_REDIRECT_URI)
+        
+        provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
+        
+        try:
+            token_data = provider.exchange_code(code)
+        except Exception as e:
+             return Response({'error': f'Token exchange failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+             
+        if 'error' in token_data:
+             return Response({'error': token_data.get('error_description', 'Unknown OAuth error')}, status=status.HTTP_400_BAD_REQUEST)
+             
+        access_token = token_data.get('access_token')
+        
+        # 2. Get User Info
+        try:
+            user_info = provider.get_user_info(access_token)
+        except Exception as e:
+            return Response({'error': 'Failed to fetch user info'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        email = user_info.get('email')
+        if not email:
+            return Response({'error': 'No email found in Google account'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # 3. Find or Create User
+        User = get_user_model()
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            # Create new user
+            username = email.split('@')[0]
+            # Ensure unique username
+            base_username = username
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username}{counter}"
+                counter += 1
+                
+            user = User.objects.create_user(
+                username=username,
+                email=email,
+                first_name=user_info.get('given_name', ''),
+                last_name=user_info.get('family_name', '')
+            )
+            # Create profile
+            UserProfile.objects.create(user=user)
+            
+        # 4. Generate JWT
+        refresh = RefreshToken.for_user(user)
+        try:
+             profile = user.profile
+        except UserProfile.DoesNotExist:
+             profile = UserProfile.objects.create(user=user)
+
+        return Response({
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'name': f"{user.first_name} {user.last_name}".strip() or user.username,
+                'tier': profile.tier,
+                'credits': profile.credits_remaining,
+                'createdAt': user.date_joined.isoformat(),
+            }
+        })
+
+
 class CustomTokenObtainPairView(TokenObtainPairView):
     """
     Custom JWT token view with additional user data.

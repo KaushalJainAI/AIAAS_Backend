@@ -35,33 +35,31 @@ class CredentialSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         
-        # specific handling to getting decrypted data
+        # 1. Get Decrypted Data
         try:
             decrypted_data = instance.get_credential_data()
-        except Exception:
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to decrypt data for credential {instance.id}: {e}")
             decrypted_data = {}
 
+        # 2. Get Public Data
+        public_data = instance.public_metadata or {}
+        
+        # 3. Merge (Decrypted overrides public if collision, though shouldn't happen)
+        full_data = {**public_data, **decrypted_data}
+
         # The frontend expects 'fields' array with metadata + value.
-        # We need the CredentialType schema to build this.
         cred_type = instance.credential_type
         schema = cred_type.fields_schema # list of dicts defining fields
         
-        # Merge schema with values
         fields_response = []
         for field_def in schema:
-            # field_def expected keys: name, label, type, required...
             key = field_def.get('name')
             
-            # Mask sensitive values if not explicitly requested? 
-            # For "Edit" view, we usually need the values. 
-            # Password fields should probably be masked strictly speaking, but for "Edit" usage 
-            # the user often wants to see if it's set or overwrite it.
-            # Let's return the value as is.
-            value = decrypted_data.get(key, '')
+            value = full_data.get(key, '')
             
-            # Construct entry matching frontend CredentialField expectation roughly
-            # Frontend CredentialField: { key: string, label: string, type: string, value: string }
-            # Backend field_def might use 'name' instead of 'key'.
             fields_response.append({
                 'key': key,
                 'label': field_def.get('label', key),
@@ -73,20 +71,63 @@ class CredentialSerializer(serializers.ModelSerializer):
         return ret
 
     def create(self, validated_data):
-        data = validated_data.pop('data', {})
-        credential = Credential.objects.create(**validated_data)
-        if data:
-            credential.set_credential_data(data)
-            credential.save()
+        validated_data.pop('data', None)
+        raw_data = self.initial_data.get('data', {})
+        
+        # We need to assign user before we can access instance.credential_type easily 
+        # (though validated_data has credential_type id)
+        credential = Credential(**validated_data)
+        
+        # Helper to split data
+        self._save_credential_data(credential, raw_data)
+        
         return credential
 
     def update(self, instance, validated_data):
-        data = validated_data.pop('data', None)
+        validated_data.pop('data', None)
+        raw_data = self.initial_data.get('data', None)
+        
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         
-        if data is not None:
-             instance.set_credential_data(data)
+        if raw_data is not None:
+             self._save_credential_data(instance, raw_data, save=False)
         
         instance.save()
         return instance
+
+    def _save_credential_data(self, credential, data, save=True):
+        """
+        Splits data into public and encrypted based on type schema
+        """
+        # Fetch type (if not loaded)
+        if not credential.credential_type_id:
+             # Should be handled by validation, but safe check
+             return
+             
+        # If credential_type is lazy/id, fetch it. 
+        # But 'credential' instance from create() isn't saved yet, 
+        # so we rely on what we passed to constructor or have in instance.
+        
+        # In create(), credential.credential_type is likely accessible b/c we passed an instance to FK field
+        # or we passed ID and Django resolves it on access if strictly needed?
+        # Let's simple check schema.
+        
+        schema = credential.credential_type.fields_schema
+        
+        public_payload = {}
+        encrypted_payload = {}
+        
+        public_keys = {f['name'] for f in schema if f.get('public')}
+        
+        for key, value in data.items():
+            if key in public_keys:
+                public_payload[key] = value
+            else:
+                encrypted_payload[key] = value
+                
+        credential.public_metadata = public_payload
+        credential.set_credential_data(encrypted_payload)
+        
+        if save:
+            credential.save()

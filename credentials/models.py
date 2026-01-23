@@ -97,6 +97,13 @@ class Credential(models.Model):
         help_text='Friendly name for this credential'
     )
     
+    # Public credential data (not encrypted)
+    public_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Public visibility credential data (username, urls, etc)'
+    )
+
     # Encrypted credential data
     encrypted_data = models.BinaryField(
         help_text='Encrypted credential data'
@@ -171,9 +178,17 @@ class Credential(models.Model):
     def decrypt_data(self) -> dict:
         """Decrypt credential data"""
         import json
-        fernet = Fernet(self._get_encryption_key())
-        decrypted = fernet.decrypt(self.encrypted_data)
-        return json.loads(decrypted.decode())
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
+        try:
+            fernet = Fernet(self._get_encryption_key())
+            decrypted = fernet.decrypt(self.encrypted_data)
+            return json.loads(decrypted.decode())
+        except Exception as e:
+            logger.error(f"Decryption failed for credential {self.id} ({self.name}): {str(e)}", exc_info=True)
+            raise
 
     def set_credential_data(self, data: dict):
         """Set and encrypt credential data"""
@@ -182,3 +197,4 @@ class Credential(models.Model):
     def get_credential_data(self) -> dict:
         """Get decrypted credential data"""
         return self.decrypt_data()
+

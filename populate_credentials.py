@@ -42,11 +42,7 @@ def populate_types():
             'description': 'Google Cloud Platform OAuth2',
             'icon': 'Mail',
             'auth_method': 'oauth2',
-            'fields_schema': [
-                {'name': 'clientId', 'label': 'Client ID', 'type': 'text', 'required': True},
-                {'name': 'clientSecret', 'label': 'Client Secret', 'type': 'password', 'required': True},
-                {'name': 'redirectUri', 'label': 'Redirect URI', 'type': 'text', 'required': True}
-            ]
+            'fields_schema': [] # Managed via OAuth flow
         },
         {
             'name': 'Slack Token',
@@ -56,6 +52,28 @@ def populate_types():
             'auth_method': 'bearer',
             'fields_schema': [
                 {'name': 'token', 'label': 'Bot User OAuth Token', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'Website Login',
+            'slug': 'website-login',
+            'description': 'Login credentials for website automation',
+            'icon': 'Globe',
+            'auth_method': 'custom',
+            'fields_schema': [
+                {'name': 'loginUrl', 'label': 'Login Page URL', 'type': 'text', 'required': True, 'placeholder': 'https://example.com/login', 'public': True},
+                {'name': 'username', 'label': 'Username or Email', 'type': 'text', 'required': True, 'public': True},
+                {'name': 'password', 'label': 'Password', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'HTTP Bearer',
+            'slug': 'http-bearer',
+            'description': 'Standard HTTP Bearer Token Authentication',
+            'icon': 'Shield',
+            'auth_method': 'bearer',
+            'fields_schema': [
+                {'name': 'token', 'label': 'Bearer Token', 'type': 'password', 'required': True}
             ]
         }
     ]

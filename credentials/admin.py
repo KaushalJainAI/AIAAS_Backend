@@ -36,18 +36,25 @@ class CredentialAdmin(admin.ModelAdmin):
     list_filter = ['credential_type', 'is_active', 'is_verified', 'created_at']
     search_fields = ['name', 'user__username', 'user__email']
     list_editable = ['is_active']
-    readonly_fields = ['encrypted_data', 'access_token', 'refresh_token', 
+    readonly_fields = ['encrypted_data', 'decrypted_data_preview', 'access_token', 'refresh_token', 
                        'last_used_at', 'created_at', 'updated_at']
     ordering = ['-created_at']
     
+    def decrypted_data_preview(self, obj):
+        try:
+            return obj.get_credential_data()
+        except Exception as e:
+            return f"Error decrypting: {e}"
+    decrypted_data_preview.short_description = "Decrypted Data (Preview)"
+
     fieldsets = (
         ('Ownership', {
             'fields': ('user', 'credential_type', 'name')
         }),
         ('Encrypted Data', {
-            'fields': ('encrypted_data',),
+            'fields': ('encrypted_data', 'decrypted_data_preview'),
             'classes': ('collapse',),
-            'description': 'Encrypted credential data (not editable)'
+            'description': 'Encrypted credential data (decrypted view for admins)'
         }),
         ('OAuth Tokens', {
             'fields': ('access_token', 'refresh_token', 'token_expires_at'),
@@ -61,3 +68,4 @@ class CredentialAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
+
