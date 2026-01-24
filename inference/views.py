@@ -169,20 +169,11 @@ async def document_share(request, document_id: int):
         doc.is_shared = True
         doc.shared_at = timezone.now()
         
-        try:
-            platform_kb = get_platform_knowledge_base()
-            await platform_kb.initialize()
-            await platform_kb.add_document(doc.id, doc.content_text, {
-                'name': doc.name,
-                'user_id': request.user.id,
-                'shared': True,
-                'sharing_mode': doc.sharing_mode
-            })
-        except Exception as e:
-            return Response({
-                'error': f'Failed to share document: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            
+        # Offload knowledge base update to background thread
+        import threading
+        from .tasks import share_document
+        threading.Thread(target=share_document, args=(doc.id, request.user.id)).start()
+        
     else:
         doc.sharing_mode = 'private'
         doc.is_shared = False

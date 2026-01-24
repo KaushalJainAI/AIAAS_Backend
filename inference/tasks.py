@@ -2,7 +2,7 @@ import logging
 from celery import shared_task
 from django.utils import timezone
 from .models import Document
-from .engine import get_user_knowledge_base
+from .engine import get_user_knowledge_base, get_platform_knowledge_base
 from asgiref.sync import async_to_sync
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,13 @@ def process_document_task(self, document_id):
     Celery task wrapper for document processing.
     """
     return process_document(document_id)
+
+@shared_task(bind=True, time_limit=600, soft_time_limit=540)
+def share_document_task(self, document_id, user_id):
+    """
+    Celery task wrapper for sharing document to platform KB.
+    """
+    return share_document(document_id, user_id)
 
 
 from .utils import extract_text_from_file
@@ -81,7 +88,38 @@ def process_document(document_id):
             doc.save()
         except:
             pass
-        # Don't re-raise if running in thread, just log. 
-        # But for Celery retry it might be useful. 
-        # For simple threading, we catch everything here so the thread dies quietly after updating DB.
+        return f"Failed: {str(e)}"
+
+def share_document(document_id, user_id):
+    """
+    Add document to platform KB.
+    """
+    try:
+        doc = Document.objects.get(id=document_id)
+        logger.info(f"Adding document {document_id} to platform KB")
+        
+        platform_kb = get_platform_knowledge_base()
+        
+        async def _share():
+            await platform_kb.initialize()
+            
+            # Check if already exists
+            if await platform_kb.has_document(doc.id):
+                logger.info(f"Document {doc.id} already in platform KB. Skipping.")
+                return "Skipped (Duplicate)"
+                
+            await platform_kb.add_document(doc.id, doc.content_text, {
+                'name': doc.name,
+                'user_id': user_id,
+                'shared': True,
+                'sharing_mode': doc.sharing_mode
+            })
+            return "Added"
+
+        result = async_to_sync(_share)()
+        logger.info(f"Document {document_id} shared to platform KB: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error sharing document {document_id}: {str(e)}", exc_info=True)
         return f"Failed: {str(e)}"

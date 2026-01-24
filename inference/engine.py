@@ -65,6 +65,14 @@ class KnowledgeBase:
             logger.warning(f"FAISS or sentence-transformers not installed: {e}")
             self._initialized = False
     
+    async def has_document(self, doc_id: int) -> bool:
+        """Check if document already exists in the knowledge base."""
+        # Simple linear scan. For production, maintain a separate set of doc_ids.
+        for _, (existing_id, _, _) in self._documents.items():
+            if existing_id == doc_id:
+                return True
+        return False
+
     async def add_document(
         self,
         doc_id: int,
