@@ -35,6 +35,8 @@ def login_and_extract_tokens(url, username, password):
     try:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
+        driver.set_page_load_timeout(15) # Prevent infinite hanging
+        driver.set_script_timeout(15)
         
         try:
             # 1. Navigate to Login Page

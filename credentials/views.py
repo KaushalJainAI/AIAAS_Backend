@@ -30,7 +30,7 @@ class CredentialViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         # Users can only see their own credentials
-        return Credential.objects.filter(user=self.request.user)
+        return Credential.objects.filter(user=self.request.user).select_related('credential_type')
 
     def list(self, request, *args, **kwargs):
         """Override to return wrapped response matching frontend expectations."""
