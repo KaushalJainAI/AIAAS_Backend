@@ -15,6 +15,8 @@ def process_document_task(self, document_id):
     return process_document(document_id)
 
 
+from .utils import extract_text_from_file
+
 def process_document(document_id):
     """
     Process and index a document.
@@ -28,6 +30,16 @@ def process_document(document_id):
         doc.save()
         
         logger.info(f"Starting processing for document {document_id}: {doc.name}")
+        
+        # Extract text if not already present
+        if not doc.content_text and doc.file:
+            try:
+                logger.info(f"Extracting text from file: {doc.file.path}")
+                doc.content_text = extract_text_from_file(doc.file.path, doc.file_type)
+                doc.save(update_fields=['content_text'])
+            except Exception as e:
+                logger.error(f"Failed to extract text: {e}")
+                # We continue, maybe there is some partial text or we just index empty
         
         # Initialize Knowledge Base
         user_kb = get_user_knowledge_base(doc.user.id)

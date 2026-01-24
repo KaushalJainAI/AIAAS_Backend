@@ -2,8 +2,8 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from .models import Credential, CredentialType
-from .serializers import CredentialSerializer, CredentialTypeSerializer
+from .models import Credential, CredentialType, CredentialAuditLog
+from .serializers import CredentialSerializer, CredentialTypeSerializer, CredentialAuditLogSerializer
 
 class CredentialTypeViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -42,6 +42,52 @@ class CredentialViewSet(viewsets.ModelViewSet):
         # Automatically assign the creator
         serializer.save(user=self.request.user)
 
+    def destroy(self, request, *args, **kwargs):
+        """
+        Prevent deletion if credential is used in active workflows.
+        """
+        instance = self.get_object()
+        credential_id = str(instance.id)
+        
+        # Check active workflows
+        # Since we don't have a normalized WorkflowNode model, we inspect the JSON
+        from orchestrator.models import Workflow
+        
+        active_workflows = Workflow.objects.filter(
+            user=request.user, 
+            status='active'
+        )
+        
+        affected = []
+        for wf in active_workflows:
+            for node in wf.nodes:
+                data = node.get('data', {})
+                # check for credential_id usage
+                if str(data.get('credential_id')) == credential_id:
+                    affected.append(wf.name)
+                    break 
+        
+        if affected:
+            return Response(
+                {'error': f'Cannot delete credential used in active workflows: {", ".join(affected)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Log deletion audit
+        from .models import CredentialAuditLog
+        CredentialAuditLog.objects.create(
+            credential=instance, # It will be nullified on delete due to SET_NULL but we capture it now? 
+            # Actually on_delete=SET_NULL in AuditLog means log stays but credential link is lost.
+            # We should probably capture name/type in snapshot if we want to keep history meaningful?
+            # Creating audit log BEFORE deletion so it has the link.
+            user=request.user,
+            action='deleted',
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT')
+        )
+            
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=True, methods=['post'])
     def verify(self, request, pk=None):
         """
@@ -50,7 +96,15 @@ class CredentialViewSet(viewsets.ModelViewSet):
         credential = self.get_object()
         
         from .verification import CredentialVerifier
-        is_valid, message = CredentialVerifier.verify(credential)
+        
+        # Capture audit context
+        audit_context = {
+            'user': request.user,
+            'ip_address': request.META.get('REMOTE_ADDR'),
+            'user_agent': request.META.get('HTTP_USER_AGENT')
+        }
+        
+        is_valid, message = CredentialVerifier.verify(credential, audit_context=audit_context)
         
         credential.is_verified = is_valid
         # Update last_error if failed, clear it if success
@@ -168,6 +222,17 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
             
         credential.save()
             
-        from .serializers import CredentialSerializer
         return Response(CredentialSerializer(credential).data)
+
+
+class CredentialAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ReadOnly ViewSet for Credential Audit Logs.
+    Users can view logs for their own credentials.
+    """
+    serializer_class = CredentialAuditLogSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return CredentialAuditLog.objects.filter(user=self.request.user)
 

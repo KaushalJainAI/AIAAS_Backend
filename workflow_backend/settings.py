@@ -251,6 +251,10 @@ CELERY_RESULT_SERIALIZER = 'json'
 # ============================================
 CREDENTIAL_ENCRYPTION_KEY = os.environ.get('CREDENTIAL_ENCRYPTION_KEY')
 
+if not CREDENTIAL_ENCRYPTION_KEY:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured("CREDENTIAL_ENCRYPTION_KEY must be set in environment variables.")
+
 # ============================================
 # Google OAuth Configuration
 # ============================================
@@ -264,4 +268,28 @@ GOOGLE_OAUTH_LOGIN_SCOPES = [
     'https://www.googleapis.com/auth/userinfo.profile',
     'openid'
 ]
+
+
+# ============================================
+# Logging Configuration
+# ============================================
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {
+        'sensitive_data': {
+            '()': 'core.logging_filters.SensitiveDataFilter',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'filters': ['sensitive_data'],
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+}
 

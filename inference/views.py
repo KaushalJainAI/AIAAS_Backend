@@ -25,6 +25,9 @@ from .engine import (
 )
 
 
+from .utils import validate_file_upload
+from django.core.exceptions import ValidationError
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 async def document_list(request):
@@ -53,6 +56,7 @@ async def document_list(request):
                     'shared_at': d.shared_at,
                     'created_at': d.created_at,
                     'updated_at': d.updated_at,
+                    'sharing_mode': d.sharing_mode,
                 }
                 for d in docs
             ]
@@ -66,20 +70,34 @@ async def document_list(request):
         # Handle file upload without blocking
         if 'file' in request.FILES:
             file = request.FILES['file']
+            
+            # Validate file
+            try:
+                # Run validation in sync_to_async if needed, or direct if fast enough. 
+                # Magic/IO might be slow, so wrapping is safer.
+                await sync_to_async(validate_file_upload)(file)
+            except ValidationError as e:
+                return Response({'error': str(e)}, status=400)
+                
             name = file.name
-            # Read file asynchronously
-            content = await sync_to_async(file.read)()
-            content = content.decode('utf-8', errors='ignore')
+            name = file.name
+            name = file.name
+            
+            # NOTE: We do NOT read the content here anymore. 
+            # We save the file stream directly to disk/storage via the model.
+            # Extraction happens in the background task.
             file_type = name.split('.')[-1] if '.' in name else 'txt'
+            content = "" 
         
         # Create document without blocking
         doc = await sync_to_async(Document.objects.create)(
             user=request.user,
             name=name,
-            content_text=content,
+            content_text="", # Empty initially
+            file=file,  # Save the original file
             file_type=file_type,
-            file_size=len(content),
-            status='pending'  # Explicitly set status to pending
+            file_size=file.size,
+            status='pending'
         )
         
         # Trigger background processing via Thread (no Redis required)
@@ -146,9 +164,9 @@ async def document_share(request, document_id: int):
     )
     
     # Toggle sharing status
-    doc.is_shared = not doc.is_shared
-    
-    if doc.is_shared:
+    if doc.sharing_mode == 'private':
+        doc.sharing_mode = 'shared_read'
+        doc.is_shared = True
         doc.shared_at = timezone.now()
         
         try:
@@ -158,21 +176,27 @@ async def document_share(request, document_id: int):
                 'name': doc.name,
                 'user_id': request.user.id,
                 'shared': True,
+                'sharing_mode': doc.sharing_mode
             })
         except Exception as e:
             return Response({
                 'error': f'Failed to share document: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
     else:
+        doc.sharing_mode = 'private'
+        doc.is_shared = False
         doc.shared_at = None
+        # TODO: Remove from platform KB when such method is available
     
     await sync_to_async(doc.save)()
     
     return Response({
         'id': doc.id,
         'is_shared': doc.is_shared,
+        'sharing_mode': doc.sharing_mode,
         'shared_at': doc.shared_at,
-        'message': 'Document shared with platform' if doc.is_shared else 'Document unshared from platform'
+        'message': f'Document set to {doc.sharing_mode}'
     })
 
 
@@ -250,3 +274,36 @@ async def rag_query(request):
     )
     
     return Response(result)
+
+
+from django.http import FileResponse
+from io import BytesIO
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def document_download(request, document_id: int):
+    """
+    Download document content.
+    """
+    doc = await sync_to_async(get_object_or_404)(
+        Document, id=document_id, user=request.user
+    )
+    
+    # Create a file-like object from content_text
+    # Since we currently store content as text in the DB, we encode it back.
+    # Note: If the original file was binary (e.g. PDF), content_text might be
+    # the extracted text or raw decoded string depending on upload logic.
+    # Ideally we should serve the original 'file' field if available.
+    if doc.file:
+        try:
+            # If actual file exists in storage
+            return FileResponse(doc.file.open('rb'), as_attachment=True, filename=doc.name)
+        except Exception:
+            # Fallback to content_text if file open fails
+            pass
+            
+    file_content = doc.content_text.encode('utf-8')
+    buffer = BytesIO(file_content)
+    
+    response = FileResponse(buffer, as_attachment=True, filename=doc.name)
+    return response

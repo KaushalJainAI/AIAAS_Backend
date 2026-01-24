@@ -97,10 +97,21 @@ class Document(models.Model):
         help_text='Virtual folder path for organization'
     )
     
-    # Platform Sharing - User can opt-in to share document with platform KB
+    # Platform Sharing
+    SHARING_MODE_CHOICES = [
+        ('private', 'Private'),
+        ('shared_read', 'Shared (Read-Only)'),
+        ('shared_write', 'Shared (Read/Write)'),
+    ]
+    sharing_mode = models.CharField(
+        max_length=20,
+        choices=SHARING_MODE_CHOICES,
+        default='private',
+        help_text='Privacy setting for this document'
+    )
     is_shared = models.BooleanField(
         default=False,
-        help_text='If True, document is shared with platform knowledge base'
+        help_text='Deprecated: Use sharing_mode instead'
     )
     shared_at = models.DateTimeField(
         blank=True,
@@ -121,8 +132,14 @@ class Document(models.Model):
             models.Index(fields=['user', 'status']),
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['file_type', 'status']),
-            models.Index(fields=['is_shared', 'status']),  # For platform KB queries
+            models.Index(fields=['sharing_mode', 'status']),  # For platform KB queries
         ]
+
+    def save(self, *args, **kwargs):
+        from .utils import sanitize_document_content
+        if self.content_text:
+            self.content_text = sanitize_document_content(self.content_text)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name

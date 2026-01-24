@@ -1,5 +1,17 @@
 from rest_framework import serializers
-from .models import Credential, CredentialType
+from .models import Credential, CredentialType, CredentialAuditLog
+
+class CredentialAuditLogSerializer(serializers.ModelSerializer):
+    credential_name = serializers.CharField(source='credential.name', read_only=True)
+    credential_type_name = serializers.CharField(source='credential.credential_type.name', read_only=True)
+    
+    class Meta:
+        model = CredentialAuditLog
+        fields = [
+            'id', 'credential', 'credential_name', 'credential_type_name',
+            'action', 'workflow_id', 'timestamp', 'ip_address', 'user_agent'
+        ]
+        read_only_fields = ['id', 'credential', 'credential_name', 'credential_type_name', 'action', 'workflow_id', 'timestamp', 'ip_address', 'user_agent']
 
 class CredentialTypeSerializer(serializers.ModelSerializer):
     class Meta:
@@ -92,6 +104,9 @@ class CredentialSerializer(serializers.ModelSerializer):
         
         if raw_data is not None:
              self._save_credential_data(instance, raw_data, save=False)
+             # Reset verification status on sensitive data update
+             instance.is_verified = False
+             instance.last_error = "" # Set to empty string as field is NOT NULL
         
         instance.save()
         return instance

@@ -161,13 +161,8 @@ class Credential(models.Model):
 
     @staticmethod
     def _get_encryption_key():
-        """Get or generate encryption key from settings"""
-        # In production, this should come from environment variable
-        key = getattr(django_settings, 'CREDENTIAL_ENCRYPTION_KEY', None)
-        if not key:
-            # Generate a default key for development (NOT for production!)
-            key = base64.urlsafe_b64encode(os.urandom(32))
-        return key
+        """Get encryption key from settings"""
+        return settings.CREDENTIAL_ENCRYPTION_KEY
 
     def encrypt_data(self, data: dict) -> bytes:
         """Encrypt credential data"""
@@ -175,26 +170,188 @@ class Credential(models.Model):
         fernet = Fernet(self._get_encryption_key())
         return fernet.encrypt(json.dumps(data).encode())
 
-    def decrypt_data(self) -> dict:
-        """Decrypt credential data"""
+    def decrypt_data(self, user=None, ip_address=None, user_agent=None, workflow_id=None) -> dict:
+        """
+        Decrypt credential data.
+        Optionally logs access if user/context is provided.
+        """
         import json
         import logging
+        from django.utils import timezone
         
         logger = logging.getLogger(__name__)
+        
+        # Audit Logging
+        if user:
+            try:
+                CredentialAuditLog.objects.create(
+                    credential=self,
+                    user=user,
+                    workflow_id=workflow_id,
+                    action='accessed',
+                    ip_address=ip_address,
+                    user_agent=user_agent
+                )
+            except Exception as e:
+                logger.error(f"Failed to create audit log: {e}")
         
         try:
             fernet = Fernet(self._get_encryption_key())
             decrypted = fernet.decrypt(self.encrypted_data)
             return json.loads(decrypted.decode())
         except Exception as e:
-            logger.error(f"Decryption failed for credential {self.id} ({self.name}): {str(e)}", exc_info=True)
-            raise
+            # Don't expose original exception message (key error, padding, etc) in logs if it contains sensitive info
+            # Only log the type of error and credential ID
+            logger.error(f"Decryption failed for credential {self.id}: {type(e).__name__}")
+            raise ValueError("Failed to decrypt credential data")
 
     def set_credential_data(self, data: dict):
         """Set and encrypt credential data"""
         self.encrypted_data = self.encrypt_data(data)
 
-    def get_credential_data(self) -> dict:
+    def get_credential_data(self, **kwargs) -> dict:
         """Get decrypted credential data"""
-        return self.decrypt_data()
+        return self.decrypt_data(**kwargs)
+
+    def is_token_expired(self) -> bool:
+        """Check if access token is expired (with buffer)"""
+        if not self.token_expires_at:
+            return False 
+        from django.utils import timezone
+        # 5 minute buffer
+        return timezone.now() > (self.token_expires_at - timezone.timedelta(minutes=5))
+
+    def get_valid_access_token(self):
+        """
+        Get valid access token, refreshing if necessary.
+        """
+        from datetime import timedelta
+        from django.utils import timezone
+        import requests
+        import logging
+        
+        logger = logging.getLogger(__name__)
+
+        # 1. Decrypt current token
+        try:
+            fernet = Fernet(self._get_encryption_key())
+            if self.access_token:
+                current_token = fernet.decrypt(self.access_token).decode()
+            else:
+                return None
+        except Exception:
+            return None
+
+        # 2. Check expiry
+        if not self.is_token_expired():
+            return current_token
+            
+        # 3. Refresh if expired
+        if not self.refresh_token:
+            logger.warning(f"Credential {self.id} expired and has no refresh token")
+            return None
+            
+        try:
+            refresh_token = fernet.decrypt(self.refresh_token).decode()
+        except:
+            return None
+            
+        config = self.credential_type.oauth_config
+        token_url = config.get('token_url', 'https://oauth2.googleapis.com/token') # Default to Google for now
+        client_id = settings.GOOGLE_OAUTH_CLIENT_ID
+        client_secret = settings.GOOGLE_OAUTH_CLIENT_SECRET
+        
+        try:
+            resp = requests.post(token_url, data={
+                'client_id': client_id,
+                'client_secret': client_secret,
+                'refresh_token': refresh_token,
+                'grant_type': 'refresh_token'
+            }, timeout=10)
+            
+            if resp.status_code != 200:
+                logger.error(f"Token refresh failed: {resp.text}")
+                self.last_error = f"Token refresh failed: {resp.status_code}"
+                self.is_verified = False
+                self.save()
+                return None
+                
+            new_tokens = resp.json()
+            new_access = new_tokens.get('access_token')
+            expires_in = new_tokens.get('expires_in')
+            
+            if new_access:
+                self.access_token = fernet.encrypt(new_access.encode())
+                if expires_in:
+                    self.token_expires_at = timezone.now() + timedelta(seconds=expires_in)
+                self.is_verified = True
+                self.last_error = ""
+                self.save()
+                
+                # Log audit
+                CredentialAuditLog.objects.create(
+                    credential=self,
+                    user=self.user,
+                    action='updated', # Refreshed
+                    user_agent='System/AutoRefresh'
+                )
+                return new_access
+                
+        except Exception as e:
+            logger.error(f"Token refresh error: {e}")
+            
+        return None
+
+
+class CredentialAuditLog(models.Model):
+    """
+    Audit log for credential access/usage.
+    """
+    ACTION_CHOICES = [
+        ('accessed', 'Accessed'),
+        ('updated', 'Updated'),
+        ('deleted', 'Deleted'),
+    ]
+    
+    credential = models.ForeignKey(
+        Credential,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='audit_logs'
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='credential_audit_logs'
+    )
+    workflow_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='Workflow using the credential'
+    )
+    action = models.CharField(
+        max_length=20,
+        choices=ACTION_CHOICES
+    )
+    timestamp = models.DateTimeField(auto_now_add=True)
+    ip_address = models.GenericIPAddressField(
+        blank=True,
+        null=True
+    )
+    user_agent = models.TextField(
+        blank=True,
+        help_text='User Agent string'
+    )
+
+    class Meta:
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['credential', 'timestamp']),
+            models.Index(fields=['user', 'timestamp']),
+        ]
+
+    def __str__(self):
+        return f"{self.action} by {self.user} at {self.timestamp}"
 
