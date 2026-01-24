@@ -75,6 +75,26 @@ def populate_types():
             'fields_schema': [
                 {'name': 'token', 'label': 'Bearer Token', 'type': 'password', 'required': True}
             ]
+        },
+        {
+            'name': 'Gemini API',
+            'slug': 'gemini-api',
+            'description': 'Google Gemini API Key',
+            'icon': 'Sparkles',
+            'auth_method': 'api_key',
+            'fields_schema': [
+                {'name': 'api_key', 'label': 'API Key', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'Perplexity API',
+            'slug': 'perplexity-api',
+            'description': 'Perplexity AI API Key',
+            'icon': 'Search',
+            'auth_method': 'api_key',
+            'fields_schema': [
+                {'name': 'api_key', 'label': 'API Key', 'type': 'password', 'required': True}
+            ]
         }
     ]
 

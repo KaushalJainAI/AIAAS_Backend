@@ -139,15 +139,55 @@ def get_registry() -> NodeRegistry:
     # Usually registration happens at app startup or module import.
     # Let's import and register here to be safe and ensure they exist.
     
-    from .core_nodes import HTTPRequestNode, CodeNode, SetNode, IfNode
+    from .core_nodes import CodeNode, SetNode, IfNode
     from .logic_nodes import LoopNode, SplitInBatchesNode
+    from .integration_nodes import (
+        GmailNode, SlackNode, GoogleSheetsNode, DiscordNode, NotionNode,
+        AirtableNode, TelegramNode, TrelloNode, GitHubNode, HTTPRequestNode
+    )
+    from .triggers import (
+        ManualTriggerNode, WebhookTriggerNode, ScheduleTriggerNode, EmailTriggerNode,
+        FormTriggerNode, SlackTriggerNode, GoogleSheetsTriggerNode, GitHubTriggerNode,
+        DiscordTriggerNode, TelegramTriggerNode, RssFeedTriggerNode, FileTriggerNode,
+        SQSTriggerNode
+    )
     
-    if not registry.has_handler('http_request'):
-        registry.register(HTTPRequestNode)
+    # Check if we need to register nodes (checking one is enough to know if we initialized)
+    if not registry.has_handler('code'):
+        # Register Core
         registry.register(CodeNode)
         registry.register(SetNode)
         registry.register(IfNode)
+        
+        # Register Logic
         registry.register(LoopNode)
         registry.register(SplitInBatchesNode)
+        
+        # Register Integrations
+        registry.register(GmailNode)
+        registry.register(SlackNode)
+        registry.register(GoogleSheetsNode)
+        registry.register(DiscordNode)
+        registry.register(NotionNode)
+        registry.register(AirtableNode)
+        registry.register(TelegramNode)
+        registry.register(TrelloNode)
+        registry.register(GitHubNode)
+        registry.register(HTTPRequestNode) # Using the improved version from integration_nodes
+        
+        # Register Triggers
+        registry.register(ManualTriggerNode)
+        registry.register(WebhookTriggerNode)
+        registry.register(ScheduleTriggerNode)
+        registry.register(EmailTriggerNode)
+        registry.register(FormTriggerNode)
+        registry.register(SlackTriggerNode)
+        registry.register(GoogleSheetsTriggerNode)
+        registry.register(GitHubTriggerNode)
+        registry.register(DiscordTriggerNode)
+        registry.register(TelegramTriggerNode)
+        registry.register(RssFeedTriggerNode)
+        registry.register(FileTriggerNode)
+        registry.register(SQSTriggerNode)
         
     return registry

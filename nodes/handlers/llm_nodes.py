@@ -461,3 +461,228 @@ class OllamaNode(BaseNodeHandler):
                 error=f"Ollama error: {str(e)}",
                 output_handle="error"
             )
+
+class PerplexityNode(BaseNodeHandler):
+    """
+    Call Perplexity API for web-grounded AI responses.
+    
+    Supports Sonar models with real-time web search capabilities.
+    """
+    
+    node_type = "perplexity"
+    name = "Perplexity"
+    category = NodeCategory.AI.value
+    description = "Generate web-grounded answers using Perplexity AI"
+    icon = "🔍"
+    color = "#1FB1E6"  # Perplexity blue
+    
+    fields = [
+        FieldConfig(
+            name="credential",
+            label="Perplexity API Key",
+            field_type=FieldType.CREDENTIAL,
+            description="Select your Perplexity API credential"
+        ),
+        FieldConfig(
+            name="model",
+            label="Model",
+            field_type=FieldType.SELECT,
+            options=[
+                "sonar",
+                "sonar-pro", 
+                "sonar-reasoning",
+            ],
+            default="sonar"
+        ),
+        FieldConfig(
+            name="prompt",
+            label="Prompt",
+            field_type=FieldType.STRING,
+            placeholder="Enter your question or prompt...",
+            description="The prompt to send to Perplexity"
+        ),
+        FieldConfig(
+            name="system_message",
+            label="System Message",
+            field_type=FieldType.STRING,
+            required=False,
+            default="Be precise and concise.",
+            description="Optional system message to set behavior"
+        ),
+        FieldConfig(
+            name="search_domain_filter",
+            label="Domain Filter",
+            field_type=FieldType.STRING,
+            required=False,
+            placeholder="e.g., github.com, stackoverflow.com",
+            description="Comma-separated domains to search (optional)"
+        ),
+        FieldConfig(
+            name="search_recency_filter",
+            label="Recency Filter",
+            field_type=FieldType.SELECT,
+            options=["none", "day", "week", "month", "year"],
+            default="none",
+            required=False,
+            description="Filter sources by recency"
+        ),
+        FieldConfig(
+            name="temperature",
+            label="Temperature",
+            field_type=FieldType.NUMBER,
+            default=0.2,
+            required=False,
+            description="Creativity (0-2, lower = more factual)"
+        ),
+        FieldConfig(
+            name="max_tokens",
+            label="Max Tokens",
+            field_type=FieldType.NUMBER,
+            default=1024,
+            required=False,
+            description="Maximum tokens in response"
+        ),
+        FieldConfig(
+            name="return_citations",
+            label="Return Citations",
+            field_type=FieldType.BOOLEAN,
+            default=True,
+            required=False,
+            description="Include source URLs in response"
+        ),
+        FieldConfig(
+            name="return_images",
+            label="Return Images",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="Include related images if available"
+        ),
+    ]
+    
+    outputs = [
+        HandleDef(id="success", label="Success", handle_type="success"),
+        HandleDef(id="error", label="Error", handle_type="error"),
+    ]
+    
+    async def execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> NodeExecutionResult:
+        credential_id = config.get("credential")
+        model = config.get("model", "sonar")
+        prompt = config.get("prompt", "")
+        system_message = config.get("system_message", "Be precise and concise.")
+        temperature = config.get("temperature", 0.2)
+        max_tokens = config.get("max_tokens", 1024)
+        domain_filter = config.get("search_domain_filter", "")
+        recency_filter = config.get("search_recency_filter", "none")
+        return_citations = config.get("return_citations", True)
+        return_images = config.get("return_images", False)
+        
+        if not prompt:
+            return NodeExecutionResult(
+                success=False,
+                error="Prompt is required",
+                output_handle="error"
+            )
+        
+        # Get API key from credentials
+        creds = context.get_credential(credential_id) if credential_id else None
+        if not creds or "api_key" not in creds:
+            return NodeExecutionResult(
+                success=False,
+                error="Perplexity API key not configured",
+                output_handle="error"
+            )
+        
+        api_key = creds["api_key"]
+        
+        try:
+            # Build request payload
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt},
+            ]
+            
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "return_citations": return_citations,
+                "return_images": return_images,
+            }
+            
+            # Add optional search filters
+            if domain_filter:
+                domains = [d.strip() for d in domain_filter.split(",") if d.strip()]
+                if domains:
+                    payload["search_domain_filter"] = domains
+            
+            if recency_filter and recency_filter != "none":
+                payload["search_recency_filter"] = recency_filter
+            
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    "https://api.perplexity.ai/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                
+                if response.status_code != 200:
+                    error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                    error_msg = error_data.get("error", {}).get("message", response.text) if isinstance(error_data.get("error"), dict) else str(error_data.get("error", response.text))
+                    return NodeExecutionResult(
+                        success=False,
+                        error=f"Perplexity API error: {error_msg}",
+                        output_handle="error"
+                    )
+                
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                usage = data.get("usage", {})
+                citations = data.get("citations", [])
+                images = data.get("images", [])
+                
+                result_data = {
+                    "content": content,
+                    "model": model,
+                    "usage": {
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
+                    "input": input_data,
+                }
+                
+                # Add optional fields if present
+                if return_citations and citations:
+                    result_data["citations"] = citations
+                
+                if return_images and images:
+                    result_data["images"] = images
+                
+                return NodeExecutionResult(
+                    success=True,
+                    data=result_data,
+                    output_handle="success"
+                )
+                
+        except httpx.TimeoutException:
+            return NodeExecutionResult(
+                success=False,
+                error="Perplexity API request timed out",
+                output_handle="error"
+            )
+        except Exception as e:
+            return NodeExecutionResult(
+                success=False,
+                error=f"Perplexity error: {str(e)}",
+                output_handle="error"
+            )

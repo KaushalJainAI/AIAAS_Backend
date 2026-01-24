@@ -43,16 +43,16 @@ class NodeCategory(str, Enum):
 
 class FieldConfig(BaseModel):
     """Configuration for a node input field"""
-    name: str = Field(..., description="Field identifier")
+    name: str = Field(..., description="Field identifier", serialization_alias="id")
     label: str = Field(..., description="Display label")
-    field_type: FieldType = Field(..., description="Type of field")
+    field_type: FieldType = Field(..., description="Type of field", serialization_alias="type")
     required: bool = Field(default=True, description="Whether field is required")
-    default: Any = Field(default=None, description="Default value")
+    default: Any = Field(default=None, description="Default value", serialization_alias="defaultValue")
     options: list[str] | None = Field(default=None, description="Options for SELECT type")
     placeholder: str = Field(default="", description="Placeholder text")
     description: str = Field(default="", description="Help text")
     
-    model_config = {"use_enum_values": True}
+    model_config = {"use_enum_values": True, "populate_by_name": True}
 
 
 class HandleDef(BaseModel):
@@ -66,7 +66,7 @@ class HandleDef(BaseModel):
 
 class NodeSchema(BaseModel):
     """Schema returned to frontend for node palette"""
-    node_type: str
+    node_type: str = Field(..., serialization_alias="nodeType")
     name: str
     category: str
     description: str
@@ -76,7 +76,7 @@ class NodeSchema(BaseModel):
     inputs: list[HandleDef]
     outputs: list[HandleDef]
     
-    model_config = {"use_enum_values": True}
+    model_config = {"use_enum_values": True, "populate_by_name": True}
 
 
 class NodeExecutionResult(BaseModel):
