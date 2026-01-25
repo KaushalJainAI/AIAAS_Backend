@@ -80,6 +80,7 @@ class ExecutionHandle:
     pending_hitl: HITLRequest | None = None
     # Track loop counters: node_id -> iteration count
     loop_counters: dict[str, int] = field(default_factory=dict)
+    parent_execution_id: UUID | None = None
 
 
 class WorkflowOrchestrator(OrchestratorInterface):
@@ -210,6 +211,10 @@ class WorkflowOrchestrator(OrchestratorInterface):
         input_data: dict[str, Any] | None = None,
         credentials: dict[str, Any] | None = None,
         workflow_version_id: int | None = None,
+        parent_execution_id: UUID | None = None,
+        nesting_depth: int = 0,
+        workflow_chain: list[int] | None = None,
+        timeout_budget_ms: int | None = None,
     ) -> ExecutionHandle:
         """Start a new workflow execution using LangGraph."""
         execution_id = uuid4()
@@ -222,6 +227,7 @@ class WorkflowOrchestrator(OrchestratorInterface):
             workflow_version_id=workflow_version_id,
             state=ExecutionState.PENDING,
             started_at=timezone.now(),
+            parent_execution_id=parent_execution_id,
         )
         self._executions[execution_id] = handle
         
@@ -235,6 +241,10 @@ class WorkflowOrchestrator(OrchestratorInterface):
                 workflow_json,
                 input_data or {},
                 credentials or {},
+                parent_execution_id,
+                nesting_depth,
+                workflow_chain or [],
+                timeout_budget_ms
             )
         )
         self._tasks[execution_id] = task
@@ -248,6 +258,10 @@ class WorkflowOrchestrator(OrchestratorInterface):
         workflow_json: dict,
         input_data: dict[str, Any],
         credentials: dict[str, Any],
+        parent_execution_id: UUID | None = None,
+        nesting_depth: int = 0,
+        workflow_chain: list[int] | None = None,
+        timeout_budget_ms: int | None = None
     ) -> None:
         """Internal execution loop using LangGraph."""
         execution_id = handle.execution_id
@@ -280,7 +294,11 @@ class WorkflowOrchestrator(OrchestratorInterface):
                 execution_id=execution_id,
                 workflow_id=handle.workflow_id,
                 user_id=handle.user_id,
-                trigger_type="orchestrator"
+                trigger_type="orchestrator",
+                parent_execution_id=parent_execution_id,
+                nesting_depth=nesting_depth,
+                timeout_budget_ms=timeout_budget_ms,
+                workflow_snapshot=workflow_json
             )
             
             # 4. Invoke Graph
@@ -298,7 +316,11 @@ class WorkflowOrchestrator(OrchestratorInterface):
                 "variables": {},
                 "credentials": credentials,
                 "error": None,
-                "status": "running"
+                "status": "running",
+                "nesting_depth": nesting_depth,
+                "workflow_chain": workflow_chain or [],
+                "parent_execution_id": str(parent_execution_id) if parent_execution_id else None,
+                "timeout_budget_ms": timeout_budget_ms
             }
             
             # Map input to entry points
@@ -419,3 +441,137 @@ def get_orchestrator() -> WorkflowOrchestrator:
     if _orchestrator is None:
         _orchestrator = WorkflowOrchestrator()
     return _orchestrator
+
+    # --- Subworkflow Execution ---
+
+    async def execute_subworkflow(
+        self,
+        parent_context: ExecutionContext,
+        node_config: dict[str, Any],
+        input_data: dict[str, Any]
+    ) -> Any:
+        """
+        Execute a subworkflow node.
+        """
+        from orchestrator.models import Workflow
+        from nodes.handlers.base import NodeExecutionResult
+        
+        workflow_handle_id = node_config.get("workflow_id")
+        if not workflow_handle_id:
+            return NodeExecutionResult(success=False, error="No workflow selected")
+            
+        try:
+            workflow_id_int = int(workflow_handle_id)
+        except (ValueError, TypeError):
+             return NodeExecutionResult(success=False, error=f"Invalid workflow ID: {workflow_handle_id}")
+
+        # 1. Depth Check
+        if parent_context.nesting_depth >= parent_context.max_nesting_depth:
+             return NodeExecutionResult(
+                success=False, 
+                error=f"Max nesting depth ({parent_context.max_nesting_depth}) exceeded"
+            )
+            
+        # 2. Recursion Check using ExecutionContext workflow_chain
+        if workflow_id_int in parent_context.workflow_chain:
+             return NodeExecutionResult(
+                success=False, 
+                error=f"Circular dependency: Workflow {workflow_id_int} is already executing"
+            )
+            
+        # 3. Load Workflow
+        try:
+            workflow = await Workflow.objects.aget(id=workflow_id_int)
+        except Workflow.DoesNotExist:
+             return NodeExecutionResult(success=False, error=f"Workflow {workflow_id_int} not found")
+        
+        # 4. Prepare Context
+        new_chain = parent_context.workflow_chain.copy()
+        new_chain.append(parent_context.workflow_id)
+        
+        # Calculate timeout
+        # Parent timeout budget might be None, enforce system default if so
+        remaining_parent_ms = parent_context.timeout_budget_ms or 300000 
+        sub_timeout = min(remaining_parent_ms, 300000) # Simple cap for now
+        
+        # 5. Start Execution
+        wait_for_completion = node_config.get("wait_for_completion", True)
+        
+        # Helper method for compatibility if start() signature varies or we direct call run
+        # We use public start() method
+        handle = await self.start(
+            workflow_json={
+                "id": workflow.id,
+                "name": workflow.name,
+                "nodes": workflow.nodes,
+                "edges": workflow.edges
+            },
+            user_id=parent_context.user_id,
+            input_data=input_data,
+            credentials=parent_context.credentials, # Propagate credentials?
+            workflow_version_id=None,
+            parent_execution_id=parent_context.execution_id,
+            nesting_depth=parent_context.nesting_depth + 1,
+            workflow_chain=new_chain,
+            timeout_budget_ms=sub_timeout
+        )
+        
+        if not wait_for_completion:
+            return NodeExecutionResult(
+                success=True, 
+                data={"execution_id": str(handle.execution_id), "status": "started_async"},
+                output_handle="success"
+            )
+            
+        # 6. Wait for Completion
+        # We need to poll or wait on the task
+        task = self._tasks.get(handle.execution_id)
+        if task:
+            try:
+                # Add a timeout to the wait itself
+                # We use calculated sub_timeout / 1000 seconds
+                await asyncio.wait_for(task, timeout=sub_timeout / 1000)
+            except asyncio.TimeoutError:
+                return NodeExecutionResult(
+                    success=False,
+                    error="Subworkflow execution timed out",
+                    output_handle="error"
+                )
+            except Exception as e:
+                return NodeExecutionResult(
+                    success=False,
+                    error=f"Subworkflow error: {str(e)}",
+                    output_handle="error"
+                )
+        
+        # 7. Check final status
+        if handle.state == ExecutionState.COMPLETED:
+            # We need to retrieve output. ExecutionLog has it.
+            # Or handle has a way? ExecutionHandle doesn't store output data directly.
+            # But the task task runs _run_workflow_langgraph which updates DB.
+            # We can fetch from DB.
+            from logs.models import ExecutionLog
+            try:
+                log = await ExecutionLog.objects.aget(execution_id=handle.execution_id)
+                return NodeExecutionResult(
+                    success=True,
+                    data=log.output_data,
+                    output_handle="success"
+                )
+            except Exception:
+                return NodeExecutionResult(success=True, data={}, output_handle="success")
+                
+        elif handle.state == ExecutionState.FAILED:
+            return NodeExecutionResult(
+                success=False, 
+                error=handle.error or "Subworkflow failed",
+                output_handle="error"
+            )
+        else:
+             return NodeExecutionResult(
+                success=False, 
+                error=f"Subworkflow ended with status {handle.state}",
+                output_handle="error"
+            )
+
+

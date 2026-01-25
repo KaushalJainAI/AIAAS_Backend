@@ -28,6 +28,10 @@ class WorkflowState(TypedDict):
     loop_stats: dict[str, int]  # Track loop iterations
     error: str | None
     status: str  # 'running', 'completed', 'failed', 'cancelled', 'paused'
+    nesting_depth: int
+    workflow_chain: list[int]
+    parent_execution_id: str | None
+    timeout_budget_ms: int | None
 
 
 class LangGraphBuilder:
@@ -176,6 +180,10 @@ class LangGraphBuilder:
                     variables=state['variables'],
                     current_node_id=node_id,
                     loop_stats=state['loop_stats'],
+                    nesting_depth=state.get('nesting_depth', 0),
+                    workflow_chain=state.get('workflow_chain', []),
+                    parent_execution_id=state.get('parent_execution_id'),
+                    timeout_budget_ms=state.get('timeout_budget_ms'),
                 )
                 
                 # Prepare input data (merged from previous nodes)

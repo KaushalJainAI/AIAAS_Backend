@@ -44,6 +44,7 @@
 | `inference` | RAG Engine | `engine.py`, `views.py` |
 | `logs` | Logging & Analytics | `logger.py`, `views.py` |
 | `streaming` | Real-time | `consumers.py` |
+| `templates` | Template Library | `models.py`, `services.py`, `views.py` |
 
 ---
 
@@ -57,10 +58,14 @@
 - **Custom Nodes**: Dynamic loading with AST security
 
 ### Compiler
+### Compiler
+- **Detailed Process**: [See COMPILATION_PROCESS.md](./compiler/COMPILATION_PROCESS.md)
 - DAG validation (cycles, orphans)
 - Type compatibility checking
 - Credential validation
 - LangGraph builder for orchestration
+- Toplogical sort with deterministic ordering
+- **Subworkflow Support**: Nested execution validation and infinite loop protection
 
 ### Executor
 - Retry logic with configurable attempts
@@ -68,6 +73,8 @@
 - Error output handles
 - Safe sandboxed code execution
 - Method whitelisting
+- **Loop Control**: `max_loop_count` protection and deterministic iteration logic
+- **Subworkflows**: Isolated context execution with parent tracing
 
 ### Orchestrator
 - Workflow start/stop/pause/resume
@@ -75,6 +82,13 @@
 - AI workflow generation
 - Context-aware chat
 - Version history
+- **Templates**: Public marketplace for sharing and instantiating workflows
+
+### Templates
+- **Template Library**: Reusable workflow blueprints
+- **Semantic Search**: Vector-based discovery using embeddings
+- **Credential Scrubbing**: Automatic removal of secrets upon publication
+- **Auto-Sync**: Signals to keep public templates up-to-date with source workflows
 
 ### Security
 - JWT + API key authentication
@@ -84,6 +98,7 @@
 - CORS, CSP, secure cookies
 - Abuse detection & blocking
 - Thread-safe context isolation
+- **Google OAuth**: SSO and API credential integration
 
 ### Real-time
 - SSE for execution streaming
@@ -104,6 +119,7 @@
 | Compiler | `/api/compile/` | Validate, Compile |
 | Credentials | `/api/credentials/` | CRUD, Types |
 | Streaming | `/api/streaming/` | SSE Events |
+| Templates | `/api/orchestrator/templates/` | List, Search, Publish, Clone |
 
 See [PERMISSIONS.md](./PERMISSIONS.md) for detailed permissions.
 
@@ -160,6 +176,16 @@ compiler/
 
 credentials/
 └── manager.py          # Credential management
+
+templates/
+├── models.py           # WorkflowTemplate model
+├── services.py         # Publishing and credential scrubbing logic
+└── views.py            # API endpoints
+
+CHECKLIST.md            # Detailed implementation checklist
+IMPLEMENTATION_PLAN.md  # Architectural decisions and roadmap
+PERMISSIONS.md          # API permission reference
+SCHEMA.md               # Node and JSON schema reference
 ```
 
 ---

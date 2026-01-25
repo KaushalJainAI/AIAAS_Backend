@@ -276,3 +276,134 @@ def send_hitl_notification(user_id: int, request_id: str, channel: str = 'websoc
         pass
     
     return {"sent": True, "channel": channel}
+
+
+# ======================== Testing & Metrics ========================
+
+@shared_task(bind=True)
+def test_workflow_async(self, workflow_id: int):
+    """
+    Run async test for a workflow.
+    """
+    import asyncio
+    from orchestrator.models import Workflow, WorkflowTestResult
+    from executor.test_generator import generate_test_input, validate_test_result
+    from executor.orchestrator import get_orchestrator
+    from logs.models import ExecutionLog
+
+    try:
+        workflow = Workflow.objects.get(id=workflow_id)
+    except Workflow.DoesNotExist:
+        return {"error": "Workflow not found"}
+
+    # Generate test data
+    try:
+        test_input = generate_test_input(workflow)
+    except Exception as e:
+        return {"error": f"Failed to generate test input: {e}"}
+
+    async def run_test():
+        orchestrator = get_orchestrator()
+        
+        # Start execution
+        handle = await orchestrator.start(
+            workflow_json={
+                 "id": workflow.id,
+                 "name": workflow.name,
+                 "nodes": workflow.nodes,
+                 "edges": workflow.edges,
+                 "settings": workflow.workflow_settings
+            },
+            user_id=workflow.user_id,
+            input_data=test_input,
+            # Mock credentials would go here
+        )
+        
+        # Wait for completion (60s max for test)
+        for _ in range(60):
+            if handle.completed_at:
+                break
+            await asyncio.sleep(1)
+            
+        return handle
+
+    try:
+        handle = asyncio.run(run_test())
+    except Exception as e:
+        return {"status": "error", "message": f"Test execution error: {e}"}
+    
+    # Determine status
+    status = "failed"
+    if handle.state.value == "completed":
+        status = "passed"
+    elif handle.state.value == "timeout": # If handled by state
+        status = "timeout"
+        
+    # Get Output
+    output_data = {}
+    try:
+        log = ExecutionLog.objects.get(execution_id=handle.execution_id)
+        output_data = log.output_data
+    except ExecutionLog.DoesNotExist:
+        pass
+        
+    # Validation
+    validation = validate_test_result(output_data)
+    if not validation.passed:
+        status = "failed"
+        
+    # Record Result
+    WorkflowTestResult.objects.create(
+        workflow=workflow,
+        status=status,
+        test_input=test_input,
+        test_output=output_data,
+        execution_time_ms=(handle.completed_at - handle.started_at).total_seconds() * 1000 if handle.completed_at else None,
+        error_message=handle.error or validation.error or "",
+        schema_valid=validation.passed
+    )
+    
+    return {"status": status, "execution_id": str(handle.execution_id)}
+
+
+@shared_task
+def update_template_metrics(template_id: int, success: bool, duration_ms: int):
+    """
+    Update usage metrics for a template.
+    """
+    from orchestrator.models import WorkflowTemplate
+    from django.db.models import F
+    
+    try:
+        template = WorkflowTemplate.objects.get(id=template_id)
+        
+        # Update rolling average for duration
+        if template.average_duration_ms:
+            # Weighted average based on usage_count, but simpler to just do exponential moving average or 
+            # simple update if usage_count is small.
+            # Let's do simple update: new_avg = (old_avg * count + new) / (count + 1)
+            count = template.usage_count
+            total_duration = template.average_duration_ms * count
+            new_avg = (total_duration + duration_ms) / (count + 1)
+            template.average_duration_ms = int(new_avg)
+        else:
+            template.average_duration_ms = duration_ms
+            
+        # Update success rate
+        # Success rate is stored as 0.0 to 100.0? Field says FloatField(default=0.0).
+        # Assuming 0-100.
+        current_rate = template.success_rate or 0.0
+        count = template.usage_count
+        
+        # Calculate new successes count derived from rate
+        current_successes = (current_rate / 100.0) * count
+        new_successes = current_successes + (1 if success else 0)
+        
+        template.usage_count = count + 1
+        template.success_rate = (new_successes / (count + 1)) * 100.0
+        
+        template.save()
+        
+    except WorkflowTemplate.DoesNotExist:
+        pass
+

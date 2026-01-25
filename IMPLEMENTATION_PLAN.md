@@ -236,8 +236,8 @@ The Orchestrator is a **LangGraph ReAct agent** that uses your workflow system a
 | **Modify** | Change existing workflows via chat | 🟢 P0 |
 | **Pause/Resume** | Control running executions | 🟢 P0 |
 | **HITL** | Ask human for approval/clarification | 🟢 P0 |
-| **Combine** | Merge or chain multiple workflows | 🟡 P1 |
-| **Templates** | Suggest from learned patterns | 🟡 P1 |
+| **Combine** | Merge or chain multiple workflows | 🟢 P0 |
+| **Templates** | Suggest from learned patterns | 🟢 P0 |
 | **Knowledge Base** | Query organizational docs | 🟡 P1 |
 | **Schedule** | Set up recurring executions | 🟡 P1 |
 | ~~Real-time Monitor~~ | ~~Watch running workflows~~ | 🔴 Deferred |
@@ -774,6 +774,23 @@ GET /api/audit                  # List audit entries (paginated)
 GET /api/audit/workflow/:id     # Audit entries for specific workflow
 GET /api/audit/export           # Export audit log (CSV/JSON)
 ```
+
+## 🧩 Templates API
+*"Marketplace for workflow blueprints"*
+
+**Endpoints Required**:
+```
+GET  /api/templates             # List available templates
+GET  /api/templates/:id         # Get template details
+POST /api/templates/search      # Semantic search
+POST /api/templates/publish/:id # Publish workflow as template
+```
+
+**Security Features**:
+- Credential scrubbing (removes API keys before publish)
+- PII detection (warns about potential data leaks)
+
+---
 
 **Audit Entry Fields**:
 - `timestamp`, `user_id`, `workflow_id`, `node_id`

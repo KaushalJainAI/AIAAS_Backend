@@ -170,3 +170,50 @@ class BaseNodeHandler(ABC):
     
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}: {self.node_type}>"
+
+    def _detect_circular_dependency(self, workflow_id: str, context: 'ExecutionContext') -> bool:
+        """
+        Check if workflow_id is already in the execution chain to prevent infinite recursion.
+        """
+        # Assuming context has a 'workflow_chain' attribute which is a list of workflow IDs
+        if not hasattr(context, 'workflow_chain'):
+            return False
+        return workflow_id in context.workflow_chain
+
+    def _transform_state(self, data: dict, mapping: dict) -> dict:
+        """
+        Transform state data based on a mapping configuration.
+        Mapping format: {'target_field': 'source_field_path'}
+        """
+        if not mapping:
+            return data
+            
+        transformed = {}
+        for target, source in mapping.items():
+            # Simple direct mapping for now. 
+            # In production, this would handle dot notation for nested fields e.g. "body.user.id"
+            if source in data:
+                transformed[target] = data[source]
+            # Handle deep get if source has dots, etc.
+        
+        return transformed
+
+    def _calculate_timeout(self, child_workflow: Any, parent_context: 'ExecutionContext') -> int:
+        """
+        Calculate timeout budget for child workflow.
+        """
+        # This is a placeholder logic. Real implementation needs to check parent's remaining time.
+        # parent_timeout = getattr(parent_context, 'timeout_budget_ms', 300000)
+        # child_timeout = child_workflow.workflow_settings.get('timeout', 60000)
+        return 60000 # Default to 60s for now
+
+    def _create_child_context(self, parent_context: 'ExecutionContext', child_workflow: Any, config: dict) -> Any:
+        """
+        Create an isolated execution context for the child workflow.
+        Returns a new ExecutionContext object.
+        """
+        # This requires the ExecutionContext class definition which might cause circular imports
+        # if imported at top level. 
+        # For now, we stub this or expect the caller/subclass to handle the actual instantiation
+        # using the parent class's type or a factory.
+        pass

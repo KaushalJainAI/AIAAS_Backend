@@ -48,7 +48,11 @@ class ExecutionLogger:
         workflow,
         user,
         trigger_type: str,
-        input_data: dict[str, Any] | None = None
+        input_data: dict[str, Any] | None = None,
+        parent_execution_id: UUID | None = None,
+        nesting_depth: int = 0,
+        timeout_budget_ms: int | None = None,
+        workflow_snapshot: dict | None = None
     ) -> ExecutionLog:
         """
         Create a new execution log entry when workflow starts.
@@ -58,6 +62,10 @@ class ExecutionLogger:
             user: User model instance running the workflow
             trigger_type: How it was triggered ('manual', 'schedule', 'webhook', 'api')
             input_data: Initial input data for the workflow
+            parent_execution_id: ID of parent execution if subworkflow
+            nesting_depth: Current nesting depth
+            timeout_budget_ms: Timeout budget for this execution
+            workflow_snapshot: Snapshot of workflow definition
             
         Returns:
             The created ExecutionLog instance
@@ -73,7 +81,12 @@ class ExecutionLogger:
             status='running',
             trigger_type=trigger_type,
             started_at=timezone.now(),
-            input_data=input_data or {}
+            input_data=input_data or {},
+            parent_execution_id=parent_execution_id,
+            nesting_depth=nesting_depth,
+            is_subworkflow_execution=bool(parent_execution_id),
+            timeout_budget_ms=timeout_budget_ms,
+            workflow_snapshot=workflow_snapshot or {}
         )
         
         return exec_log

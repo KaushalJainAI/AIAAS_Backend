@@ -39,5 +39,10 @@ urlpatterns = [
     
     # Thought History
     path('executions/<str:execution_id>/thoughts/', views.thought_history, name='thought_history'),
+    
+    
+    # Templates & Testing
+    path('workflows/<int:workflow_id>/test/', views.test_workflow, name='test_workflow'),
+    path('workflows/<int:workflow_id>/clone/', views.clone_workflow, name='clone_workflow'),
 ]
 

@@ -171,6 +171,23 @@ class KnowledgeBase:
         
         return results
     
+    async def embed_text(self, text: str) -> Any:
+        """
+        Generate embedding for a text string.
+        
+        Args:
+            text: Input text
+            
+        Returns:
+            Numpy array of embedding
+        """
+        if not self._initialized:
+            await self.initialize()
+            if not self._initialized:
+                return None
+                
+        return self._embedder.encode([text])[0]
+    
     def _chunk_text(
         self,
         text: str,

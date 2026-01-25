@@ -128,6 +128,55 @@ class Workflow(models.Model):
         """Check if workflow is currently active"""
         return self.status == 'active'
 
+    # Subworkflow & Template Support
+    is_subworkflow_enabled = models.BooleanField(
+        default=True,
+        help_text='Allow this workflow to be used as a subworkflow'
+    )
+    max_nesting_depth = models.IntegerField(
+        default=3,
+        help_text='Maximum allowed nesting depth to prevent infinite recursion'
+    )
+    parent_template = models.ForeignKey(
+        'templates.WorkflowTemplate',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='derived_workflows',
+        help_text='Template this workflow was cloned from'
+    )
+    modifiable_fields = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='List of fields that can be safely modified during cloning'
+    )
+    is_cloneable = models.BooleanField(
+        default=True,
+        help_text='Whether this workflow can be cloned by the orchestrator'
+    )
+    
+    # Performance Metrics
+    total_executions = models.IntegerField(
+        default=0,
+        help_text='Total number of times this workflow has been executed'
+    )
+    successful_executions = models.IntegerField(
+        default=0,
+        help_text='Total number of successful executions'
+    )
+    average_duration_ms = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text='Average execution duration in milliseconds'
+    )
+
+    @property
+    def success_rate(self):
+        """Calculated success rate percentage"""
+        if self.total_executions == 0:
+            return 0.0
+        return (self.successful_executions / self.total_executions) * 100
+
 
 class WorkflowVersion(models.Model):
     """
@@ -364,3 +413,93 @@ class ConversationMessage(models.Model):
     def __str__(self):
         preview = self.content[:50] + "..." if len(self.content) > 50 else self.content
         return f"{self.role}: {preview}"
+
+
+
+
+
+class WorkflowTestResult(models.Model):
+    """
+    Results of async workflow testing.
+    Validates correctness and performance before production use.
+    """
+    STATUS_CHOICES = [
+        ('passed', 'Passed'),
+        ('failed', 'Failed'),
+        ('timeout', 'Timeout'),
+        ('error', 'Error'),
+    ]
+    
+    test_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    
+    # Target
+    workflow_template = models.ForeignKey(
+        'templates.WorkflowTemplate',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='test_results'
+    )
+    workflow = models.ForeignKey(
+        Workflow,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='test_results'
+    )
+    
+    # Result
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    
+    # Data
+    test_input = models.JSONField(default=dict, help_text='Synthetic input used during test')
+    test_output = models.JSONField(default=dict, help_text='Actual output received')
+    expected_output_schema = models.JSONField(default=dict, blank=True)
+    
+    # Performance & Error
+    execution_time_ms = models.IntegerField(null=True)
+    error_message = models.TextField(blank=True)
+    error_node_id = models.CharField(max_length=100, blank=True)
+    
+    # Validation Flags
+    schema_valid = models.BooleanField(default=False)
+    timeout_within_limit = models.BooleanField(default=False)
+    no_exceptions = models.BooleanField(default=False)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class WorkflowCloneHistory(models.Model):
+    """
+    Tracks the lineage of workflow creation and modification.
+    Useful for debugging and understanding AI generation patterns.
+    """
+    parent_workflow = models.ForeignKey(
+        Workflow,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='clones'
+    )
+    child_workflow = models.ForeignKey(
+        Workflow,
+        on_delete=models.CASCADE,
+        related_name='clone_source'
+    )
+    
+    # Change Tracking
+    modifications_applied = models.JSONField(
+        default=dict,
+        help_text='Diff of what changed during cloning'
+    )
+    
+    # Context
+    cloned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True
+    )
+    reason = models.TextField(blank=True, help_text='Why this clone was created')
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+

@@ -772,3 +772,52 @@ def thought_history(request, execution_id: str):
         'summary': history.to_summary(),
     })
 
+
+# ======================== Template & Testing API ========================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def clone_workflow(request, workflow_id: int):
+    """Clone an existing workflow."""
+    original = get_object_or_404(Workflow, id=workflow_id, user=request.user)
+    
+    clone = Workflow.objects.create(
+        user=request.user,
+        name=f"{original.name} (Clone)",
+        description=original.description,
+        nodes=original.nodes,
+        edges=original.edges,
+        workflow_settings=original.workflow_settings,
+        status='draft',
+        icon=original.icon,
+        color=original.color,
+        tags=original.tags
+    )
+    
+    return Response({
+        'id': clone.id,
+        'name': clone.name,
+        'status': clone.status
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def test_workflow(request, workflow_id: int):
+    """Run a test execution."""
+    from executor.tasks import test_workflow_async
+    
+    workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
+    
+    task = test_workflow_async.delay(workflow.id)
+    
+    return Response({
+        'task_id': task.id,
+        'status': 'queued',
+        'workflow_id': workflow.id
+    })
+
+
+
+
+

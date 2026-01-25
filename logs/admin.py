@@ -4,6 +4,7 @@ from .models import ExecutionLog, NodeExecutionLog, AuditEntry
 
 class NodeExecutionLogInline(admin.TabularInline):
     model = NodeExecutionLog
+    fk_name = 'execution'
     extra = 0
     readonly_fields = ['node_id', 'node_type', 'node_name', 'status', 
                        'execution_order', 'started_at', 'completed_at', 'duration_ms']

@@ -55,6 +55,38 @@ class ExecutionLog(models.Model):
         default='manual'
     )
     
+    # Subworkflow Support
+    parent_execution = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='child_executions',
+        help_text='Parent execution if this is a subworkflow'
+    )
+    nesting_depth = models.IntegerField(
+        default=0,
+        help_text='Depth in the execution hierarchy (0 = root)'
+    )
+    is_subworkflow_execution = models.BooleanField(
+        default=False,
+        help_text='Flag to identify subworkflow executions'
+    )
+    workflow_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Snapshot of workflow definition at execution time'
+    )
+    timeout_budget_ms = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text='Allocated timeout budget in milliseconds'
+    )
+    loop_iterations = models.IntegerField(
+        default=0,
+        help_text='Count of loops within this execution'
+    )
+    
     # Timing
     started_at = models.DateTimeField(
         blank=True,
@@ -165,6 +197,30 @@ class NodeExecutionLog(models.Model):
         max_length=200,
         blank=True,
         help_text='Display name of the node'
+    )
+    
+    # Subworkflow Support
+    is_subworkflow_node = models.BooleanField(
+        default=False,
+        help_text='Whether this node executed a subworkflow'
+    )
+    child_execution = models.ForeignKey(
+        ExecutionLog,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='parent_node_log',
+        help_text='Link to the subworkflow execution'
+    )
+    input_mapping_applied = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Input variable mapping applied'
+    )
+    output_mapping_applied = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Output variable mapping applied'
     )
     
     # Execution Details

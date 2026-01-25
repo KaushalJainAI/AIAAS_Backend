@@ -141,6 +141,7 @@ def get_registry() -> NodeRegistry:
     
     from .core_nodes import CodeNode, SetNode, IfNode
     from .logic_nodes import LoopNode, SplitInBatchesNode
+    from .subworkflow_node import SubworkflowNodeHandler
     from .integration_nodes import (
         GmailNode, SlackNode, GoogleSheetsNode, DiscordNode, NotionNode,
         AirtableNode, TelegramNode, TrelloNode, GitHubNode, HTTPRequestNode
@@ -162,6 +163,7 @@ def get_registry() -> NodeRegistry:
         # Register Logic
         registry.register(LoopNode)
         registry.register(SplitInBatchesNode)
+        registry.register(SubworkflowNodeHandler)
         
         # Register Integrations
         registry.register(GmailNode)

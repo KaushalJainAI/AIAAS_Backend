@@ -82,6 +82,13 @@ class ExecutionContext(BaseModel):
     # Configuration
     timeout_seconds: int = Field(default=300, description="Overall execution timeout")
     
+    # Subworkflow tracking
+    nesting_depth: int = Field(default=0, description="Current nesting depth")
+    max_nesting_depth: int = Field(default=3, description="Maximum allowed nesting depth")
+    workflow_chain: list[int] = Field(default_factory=list, description="Chain of parent workflow IDs")
+    parent_execution_id: UUID | None = Field(default=None, description="ID of parent execution")
+    timeout_budget_ms: int | None = Field(default=None, description="Remaining timeout budget in ms")
+    
     model_config = {"arbitrary_types_allowed": True}
     
     # ==================== Helper Methods ====================

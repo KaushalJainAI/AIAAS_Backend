@@ -40,6 +40,9 @@ urlpatterns = [
 
     # Credentials
     path('api/credentials/', include('credentials.urls')),
+    
+    # Templates
+    path('api/orchestrator/templates/', include('templates.urls')),
 ]
 
 

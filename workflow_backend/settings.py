@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     'inference',
     'logs',
     'streaming',
+    'templates',
 ]
 
 MIDDLEWARE = [
