@@ -42,7 +42,11 @@ urlpatterns = [
     path('api/credentials/', include('credentials.urls')),
     
     # Templates
+    # Templates
     path('api/orchestrator/templates/', include('templates.urls')),
+    
+    # MCP
+    path('api/mcp/', include('mcp_integration.urls')),
 ]
 
 

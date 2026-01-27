@@ -14,6 +14,7 @@
 | **Local LLM** | Ollama (localhost) | Credential mapping, local inference |
 | **Real-time HITL** | Django Channels (WebSocket) | Already configured, real-time communication |
 | **Timeouts** | Per-node adjustable | Default 60s, configurable in node settings |
+| **External Tools** | MCP (Model Context Protocol) | Universal connection to external services (Stripe, Postgres, Filesystem) |
 
 ## Execution Strategy
 ```
@@ -38,15 +39,14 @@ class NodeConfig:
     retry_delay_seconds: int = 5   # Delay between retries
 ```
 
-## Ollama Integration (Local LLM)
+## MCP Integration (Model Context Protocol)
 ```python
 # Used for:
-# 1. Credential mapping (placeholder → real credential)
-# 2. AI workflow generation/modification
-# 3. Local inference nodes (no cloud API needed)
+# 1. Connecting to any MCP-compliant server (Node.js, Python, Go)
+# 2. Exposing external tools to the workflow engine without custom code
+# 3. Secure sandboxed tool execution via stdio or SSE
 
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "llama3.2"  # or mistral, codellama, etc.
+MCP_SERVER_TYPES = ['stdio', 'sse']
 ```
 
 ---
@@ -74,13 +74,19 @@ OLLAMA_MODEL = "llama3.2"  # or mistral, codellama, etc.
 │  ┌──────────────────────┐  ┌──────────────────────────────────┐ │
 │  │    🧩 NODE SYSTEM    │  │       ⚙️ COMPILER                 │ │
 │  │  Built-in + Custom   │  │  Parse • Validate • Build        │ │
+│  │  + MCP Clients       │  │                                  │ │
 │  └──────────────────────┘  └──────────────────────────────────┘ │
 │                                                                  │
 │  ┌──────────────────────┐  ┌──────────────────────────────────┐ │
 │  │    ▶️ EXECUTOR        │  │       🤖 ORCHESTRATOR            │ │
 │  │  Run Nodes in Order  │◀─┤  Supervise • Generate • Modify   │ │
-│  └──────────┬───────────┘  │  ASK HUMAN • Handle Errors       │ │
-│             │              └──────────────┬───────────────────┘ │
+│  │  (LangGraph)         │  │  ASK HUMAN • Handle Errors       │ │
+│  └──────────┬───────────┘  └──────────────┬───────────────────┘ │
+│             │                             │                      │
+│             │             ┌───────────────┴───────────────────┐  │
+│             │             │      🔌 MCP INTEGRATION           │  │
+│             │             │ Connects to: Stripe, GitHub, etc. │  │
+│             │             └───────────────────────────────────┘  │
 │             │                             │                      │
 │             │  ┌──────────────────────────┴──────────────────┐  │
 │             │  │          👥 HUMAN-IN-THE-LOOP               │  │
@@ -92,7 +98,7 @@ OLLAMA_MODEL = "llama3.2"  # or mistral, codellama, etc.
 │  │🔐 CREDS │ │🧠 INFER │ │📋 LOGS  │ │📡 STREAM│ │🏠 LOCAL  │  │
 │  │Encrypted│ │RAG+Files│ │History  │ │SSE/WS   │ │LLM       │  │
 │  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └──────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+95: └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -132,48 +138,46 @@ USER DESIGNS WORKFLOW
          │         ┌───────────────────────────┴────────────┐
          │         ▼                                        │
          │    ┌────────────────────────────────────┐        │
-         │    │      👥 HUMAN-IN-THE-LOOP          │        │
+         │    │      🔌 MCP TOOL EXECUTION         │        │
          │    │                                    │        │
-         │    │  🚨 APPROVAL NEEDED?               │        │
-         │    │     → Sensitive operation          │        │
-         │    │     → Database modification        │        │
-         │    │     → External API call            │        │
-         │    │                                    │        │
-         │    │  ❓ CLARIFICATION NEEDED?          │        │
-         │    │     → Ambiguous input              │        │
-         │    │     → Missing parameters           │        │
-         │    │     → Multiple valid options       │        │
-         │    │                                    │        │
-         │    │  ⚠️ ERROR RECOVERY?                │        │
-         │    │     → Node failed, ask retry?      │        │
-         │    │     → Unexpected result, proceed?  │        │
-         │    │                                    │◀───────┤
-         │    └────────────────┬───────────────────┘  Human │
-         │                     │                      Response
-         │    ◀────────────────┘                        │
-         │    (Resume after human responds)             │
-         ▼                                              │
-┌─────────────────────────────────────────────────┐    │
-│                   EXECUTOR                       │    │
-│                                                  │    │
-│  Node 1 ──▶ Node 2 ──▶ Node 3 ──▶ Node 4       │    │
-│    │          │          │          │           │    │
-│    └──────────┴──────────┴──────────┘           │    │
-│              Data flows between                  │    │
-└────────────────────┬────────────────────────────┘    │
-                     │                                  │
-    ┌────────────────┼────────────────┐                │
-    ▼                ▼                ▼                ▼
-┌────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-│STREAMING│     │ LOGGING  │     │  CREDS   │     │ FRONTEND │
-│push to  │     │ save to  │     │ fetch as │     │ Approval │
-│frontend │     │ database │     │ needed   │     │ Requests │
-└─────────┘     └──────────┘     └──────────┘     └──────────┘
+         │    │  1. Node asks for "stripe_refund"  │        │
+         │    │  2. MCP Client connects to Server  │        │
+         │    │  3. Sends JSON payload             │        │
+         │    │  4. Returns Result                 │        │
+         │    └────────────────────────────────────┘        │
+         │                                                  │
+         ▼                                                  │
+┌─────────────────────────────────────────────────┐        │
+│                   EXECUTOR                       │        │
+│                                                  │        │
+│  Node 1 ──▶ Node 2 ──▶ Node 3 ──▶ Node 4       │        │
+│    │          │          │          │           │        │
+│    └──────────┴──────────┴──────────┘           │        │
+│              Data flows between                  │        │
+└────────────────────┬────────────────────────────┘        │
+                     │                                      │
+    ┌────────────────┼────────────────┐                    │
+    ▼                ▼                ▼                    ▼
+┌────────┐     ┌──────────┐     ┌──────────┐         ┌──────────┐
+│STREAMING│     │ LOGGING  │     │  CREDS   │         │ FRONTEND │
+│push to  │     │ save to  │     │ fetch as │         │ Approval │
+│frontend │     │ database │     │ needed   │         │ Requests │
+└─────────┘     └──────────┘     └──────────┘         └──────────┘
 ```
 
 ---
 
 # The Story of Each Component
+
+## 🔌 MCP Integration
+*"The universal connector"*
+
+Instead of writing a custom Python class for every potential third-party service, we use the **Model Context Protocol (MCP)**.
+- **MCP Servers**: External processes or URLs that expose a list of tools (e.g., `read_file`, `query_database`, `slack_post`).
+- **MCP Client**: The backend connects to these servers on demand.
+- **MCP Node**: A generic node that can execute ANY tool from ANY connected server.
+
+This allows the platform to support hundreds of integrations day-one, just by pointing to an MCP server configuration.
 
 ## 👤 User Management
 *"Who are you, and what can you do?"*
@@ -240,7 +244,7 @@ The Orchestrator is a **LangGraph ReAct agent** that uses your workflow system a
 | **Templates** | Suggest from learned patterns | 🟢 P0 |
 | **Knowledge Base** | Query organizational docs | 🟡 P1 |
 | **Schedule** | Set up recurring executions | 🟡 P1 |
-| ~~Real-time Monitor~~ | ~~Watch running workflows~~ | 🔴 Deferred |
+| **MCP** | Connect external tools dynamically | 🟢 P0 |
 
 ### Memory Systems
 
@@ -321,15 +325,17 @@ User: "Retry"
 - [x] HITL integration
 
 **Phase 2: Memory & Templates** (P1) ⏱️ ~1 week
-- [ ] Conversation summarization
-- [ ] WorkflowTemplate model
-- [ ] n8n workflow importer
-- [ ] Template similarity search
+- [x] Conversation summarization
+- [x] WorkflowTemplate model
+- [x] n8n workflow importer
+- [x] Template similarity search
 
-**Phase 3: Knowledge Base** (P1) ⏱️ ~1 week
-- [ ] Document embedding pipeline
-- [ ] RAG query tool
-- [ ] Context injection
+**Phase 3: Knowledge Base & MCP** (P1) ⏱️ ~1 week
+- [x] Document embedding pipeline
+- [x] RAG query tool
+- [x] Context injection
+- [x] MCP Client Manager
+- [x] MCP Tool Node
 
 ### New Models Required
 
@@ -356,6 +362,16 @@ class ConversationSummary(models.Model):
     key_entities = models.JSONField(default=list)
     embedding = models.BinaryField(null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    
+# mcp_integration/models.py - ADDED
+class MCPServer(models.Model):
+    """External MCP Server Configuration"""
+    name = models.CharField(max_length=255)
+    type = models.CharField(choices=(('stdio', 'stdio'), ('sse', 'sse')))
+    command = models.CharField(max_length=1024, blank=True)
+    args = models.JSONField(default=list, blank=True)
+    url = models.URLField(blank=True)
+    env = models.JSONField(default=dict)
 ```
 
 ## 🔐 Credentials
@@ -443,7 +459,7 @@ User can design: "On error → Send Slack alert"
 
 > 🚨 **Critical Issues Identified from Agentic-AI Backend Analysis**
 
-The following security loopholes were discovered in the existing Agentic-AI implementation (`host.py`, `langgraph_super_agent.py`, `connections.py`). These MUST be addressed in the Django backend:
+The following security loopholes were discovered in the existing Agentic-AI implementation (`host.py`, `host.py`, `langgraph_super_agent.py`, `connections.py`). These MUST be addressed in the Django backend:
 
 ## 🔴 Critical Security Fixes
 
@@ -798,10 +814,3 @@ POST /api/templates/publish/:id # Publish workflow as template
 - `request_details`, `response`, `response_time_ms`
 
 ---
-
-# Implementation Checklist
-
-See [CHECKLIST.md](./CHECKLIST.md) for the full checklist (13 phases, 60+ items including security).
-
-**Estimated: ~75 hours total (33h core + 25.5h security + 16.5h frontend APIs)**
-

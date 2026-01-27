@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     'logs',
     'streaming',
     'templates',
+    'mcp_integration',
 ]
 
 MIDDLEWARE = [

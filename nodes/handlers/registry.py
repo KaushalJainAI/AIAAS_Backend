@@ -163,7 +163,17 @@ def get_registry() -> NodeRegistry:
         # Register Logic
         registry.register(LoopNode)
         registry.register(SplitInBatchesNode)
+        registry.register(LoopNode)
+        registry.register(SplitInBatchesNode)
         registry.register(SubworkflowNodeHandler)
+        
+        # Register MCP
+        from mcp_integration.nodes import MCPToolNode
+        registry.register(MCPToolNode)
+
+        # Register LangChain
+        from .langchain_nodes import LangChainToolNode
+        registry.register(LangChainToolNode)
         
         # Register Integrations
         registry.register(GmailNode)

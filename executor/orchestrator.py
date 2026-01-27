@@ -15,9 +15,8 @@ from dataclasses import dataclass, field
 
 from django.utils import timezone
 
-from compiler.schemas import ExecutionContext, WorkflowExecutionPlan
+from compiler.schemas import ExecutionContext
 from compiler.compiler import WorkflowCompiler
-from compiler.langgraph_builder import build_langgraph
 from orchestrator.interface import (
     OrchestratorInterface,
     OrchestratorDecision,
@@ -112,8 +111,12 @@ class WorkflowOrchestrator(OrchestratorInterface):
         self._on_progress = on_progress
         self._on_hitl_request = on_hitl_request
     
-    # --- OrchestratorInterface Implementation ---
+    def get_execution_state(self, execution_id: UUID) -> ExecutionState:
+        """Get the current state of an execution."""
+        handle = self._executions.get(execution_id)
+        return handle.state if handle else ExecutionState.PENDING
     
+    # --- OrchestratorInterface Implementation ---
     async def before_node(
         self,
         execution_id: UUID,
@@ -270,25 +273,32 @@ class WorkflowOrchestrator(OrchestratorInterface):
             handle.state = ExecutionState.RUNNING
             self._notify_state_change(handle)
             
-            # 1. Compile
-            # Pass user credentials for validation (assuming credentials dict has IDs or we need to look them up)
-            # In real system, we might need a DB lookup here, but for now we follow existing pattern.
-            compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=set(credentials.keys()) if credentials else set())
-            compile_result = compiler.compile()
+            # 1. Compile & Build Graph (Single Pass)
+            from compiler.compiler import WorkflowCompiler, WorkflowCompilationError
             
-            if not compile_result.success:
+            try:
+                # Pass used credentials so they are validated
+                used_creds = set(credentials.keys()) if credentials else set()
+                compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=used_creds)
+                
+                # Direct compilation to StateGraph
+                graph = compiler.compile(orchestrator=self)
+                
+            except WorkflowCompilationError as e:
                 handle.state = ExecutionState.FAILED
-                handle.error = "; ".join([e.message for e in compile_result.errors])
+                handle.error = f"Compilation failed: {str(e)}"
+                if e.errors:
+                    handle.error += f" ({len(e.errors)} errors)"
                 self._notify_state_change(handle)
                 return
-            
-            execution_plan = WorkflowExecutionPlan(**compile_result.execution_plan)
-            
-            # 2. Build LangGraph with Orchestrator Hooks
-            # We need to pass 'self' (the orchestrator) to the builder so it can inject hooks.
-            graph = build_langgraph(execution_plan, workflow_json.get('edges', []), orchestrator=self)
-            
-            # 3. Create Logger
+            except Exception as e:
+                handle.state = ExecutionState.FAILED
+                handle.error = f"Unexpected compilation error: {str(e)}"
+                self._notify_state_change(handle)
+                logger.exception("Compilation crash")
+                return
+
+            # 2. Create Logger
             exec_logger = ExecutionLogger()
             await exec_logger.start_execution(
                 execution_id=execution_id,

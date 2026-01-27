@@ -6,7 +6,7 @@
 
 ## Status: ✅ 100% Feature Complete
 
-**Last Updated**: 2026-01-22
+**Last Updated**: 2026-01-27
 
 ---
 
@@ -22,7 +22,12 @@
 ├──────────────┬──────────────┬──────────────┬───────────────────┤
 │     Core     │  Orchestrator│   Executor   │    Inference       │
 │  (Auth/API)  │  (Workflows) │  (Runtime)   │    (RAG)           │
-├──────────────┴──────────────┴──────────────┴───────────────────┤
+├──────────────┴───┬──────────┴──────────────┴───────────────────┤
+│                  │            MCP INTEGRATION                  │
+│                  └──────────────────┬──────────────────────────┤
+│                                     ▼                          │
+│                             External Tools                     │
+├─────────────────────────────────────────────────────────────────┤
 │                        Celery Workers                            │
 ├─────────────────────────────────────────────────────────────────┤
 │                    PostgreSQL + Redis                            │
@@ -45,6 +50,7 @@
 | `logs` | Logging & Analytics | `logger.py`, `views.py` |
 | `streaming` | Real-time | `consumers.py` |
 | `templates` | Template Library | `models.py`, `services.py`, `views.py` |
+| `mcp_integration` | Model Context Protocol | `models.py`, `client.py`, `nodes.py` |
 
 ---
 
@@ -56,8 +62,9 @@
 - **Core Nodes**: HTTP Request, Code, Set, If/Switch
 - **Trigger Nodes**: Manual, Webhook, Schedule
 - **Custom Nodes**: Dynamic loading with AST security
+- **MCP Nodes**: Generic node to execute Any external tool.
+- **LangChain Nodes**: Wraps community tools (Wikipedia, Arxiv, etc.) as workflow nodes.
 
-### Compiler
 ### Compiler
 - **Detailed Process**: [See COMPILATION_PROCESS.md](./compiler/COMPILATION_PROCESS.md)
 - DAG validation (cycles, orphans)
@@ -83,6 +90,12 @@
 - Context-aware chat
 - Version history
 - **Templates**: Public marketplace for sharing and instantiating workflows
+
+### MCP Integration
+- **Universal Tool Access**: Connect to any MCP server (filesystem, database, API wrappers).
+- **Transport Types**: STDIO (local secure processes) and SSE (remote HTTP streams).
+- **Security**: Sandboxed execution of tools.
+- **Dynamic Discovery**: Tools are listed and configured at runtime.
 
 ### Templates
 - **Template Library**: Reusable workflow blueprints
@@ -120,6 +133,7 @@
 | Credentials | `/api/credentials/` | CRUD, Types |
 | Streaming | `/api/streaming/` | SSE Events |
 | Templates | `/api/orchestrator/templates/` | List, Search, Publish, Clone |
+| MCP | `/api/mcp/` | Servers, Tools |
 
 See [PERMISSIONS.md](./PERMISSIONS.md) for detailed permissions.
 
@@ -137,6 +151,8 @@ See [PERMISSIONS.md](./PERMISSIONS.md) for detailed permissions.
 | Vector DB | FAISS |
 | Embeddings | sentence-transformers |
 | Database | PostgreSQL |
+| MCP SDK | `mcp`, `sse-starlette` |
+| Integrations | `langchain`, `langchain-community` |
 
 ---
 
@@ -169,6 +185,7 @@ inference/
 nodes/handlers/
 ├── llm_nodes.py        # OpenAI, Gemini, Ollama
 ├── integration_nodes.py # Gmail, Slack, Sheets
+├── langchain_nodes.py  # LangChain Toolkit Wrapper
 └── custom_loader.py    # Dynamic node loading
 
 compiler/
@@ -181,6 +198,11 @@ templates/
 ├── models.py           # WorkflowTemplate model
 ├── services.py         # Publishing and credential scrubbing logic
 └── views.py            # API endpoints
+
+mcp_integration/
+├── client.py           # MCP Client Manager
+├── nodes.py            # MCP Tool Node
+└── views.py            # Server & Tool List API
 
 CHECKLIST.md            # Detailed implementation checklist
 IMPLEMENTATION_PLAN.md  # Architectural decisions and roadmap

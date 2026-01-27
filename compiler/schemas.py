@@ -22,14 +22,7 @@ class CompileWarning(BaseModel):
     message: str
 
 
-class CompileResult(BaseModel):
-    """Result of workflow compilation"""
-    success: bool = Field(..., description="Whether compilation succeeded")
-    errors: list[CompileError] = Field(default_factory=list)
-    warnings: list[CompileWarning] = Field(default_factory=list)
-    execution_plan: dict | None = Field(default=None, description="Compiled execution plan if successful")
-    node_count: int = 0
-    edge_count: int = 0
+# CompileResult removed (Deprecated)
 
 
 class ExecutionContext(BaseModel):
@@ -170,17 +163,12 @@ class ExecutionContext(BaseModel):
 
 
 class NodeExecutionPlan(BaseModel):
-    """Execution plan for a single node"""
+    """
+    Execution configuration for a single node.
+    (Kept for internal use if needed, but mostly deprecated by dict lookups)
+    """
     node_id: str
     node_type: str
     config: dict[str, Any]
-    dependencies: list[str] = Field(default_factory=list, description="Node IDs that must complete first")
+    dependencies: list[str] = Field(default_factory=list)
     timeout_seconds: int = 60
-
-
-class WorkflowExecutionPlan(BaseModel):
-    """Complete execution plan for a workflow"""
-    workflow_id: int
-    execution_order: list[str] = Field(description="Topologically sorted node IDs")
-    nodes: dict[str, NodeExecutionPlan] = Field(description="Node ID -> execution plan")
-    entry_points: list[str] = Field(description="Trigger node IDs (no dependencies)")

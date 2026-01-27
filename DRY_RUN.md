@@ -142,66 +142,33 @@ This is the exact structure stored in the database.
 
 ---
 
-## 2. Phase 2: Compilation (`Backend/compiler/compiler.py`)
+## 2. Phase 2: Compilation & Graph Build (`Backend/compiler/compiler.py`)
 
-The raw JSON from Section 0 is compiled into an execution plan.
+The raw JSON is compiled **directly** into an executable LangGraph StateGraph (Single-Pass Architecture).
 
 ### 2.1 Input
-The `nodes` and `edges` arrays from the Workflow JSON.
+The `nodes`, `edges`, and `user_credentials` are passed to `WorkflowCompiler`.
 
-### 2.2 Validation Steps
+### 2.2 Validation Steps (Fail-Fast)
 1.  **DAG Check**: `validate_dag` confirms no cycles exist.
 2.  **Creds Check**: Verifies `cred_internal_api_001` exists in the user's keychain.
-3.  **Type Check**: `validate_type_compatibility` (if simplified) passes.
+3.  **Type Check**: `validate_type_compatibility` passes.
 
-### 2.3 Output: WorkflowExecutionPlan
-This JSON is built by `WorkflowCompiler.compile()`. It defines the precise order and dependencies.
+If any check fails, a `WorkflowCompilationError` is raised immediately, halting execution.
 
-```json
-{
-  "workflow_id": 1,
-  "execution_order": ["node_trigger_1", "node_code_1", "node_if_1", "node_http_1", "node_notify_1"],
-  "entry_points": ["node_trigger_1"],
-  "nodes": {
-    "node_trigger_1": {
-      "node_id": "node_trigger_1",
-      "type": "manual_trigger",
-      "config": { "label": "Start Request" },
-      "dependencies": []
-    },
-    "node_code_1": {
-      "node_id": "node_code_1",
-      "type": "code",
-      "config": { "code": "return {'batch_id': input['user_id'] + 1000...}" },
-      "dependencies": ["node_trigger_1"]
-    },
-    "node_if_1": {
-      "node_id": "node_if_1",
-      "type": "if_condition",
-      "config": { "expression": "{{ $input.batch_id }} > 2000" },
-      "dependencies": ["node_code_1"]
-    },
-    "node_http_1": {
-      "node_id": "node_http_1",
-      "type": "http_request",
-      "config": { "url": "...", "method": "GET" },
-      "dependencies": ["node_if_1"]
-    },
-    "node_notify_1": {
-      "node_id": "node_notify_1",
-      "type": "notification",
-      "config": { "channel": "slack" },
-      "dependencies": ["node_if_1"]
-    }
-  }
-}
-```
+### 2.3 Output: CompiledStateGraph
+The compiler constructs the graph in-memory:
+1.  **Nodes**: Each workflow node is wrapped in a `node_function` with Orchestrator hooks.
+2.  **Edges**: Routing logic is baked into LangGraph structure (including conditional branches).
+3.  **Entry Point**: `node_trigger_1` is identified and set as the start.
+
+*No intermediate JSON execution plan is generated.*
 
 ---
 
 ## 3. Phase 3: Runtime Initialization
 
-The `WorkflowOrchestrator` initializes the `ExecutionLog` entry before starting the LangGraph runner.
+The `WorkflowOrchestrator` initializes the `ExecutionLog` entry before invoking the graph.
 
 ### 3.1 DB INSERTS (ExecutionLog)
 ```python
@@ -406,3 +373,146 @@ NodeExecutionLog.objects.create(
     output_data={ "verification_result": "active" }
 )
 ```
+
+---
+
+## 7. Phase 7: MCP Tool Execution (NEW)
+
+This section details how an **MCP Tool Node** interacts with an external MCP Server (e.g., filesystem).
+
+**Scenario**: A workflow step requires reading a file from the server's disk using the `filesystem` MCP server.
+
+### 7.1 Node Definition
+
+```json
+{
+  "id": "node_mcp_read",
+  "type": "mcp_tool",
+  "data": {
+    "server_id": 101,
+    "tool_name": "read_file",
+    "arguments": {
+      "path": "/var/logs/app.log"
+    }
+  }
+}
+```
+
+### 7.2 Connection Establishment (`Backend/mcp_integration/client.py`)
+
+1.  **Server Config Lookup**:
+    *   Fetches `MCPServer(id=101)` from DB.
+    *   Type: `stdio`, Command: `npx`, Args: `['@modelcontextprotocol/server-filesystem', '/var/logs']`.
+
+2.  **Process Spawn**:
+    *   Backend spawns the node process via `subprocess.Popen` (Stdio).
+    *   Protocol handshake (Initialize) occurs.
+
+3.  **Tool List Verification**:
+    *   Backend implicitly trusts the tool name `read_file` exists (or validates against cached list).
+
+### 7.3 Tool Execution
+
+1.  **Call Tool**:
+    *   Backend sends JSON-RPC request: `{ "method": "tools/call", "params": { "name": "read_file", "arguments": { "path": "/var/logs/app.log" } } }`.
+2.  **Server Action**:
+    *   External process reads the file from disk.
+    *   Returns content.
+3.  **Response Handling**:
+    *   Backend receives: `{ "content": [{ "type": "text", "text": "Error: Connection timed out..." }] }`.
+    *   Parsed into python dict: `['Error: Connection timed out...']`.
+
+### 7.4 Logging & Teardown
+
+1.  **Logging**: `NodeExecutionLog` saves the file content as output.
+2.  **Teardown**: The stdio process is terminated (ephemeral connection).
+
+### 7.5 Database State
+
+```python
+NodeExecutionLog.objects.create(
+    execution_id="exc-mcp-test-1",
+    node_id="node_mcp_read",
+    status="completed",
+    output_data=["Error: Connection timed out..."]
+)
+```
+
+---
+
+## 8. Phase 8: Internal Graph Logic & Looping (Reference)
+
+This section explains the internal logic baked into the **CompiledStateGraph** created in Phase 2.
+
+**Scenario**: A "Retry Loop" where we try a task up to 3 times.
+**Graph**: `Trigger` -> `Loop Node` -> `Task (Code)` -> `Loop Node`
+
+### 8.1 LangGraph State Schema
+The graph maintains a `WorkflowState` (TypedDict) internally:
+*   `node_outputs`: Stores results of every node.
+*   `loop_stats`: Dictionary `{ "node_loop_1": int }` tracking iterations.
+*   `status`: Controls flow (running/paused/failed).
+
+### 8.2 Conditional Edge Logic
+For the Loop Node, the compiler generates a dynamic routing function:
+```python
+def route_conditional(state):
+    # Reads the handle returned by the node execution
+    handle = state['node_outputs'].get("_handle_node_loop_1")
+    if handle == 'loop': return "node_code_task"
+    if handle == 'done': return END
+    return END
+```
+
+### 8.3 Loop Runtime Execution (`Backend/nodes/handlers/logic_nodes.py`)
+**Node**: `node_loop_1` (Max Loop Count: 3)
+
+#### **Iteration 1**:
+1.  **State**: `loop_stats['node_loop_1']` is undefined (0).
+2.  **Check**: `0 < 3` -> **True**.
+3.  **State Update**: `loop_stats` -> `1`. Returns `"loop"`.
+4.  **Route**: To `node_code_task`.
+
+#### **Iteration 2 & 3**:
+Same logic, incrementing count.
+
+#### **Iteration 4 (Termination)**:
+1.  **Check**: `3 < 3` -> **False**.
+2.  **Result**: Returns `"done"`.
+3.  **Route**: To `END`.
+
+---
+
+## 9. Phase 9: Orchestrator Governance & Logic Interception
+
+In addition to physical execution, the **Orchestrator** acts as a supervisory layer. It injects hooks *before* and *after* each node to enforce policy.
+
+### 9.1 The Supervisor Loop (`Backend/executor/orchestrator.py`)
+Because the orchestrator manages the entire graph, it makes decisions at every step.
+
+#### **Hook 1: `before_node()`**
+Before `node_code_1` executes:
+1.  **Pause Check**: Is the execution paused?
+    *   If `state==PAUSED`, execution halts here until resumed.
+2.  **Cancellation Check**: Is `state==CANCELLED`?
+    *   If true, returns `AbortDecision`.
+3.  **Progress Notification**:
+    *   Updates in-memory state: `handle.current_node = "node_code_1"`.
+    *   Emits websocket event: `execution_progress { node_id: "node_code_1", progress: 20% }`.
+
+#### **Hook 2: `after_node()`**
+After `node_code_1` finishes:
+1.  **Loop Counting**: logic checks if `output_handle == 'loop'`.
+    *   Increments `handle.loop_counters['node_id']`.
+2.  **System Safety Check**:
+    *   Enforces `SYSTEM_MAX_LOOPS = 1000`.
+    *   If exceeded: Returns `AbortDecision("System safety limit exceeded")`.
+
+#### **Hook 3: `on_error()`**
+If `node_code_1` throws an exception:
+1.  **Logging**: Logs "Error in node node_code_1: Division by zero".
+2.  **Policy Decision**:
+    *   Currently defaults to `AbortDecision`.
+    *   *(Future)*: Could check "Continue on Error" flag and return `ContinueDecision`.
+
+This multi-layer architecture ensures that the system remains responsive (pausable/cancellable) and safe (infinite loop protection) regardless of the underlying graph logic.
