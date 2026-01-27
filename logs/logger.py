@@ -26,6 +26,7 @@ from django.utils import timezone
 from django.db import transaction
 
 from .models import ExecutionLog, NodeExecutionLog, AuditEntry
+from streaming.broadcaster import send_event_sync
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,23 @@ class ExecutionLogger:
         node_log.output_data = output_data or {}
         node_log.error_message = error_message
         node_log.save()
+        
+        # Broadcast event
+        try:
+            send_event_sync(
+                execution_id=execution_id,
+                event_type='node_complete',
+                data={
+                    'node_id': node_id,
+                    'status': 'completed' if success else 'failed',
+                    'output': output_data or {},
+                    'error': error_message,
+                    'duration_ms': duration_ms
+                }
+            )
+        except Exception as e:
+            # Don't fail execution if broadcast fails
+            logger.warning(f"Failed to broadcast node_complete event: {e}")
         
         log_level = logging.DEBUG if success else logging.WARNING
         logger.log(

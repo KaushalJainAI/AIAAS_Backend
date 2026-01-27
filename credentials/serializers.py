@@ -16,7 +16,7 @@ class CredentialAuditLogSerializer(serializers.ModelSerializer):
 class CredentialTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = CredentialType
-        fields = ['id', 'name', 'slug', 'description', 'icon', 'auth_method', 'fields_schema', 'oauth_config']
+        fields = ['id', 'name', 'slug', 'service_identifier', 'description', 'icon', 'auth_method', 'fields_schema', 'oauth_config']
 
 
 class CredentialSerializer(serializers.ModelSerializer):

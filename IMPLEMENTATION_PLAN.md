@@ -315,10 +315,10 @@ User: "Retry"
 ### Implementation Phases
 
 **Phase 1: Core Agent** (P0) ⏱️ ~2 weeks
-- [ ] Basic chat via WebSocket
-- [ ] Workflow tools (create, execute, pause, modify)
-- [ ] Simple conversation memory (last 20 messages)
-- [ ] HITL integration
+- [x] Basic chat via WebSocket
+- [x] Workflow tools (create, execute, pause, modify)
+- [x] Simple conversation memory (last 20 messages)
+- [x] HITL integration
 
 **Phase 2: Memory & Templates** (P1) ⏱️ ~1 week
 - [ ] Conversation summarization
@@ -466,10 +466,10 @@ class APIKeyAuthentication:
 ```
 
 **Checklist**:
-- [ ] JWT token generation/validation
-- [ ] API key per user with rotation support
-- [ ] Permission classes per endpoint
-- [ ] Admin-only routes protection
+- [x] JWT token generation/validation
+- [x] API key per user with rotation support
+- [x] Permission classes per endpoint
+- [x] Admin-only routes protection
 
 ---
 
@@ -550,10 +550,10 @@ async def execute_with_timeout(workflow, timeout=300):
 **Current Issue**: API keys in `.env` shared across all agents, logs may contain sensitive data.
 
 **Fix Required**:
-- [ ] Per-user credential isolation (already in checklist)
-- [ ] Encryption at rest for credentials (AES-256)
-- [ ] Audit logging for credential access
-- [ ] Log sanitization (strip PII, secrets before logging)
+- [x] Per-user credential isolation (already in checklist)
+- [x] Encryption at rest for credentials (AES-256)
+- [x] Audit logging for credential access
+- [x] Log sanitization (strip PII, secrets before logging)
 
 ```python
 # core/logging.py

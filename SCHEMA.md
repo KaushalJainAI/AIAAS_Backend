@@ -23,7 +23,8 @@ erDiagram
     Workflow ||--o{ WorkflowVersion : versions
     Workflow ||--o{ ExecutionLog : executes
     Workflow ||--o{ ConversationMessage : context
-    Workflow ||--o{ AuditEntry : audits
+    Workflow ||--o{ WorkflowTestResult : tests
+    Workflow ||--o{ WorkflowCloneHistory : clones
     
     ExecutionLog ||--o{ NodeExecutionLog : contains
     ExecutionLog ||--o{ HITLRequest : triggers
@@ -57,6 +58,7 @@ erDiagram
 |-------|-------------|
 | **CredentialType** | Integration types (OAuth, API Key, etc.) |
 | **Credential** | Encrypted user credentials |
+| **CredentialAuditLog** | Audit log for credential access/usage |
 
 ### 📋 logs
 
@@ -65,6 +67,7 @@ erDiagram
 | **ExecutionLog** | Workflow execution records |
 | **NodeExecutionLog** | Per-node execution details |
 | **AuditEntry** | HITL decisions and sensitive actions |
+| **ValidationFailureLog** | Logs for validation failures |
 
 ### 🤖 orchestrator
 
@@ -74,6 +77,8 @@ erDiagram
 | **WorkflowVersion** | Version history snapshots |
 | **HITLRequest** | Human-in-the-loop requests |
 | **ConversationMessage** | AI chat history |
+| **WorkflowTestResult** | Results of async workflow testing |
+| **WorkflowCloneHistory** | Tracks lineage of workflow creation |
 
 ### 🧠 inference
 
@@ -123,10 +128,17 @@ erDiagram
 | nodes | JSONField | Array of node definitions |
 | edges | JSONField | Array of connections |
 | viewport | JSONField | Canvas state |
-| settings | JSONField | Workflow config |
+| workflow_settings | JSONField | Workflow config |
 | status | CharField | draft/active/paused/archived |
 | is_template | BooleanField | Template flag |
 | execution_count | IntegerField | Total runs |
+| is_subworkflow_enabled | BooleanField | Allow use as subworkflow |
+| max_nesting_depth | IntegerField | Max recursion depth |
+| parent_template | FK(WorkflowTemplate) | Source template |
+| modifiable_fields | JSONField | Fields safe to modify |
+| is_cloneable | BooleanField | Cloneable flag |
+| successful_executions | IntegerField | Count of successes |
+| average_duration_ms | IntegerField | Avg duration |
 
 ### ExecutionLog
 | Field | Type | Description |
@@ -152,10 +164,25 @@ erDiagram
 | user | FK(User) | Owner |
 | credential_type | FK(CredentialType) | Type |
 | name | CharField | Friendly name |
+| public_metadata | JSONField | Public visibility data |
 | encrypted_data | BinaryField | Fernet encrypted |
+| access_token | BinaryField | Encrypted OAuth access token |
+| refresh_token | BinaryField | Encrypted OAuth refresh token |
+| token_expires_at | DateTimeField | Token expiry |
 | is_active | BooleanField | Active status |
 | is_verified | BooleanField | Verified working |
 | last_used_at | DateTimeField | Last usage |
+| last_error | TextField | Last error message |
+
+### CredentialType
+| Field | Type | Description |
+|-------|------|-------------|
+| name | CharField | Display name |
+| slug | SlugField | Unique ID |
+| service_identifier | CharField | Maps to nodeType |
+| auth_method | CharField | api_key/oauth2/basic/etc |
+| fields_schema | JSONField | JSON schema for fields |
+| oauth_config | JSONField | OAuth configuration |
 
 ### HITLRequest
 | Field | Type | Description |
@@ -171,17 +198,21 @@ erDiagram
 | response | JSONField | User response |
 | timeout_seconds | IntegerField | Timeout config |
 
-### Document
+### CustomNode
 | Field | Type | Description |
 |-------|------|-------------|
-| document_id | UUIDField | Unique identifier |
-| user | FK(User) | Owner |
-| name | CharField | Filename |
-| file | FileField | Uploaded file |
-| file_type | CharField | pdf/txt/md/docx/csv/json/html |
-| status | CharField | pending/processing/indexed/failed |
-| content_text | TextField | Extracted text |
-| chunk_count | IntegerField | Number of chunks |
+| user | FK(User) | Creator |
+| name | CharField | Display name |
+| node_type | CharField | Unique ID |
+| category | CharField | Node category |
+| code | TextField | Python code |
+| fields_schema | JSONField | Config schema |
+| input_schema | JSONField | Input schema |
+| output_schema | JSONField | Output schema |
+| status | CharField | draft/pending/approved/rejected |
+| is_validated | BooleanField | Validation status |
+| is_public | BooleanField | Public availability |
+| version | CharField | Version string |
 
 ---
 
@@ -189,6 +220,6 @@ erDiagram
 
 | Metric | Value |
 |--------|-------|
-| **Total Models** | 16 |
+| **Total Models** | 20 |
 | **Apps with Models** | 7 |
-| **Total Fields** | ~120 |
+| **Total Fields** | ~160 |

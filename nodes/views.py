@@ -68,4 +68,4 @@ class NodeSchemaDetailView(APIView):
         handler = registry.get_handler(node_type)
         schema = handler.get_schema()
         
-        return Response(schema.model_dump())
+        return Response(schema.model_dump(by_alias=True))

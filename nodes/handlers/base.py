@@ -67,7 +67,7 @@ class HandleDef(BaseModel):
 class NodeSchema(BaseModel):
     """Schema returned to frontend for node palette"""
     node_type: str = Field(..., serialization_alias="nodeType")
-    name: str
+    name: str = Field(..., serialization_alias="displayName")
     category: str
     description: str
     icon: str

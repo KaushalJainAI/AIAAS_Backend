@@ -29,6 +29,13 @@ class CredentialType(models.Model):
         unique=True,
         help_text='Unique identifier for this credential type'
     )
+    service_identifier = models.CharField(
+        max_length=100,
+        unique=True,
+        blank=True,
+        null=True,
+        help_text='Maps to nodeType (e.g., "openai", "gmail")'
+    )
     description = models.TextField(
         blank=True,
         help_text='Description of what this credential is for'

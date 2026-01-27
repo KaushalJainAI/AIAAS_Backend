@@ -46,9 +46,17 @@ def workflow_list(request):
     elif request.method == 'POST':
         data = request.data
         
+        # Ensure unique name
+        base_name = data.get('name', 'Untitled Workflow')
+        name = base_name
+        counter = 1
+        while Workflow.objects.filter(user=request.user, name=name).exists():
+            name = f"{base_name} ({counter})"
+            counter += 1
+        
         workflow = Workflow.objects.create(
             user=request.user,
-            name=data.get('name', 'Untitled Workflow'),
+            name=name,
             description=data.get('description', ''),
             nodes=data.get('nodes', []),
             edges=data.get('edges', []),
@@ -107,6 +115,16 @@ def workflow_detail(request, workflow_id: int):
         last_version = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number').first()
         next_version_num = (last_version.version_number + 1) if last_version else 1
         
+        # Limit version history to 10 versions
+        MAX_VERSIONS = 10
+        current_versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('version_number')
+        if current_versions.count() >= MAX_VERSIONS:
+            # Delete oldest versions to keep total at MAX_VERSIONS after new one
+            to_delete_count = current_versions.count() - MAX_VERSIONS + 1
+            if to_delete_count > 0:
+                to_delete_ids = list(current_versions.values_list('id', flat=True)[:to_delete_count])
+                WorkflowVersion.objects.filter(id__in=to_delete_ids).delete()
+
         WorkflowVersion.objects.create(
             workflow=workflow,
             version_number=next_version_num,
@@ -177,6 +195,10 @@ def execute_workflow(request, workflow_id: int):
     # Get orchestrator
     orchestrator = get_orchestrator()
     
+    # Auto-inject user credentials
+    from executor.credential_utils import get_user_credentials
+    user_credentials = get_user_credentials(request.user.id)
+    
     # Build workflow JSON
     workflow_json = {
         'id': workflow.id,
@@ -191,6 +213,7 @@ def execute_workflow(request, workflow_id: int):
             workflow_json=workflow_json,
             user_id=request.user.id,
             input_data=input_data,
+            credentials=user_credentials,
         )
     
     handle = asyncio.run(start())
@@ -472,6 +495,16 @@ def workflow_versions(request, workflow_id: int):
         last_version = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number').first()
         next_version = (last_version.version_number + 1) if last_version else 1
         
+        # Limit version history to 10 versions
+        MAX_VERSIONS = 10
+        current_versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('version_number')
+        if current_versions.count() >= MAX_VERSIONS:
+            # Delete oldest versions to keep total at MAX_VERSIONS after new one
+            to_delete_count = current_versions.count() - MAX_VERSIONS + 1
+            if to_delete_count > 0:
+                to_delete_ids = list(current_versions.values_list('id', flat=True)[:to_delete_count])
+                WorkflowVersion.objects.filter(id__in=to_delete_ids).delete()
+
         version = WorkflowVersion.objects.create(
             workflow=workflow,
             version_number=next_version,
@@ -548,9 +581,16 @@ def generate_workflow(request):
     
     # Optionally save the generated workflow
     if request.data.get('save', False):
+        base_name = result.get('name', 'Generated Workflow')
+        name = base_name
+        counter = 1
+        while Workflow.objects.filter(user=request.user, name=name).exists():
+            name = f"{base_name} ({counter})"
+            counter += 1
+            
         workflow = Workflow.objects.create(
             user=request.user,
-            name=result.get('name', 'Generated Workflow'),
+            name=name,
             description=result.get('description', description),
             nodes=result.get('nodes', []),
             edges=result.get('edges', []),
@@ -639,7 +679,17 @@ def modify_workflow(request, workflow_id: int):
     
     # Apply changes if requested
     if request.data.get('apply', False):
-        workflow.name = result.get('name', workflow.name)
+        new_name = result.get('name', workflow.name)
+        if new_name != workflow.name:
+            # Ensure uniqueness if name changed
+            base_name = new_name
+            name = base_name
+            counter = 1
+            while Workflow.objects.filter(user=request.user, name=name).exclude(id=workflow.id).exists():
+                name = f"{base_name} ({counter})"
+                counter += 1
+            workflow.name = name
+            
         workflow.description = result.get('description', workflow.description)
         workflow.nodes = result.get('nodes', workflow.nodes)
         workflow.edges = result.get('edges', workflow.edges)
@@ -781,9 +831,16 @@ def clone_workflow(request, workflow_id: int):
     """Clone an existing workflow."""
     original = get_object_or_404(Workflow, id=workflow_id, user=request.user)
     
+    base_name = f"{original.name} (Clone)"
+    name = base_name
+    counter = 1
+    while Workflow.objects.filter(user=request.user, name=name).exists():
+        name = f"{base_name} ({counter})"
+        counter += 1
+    
     clone = Workflow.objects.create(
         user=request.user,
-        name=f"{original.name} (Clone)",
+        name=name,
         description=original.description,
         nodes=original.nodes,
         edges=original.edges,

@@ -89,7 +89,7 @@ class NodeRegistry:
         schemas = []
         for handler_class in self._handlers.values():
             handler = handler_class()
-            schemas.append(handler.get_schema().model_dump())
+            schemas.append(handler.get_schema().model_dump(by_alias=True))
         return schemas
     
     def get_schemas_by_category(self) -> dict[str, list[dict]]:
@@ -103,7 +103,7 @@ class NodeRegistry:
         
         for handler_class in self._handlers.values():
             handler = handler_class()
-            schema = handler.get_schema().model_dump()
+            schema = handler.get_schema().model_dump(by_alias=True)
             category = schema['category']
             
             if category not in grouped:
