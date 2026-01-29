@@ -24,6 +24,7 @@ langgraph>=0.0.40
 langchain-openai>=0.0.5
 langchain-google-genai>=0.0.6
 langchain-community>=0.0.20
+mcp>=0.1.0
 
 # Vector Store (for Inference Engine)
 chromadb>=0.4

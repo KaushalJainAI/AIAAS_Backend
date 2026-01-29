@@ -163,8 +163,6 @@ def get_registry() -> NodeRegistry:
         # Register Logic
         registry.register(LoopNode)
         registry.register(SplitInBatchesNode)
-        registry.register(LoopNode)
-        registry.register(SplitInBatchesNode)
         registry.register(SubworkflowNodeHandler)
         
         # Register MCP

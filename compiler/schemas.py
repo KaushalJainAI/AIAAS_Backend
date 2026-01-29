@@ -22,8 +22,6 @@ class CompileWarning(BaseModel):
     message: str
 
 
-# CompileResult removed (Deprecated)
-
 
 class ExecutionContext(BaseModel):
     """

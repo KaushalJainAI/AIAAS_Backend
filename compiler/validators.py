@@ -162,7 +162,7 @@ def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
 def validate_credentials(
     nodes: list[dict],
     user_credentials: set[str]
-) -> list[CompileError]:
+    ) -> list[CompileError]:
     """
     Validate user has required credentials for all nodes.
     
@@ -398,7 +398,7 @@ NODE_INPUT_TYPES = {
 def validate_type_compatibility(
     nodes: list[dict],
     edges: list[dict]
-) -> list[CompileError]:
+    ) -> list[CompileError]:
     """
     Validate type compatibility between connected nodes.
     
@@ -457,8 +457,8 @@ def validate_nesting_depth(
     user_id: int,
     visited: set[str] = None,
     depth: int = 0,
-    max_depth: int = 3
-) -> list[CompileError]:
+    max_depth: int = 3  
+    ) -> list[CompileError]:
     """
     Recursively check that no workflow nesting exceeds max_depth.
     Also detects circular dependencies across workflow boundaries.
@@ -546,7 +546,7 @@ def validate_nesting_depth(
 def validate_timeout_budget(
     nodes: list[dict],
     parent_timeout_ms: int = 300000
-) -> list[CompileError]:
+    ) -> list[CompileError]:
     """
     Validate that total timeout budget for subworkflows doesn't exceed parent.
     """

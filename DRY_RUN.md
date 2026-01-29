@@ -440,20 +440,69 @@ NodeExecutionLog.objects.create(
 
 ---
 
-## 8. Phase 8: Internal Graph Logic & Looping (Reference)
+## 8. Phase 8: LangChain Tool Execution (NEW)
+
+This section details how a **LangChain Tool Node** interacts with standard LangChain tools (e.g., Wikipedia).
+
+**Scenario**: A workflow step requires fetching a summary from Wikipedia.
+
+### 8.1 Node Definition
+
+```json
+{
+  "id": "node_lc_wiki",
+  "type": "langchain_tool",
+  "data": {
+    "tool_name": "wikipedia",
+    "query": "LangChain",
+    "config": {
+      "tool_name": "wikipedia",
+      "query": "LangChain"
+    }
+  }
+}
+```
+
+### 8.2 Execution Logic (`Backend/nodes/handlers/langchain_nodes.py`)
+
+1.  **Tool Lookup**:
+    *   Backend checks `TOOLS` registry for "wikipedia".
+    *   Found `WikipediaQueryRun`.
+
+2.  **Execution**:
+    *   Calls `tool.run("LangChain")` (in thread pool if sync).
+    *   LangChain wrapper calls Wikipedia API.
+
+3.  **Output**:
+    *   Returns: `{ "result": "LangChain is a framework designed to simplify the creation of applications..." }`.
+
+### 8.3 Database State
+
+```python
+NodeExecutionLog.objects.create(
+    execution_id="exc-lc-test-1",
+    node_id="node_lc_wiki",
+    status="completed",
+    output_data={ "result": "LangChain is a framework..." }
+)
+```
+
+
+
+## 9. Phase 9: Internal Graph Logic & Looping (Reference)
 
 This section explains the internal logic baked into the **CompiledStateGraph** created in Phase 2.
 
 **Scenario**: A "Retry Loop" where we try a task up to 3 times.
 **Graph**: `Trigger` -> `Loop Node` -> `Task (Code)` -> `Loop Node`
 
-### 8.1 LangGraph State Schema
+### 9.1 LangGraph State Schema
 The graph maintains a `WorkflowState` (TypedDict) internally:
 *   `node_outputs`: Stores results of every node.
 *   `loop_stats`: Dictionary `{ "node_loop_1": int }` tracking iterations.
 *   `status`: Controls flow (running/paused/failed).
 
-### 8.2 Conditional Edge Logic
+### 9.2 Conditional Edge Logic
 For the Loop Node, the compiler generates a dynamic routing function:
 ```python
 def route_conditional(state):
@@ -464,7 +513,7 @@ def route_conditional(state):
     return END
 ```
 
-### 8.3 Loop Runtime Execution (`Backend/nodes/handlers/logic_nodes.py`)
+### 9.3 Loop Runtime Execution (`Backend/nodes/handlers/logic_nodes.py`)
 **Node**: `node_loop_1` (Max Loop Count: 3)
 
 #### **Iteration 1**:
@@ -483,11 +532,11 @@ Same logic, incrementing count.
 
 ---
 
-## 9. Phase 9: Orchestrator Governance & Logic Interception
+## 10. Phase 10: Orchestrator Governance & Logic Interception
 
 In addition to physical execution, the **Orchestrator** acts as a supervisory layer. It injects hooks *before* and *after* each node to enforce policy.
 
-### 9.1 The Supervisor Loop (`Backend/executor/orchestrator.py`)
+### 10.1 The Supervisor Loop (`Backend/executor/orchestrator.py`)
 Because the orchestrator manages the entire graph, it makes decisions at every step.
 
 #### **Hook 1: `before_node()`**

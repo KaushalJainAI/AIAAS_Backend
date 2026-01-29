@@ -1,7 +1,7 @@
 from typing import Any, Dict, List
 from pydantic import Field
 
-from nodes.handlers.base import BaseNodeHandler, NodeConfig
+from nodes.handlers.base import BaseNodeHandler
 from compiler.schemas import ExecutionContext
 from .client import MCPClientManager
 

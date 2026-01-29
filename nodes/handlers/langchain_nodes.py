@@ -1,7 +1,7 @@
 from typing import Any, Dict, List
 from pydantic import Field
 
-from nodes.handlers.base import BaseNodeHandler, NodeConfig, FieldType, FieldConfig
+from nodes.handlers.base import BaseNodeHandler, FieldType, FieldConfig
 from compiler.schemas import ExecutionContext
 from langchain_community.tools import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
