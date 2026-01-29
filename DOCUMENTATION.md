@@ -43,7 +43,7 @@
 | `core` | Auth, Users, Security | `authentication.py`, `permissions.py`, `security_config.py` |
 | `nodes` | Node System | `handlers/base.py`, `llm_nodes.py`, `integration_nodes.py` |
 | `compiler` | Workflow Compilation | `compiler.py`, `validators.py`, `langgraph_builder.py` |
-| `executor` | Execution Engine | `runner.py`, `orchestrator.py`, `safe_execution.py` |
+| `executor` | Execution Engine | `king.py`, `engine.py`, `tasks.py` |
 | `orchestrator` | Workflows & HITL | `models.py`, `views.py`, `ai_generator.py`, `approval_gates.py` |
 | `credentials` | Secret Management | `models.py`, `manager.py` |
 | `inference` | RAG Engine | `engine.py`, `views.py` |
@@ -74,14 +74,18 @@
 - Toplogical sort with deterministic ordering
 - **Subworkflow Support**: Nested execution validation and infinite loop protection
 
-### Executor
-- Retry logic with configurable attempts
-- Per-node timeouts
-- Error output handles
-- Safe sandboxed code execution
-- Method whitelisting
-- **Loop Control**: `max_loop_count` protection and deterministic iteration logic
-- **Subworkflows**: Isolated context execution with parent tracing
+### Executor (The Worker)
+- **Deterministic Engine**: `engine.py` using LangGraph.
+- **Reliable**: Retry logic, timeouts, and state persistence.
+- **Safe**: Sandboxed code execution (`safe_execution.py`).
+- **Loop Control**: `max_loop_count` protection.
+- **Subworkflows**: Isolated context execution with parent tracing.
+
+### King Agent Orchestrator (The Manager)
+- **Intent-Driven**: `king.py` translates natural language to workflows.
+- **Supervision**: Monitors execution state (Pause, Resume, Stop).
+- **Human-in-the-Loop**: Native `ask_human` capability for recovery/clarification.
+- **AI Planning**: Generates and modifies workflows on the fly.
 
 ### Orchestrator
 - Workflow start/stop/pause/resume
@@ -169,11 +173,11 @@ orchestrator/
 └── views.py            # API endpoints
 
 executor/
-├── orchestrator.py      # Workflow orchestration
-├── context_isolation.py # Thread-safe isolation
-├── safe_execution.py    # Sandboxed code execution
-├── dead_letter_queue.py # Failed task management
-└── tasks.py            # Celery tasks
+├── king.py            # King Agent (Orchestrator Logic)
+├── engine.py          # Execution Engine (LangGraph Worker)
+├── tasks.py           # Celery tasks
+├── safe_execution.py  # Sandboxed code execution
+└── runner.py          # [DEPRECATED] Legacy runner
 
 core/
 └── security_config.py   # Security utilities

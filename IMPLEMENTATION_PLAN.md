@@ -78,9 +78,9 @@ MCP_SERVER_TYPES = ['stdio', 'sse']
 │  └──────────────────────┘  └──────────────────────────────────┘ │
 │                                                                  │
 │  ┌──────────────────────┐  ┌──────────────────────────────────┐ │
-│  │    ▶️ EXECUTOR        │  │       🤖 ORCHESTRATOR            │ │
-│  │  Run Nodes in Order  │◀─┤  Supervise • Generate • Modify   │ │
-│  │  (LangGraph)         │  │  ASK HUMAN • Handle Errors       │ │
+│  │    ▶️ WORKER ENGINE   │  │       👑 KING AGENT                │ │
+│  │  Deterministic Run   │◀─┤  Plan • Supervise • HITL         │ │
+│  │  (LangGraph)         │  │  Intent -> Execution             │ │
 │  └──────────┬───────────┘  └──────────────┬───────────────────┘ │
 │             │                             │                      │
 │             │             ┌───────────────┴───────────────────┐  │
@@ -131,8 +131,8 @@ USER DESIGNS WORKFLOW
          │
          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      ORCHESTRATOR                            │
-│           Can STOP, PAUSE, MODIFY, or ASK HUMAN              │
+│                      KING AGENT (ORCHESTRATOR)               │
+│           Manage Intent, Pause/Resume, & HITL                │
 └────────┬─────────────────────────────────────┬──────────────┘
          │                                     │
          │         ┌───────────────────────────┴────────────┐
@@ -148,7 +148,7 @@ USER DESIGNS WORKFLOW
          │                                                  │
          ▼                                                  │
 ┌─────────────────────────────────────────────────┐        │
-│                   EXECUTOR                       │        │
+│                   WORKER ENGINE                  │        │
 │                                                  │        │
 │  Node 1 ──▶ Node 2 ──▶ Node 3 ──▶ Node 4       │        │
 │    │          │          │          │           │        │
@@ -201,13 +201,18 @@ Before execution, the compiler checks everything:
 
 Only valid workflows get compiled into LangGraph execution plans.
 
-## ▶️ Executor
-*"Running your automation, node by node"*
+## ▶️ Execution Engine ("The Worker")
+*"Deterministic, reliable execution"*
 
-The executor walks through the graph, running each node in order. Data flows from one node to the next. Errors are caught and logged. Conditional nodes (IF, Switch) change the path.
+The execution engine (`engine.py`) takes a compiled graph and runs it. It doesn't "think"—it obeys. It handles retries, state persistence, and error catching. It reports status back to the King.
 
-## 🤖 Orchestrator Agent (JARVIS)
-*"Your AI assistant for workflow automation"*
+## 👑 King Agent (Orchestrator)
+*"The intelligent supervisor"*
+
+The King (`king.py`) is the brain. It:
+1.  **Translates Intent**: "Run the monthly report" -> workflow execution.
+2.  **Supervises**: watches the Worker, handling pauses and stops.
+3.  **Handles Humans**: If the Worker gets stuck, the King asks the user for help (HITL).
 
 The Orchestrator is a **LangGraph ReAct agent** that uses your workflow system as its toolkit. It can create, run, modify, and combine automations via natural language.
 

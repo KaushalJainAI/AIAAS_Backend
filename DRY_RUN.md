@@ -138,7 +138,7 @@ This is the exact structure stored in the database.
     *   Calls `get_user_credentials(user_id=1)`.
     *   **Decrypts**: `{ "cred_internal_api_001": { "api_key": "sk-secure-key..." } }`.
     *   *Note*: These are kept in memory only; never logged to DB.
-4.  **Async Launch**: Pass payload to `WorkflowOrchestrator.start()`.
+4.  **Async Launch**: Pass payload to `KingOrchestrator.start()`.
 
 ---
 
@@ -168,7 +168,7 @@ The compiler constructs the graph in-memory:
 
 ## 3. Phase 3: Runtime Initialization
 
-The `WorkflowOrchestrator` initializes the `ExecutionLog` entry before invoking the graph.
+The `KingOrchestrator` initializes the `ExecutionHandle` and `ExecutionLog` entry before invoking the `ExecutionEngine`.
 
 ### 3.1 DB INSERTS (ExecutionLog)
 ```python
@@ -337,7 +337,7 @@ The parent workflow contains a `subworkflow` node configured to call Workflow ID
     *   Constructs Child Input: `{ "user_id": 1500 }`.
 
 4.  **Orchestrator Recursion**:
-    *   Calls `WorkflowOrchestrator.execute_subworkflow()`.
+    *   Calls `KingOrchestrator.start()` recursively.
     *   **Crucial Step**: Creates a **NEW** `ExecutionLog` entry for the child.
 
 ### 6.3 Database State (Child Execution)
@@ -532,12 +532,12 @@ Same logic, incrementing count.
 
 ---
 
-## 10. Phase 10: Orchestrator Governance & Logic Interception
+## 10. Phase 10: King Agent Governance & Logic Interception
 
-In addition to physical execution, the **Orchestrator** acts as a supervisory layer. It injects hooks *before* and *after* each node to enforce policy.
+In addition to physical execution by the **ExecutionEngine**, the **King Agent** acts as a supervisory layer. It injects hooks *before* and *after* each node to enforce policy.
 
-### 10.1 The Supervisor Loop (`Backend/executor/orchestrator.py`)
-Because the orchestrator manages the entire graph, it makes decisions at every step.
+### 10.1 The Supervisor Loop (`Backend/executor/king.py`)
+Because the King Agent manages the entire graph execution via the Engine, it makes decisions at every step.
 
 #### **Hook 1: `before_node()`**
 Before `node_code_1` executes:

@@ -1,6 +1,17 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Literal
 from uuid import UUID
+from enum import Enum
+
+class ExecutionState(str, Enum):
+    """Possible states of a workflow execution."""
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    WAITING_HUMAN = "waiting_human"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 class OrchestratorDecision(ABC):
     """Result of an orchestrator hook decision."""

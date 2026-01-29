@@ -35,7 +35,7 @@ def execute_workflow_async(
         input_data: Initial input data
     """
     import asyncio
-    from executor.orchestrator import get_orchestrator
+    from executor.king import get_orchestrator
     from orchestrator.models import Workflow
     
     try:
@@ -288,7 +288,7 @@ def test_workflow_async(self, workflow_id: int):
     import asyncio
     from orchestrator.models import Workflow, WorkflowTestResult
     from executor.test_generator import generate_test_input, validate_test_result
-    from executor.orchestrator import get_orchestrator
+    from executor.king import get_orchestrator
     from logs.models import ExecutionLog
 
     try:
