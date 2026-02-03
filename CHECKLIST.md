@@ -55,6 +55,10 @@
 - [x] AI workflow modifier ✅
 - [x] **Subworkflow Support** (nested execution) ✅
 - [x] **Template & Versioning System** ✅
+- [x] **Unified LLM Capabilities** (merged ai_generator into king.py) ✅
+- [x] **Goal-Oriented Execution** (runtime context, goal conditions) ✅
+- [x] **Configurable LLM Provider** (OpenRouter, OpenAI, Gemini) ✅
+- [x] **Supervision Levels** (full, error_only, none) ✅
 
 ### Human Feedback Integration
 - [x] WebSocket connection for real-time communication ✅

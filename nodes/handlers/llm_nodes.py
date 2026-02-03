@@ -686,3 +686,215 @@ class PerplexityNode(BaseNodeHandler):
                 error=f"Perplexity error: {str(e)}",
                 output_handle="error"
             )
+
+
+class OpenRouterNode(BaseNodeHandler):
+    """
+    Call OpenRouter API for unified access to many LLM models.
+    
+    OpenRouter provides access to GPT-4, Claude, Llama, Mistral, Gemini, and many more
+    through a single API with unified pricing.
+    """
+    
+    node_type = "openrouter"
+    name = "OpenRouter"
+    category = NodeCategory.AI.value
+    description = "Access 100+ AI models through OpenRouter (GPT-4, Claude, Llama, Mistral, etc.)"
+    icon = "🌐"
+    color = "#6366f1"  # Indigo
+    
+    fields = [
+        FieldConfig(
+            name="credential",
+            label="OpenRouter API Key",
+            field_type=FieldType.CREDENTIAL,
+            description="Select your OpenRouter credential"
+        ),
+        FieldConfig(
+            name="model",
+            label="Model",
+            field_type=FieldType.SELECT,
+            options=[
+                # Popular Free Models
+                "google/gemini-2.0-flash-exp:free",
+                "meta-llama/llama-3.3-70b-instruct:free",
+                "qwen/qwen-2.5-72b-instruct:free",
+                "deepseek/deepseek-chat:free",
+                "mistralai/mistral-small-24b-instruct-2501:free",
+                # OpenAI
+                "openai/gpt-4o",
+                "openai/gpt-4o-mini",
+                "openai/gpt-4-turbo",
+                "openai/o1",
+                "openai/o1-mini",
+                # Anthropic
+                "anthropic/claude-3.5-sonnet",
+                "anthropic/claude-3.5-haiku",
+                "anthropic/claude-3-opus",
+                # Google
+                "google/gemini-2.0-flash-001",
+                "google/gemini-pro-1.5",
+                "google/gemini-flash-1.5",
+                # Meta Llama
+                "meta-llama/llama-3.3-70b-instruct",
+                "meta-llama/llama-3.1-405b-instruct",
+                "meta-llama/llama-3.1-70b-instruct",
+                # Mistral
+                "mistralai/mistral-large-2411",
+                "mistralai/mistral-medium",
+                "mistralai/mixtral-8x22b-instruct",
+                # DeepSeek
+                "deepseek/deepseek-r1",
+                "deepseek/deepseek-chat",
+                # Qwen
+                "qwen/qwen-2.5-72b-instruct",
+                "qwen/qwq-32b",
+                # Cohere
+                "cohere/command-r-plus",
+                "cohere/command-r",
+            ],
+            default="google/gemini-2.0-flash-exp:free"
+        ),
+        FieldConfig(
+            name="prompt",
+            label="Prompt",
+            field_type=FieldType.STRING,
+            placeholder="Enter your prompt here...",
+            description="The prompt to send to the model"
+        ),
+        FieldConfig(
+            name="system_message",
+            label="System Message",
+            field_type=FieldType.STRING,
+            required=False,
+            default="You are a helpful assistant.",
+            description="Optional system message to set context"
+        ),
+        FieldConfig(
+            name="temperature",
+            label="Temperature",
+            field_type=FieldType.NUMBER,
+            default=0.7,
+            required=False,
+            description="Creativity (0-2, lower = more deterministic)"
+        ),
+        FieldConfig(
+            name="max_tokens",
+            label="Max Tokens",
+            field_type=FieldType.NUMBER,
+            default=2048,
+            required=False,
+            description="Maximum tokens in response"
+        ),
+        FieldConfig(
+            name="top_p",
+            label="Top P",
+            field_type=FieldType.NUMBER,
+            default=1.0,
+            required=False,
+            description="Nucleus sampling (0-1)"
+        ),
+    ]
+    
+    outputs = [
+        HandleDef(id="success", label="Success", handle_type="success"),
+        HandleDef(id="error", label="Error", handle_type="error"),
+    ]
+    
+    async def execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> NodeExecutionResult:
+        credential_id = config.get("credential")
+        model = config.get("model", "google/gemini-2.0-flash-exp:free")
+        prompt = config.get("prompt", "")
+        system_message = config.get("system_message", "You are a helpful assistant.")
+        temperature = config.get("temperature", 0.7)
+        max_tokens = config.get("max_tokens", 2048)
+        top_p = config.get("top_p", 1.0)
+        
+        if not prompt:
+            return NodeExecutionResult(
+                success=False,
+                error="Prompt is required",
+                output_handle="error"
+            )
+        
+        # Get API key from credentials
+        creds = context.get_credential(credential_id) if credential_id else None
+        if not creds or "api_key" not in creds:
+            return NodeExecutionResult(
+                success=False,
+                error="OpenRouter API key not configured",
+                output_handle="error"
+            )
+        
+        api_key = creds["api_key"]
+        
+        try:
+            # Build messages
+            messages = []
+            if system_message:
+                messages.append({"role": "system", "content": system_message})
+            messages.append({"role": "user", "content": prompt})
+            
+            async with httpx.AsyncClient(timeout=180) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://aiaas.local",  # Optional: your app URL
+                        "X-Title": "AIAAS Workflow",  # Optional: your app name
+                    },
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "top_p": top_p,
+                    },
+                )
+                
+                if response.status_code != 200:
+                    error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                    error_msg = error_data.get("error", {}).get("message", response.text) if isinstance(error_data.get("error"), dict) else str(error_data.get("error", response.text))
+                    return NodeExecutionResult(
+                        success=False,
+                        error=f"OpenRouter API error: {error_msg}",
+                        output_handle="error"
+                    )
+                
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                usage = data.get("usage", {})
+                
+                return NodeExecutionResult(
+                    success=True,
+                    data={
+                        "content": content,
+                        "model": model,
+                        "usage": {
+                            "prompt_tokens": usage.get("prompt_tokens", 0),
+                            "completion_tokens": usage.get("completion_tokens", 0),
+                            "total_tokens": usage.get("total_tokens", 0),
+                        },
+                        "input": input_data,
+                    },
+                    output_handle="success"
+                )
+                
+        except httpx.TimeoutException:
+            return NodeExecutionResult(
+                success=False,
+                error="OpenRouter API request timed out",
+                output_handle="error"
+            )
+        except Exception as e:
+            return NodeExecutionResult(
+                success=False,
+                error=f"OpenRouter error: {str(e)}",
+                output_handle="error"
+            )

@@ -13,6 +13,13 @@ class ExecutionState(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+
+class SupervisionLevel(str, Enum):
+    """Level of orchestrator supervision during execution."""
+    FULL = "full"           # All hooks: before_node, after_node, on_error
+    ERROR_ONLY = "error_only"  # Only on_error hook (lightweight mode)
+    NONE = "none"           # No hooks (pure engine execution)
+
 class OrchestratorDecision(ABC):
     """Result of an orchestrator hook decision."""
     pass

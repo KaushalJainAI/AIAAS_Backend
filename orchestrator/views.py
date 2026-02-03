@@ -97,6 +97,10 @@ def workflow_detail(request, workflow_id: int):
             'edges': workflow.edges,
             'viewport': workflow.viewport,
             'workflow_settings': workflow.workflow_settings,
+            'supervision_level': workflow.supervision_level,
+            'llm_provider': workflow.llm_provider,
+            'llm_model': workflow.llm_model,
+            'llm_credential_id': workflow.llm_credential_id,
             'status': workflow.status,
             'icon': workflow.icon,
             'color': workflow.color,
@@ -157,6 +161,31 @@ def workflow_detail(request, workflow_id: int):
             workflow.color = data['color']
         if 'tags' in data:
             workflow.tags = data['tags']
+        if 'supervision_level' in data:
+            # Validate supervision level
+            valid_levels = ['error_only', 'full', 'none']
+            if data['supervision_level'] in valid_levels:
+                workflow.supervision_level = data['supervision_level']
+        
+        # LLM provider settings
+        if 'llm_provider' in data:
+            valid_providers = ['openrouter', 'openai', 'gemini', 'ollama', 'perplexity']
+            if data['llm_provider'] in valid_providers:
+                workflow.llm_provider = data['llm_provider']
+        if 'llm_model' in data:
+            workflow.llm_model = data['llm_model']
+        if 'llm_credential_id' in data:
+            from credentials.models import Credential
+            cred_id = data['llm_credential_id']
+            if cred_id:
+                # Validate credential belongs to user
+                try:
+                    cred = Credential.objects.get(id=cred_id, user=request.user)
+                    workflow.llm_credential = cred
+                except Credential.DoesNotExist:
+                    pass  # Ignore invalid credential
+            else:
+                workflow.llm_credential = None
         
         workflow.save()
         
@@ -214,6 +243,7 @@ def execute_workflow(request, workflow_id: int):
             user_id=request.user.id,
             input_data=input_data,
             credentials=user_credentials,
+            supervision=workflow.supervision_level,  # Use workflow's setting
         )
     
     handle = asyncio.run(start())
@@ -234,7 +264,7 @@ def pause_execution(request, execution_id: str):
     import asyncio
     
     orchestrator = get_orchestrator()
-    result = asyncio.run(orchestrator.pause(UUID(execution_id)))
+    result = asyncio.run(orchestrator.pause(UUID(execution_id), request.user.id))
     
     if result:
         return Response({'status': 'paused', 'execution_id': execution_id})
@@ -249,7 +279,7 @@ def resume_execution(request, execution_id: str):
     import asyncio
     
     orchestrator = get_orchestrator()
-    result = asyncio.run(orchestrator.resume(UUID(execution_id)))
+    result = asyncio.run(orchestrator.resume(UUID(execution_id), request.user.id))
     
     if result:
         return Response({'status': 'resumed', 'execution_id': execution_id})
@@ -264,7 +294,7 @@ def stop_execution(request, execution_id: str):
     import asyncio
     
     orchestrator = get_orchestrator()
-    result = asyncio.run(orchestrator.stop(UUID(execution_id)))
+    result = asyncio.run(orchestrator.stop(UUID(execution_id), request.user.id))
     
     if result:
         return Response({'status': 'stopped', 'execution_id': execution_id})
@@ -278,10 +308,10 @@ def execution_status(request, execution_id: str):
     from executor.orchestrator import get_orchestrator
     
     orchestrator = get_orchestrator()
-    handle = orchestrator.get_status(UUID(execution_id))
+    handle = orchestrator.get_status(UUID(execution_id), request.user.id)
     
     if not handle:
-        return Response({'error': 'Execution not found'}, status=404)
+        return Response({'error': 'Execution not found or not authorized'}, status=404)
     
     return Response({
         'execution_id': str(handle.execution_id),

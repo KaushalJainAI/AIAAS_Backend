@@ -23,6 +23,8 @@ class NodesConfig(AppConfig):
             OpenAINode,
             GeminiNode,
             OllamaNode,
+            PerplexityNode,
+            OpenRouterNode,
         )
         from .handlers.integration_nodes import (
             GmailNode,
@@ -47,6 +49,8 @@ class NodesConfig(AppConfig):
         registry.register(OpenAINode)
         registry.register(GeminiNode)
         registry.register(OllamaNode)
+        registry.register(PerplexityNode)
+        registry.register(OpenRouterNode)
         
         # Register integration nodes
         registry.register(GmailNode)

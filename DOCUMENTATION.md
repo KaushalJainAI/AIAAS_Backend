@@ -6,7 +6,7 @@
 
 ## Status: ✅ 100% Feature Complete
 
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-02-03
 
 ---
 
@@ -44,7 +44,7 @@
 | `nodes` | Node System | `handlers/base.py`, `llm_nodes.py`, `integration_nodes.py` |
 | `compiler` | Workflow Compilation | `compiler.py`, `validators.py`, `langgraph_builder.py` |
 | `executor` | Execution Engine | `king.py`, `engine.py`, `tasks.py` |
-| `orchestrator` | Workflows & HITL | `models.py`, `views.py`, `ai_generator.py`, `approval_gates.py` |
+| `orchestrator` | Workflows & HITL | `models.py`, `views.py`, `context.py`, `approval_gates.py` |
 | `credentials` | Secret Management | `models.py`, `manager.py` |
 | `inference` | RAG Engine | `engine.py`, `views.py` |
 | `logs` | Logging & Analytics | `logger.py`, `views.py` |
@@ -83,9 +83,12 @@
 
 ### King Agent Orchestrator (The Manager)
 - **Intent-Driven**: `king.py` translates natural language to workflows.
+- **Unified LLM**: All AI generation capabilities merged into single class.
 - **Supervision**: Monitors execution state (Pause, Resume, Stop).
 - **Human-in-the-Loop**: Native `ask_human` capability for recovery/clarification.
-- **AI Planning**: Generates and modifies workflows on the fly.
+- **AI Planning**: Generates and modifies workflows using configurable LLM.
+- **Goal-Oriented Execution**: Runtime decisions based on node outputs and goal conditions.
+- **Configurable LLM**: Supports OpenRouter, OpenAI, Gemini with model selection.
 
 ### Orchestrator
 - Workflow start/stop/pause/resume

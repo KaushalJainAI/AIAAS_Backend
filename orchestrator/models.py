@@ -16,6 +16,12 @@ class Workflow(models.Model):
         ('archived', 'Archived'),
     ]
     
+    SUPERVISION_CHOICES = [
+        ('error_only', 'Error Only (Recommended)'),
+        ('full', 'Full Supervision'),
+        ('none', 'No Supervision'),
+    ]
+    
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -56,6 +62,44 @@ class Workflow(models.Model):
         default=dict,
         blank=True,
         help_text='Workflow-level settings (timeout, retry config, etc.)'
+    )
+    
+    # Supervision Level (Cost/Performance Control)
+    supervision_level = models.CharField(
+        max_length=20,
+        choices=SUPERVISION_CHOICES,
+        default='error_only',
+        help_text='Level of orchestrator supervision. WARNING: "Full Supervision" increases API costs and system overhead.'
+    )
+    
+    # LLM Provider Configuration (for AI features)
+    LLM_PROVIDER_CHOICES = [
+        ('openrouter', 'OpenRouter (100+ models)'),
+        ('openai', 'OpenAI'),
+        ('gemini', 'Google Gemini'),
+        ('ollama', 'Ollama (Local)'),
+        ('perplexity', 'Perplexity'),
+    ]
+    
+    llm_provider = models.CharField(
+        max_length=30,
+        choices=LLM_PROVIDER_CHOICES,
+        default='openrouter',
+        help_text='LLM provider for AI features (workflow generation, suggestions)'
+    )
+    llm_model = models.CharField(
+        max_length=100,
+        default='google/gemini-2.0-flash-exp:free',
+        blank=True,
+        help_text='Specific model to use (provider-dependent)'
+    )
+    llm_credential = models.ForeignKey(
+        'credentials.Credential',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='workflows_using_llm',
+        help_text='Credential to use for LLM API calls'
     )
     
     # Status

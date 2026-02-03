@@ -80,12 +80,16 @@ class WorkflowCompiler:
             if src:
                 self._outgoing[src].append(edge)
 
-    def compile(self, orchestrator: Any = None) -> CompiledStateGraph:
+    def compile(self, orchestrator: Any = None, supervision_level: Any = None) -> CompiledStateGraph:
         """
         Compile workflow directly to StateGraph.
         
         Args:
             orchestrator: Optional orchestrator instance for runtime hooks
+            supervision_level: Level of supervision (FULL, ERROR_ONLY, NONE)
+                - FULL: All hooks (before_node, after_node, on_error)
+                - ERROR_ONLY: Only on_error hook called
+                - NONE: No hooks called
             
         Returns:
             Executable CompiledStateGraph
@@ -115,12 +119,12 @@ class WorkflowCompiler:
 
         # --- Graph Construction Phase ---
         try:
-            return self._build_graph(orchestrator)
+            return self._build_graph(orchestrator, supervision_level)
         except Exception as e:
             logger.exception("Graph construction failed")
             raise WorkflowCompilationError(f"Graph construction failed: {str(e)}")
 
-    def _build_graph(self, orchestrator: Any) -> CompiledStateGraph:
+    def _build_graph(self, orchestrator: Any, supervision_level: Any) -> CompiledStateGraph:
         graph = StateGraph(WorkflowState)
         
         # 1. Determine Execution Order (for linear edges fallback)
@@ -132,7 +136,7 @@ class WorkflowCompiler:
         for node in self.nodes:
             node_id = node['id']
             # Create handler function (closure)
-            node_func = self._create_node_function(node, orchestrator)
+            node_func = self._create_node_function(node, orchestrator, supervision_level)
             graph.add_node(node_id, node_func)
             
         # 3. Add Edges
@@ -172,7 +176,7 @@ class WorkflowCompiler:
             
         return graph.compile()
 
-    def _create_node_function(self, node_data: dict, orchestrator: Any):
+    def _create_node_function(self, node_data: dict, orchestrator: Any, supervision_level: Any):
         node_id = node_data['id']
         node_type = node_data.get('type')
         config = node_data.get('data', {}) # .get('config')? Frontends vary. Assuming data IS config or contains it.
@@ -199,8 +203,16 @@ class WorkflowCompiler:
             if state.get('status') in ['failed', 'cancelled', 'paused']:
                 return state
 
-            # Before Hook
-            if orchestrator:
+            # Before Hook (only for FULL supervision)
+            # Import here to avoid circular import
+            from orchestrator.interface import SupervisionLevel
+            
+            should_call_before = (
+                orchestrator and 
+                supervision_level not in (SupervisionLevel.ERROR_ONLY, SupervisionLevel.NONE, 'error_only', 'none')
+            )
+            
+            if should_call_before:
                 decision = await orchestrator.before_node(execution_id, node_id, state)
                 if isinstance(decision, AbortDecision):
                     state['status'] = 'failed'
@@ -252,17 +264,28 @@ class WorkflowCompiler:
                     state['loop_stats'][node_id] = state['loop_stats'].get(node_id, 0) + 1
 
                 if not result.success:
-                    if orchestrator:
+                    # on_error called for FULL and ERROR_ONLY supervision
+                    should_call_error = (
+                        orchestrator and 
+                        supervision_level not in (SupervisionLevel.NONE, 'none')
+                    )
+                    if should_call_error:
                         err_decision = await orchestrator.on_error(execution_id, node_id, result.error, state)
                         if isinstance(err_decision, AbortDecision):
                             state['error'] = result.error
                             state['status'] = 'failed'
                         # Retry not implemented in this reduced scope
                     else:
-                        # Log warning maybe?
-                        pass
+                        # No orchestrator or NONE mode - just fail
+                        state['error'] = result.error
+                        state['status'] = 'failed'
                 else:
-                    if orchestrator:
+                    # after_node only for FULL supervision
+                    should_call_after = (
+                        orchestrator and 
+                        supervision_level not in (SupervisionLevel.ERROR_ONLY, SupervisionLevel.NONE, 'error_only', 'none')
+                    )
+                    if should_call_after:
                         post_decision = await orchestrator.after_node(
                             execution_id, node_id, 
                             {'data': result.data, 'output_handle': result.output_handle}, 

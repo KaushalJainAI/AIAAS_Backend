@@ -19,7 +19,7 @@ from django.utils import timezone
 from compiler.compiler import WorkflowCompiler, WorkflowCompilationError
 from logs.models import ExecutionLog
 from logs.logger import ExecutionLogger
-from orchestrator.interface import OrchestratorInterface, ExecutionState
+from orchestrator.interface import OrchestratorInterface, ExecutionState, SupervisionLevel
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +51,24 @@ class ExecutionEngine:
         parent_execution_id: UUID | None = None,
         nesting_depth: int = 0,
         workflow_chain: list[int] | None = None,
-        timeout_budget_ms: int | None = None
+        timeout_budget_ms: int | None = None,
+        supervision_level: 'SupervisionLevel' = None,
     ) -> ExecutionState:
         """
         Run a workflow from start to finish (or until paused/failed).
+        
+        Args:
+            supervision_level: Level of orchestrator supervision.
+                - FULL: All hooks called
+                - ERROR_ONLY: Only on_error hook
+                - NONE: No hooks (pure execution)
         """
-        logger.info(f"Engine starting execution {execution_id} for workflow {workflow_id}")
+        logger.info(f"Engine starting execution {execution_id} for workflow {workflow_id} (supervision={supervision_level})")
+        
+        # Determine orchestrator to pass based on supervision level
+        effective_orchestrator = self.orchestrator
+        if supervision_level == SupervisionLevel.NONE:
+            effective_orchestrator = None  # No hooks at all
         
         # 1. Compile & Build Graph (Single Pass)
         try:
@@ -65,8 +77,11 @@ class ExecutionEngine:
             compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=used_creds)
             
             # Direct compilation to StateGraph
-            # We pass self.orchestrator to allow the compiled nodes to call back hooks
-            graph = compiler.compile(orchestrator=self.orchestrator)
+            # Pass orchestrator and supervision level for hook filtering
+            graph = compiler.compile(
+                orchestrator=effective_orchestrator,
+                supervision_level=supervision_level
+            )
             
         except WorkflowCompilationError as e:
             logger.error(f"Compilation failed for execution {execution_id}: {e}")
