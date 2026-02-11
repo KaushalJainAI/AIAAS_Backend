@@ -44,9 +44,9 @@
 - [x] **ExecutionEngine** (`engine.py`) ✅
 - [x] Node runner with error handling ✅
 - [x] Data passing between nodes ✅
-- [x] Data passing between nodes ✅
 - [x] Conditional routing (If, Switch) ✅
 - [x] Loop safety limits (max_loop_count) ✅
+- [x] **Full Loop Support** (LoopNode, SplitInBatchesNode with batch slicing, result accumulation) ✅
 
 ## 🤖 Orchestrator
 - [x] **KingOrchestrator** (`king.py`) ✅
@@ -216,6 +216,16 @@
 - [x] Audit logging middleware ✅
 - [x] Audit retrieval endpoints ✅
 - [x] Audit export (CSV/JSON) ✅
+
+### ⚠️ Missing Backend Endpoints (Frontend Needs These)
+- [ ] **Forgot Password** - `POST /api/auth/forgot-password/`
+- [ ] **Export Logs** - `GET /api/logs/export/` (CSV/JSON)
+- [ ] **Notification Settings** - `GET/PATCH /api/settings/notifications/`
+- [ ] **Billing API** - Usage stats, plan upgrade endpoints
+  - [ ] `GET /api/billing/usage/` - Current usage stats
+  - [ ] `GET /api/billing/plan/` - Current plan info
+  - [ ] `POST /api/billing/upgrade/` - Plan upgrade
+- [ ] **Insights Charts** - `GET /api/insights/charts/`
 
 ---
 

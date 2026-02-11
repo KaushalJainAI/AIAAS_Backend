@@ -32,6 +32,10 @@ urlpatterns = [
     path('chat/<str:conversation_id>/', views.conversation_messages, name='chat_detail'),
     path('chat/context-aware/', views.context_aware_chat, name='context_aware_chat'),
     
+    # Partial Execution (Test Step)
+    path('workflows/execute_partial/', views.execute_partial, name='execute_partial'),
+    path('workflows/<int:workflow_id>/execute_partial/', views.execute_partial, name='execute_partial_workflow'),
+    
     # AI Workflow Generation
     path('ai/generate/', views.generate_workflow, name='generate_workflow'),
     path('workflows/<int:workflow_id>/ai/modify/', views.modify_workflow, name='modify_workflow'),

@@ -95,7 +95,49 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
             }
         })
         
+        # Send initial state sync if execution_id is provided
+        if self.execution_id:
+            try:
+                await self._send_initial_state(self.execution_id)
+            except Exception as e:
+                logger.error(f"Error sending initial state for {self.execution_id}: {e}")
+        
         logger.info(f"WebSocket connected: user={self.user_id}, execution={self.execution_id}")
+
+    async def _send_initial_state(self, execution_id: str):
+        """Send the current state of all nodes for this execution."""
+        from logs.models import ExecutionLog
+        
+        try:
+            # Fetch execution and its node logs
+            exec_log = await ExecutionLog.objects.aget(execution_id=execution_id)
+            node_logs = exec_log.node_logs.all()
+            
+            initial_state = []
+            async for node_log in node_logs:
+                initial_state.append({
+                    'node_id': node_log.node_id,
+                    'status': node_log.status,
+                    'output': node_log.output_data,
+                    'error': node_log.error_message,
+                    'duration_ms': node_log.duration_ms
+                })
+            
+            if initial_state:
+                await self.send_json({
+                    'type': 'execution.state_sync',
+                    'data': {
+                        'execution_id': execution_id,
+                        'overall_status': exec_log.status,
+                        'nodes': initial_state
+                    }
+                })
+                logger.info(f"Sent initial state sync for execution {execution_id} with {len(initial_state)} nodes")
+        except ExecutionLog.DoesNotExist:
+            logger.warning(f"Initial state sync failed: Execution {execution_id} not found")
+        except Exception as e:
+            logger.exception(f"Error in _send_initial_state: {e}")
+
     
     async def disconnect(self, close_code):
         """Handle WebSocket disconnection."""

@@ -18,6 +18,8 @@ from .schemas import (
 )
 # We can use NodeExecutionPlan as a helper or just use dicts. Using dicts to minimalize allocs.
 
+from .utils import get_node_type
+
 from .validators import (
     validate_dag,
     validate_credentials,
@@ -26,6 +28,7 @@ from .validators import (
     topological_sort,
 )
 from nodes.handlers.registry import get_registry
+from logs.logger import get_execution_logger
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +77,47 @@ class WorkflowCompiler:
 
     def _build_index(self):
         self._node_map = {n['id']: n for n in self.nodes}
+        self._label_to_id = {n.get('data', {}).get('label', n['id']): n['id'] for n in self.nodes}
+        # Secondary check for label in config
+        for n in self.nodes:
+            label = n.get('data', {}).get('label') or n.get('data', {}).get('config', {}).get('label')
+            if label:
+                self._label_to_id[label] = n['id']
+            # Add node type as a fallback label if not already present
+            node_type = get_node_type(n)
+            if node_type:
+                self._label_to_id.setdefault(node_type, n['id'])
+                self._label_to_id.setdefault(node_type.lower(), n['id']) # Also add lowercase version
+
+        # Pre-analyze expressions for each node
+        self._node_expression_paths = {}
+        for node in self.nodes:
+            node_id = node['id']
+            config = node.get('data', {}).get('config', node.get('data', {}))
+            self._node_expression_paths[node_id] = self._get_expression_paths(config)
+
         self._outgoing = defaultdict(list)
         for edge in self.edges:
             src = edge.get('source')
             if src:
                 self._outgoing[src].append(edge)
+
+    def _get_expression_paths(self, config: Any, current_path: list = None) -> list[list]:
+        """Recursively find paths to strings containing {{ }}."""
+        if current_path is None:
+            current_path = []
+        
+        paths = []
+        if isinstance(config, dict):
+            for k, v in config.items():
+                paths.extend(self._get_expression_paths(v, current_path + [k]))
+        elif isinstance(config, list):
+            for i, v in enumerate(config):
+                paths.extend(self._get_expression_paths(v, current_path + [i]))
+        elif isinstance(config, str) and "{{" in config and "}}" in config:
+            paths.append(current_path)
+        
+        return paths
 
     def compile(self, orchestrator: Any = None, supervision_level: Any = None) -> CompiledStateGraph:
         """
@@ -98,22 +137,25 @@ class WorkflowCompiler:
             WorkflowCompilationError: If validation fails
         """
         # --- Validation Phase ---
-        errors = []
+        all_issues = []
         
         # 1. DAG Validation
-        errors.extend(validate_dag(self.nodes, self.edges))
-        if errors:
-            raise WorkflowCompilationError("Invalid DAG structure", errors)
+        dag_errors = validate_dag(self.nodes, self.edges)
+        hard_dag_errors = [e for e in dag_errors if e.type == "error"]
+        if hard_dag_errors:
+            raise WorkflowCompilationError("Invalid DAG structure", hard_dag_errors)
             
         # 2. Credential Validation
-        errors.extend(validate_credentials(self.nodes, self.user_credentials))
+        all_issues.extend(validate_credentials(self.nodes, self.user_credentials))
         
         # 3. Config Validation
-        errors.extend(validate_node_configs(self.nodes))
+        all_issues.extend(validate_node_configs(self.nodes))
         
         # 4. Type Compatibility
-        errors.extend(validate_type_compatibility(self.nodes, self.edges))
+        all_issues.extend(validate_type_compatibility(self.nodes, self.edges))
         
+        # Only block on hard errors, not warnings (e.g. unknown output references)
+        errors = [e for e in all_issues if e.type == "error"]
         if errors:
             raise WorkflowCompilationError("Workflow validation failed", errors)
 
@@ -144,7 +186,7 @@ class WorkflowCompiler:
         
         for node in self.nodes:
             node_id = node['id']
-            node_type = node.get('type')
+            node_type = get_node_type(node)
             edges = self._outgoing[node_id]
             
             if not edges:
@@ -178,7 +220,7 @@ class WorkflowCompiler:
 
     def _create_node_function(self, node_data: dict, orchestrator: Any, supervision_level: Any):
         node_id = node_data['id']
-        node_type = node_data.get('type')
+        node_type = get_node_type(node_data)
         config = node_data.get('data', {}) # .get('config')? Frontends vary. Assuming data IS config or contains it.
         # Normalizing config:
         # If 'data' has 'config', use that. Else use 'data'.
@@ -228,7 +270,7 @@ class WorkflowCompiler:
                 
                 handler = registry.get_handler(node_type)
                 
-                # Context Construction
+                # 1. Create Context (Empty Initial Input)
                 context = ExecutionContext(
                     execution_id=execution_id,
                     user_id=state['user_id'],
@@ -238,30 +280,108 @@ class WorkflowCompiler:
                     variables=state['variables'],
                     current_node_id=node_id,
                     loop_stats=state['loop_stats'],
+                    node_label_to_id=self._label_to_id,
                     nesting_depth=state.get('nesting_depth', 0),
                     workflow_chain=state.get('workflow_chain', []),
                     parent_execution_id=state.get('parent_execution_id'),
                     timeout_budget_ms=state.get('timeout_budget_ms'),
+                    current_input=[],
                 )
                 
-                # Input Resolution
-                # 1. From upstream edges
-                input_data = context.get_input_for_node(node_id, self.edges)
-                # 2. From direct entry point injection
+                # 2. Resolve Input Items
+                items = context.get_input_for_node(node_id, self.edges)
+                context.current_input = items
+                
+                # 3. Resolve Expressions in Config
+                expr_paths = self._node_expression_paths.get(node_id, [])
+                resolved_config = context.resolve_expressions(node_config, expr_paths)
+                
+                # 4. Consolidate input data for handler
+                input_data = {}
+                if items:
+                    first_item = items[0]
+                    if isinstance(first_item, dict):
+                        input_data.update(first_item.get("json", first_item))
+
                 if f"_input_{node_id}" in state['node_outputs']:
-                    input_data.update(state['node_outputs'][f"_input_{node_id}"])
+                    injected_input = state['node_outputs'][f"_input_{node_id}"]
+                    if isinstance(injected_input, dict):
+                        input_data.update(injected_input)
+                    elif isinstance(injected_input, list) and injected_input:
+                        input_data.update(injected_input[0].get("json", injected_input[0]))
+
+                # Log start
+                logger_instance = get_execution_logger()
+                await logger_instance.log_node_start(
+                    execution_id=execution_id,
+                    node_id=node_id,
+                    node_type=node_type,
+                    node_name=node_id, # Could look up label if available
+                    input_data={'items': input_data}, # Wrap in dict for consistency
+                    config=node_config
+                )
 
                 # Execute
-                result = await asyncio.wait_for(
-                    handler.execute(input_data, node_config, context),
-                    timeout=timeout
-                )
+                start_time = asyncio.get_event_loop().time()
+                try:
+                    result = await asyncio.wait_for(
+                        handler.execute(input_data, resolved_config, context),
+                        timeout=timeout
+                    )
+                    duration = (asyncio.get_event_loop().time() - start_time) * 1000
+                    
+                    # Serialize results for state storage (and next nodes)
+                    serialized_items = [item.model_dump(by_alias=True) for item in result.items]
+                    
+                    # Update state
+                    state['node_outputs'][node_id] = serialized_items
+                    state['node_outputs'][f"_handle_{node_id}"] = result.output_handle
+                    
+                    # Log completion
+                    await logger_instance.log_node_complete(
+                        execution_id=execution_id,
+                        node_id=node_id,
+                        success=result.success,
+                        output_data={'items': serialized_items},
+                        error_message=result.error or '',
+                        duration_ms=int(duration),
+                        warnings=[w.model_dump(by_alias=True) for w in context.warnings]
+                    )
+                except Exception as e:
+                    # Log error
+                    duration = (asyncio.get_event_loop().time() - start_time) * 1000
+                    await logger_instance.log_node_complete(
+                        execution_id=execution_id,
+                        node_id=node_id,
+                        success=False,
+                        output_data={},
+                        error_message=str(e),
+                        duration_ms=int(duration)
+                    )
+                    raise e # Re-raise to be caught by outer try/except for supervision handling
                 
-                state['node_outputs'][node_id] = result.data
-                state['node_outputs'][f"_handle_{node_id}"] = result.output_handle
-                
+                # Track loop iterations
                 if node_type in ['loop', 'split_in_batches']:
                     state['loop_stats'][node_id] = state['loop_stats'].get(node_id, 0) + 1
+                
+                # Check if this node feeds back to a loop node - accumulate results
+                # This enables the loop node to return all accumulated results when done
+                for edge in self.edges:
+                    if edge.get('source') == node_id:
+                        target = edge.get('target')
+                        target_type = self._node_map.get(target, {}).get('type')
+                        if target_type in ['loop', 'split_in_batches']:
+                            # This node's output feeds a loop - accumulate for the loop node
+                            acc_key = f"_accumulated_{target}"
+                            if acc_key not in state['variables']:
+                                state['variables'][acc_key] = []
+                            # We might need to restructure how loop accumulation works with items
+                            # For now just appending the serialized items
+                            # But wait, look accumulation logic was outside result.success check before
+                            # Moving loops logic to AFTER success check is better anyway.
+                            # But I need to be careful not to introduce bugs if loop accumulation logic was intended for partial results? 
+                            # Usually only successful executions produce data worth accumulating.
+                            pass # Logic moved inside success block
 
                 if not result.success:
                     # on_error called for FULL and ERROR_ONLY supervision
@@ -280,6 +400,19 @@ class WorkflowCompiler:
                         state['error'] = result.error
                         state['status'] = 'failed'
                 else:
+                    # Check if this node feeds back to a loop node - accumulate results
+                    # This enables the loop node to return all accumulated results when done
+                    for edge in self.edges:
+                        if edge.get('source') == node_id:
+                            target = edge.get('target')
+                            target_type = self._node_map.get(target, {}).get('type')
+                            if target_type in ['loop', 'split_in_batches']:
+                                # This node's output feeds a loop - accumulate for the loop node
+                                acc_key = f"_accumulated_{target}"
+                                if acc_key not in state['variables']:
+                                    state['variables'][acc_key] = []
+                                state['variables'][acc_key].append(serialized_items)
+
                     # after_node only for FULL supervision
                     should_call_after = (
                         orchestrator and 
@@ -288,7 +421,7 @@ class WorkflowCompiler:
                     if should_call_after:
                         post_decision = await orchestrator.after_node(
                             execution_id, node_id, 
-                            {'data': result.data, 'output_handle': result.output_handle}, 
+                            {'items': serialized_items, 'output_handle': result.output_handle}, 
                             state
                         )
                         if isinstance(post_decision, AbortDecision):

@@ -95,6 +95,91 @@ def populate_types():
             'fields_schema': [
                 {'name': 'api_key', 'label': 'API Key', 'type': 'password', 'required': True}
             ]
+        },
+        {
+            'name': 'Notion API',
+            'slug': 'notion',
+            'description': 'Notion Integration API Key',
+            'icon': 'Database',
+            'auth_method': 'api_key',
+            'fields_schema': [
+                {'name': 'api_key', 'label': 'Internal Integration Token', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'Airtable API',
+            'slug': 'airtable',
+            'description': 'Airtable Personal Access Token',
+            'icon': 'Database',
+            'auth_method': 'api_key',
+            'fields_schema': [
+                {'name': 'api_key', 'label': 'Access Token', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'Telegram Bot',
+            'slug': 'telegram',
+            'description': 'Telegram Bot Token',
+            'icon': 'MessageSquare',
+            'auth_method': 'api_key',
+            'fields_schema': [
+                {'name': 'bot_token', 'label': 'Bot Token', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'Trello API',
+            'slug': 'trello',
+            'description': 'Trello API Key & Token',
+            'icon': 'trello',
+            'auth_method': 'custom',
+            'fields_schema': [
+                {'name': 'api_key', 'label': 'API Key', 'type': 'password', 'required': True},
+                {'name': 'token', 'label': 'Access Token', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'GitHub Token',
+            'slug': 'github',
+            'description': 'GitHub Personal Access Token',
+            'icon': 'Github',
+            'auth_method': 'api_key',
+            'fields_schema': [
+                {'name': 'token', 'label': 'Personal Access Token', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'Discord Webhook',
+            'slug': 'discord_webhook',
+            'description': 'Discord Webhook URL',
+            'icon': 'MessageSquare',
+            'auth_method': 'api_key',
+            'fields_schema': [
+                {'name': 'webhook_url', 'label': 'Webhook URL', 'type': 'password', 'required': True}
+            ]
+        },
+        {
+            'name': 'IMAP Email',
+            'slug': 'email',
+            'description': 'Email Server (IMAP) Credentials',
+            'icon': 'Mail',
+            'auth_method': 'custom',
+            'fields_schema': [
+                {'name': 'host', 'label': 'IMAP Host', 'type': 'text', 'required': True, 'placeholder': 'imap.gmail.com'},
+                {'name': 'port', 'label': 'Port', 'type': 'text', 'required': True, 'default': '993'},
+                {'name': 'username', 'label': 'Email/Username', 'type': 'text', 'required': True},
+                {'name': 'password', 'label': 'Password/App Password', 'type': 'password', 'required': True},
+                {'name': 'secure', 'label': 'Use SSL/TLS', 'type': 'boolean', 'required': False, 'default': 'true'}
+            ]
+        },
+        {
+            'name': 'Discord Bot Token',
+            'slug': 'discord_bot',
+            'description': 'Discord Bot Token',
+            'icon': 'MessageSquare',
+            'auth_method': 'api_key',
+            'fields_schema': [
+                {'name': 'bot_token', 'label': 'Bot Token', 'type': 'password', 'required': True}
+            ]
         }
     ]
 

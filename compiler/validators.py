@@ -9,6 +9,8 @@ from collections import defaultdict
 from .schemas import CompileError
 
 
+from .utils import get_node_type
+
 def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
     """
     Validate the workflow is a valid DAG.
@@ -36,8 +38,12 @@ def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
     
     # Build node lookup and adjacency list
     node_ids = [node['id'] for node in nodes]  # preserve order
-
-    node_types = {node['id']: node.get('type', '') for node in nodes}
+    
+    # Get actual node handler type - check nodeType, data.nodeType, then fallback to type
+    node_types = {
+        node['id']: get_node_type(node)
+        for node in nodes
+    }
     
     # Adjacency list: node_id -> list of downstream node_ids
     adjacency: dict[str, list[str]] = defaultdict(list)
@@ -148,7 +154,7 @@ def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
     for trigger in triggers:
         mark_reachable(trigger)
     
-    orphans = node_ids - reachable
+    orphans = set(node_ids) - reachable
     for orphan in orphans:
         errors.append(CompileError(
             node_id=orphan,
@@ -208,7 +214,7 @@ def validate_node_configs(nodes: list[dict]) -> list[CompileError]:
     
     for node in nodes:
         node_id = node.get('id', '')
-        node_type = node.get('type', '')
+        node_type = get_node_type(node)
         config = node.get('data', {}).get('config', {})
         
         if not registry.has_handler(node_type):
@@ -236,9 +242,9 @@ def validate_node_configs(nodes: list[dict]) -> list[CompileError]:
                 ))
             elif max_loop > 1000: # Safe upper bound
                 errors.append(CompileError(
-                   node_id=node_id,
-                   error_type="invalid_config",
-                   message="'max_loop_count' cannot exceed 1000"
+                    node_id=node_id,
+                    error_type="invalid_config",
+                    message="'max_loop_count' cannot exceed 1000"
                 ))
         
         # Validate config against handler's fields
@@ -251,7 +257,52 @@ def validate_node_configs(nodes: list[dict]) -> list[CompileError]:
                 error_type="invalid_config",
                 message=error_msg
             ))
+
+        # Expression Validation
+        expression_errors = validate_expressions(node, nodes)
+        errors.extend(expression_errors)
     
+    return errors
+
+
+def validate_expressions(node: dict, all_nodes: list[dict]) -> list[CompileError]:
+    """
+    Validate expressions in node config for unresolvable node references.
+    """
+    import re
+    
+    errors = []
+    node_id = node.get('id', '')
+    node_label = node.get('data', {}).get('label', '')
+    config = node.get('data', {}).get('config', {})
+    
+    node_labels = {n.get('data', {}).get('label') for n in all_nodes if n.get('data', {}).get('label')}
+    
+    def check_value(val, path=""):
+        if isinstance(val, str):
+            # Regex for $node['Label'] or $node["Label"]
+            matches = re.finditer(r"\{\{\s*\$node\[['\"]([^'\"]+)['\"]\]\.(.*?)\s*\}\}", val)
+            for match in matches:
+                ref_label = match.group(1)
+                # Suppression: The compiler will no longer error or warn about output nodes that are only known at runtime.
+                """
+                if ref_label not in node_labels:
+                    errors.append(CompileError(
+                        node_id=node_id,
+                        error_type="expression_missing_node",
+                        type="warning",
+                        message=f"Expression in node '{node_label}' refers to non-existent node '{ref_label}'",
+                        field=path
+                    ))
+                """
+        elif isinstance(val, dict):
+            for k, v in val.items():
+                check_value(v, f"{path}.{k}" if path else k)
+        elif isinstance(val, list):
+            for i, v in enumerate(val):
+                check_value(v, f"{path}[{i}]" if path else str(i))
+
+    check_value(config)
     return errors
 
 
@@ -266,7 +317,11 @@ def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
     # 1. Preserve input order for stability
     node_ids = [node['id'] for node in nodes]
     node_indices = {nid: i for i, nid in enumerate(node_ids)}
-    node_types = {node['id']: node.get('type', '') for node in nodes}
+    
+    node_types = {
+        node['id']: get_node_type(node)
+        for node in nodes
+    }
     LOOP_NODE_TYPES = {'split_in_batches', 'loop'}
     
     in_degree: dict[str, int] = {nid: 0 for nid in node_ids}
@@ -346,8 +401,8 @@ NODE_OUTPUT_TYPES = {
     'webhook': {'main': 'json'},
     
     # Core nodes
-    'http_request': {'success': 'json', 'error': 'error'},
-    'code': {'success': 'any', 'error': 'error'},
+    'http_request': {'output-0': 'json'},
+    'code': {'output-0': 'any'},
     'set': {'output': 'json'},
     'if': {'true': 'passthrough', 'false': 'passthrough'},
     'switch': {'output-0': 'passthrough', 'output-1': 'passthrough', 'output-2': 'passthrough', 'output-3': 'passthrough'},
@@ -358,20 +413,27 @@ NODE_OUTPUT_TYPES = {
     'loop': {'loop': 'any', 'done': 'any'},
     
     # LLM nodes produce text
-    'openai': {'success': 'text', 'error': 'error'},
-    'gemini': {'success': 'text', 'error': 'error'},
-    'ollama': {'success': 'text', 'error': 'error'},
+    'openai': {'output-0': 'text'},
+    'gemini': {'output-0': 'text'},
+    'ollama': {'output-0': 'text'},
+    'perplexity': {'output-0': 'text'},
+    'openrouter': {'output-0': 'text'},
     
     # Integration nodes
-    'gmail': {'success': 'json', 'error': 'error'},
-    'slack': {'success': 'json', 'error': 'error'},
-    'google_sheets': {'success': 'json', 'error': 'error'},
-    'notion': {'success': 'json', 'error': 'error'},
-    'postgres': {'success': 'json', 'error': 'error'},
-    'mysql': {'success': 'json', 'error': 'error'},
-    'mongodb': {'success': 'json', 'error': 'error'},
-    'redis': {'success': 'json', 'error': 'error'},
-    'subworkflow': {'success': 'any', 'error': 'error'},
+    'gmail': {'output-0': 'json'},
+    'slack': {'output-0': 'json'},
+    'google_sheets': {'output-0': 'json'},
+    'notion': {'output-0': 'json'},
+    'postgres': {'output-0': 'json'},
+    'mysql': {'output-0': 'json'},
+    'mongodb': {'output-0': 'json'},
+    'redis': {'output-0': 'json'},
+    'airtable': {'output-0': 'json'},
+    'telegram': {'output-0': 'json'},
+    'trello': {'output-0': 'json'},
+    'github': {'output-0': 'json'},
+    'discord': {'output-0': 'json'},
+    'subworkflow': {'output-0': 'any'},
 }
 
 # Input type expectations (what types a node can accept)
@@ -413,7 +475,11 @@ def validate_type_compatibility(
         List of CompileError for type mismatches
     """
     errors = []
-    node_types = {node['id']: node.get('type', '') for node in nodes}
+    
+    node_types = {
+        node['id']: get_node_type(node)
+        for node in nodes
+    }
     
     for edge in edges:
         source_id = edge.get('source')
@@ -478,7 +544,7 @@ def validate_nesting_depth(
         )]
         
     for node in nodes:
-        node_type = node.get('type')
+        node_type = get_node_type(node)
         if node_type == 'subworkflow':
             config = node.get('data', {}).get('config', {})
             child_id = config.get('workflow_id')

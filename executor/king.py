@@ -666,6 +666,26 @@ Output the complete modified workflow as valid JSON only:"""
         pause_event.set()
         self._pause_events[execution_id] = pause_event
         
+        # --- FIX: Create ExecutionLog synchronously to prevent race condition ---
+        try:
+            from logs.logger import ExecutionLogger
+            exec_logger = ExecutionLogger()
+            await exec_logger.start_execution_async(
+                execution_id=execution_id,
+                workflow_id=workflow_id,
+                user_id=user_id,
+                trigger_type="manual", # Default to manual for now
+                input_data=input_data,
+                nesting_depth=nesting_depth,
+                timeout_budget_ms=timeout_budget_ms,
+                workflow_snapshot=workflow_json
+            )
+        except Exception as e:
+            logger.error(f"Failed to create execution log for {execution_id}: {e}")
+            # We continue, but engine might fail if it relies on log existence.
+            # Actually, engine will also try to log, so this is critical.
+            # But let's let the engine fail gracefully if needed.
+        
         # Delegate to Engine in a Task
         task = asyncio.create_task(
             self._run_with_engine(

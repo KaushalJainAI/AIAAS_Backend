@@ -65,12 +65,18 @@ class ExecutionEngine:
         """
         logger.info(f"Engine starting execution {execution_id} for workflow {workflow_id} (supervision={supervision_level})")
         
+        # 1. Create Logger (Start monitoring IMMEDIATELY)
+        exec_logger = ExecutionLogger()
+        # NOTE: ExecutionLog is now created by KingOrchestrator to prevent race conditions.
+        # We do NOT call start_execution_async here anymore.
+
         # Determine orchestrator to pass based on supervision level
         effective_orchestrator = self.orchestrator
         if supervision_level == SupervisionLevel.NONE:
             effective_orchestrator = None  # No hooks at all
         
-        # 1. Compile & Build Graph (Single Pass)
+        # 2. Compile & Build Graph (Single Pass)
+        graph = None
         try:
             # Pass used credentials so they are validated
             used_creds = set(credentials.keys()) if credentials else set()
@@ -84,24 +90,23 @@ class ExecutionEngine:
             )
             
         except WorkflowCompilationError as e:
-            logger.error(f"Compilation failed for execution {execution_id}: {e}")
+            error_msg = f"Compilation failed: {e}"
+            logger.error(f"{error_msg} for execution {execution_id}")
+            await exec_logger.complete_execution(
+                execution_id=execution_id,
+                status="failed",
+                error_message=error_msg
+            )
             return ExecutionState.FAILED
         except Exception as e:
-            logger.exception(f"Unexpected compilation error for execution {execution_id}")
+            error_msg = f"Unexpected compilation error: {str(e)}"
+            logger.exception(f"{error_msg} for execution {execution_id}")
+            await exec_logger.complete_execution(
+                execution_id=execution_id,
+                status="failed",
+                error_message=error_msg
+            )
             return ExecutionState.FAILED
-
-        # 2. Create Logger
-        exec_logger = ExecutionLogger()
-        await exec_logger.start_execution(
-            execution_id=execution_id,
-            workflow_id=workflow_id,
-            user_id=user_id,
-            trigger_type="orchestrator",
-            parent_execution_id=parent_execution_id,
-            nesting_depth=nesting_depth,
-            timeout_budget_ms=timeout_budget_ms,
-            workflow_snapshot=workflow_json
-        )
         
         # 3. Prepare Initial State
         initial_state = {
@@ -133,13 +138,17 @@ class ExecutionEngine:
             
             # 5. Handle Result
             final_status = final_state.get("status", "completed")
+            if final_status == "running":
+                # If it's still 'running' but the graph finished, it's successful
+                final_status = "completed"
+                
             error = final_state.get("error")
             
             # Log completion
             await exec_logger.complete_execution(
                 execution_id=execution_id,
                 status=final_status,
-                output=final_state.get("node_outputs", {}),
+                output_data=final_state.get("node_outputs", {}),
                 error_message=error if error else ""
             )
             
@@ -152,6 +161,14 @@ class ExecutionEngine:
             else:
                 return ExecutionState.COMPLETED
 
+        except asyncio.CancelledError:
+            logger.info(f"Engine execution {execution_id} cancelled")
+            await exec_logger.complete_execution(
+                execution_id=execution_id,
+                status="cancelled",
+                error_message="Execution cancelled by user"
+            )
+            raise
         except Exception as e:
             logger.exception(f"Engine crashed during execution {execution_id}")
             await exec_logger.complete_execution(

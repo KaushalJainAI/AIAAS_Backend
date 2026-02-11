@@ -1,9 +1,11 @@
-from rest_framework import viewsets, status
+from rest_framework import status
+from adrf import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from .models import Credential, CredentialType, CredentialAuditLog
 from .serializers import CredentialSerializer, CredentialTypeSerializer, CredentialAuditLogSerializer
+from asgiref.sync import sync_to_async
 
 class CredentialTypeViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -89,11 +91,12 @@ class CredentialViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
-    def verify(self, request, pk=None):
+    async def verify(self, request, pk=None):
         """
         Trigger credential verification logic against the external provider.
         """
-        credential = self.get_object()
+        # Wrap ORM in sync_to_async
+        credential = await sync_to_async(self.get_object)()
         
         from .verification import CredentialVerifier
         
@@ -104,7 +107,8 @@ class CredentialViewSet(viewsets.ModelViewSet):
             'user_agent': request.META.get('HTTP_USER_AGENT')
         }
         
-        is_valid, message = CredentialVerifier.verify(credential, audit_context=audit_context)
+        # Await the now-async verify method
+        is_valid, message = await CredentialVerifier.verify(credential, audit_context=audit_context)
         
         credential.is_verified = is_valid
         # Update last_error if failed, clear it if success
@@ -113,7 +117,7 @@ class CredentialViewSet(viewsets.ModelViewSet):
         else:
             credential.last_error = message
             
-        credential.save()
+        await sync_to_async(credential.save)()
         
         return Response({
             'valid': is_valid, 
@@ -153,7 +157,7 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         return Response({'url': url})
 
     @action(detail=False, methods=['post'])
-    def callback(self, request):
+    async def callback(self, request):
         """
         Exchange code for tokens and create/update Credential.
         Body:
@@ -174,7 +178,8 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
         
         try:
-            token_data = provider.exchange_code(code)
+            # Await async code exchange
+            token_data = await provider.exchange_code(code)
         except Exception as e:
             return Response({'error': f'Token exchange failed: {str(e)}'}, status=400)
             
@@ -183,20 +188,15 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
              
         # Get/Create Credential Type
         try:
-            cred_type = CredentialType.objects.get(slug='google-oauth2')
+            cred_type = await sync_to_async(CredentialType.objects.get)(slug='google-oauth2')
         except CredentialType.DoesNotExist:
              return Response({'error': 'Google OAuth2 credential type not found in system'}, status=500)
              
         # Create Credential
-        # We store tokens in the encrypted 'access_token'/'refresh_token' fields 
-        # OR in the 'data' blob. The model has dedicated fields for tokens.
-        
-        credential = Credential.objects.create(
+        credential = await sync_to_async(Credential.objects.create)(
             user=request.user,
             credential_type=cred_type,
             name=name,
-            # Store tokens in specific fields
-            # Note: BinaryField requires bytes
             access_token=token_data.get('access_token', '').encode(),
             refresh_token=token_data.get('refresh_token', '').encode(),
         )
@@ -208,9 +208,10 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
             from datetime import timedelta
             credential.token_expires_at = timezone.now() + timedelta(seconds=expires_in)
             
-        # Verify immediately (fetch user email/profile as proof)
+        # Verify immediately - use async info fetch
         try:
-            user_info = provider.get_user_info(token_data.get('access_token'))
+            # Await async user info fetch
+            user_info = await provider.get_user_info(token_data.get('access_token'))
             credential.public_metadata = {
                 'email': user_info.get('email'),
                 'picture': user_info.get('picture'),
@@ -220,7 +221,7 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         except:
             credential.is_verified = False
             
-        credential.save()
+        await sync_to_async(credential.save)()
             
         return Response(CredentialSerializer(credential).data)
 

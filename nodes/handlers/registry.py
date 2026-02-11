@@ -185,6 +185,14 @@ def get_registry() -> NodeRegistry:
         registry.register(GitHubNode)
         registry.register(HTTPRequestNode) # Using the improved version from integration_nodes
         
+        # Register AI / LLM Nodes
+        from .llm_nodes import OpenAINode, GeminiNode, OllamaNode, PerplexityNode, OpenRouterNode
+        registry.register(OpenAINode)
+        registry.register(GeminiNode)
+        registry.register(OllamaNode)
+        registry.register(PerplexityNode)
+        registry.register(OpenRouterNode)
+        
         # Register Triggers
         registry.register(ManualTriggerNode)
         registry.register(WebhookTriggerNode)

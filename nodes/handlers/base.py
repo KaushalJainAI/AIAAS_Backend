@@ -51,6 +51,7 @@ class FieldConfig(BaseModel):
     options: list[str] | None = Field(default=None, description="Options for SELECT type")
     placeholder: str = Field(default="", description="Placeholder text")
     description: str = Field(default="", description="Help text")
+    credential_type: str | None = Field(default=None, description="Detailed type for CREDENTIAL field", serialization_alias="credentialType")
     
     model_config = {"use_enum_values": True, "populate_by_name": True}
 
@@ -79,12 +80,77 @@ class NodeSchema(BaseModel):
     model_config = {"use_enum_values": True, "populate_by_name": True}
 
 
+class NodeItem(BaseModel):
+    """
+    Single item in node output - n8n compatible.
+    
+    Each item represents one unit of data flowing through the workflow.
+    The `json` key holds the primary data, while `binary` holds file data.
+    """
+    json_data: dict[str, Any] = Field(
+        default_factory=dict, 
+        description="Primary data payload",
+        alias="json",
+    )
+    binary: dict[str, Any] | None = Field(default=None, description="Binary file data (base64)")
+    pairedItem: dict[str, int] | None = Field(default=None, description="Link to source item for traceability")
+    
+    model_config = {
+        "extra": "allow", 
+        "populate_by_name": True,
+        "serialize_by_alias": True  # Always serialize as 'json' not 'json_data'
+    }
+    
+    @property
+    def json(self) -> dict[str, Any]:
+        """Accessor for json data (n8n compatibility)."""
+        return self.json_data
+
+
 class NodeExecutionResult(BaseModel):
-    """Result of a node execution"""
+    """
+    Result of a node execution - n8n style.
+    
+    All node outputs are standardized as an array of items.
+    Each item contains a `json` key with the data payload.
+    
+    For backward compatibility, you can still pass `data=` and it will be auto-converted to items.
+    """
     success: bool = True
-    data: dict[str, Any] = Field(default_factory=dict)
+    items: list[NodeItem] = Field(default_factory=list, description="Output items array")
+    data: dict[str, Any] | None = Field(default=None, exclude=True, description="DEPRECATED: Use items instead")
     error: str | None = None
     output_handle: str = "output"  # Which output handle to use
+    
+    def __init__(self, **data):
+        """Handle backward compatibility with old 'data' field."""
+        # If data is provided but items is not, convert data to items
+        if 'data' in data and data['data'] is not None and 'items' not in data:
+            legacy_data = data.pop('data')
+            data['items'] = [NodeItem(json=legacy_data)]
+        elif 'data' in data:
+            data.pop('data', None)  # Remove data if items also provided
+        super().__init__(**data)
+    
+    @classmethod
+    def from_data(cls, data: dict[str, Any], success: bool = True) -> "NodeExecutionResult":
+        """Helper to create result from a single data dict."""
+        return cls(success=success, items=[NodeItem(json=data)])
+    
+    @classmethod
+    def from_items_list(cls, items: list[dict], success: bool = True) -> "NodeExecutionResult":
+        """Helper to create result from list of raw dicts."""
+        return cls(success=success, items=[NodeItem(json=item) for item in items])
+    
+    def get_data(self) -> dict[str, Any]:
+        """Backward compatibility: get first item's json data."""
+        if self.items:
+            return self.items[0].json
+        return {}
+    
+    def get_all_json(self) -> list[dict[str, Any]]:
+        """Get all items' json data as a list."""
+        return [item.json for item in self.items]
 
 
 # ==================== Base Handler ====================
@@ -201,19 +267,72 @@ class BaseNodeHandler(ABC):
     def _calculate_timeout(self, child_workflow: Any, parent_context: 'ExecutionContext') -> int:
         """
         Calculate timeout budget for child workflow.
+        
+        Uses the minimum of:
+        - Parent's remaining timeout budget
+        - Child workflow's configured timeout
+        - Default timeout of 60 seconds
         """
-        # This is a placeholder logic. Real implementation needs to check parent's remaining time.
-        # parent_timeout = getattr(parent_context, 'timeout_budget_ms', 300000)
-        # child_timeout = child_workflow.workflow_settings.get('timeout', 60000)
-        return 60000 # Default to 60s for now
+        default_timeout = 60000  # 60s default
+        
+        # Get parent's remaining time budget
+        parent_remaining = getattr(parent_context, 'timeout_budget_ms', default_timeout)
+        
+        # Get child workflow's configured timeout if available
+        child_timeout = default_timeout
+        if hasattr(child_workflow, 'workflow_settings'):
+            child_timeout = child_workflow.workflow_settings.get('timeout', default_timeout)
+        elif isinstance(child_workflow, dict):
+            child_timeout = child_workflow.get('settings', {}).get('timeout', default_timeout)
+        
+        # Return the minimum to ensure we don't exceed parent's budget
+        return min(parent_remaining, child_timeout, default_timeout)
 
-    def _create_child_context(self, parent_context: 'ExecutionContext', child_workflow: Any, config: dict) -> Any:
+    def _create_child_context(self, parent_context: 'ExecutionContext', child_workflow: Any, config: dict) -> 'ExecutionContext':
         """
         Create an isolated execution context for the child workflow.
-        Returns a new ExecutionContext object.
+        
+        Inherits credentials and variables from parent, but creates isolated
+        state for the child execution.
         """
-        # This requires the ExecutionContext class definition which might cause circular imports
-        # if imported at top level. 
-        # For now, we stub this or expect the caller/subclass to handle the actual instantiation
-        # using the parent class's type or a factory.
-        pass
+        # Import here to avoid circular imports at module level
+        from compiler.schemas import ExecutionContext
+        
+        # Track nesting depth
+        current_depth = getattr(parent_context, 'nesting_depth', 0)
+        max_depth = getattr(parent_context, 'max_nesting_depth', 3)
+        
+        # Get workflow_id from child_workflow
+        workflow_id = None
+        if hasattr(child_workflow, 'id'):
+            workflow_id = str(child_workflow.id)
+        elif isinstance(child_workflow, dict):
+            workflow_id = str(child_workflow.get('id', 'unknown'))
+        
+        # Build workflow chain for circular dependency detection
+        parent_chain = getattr(parent_context, 'workflow_chain', [])
+        new_chain = parent_chain + [workflow_id] if workflow_id else parent_chain
+        
+        # Calculate timeout for child
+        timeout = self._calculate_timeout(child_workflow, parent_context)
+        
+        # Create child context with inherited but isolated state
+        child_context = ExecutionContext(
+            workflow_id=workflow_id,
+            execution_id=f"{parent_context.execution_id}_sub_{current_depth + 1}",
+            credentials=parent_context.credentials.copy() if parent_context.credentials else {},
+            variables=parent_context.variables.copy() if parent_context.variables else {},
+            node_outputs={},  # Fresh outputs for child
+            loop_stats={},    # Fresh loop stats
+            current_node_id=None,
+        )
+        
+        # Set child-specific attributes
+        child_context.nesting_depth = current_depth + 1
+        child_context.max_nesting_depth = max_depth
+        child_context.workflow_chain = new_chain
+        child_context.timeout_budget_ms = timeout
+        child_context.parent_context = parent_context
+        
+        return child_context
+

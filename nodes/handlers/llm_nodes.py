@@ -38,6 +38,7 @@ class OpenAINode(BaseNodeHandler):
             name="credential",
             label="OpenAI API Key",
             field_type=FieldType.CREDENTIAL,
+            credential_type="openai",
             description="Select your OpenAI credential"
         ),
         FieldConfig(
@@ -81,8 +82,7 @@ class OpenAINode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -111,7 +111,7 @@ class OpenAINode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="OpenAI API key not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         api_key = creds["api_key"]
@@ -141,7 +141,7 @@ class OpenAINode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"OpenAI API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
@@ -160,20 +160,20 @@ class OpenAINode(BaseNodeHandler):
                         },
                         "input": input_data,
                     },
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except httpx.TimeoutException:
             return NodeExecutionResult(
                 success=False,
                 error="OpenAI API request timed out",
-                output_handle="error"
+                output_handle="output-0"
             )
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"OpenAI error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -196,6 +196,7 @@ class GeminiNode(BaseNodeHandler):
             name="credential",
             label="Gemini API Key",
             field_type=FieldType.CREDENTIAL,
+            credential_type="gemini_api",
             description="Select your Google AI credential"
         ),
         FieldConfig(
@@ -231,8 +232,7 @@ class GeminiNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -260,7 +260,7 @@ class GeminiNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Gemini API key not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         api_key = creds["api_key"]
@@ -286,7 +286,7 @@ class GeminiNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Gemini API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
@@ -305,20 +305,20 @@ class GeminiNode(BaseNodeHandler):
                         },
                         "input": input_data,
                     },
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except httpx.TimeoutException:
             return NodeExecutionResult(
                 success=False,
                 error="Gemini API request timed out",
-                output_handle="error"
+                output_handle="output-0"
             )
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Gemini error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -378,8 +378,7 @@ class OllamaNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -425,7 +424,7 @@ class OllamaNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Ollama error: {response.text}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
@@ -440,26 +439,26 @@ class OllamaNode(BaseNodeHandler):
                         "eval_count": data.get("eval_count", 0),
                         "input": input_data,
                     },
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except httpx.ConnectError:
             return NodeExecutionResult(
                 success=False,
                 error=f"Cannot connect to Ollama at {base_url}. Is Ollama running?",
-                output_handle="error"
+                output_handle="output-0"
             )
         except httpx.TimeoutException:
             return NodeExecutionResult(
                 success=False,
                 error="Ollama request timed out (model may be loading)",
-                output_handle="error"
+                output_handle="output-0"
             )
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Ollama error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 class PerplexityNode(BaseNodeHandler):
@@ -481,6 +480,7 @@ class PerplexityNode(BaseNodeHandler):
             name="credential",
             label="Perplexity API Key",
             field_type=FieldType.CREDENTIAL,
+            credential_type="perplexity_api",
             description="Select your Perplexity API credential"
         ),
         FieldConfig(
@@ -561,8 +561,7 @@ class PerplexityNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -595,7 +594,7 @@ class PerplexityNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Perplexity API key not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         api_key = creds["api_key"]
@@ -641,7 +640,7 @@ class PerplexityNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Perplexity API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
@@ -671,20 +670,20 @@ class PerplexityNode(BaseNodeHandler):
                 return NodeExecutionResult(
                     success=True,
                     data=result_data,
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except httpx.TimeoutException:
             return NodeExecutionResult(
                 success=False,
                 error="Perplexity API request timed out",
-                output_handle="error"
+                output_handle="output-0"
             )
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Perplexity error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -708,6 +707,7 @@ class OpenRouterNode(BaseNodeHandler):
             name="credential",
             label="OpenRouter API Key",
             field_type=FieldType.CREDENTIAL,
+            credential_type="openrouter",
             description="Select your OpenRouter credential"
         ),
         FieldConfig(
@@ -797,8 +797,7 @@ class OpenRouterNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -828,7 +827,7 @@ class OpenRouterNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="OpenRouter API key not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         api_key = creds["api_key"]
@@ -864,7 +863,7 @@ class OpenRouterNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"OpenRouter API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
@@ -883,18 +882,18 @@ class OpenRouterNode(BaseNodeHandler):
                         },
                         "input": input_data,
                     },
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except httpx.TimeoutException:
             return NodeExecutionResult(
                 success=False,
                 error="OpenRouter API request timed out",
-                output_handle="error"
+                output_handle="output-0"
             )
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"OpenRouter error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )

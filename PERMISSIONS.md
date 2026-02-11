@@ -20,164 +20,188 @@
 ## 👤 Core APIs (`/api/`)
 
 ### Authentication
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/auth/register` | POST | Public | Rate limit: 5/hour |
-| `/api/auth/login` | POST | Public | Rate limit: 10/min |
-| `/api/auth/refresh` | POST | Authenticated | Refresh JWT token |
-| `/api/auth/logout` | POST | Authenticated | Invalidate token |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/auth/register` | POST | Sync | Public | Rate limit: 5/hour |
+| `/api/auth/login` | POST | Sync | Public | Rate limit: 10/min |
+| `/api/auth/google` | POST | Sync | Public | OAuth2 Flow |
+| `/api/auth/refresh` | POST | Sync | Authenticated | Refresh JWT token |
+| `/api/auth/logout` | POST | Sync | Authenticated | Invalidate token |
 
 ### User Profile
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/users/me` | GET | Authenticated | Own profile only |
-| `/api/users/me` | PATCH | Authenticated | Own profile only |
-| `/api/users/{id}` | GET | Admin | View any user |
-| `/api/users/` | GET | Admin | List all users |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/users/me` | GET | Sync | Authenticated | Own profile only |
+| `/api/users/me` | PATCH | Sync | Authenticated | Own profile only |
+| `/api/users/password` | POST | Sync | Authenticated | Change password |
+| `/api/users/{id}` | GET | Sync | Admin | View any user |
+| `/api/users/` | GET | Sync | Admin | List all users |
 
 ### API Keys
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/keys/` | GET | Authenticated | List own keys |
-| `/api/keys/` | POST | Authenticated | Create new key |
-| `/api/keys/{id}` | DELETE | Owner | Delete own key |
-| `/api/keys/{id}/rotate` | POST | Owner | Rotate key |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/keys/` | GET | Sync | Authenticated | List own keys |
+| `/api/keys/` | POST | Sync | Authenticated | Create new key |
+| `/api/keys/{id}` | DELETE | Sync | Owner | Delete own key |
+| `/api/keys/{id}/rotate` | POST | Sync | Owner | Rotate key |
+
+### Usage
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/usage/` | GET | Sync | Authenticated | Usage statistics |
 
 ---
 
 ## 🤖 Orchestrator APIs (`/api/orchestrator/`)
 
 ### Workflows CRUD
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/orchestrator/workflows/` | GET | Authenticated | List own workflows |
-| `/api/orchestrator/workflows/` | POST | Authenticated | Create workflow |
-| `/api/orchestrator/workflows/{id}/` | GET | Owner | View workflow |
-| `/api/orchestrator/workflows/{id}/` | PUT | Owner | Update workflow |
-| `/api/orchestrator/workflows/{id}/` | DELETE | Owner | Delete workflow |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/orchestrator/workflows/` | GET | Sync | Authenticated | List own workflows |
+| `/api/orchestrator/workflows/` | POST | Sync | Authenticated | Create workflow |
+| `/api/orchestrator/workflows/{id}/` | GET | Sync | Owner | View workflow |
+| `/api/orchestrator/workflows/{id}/` | PUT | Sync | Owner | Update workflow (Auto-versioning) |
+| `/api/orchestrator/workflows/{id}/` | DELETE | Sync | Owner | Delete workflow |
+| `/api/orchestrator/workflows/{id}/clone/` | POST | Sync | Owner | Clone workflow |
 
 ### Version History
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/orchestrator/workflows/{id}/versions/` | GET | Owner | List versions |
-| `/api/orchestrator/workflows/{id}/versions/` | POST | Owner | Create snapshot |
-| `/api/orchestrator/workflows/{id}/versions/{v}/restore/` | POST | Owner | Restore version |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/orchestrator/workflows/{id}/versions/` | GET | Sync | Owner | List versions |
+| `/api/orchestrator/workflows/{id}/versions/` | POST | Sync | Owner | Create snapshot |
+| `/api/orchestrator/workflows/{id}/versions/{v}/restore/` | POST | Sync | Owner | Restore version |
 
 ### Execution Control
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/orchestrator/workflows/{id}/execute/` | POST | Owner | Start execution |
-| `/api/orchestrator/executions/{id}/status/` | GET | Owner | Get status |
-| `/api/orchestrator/executions/{id}/pause/` | POST | Owner | Pause execution |
-| `/api/orchestrator/executions/{id}/resume/` | POST | Owner | Resume execution |
-| `/api/orchestrator/executions/{id}/stop/` | POST | Owner | Stop execution |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/orchestrator/workflows/{id}/execute/` | POST | **Async** | Owner | Start execution |
+| `/api/orchestrator/executions/{id}/status/` | GET | Sync | Owner | Get status |
+| `/api/orchestrator/executions/{id}/pause/` | POST | **Async** | Owner | Pause execution |
+| `/api/orchestrator/executions/{id}/resume/` | POST | **Async** | Owner | Resume execution |
+| `/api/orchestrator/executions/{id}/stop/` | POST | **Async** | Owner | Stop execution |
+| `/api/orchestrator/workflows/{id}/test/` | POST | Sync | Owner | Run background test |
 
 ### HITL (Human-in-the-Loop)
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/orchestrator/hitl/pending/` | GET | Authenticated | Pending requests |
-| `/api/orchestrator/hitl/{id}/respond/` | POST | Owner | Submit response |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/orchestrator/hitl/pending/` | GET | Sync | Authenticated | Pending requests |
+| `/api/orchestrator/hitl/{id}/respond/` | POST | **Async** | Owner | Submit response |
 
 ### AI Chat
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/orchestrator/chat/` | GET | Authenticated | List conversations |
-| `/api/orchestrator/chat/` | POST | Authenticated | Send message |
-| `/api/orchestrator/chat/{id}/` | GET | Authenticated | Get history |
-| `/api/orchestrator/chat/context-aware/` | POST | Authenticated | Context-aware chat |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/orchestrator/chat/` | GET | Sync | Authenticated | List conversations |
+| `/api/orchestrator/chat/` | POST | Sync | Authenticated | Send message |
+| `/api/orchestrator/chat/{id}/` | GET | Sync | Authenticated | Get history |
+| `/api/orchestrator/chat/{id}/` | DELETE | Sync | Authenticated | Delete history |
+| `/api/orchestrator/chat/context-aware/` | POST | **Async** | Authenticated | Context-aware chat |
 
-### AI Workflow Generation ✨ NEW
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/orchestrator/ai/generate/` | POST | Authenticated | Generate from description |
-| `/api/orchestrator/workflows/{id}/ai/modify/` | POST | Owner | Modify with NL |
-| `/api/orchestrator/workflows/{id}/ai/suggest/` | GET | Owner | Get AI suggestions |
+### AI Workflow Generation ✨
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/orchestrator/ai/generate/` | POST | **Async** | Authenticated | Generate from description |
+| `/api/orchestrator/workflows/{id}/ai/modify/` | POST | **Async** | Owner | Modify with NL |
+| `/api/orchestrator/workflows/{id}/ai/suggest/` | GET | **Async** | Owner | Get AI suggestions |
 
-### Thought History ✨ NEW
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/orchestrator/executions/{id}/thoughts/` | GET | Owner | Get execution thoughts |
+### Partial Execution ✨
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/orchestrator/workflows/{id}/partial-execute/` | POST | **Async** | Owner | Test single node |
+
+### Thought History ✨
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/orchestrator/executions/{id}/thoughts/` | GET | Sync | Owner | Get execution thoughts |
 
 ---
 
 ## 📊 Logs & Analytics APIs (`/api/logs/`)
 
 ### Insights
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/logs/insights/stats/` | GET | Authenticated | Execution statistics |
-| `/api/logs/insights/workflow/{id}/` | GET | Owner | Per-workflow metrics |
-| `/api/logs/insights/costs/` | GET | Authenticated | Cost breakdown |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/logs/insights/stats/` | GET | **Async** | Authenticated | Execution statistics |
+| `/api/logs/insights/workflow/{id}/` | GET | **Async** | Owner | Per-workflow metrics |
+| `/api/logs/insights/costs/` | GET | **Async** | Authenticated | Cost breakdown |
 
 ### Audit Trail
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/logs/audit/` | GET | Authenticated | List own audit entries |
-| `/api/logs/audit/export/` | GET | Authenticated | Export CSV/JSON |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/logs/audit/` | GET | **Async** | Authenticated | List own audit entries |
+| `/api/logs/audit/export/` | GET | **Async** | Authenticated | Export CSV/JSON |
 
 ### Execution History
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/logs/executions/` | GET | Authenticated | List executions |
-| `/api/logs/executions/{id}/` | GET | Owner | Execution details |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/logs/executions/` | GET | **Async** | Authenticated | List executions |
+| `/api/logs/executions/{id}/` | GET | **Async** | Owner | Execution details |
 
 ---
 
 ## 🧠 Inference APIs (`/api/inference/`)
 
 ### Documents
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/inference/documents/` | GET | Authenticated | List documents |
-| `/api/inference/documents/` | POST | Authenticated | Upload document |
-| `/api/inference/documents/{id}/` | GET | Owner | View document |
-| `/api/inference/documents/{id}/` | DELETE | Owner | Delete document |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/inference/documents/` | GET | **Async** | Authenticated | List documents |
+| `/api/inference/documents/` | POST | **Async** | Authenticated | Upload document |
+| `/api/inference/documents/{id}/` | GET | **Async** | Owner | View document |
+| `/api/inference/documents/{id}/` | DELETE | **Async** | Owner | Delete document |
+| `/api/inference/documents/{id}/share/` | POST | **Async** | Owner | Toggle platform share |
+| `/api/inference/documents/{id}/download/` | GET | **Async** | Owner | Download content |
 
 ### RAG
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/inference/rag/search/` | POST | Authenticated | Search documents |
-| `/api/inference/rag/query/` | POST | Authenticated | RAG Q&A |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/inference/rag/search/` | POST | **Async** | Authenticated | Search documents |
+| `/api/inference/rag/query/` | POST | **Async** | Authenticated | RAG Q&A |
 
 ---
 
 ## 🧩 Node APIs (`/api/nodes/`)
 
 ### Node Registry
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/nodes/` | GET | Authenticated | List all nodes |
-| `/api/nodes/{type}/schema/` | GET | Authenticated | Get node schema |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/nodes/` | GET | Sync | Authenticated | List all nodes |
+| `/api/nodes/categories/` | GET | Sync | Authenticated | Nodes by category |
+| `/api/nodes/{type}/schema/` | GET | Sync | Authenticated | Get node schema |
 
 ### Custom Nodes
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/nodes/custom/` | GET | Authenticated | List custom nodes |
-| `/api/nodes/custom/` | POST | Authenticated | Create custom node |
-| `/api/nodes/custom/{id}/` | GET | Owner | View custom node |
-| `/api/nodes/custom/{id}/` | DELETE | Owner | Delete custom node |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/nodes/custom/` | GET | Sync | Authenticated | List custom nodes |
+| `/api/nodes/custom/` | POST | Sync | Authenticated | Create custom node |
+| `/api/nodes/custom/{id}/` | GET | Sync | Owner | View custom node |
+| `/api/nodes/custom/{id}/` | DELETE | Sync | Owner | Delete custom node |
 
 ---
 
 ## ⚙️ Compiler APIs (`/api/compile/`)
 
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/compile/` | POST | Authenticated | Compile workflow |
-| `/api/compile/validate/` | POST | Authenticated | Validate only |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/compile/` | POST | **Async** | Authenticated | Compile workflow |
+| `/api/compile/validate/` | POST | **Async** | Authenticated | Validate only |
+| `/api/workflows/{id}/compile/` | POST | **Async** | Owner | Compile specific workflow |
+| `/api/workflows/{id}/validate/` | POST | **Async** | Owner | Validate specific workflow |
 
 ---
 
 ## 🔐 Credentials APIs (`/api/credentials/`)
 
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/credentials/` | GET | Authenticated | List own credentials |
-| `/api/credentials/` | POST | Authenticated | Create credential |
-| `/api/credentials/{id}/` | GET | Owner | View metadata |
-| `/api/credentials/{id}/` | PUT | Owner | Update credential |
-| `/api/credentials/{id}/` | DELETE | Owner | Delete credential |
-| `/api/credentials/types/` | GET | Authenticated | List types |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/credentials/` | GET | Sync | Authenticated | List own credentials |
+| `/api/credentials/` | POST | Sync | Authenticated | Create credential |
+| `/api/credentials/{id}/` | GET | Sync | Owner | View metadata |
+| `/api/credentials/{id}/` | PUT | Sync | Owner | Update credential |
+| `/api/credentials/{id}/` | DELETE | Sync | Owner | Delete credential |
+| `/api/credentials/{id}/verify/` | POST | **Async** | Owner | Verify credential |
+| `/api/credentials/types/` | GET | Sync | Authenticated | List types |
+| `/api/credentials/oauth/google/init/` | GET | Sync | Authenticated | Init Google OAuth |
+| `/api/credentials/oauth/google/callback/` | POST | **Async** | Authenticated | Google OAuth callback |
+| `/api/credentials/audit/` | GET | Sync | Authenticated | Credential audit logs |
 
 > ⚠️ **Security**: Credential values are NEVER returned. Only metadata visible.
 
@@ -186,15 +210,15 @@
 ## 📡 Streaming APIs (`/api/streaming/`)
 
 ### SSE Endpoints
-| Endpoint | Method | Permission | Notes |
-|----------|--------|------------|-------|
-| `/api/streaming/execution/{id}/` | GET | Owner | SSE execution events |
+| Endpoint | Method | Type | Permission | Notes |
+|----------|--------|------|------------|-------|
+| `/api/streaming/executions/{id}/stream/` | GET | Sync/SSE | Owner | SSE execution events |
 
 ### WebSocket Endpoints
-| Endpoint | Permission | Notes |
-|----------|------------|-------|
-| `/ws/execution/{id}/` | Owner | Real-time updates |
-| `/ws/hitl/` | Authenticated | HITL notifications |
+| Endpoint | Type | Permission | Notes |
+|----------|------|------------|-------|
+| `/ws/execution/{execution_id}/` | **Async** | Owner | Real-time updates & HITL |
+| `/ws/hitl/` | **Async** | Authenticated | Global HITL notifications |
 
 ---
 
@@ -263,16 +287,18 @@ class HasCredits(BasePermission):
 
 ---
 
-## Summary
+## 📝 Summary Table
 
-| Category | Endpoints | Auth Required | Owner Required | Admin Only |
-|----------|-----------|---------------|----------------|------------|
-| Core | 12 | 10 | 4 | 2 |
-| Orchestrator | 22 | 22 | 16 | 0 |
-| Logs | 7 | 7 | 2 | 0 |
-| Inference | 6 | 6 | 2 | 0 |
-| Nodes | 6 | 6 | 3 | 0 |
-| Compiler | 2 | 2 | 0 | 0 |
-| Credentials | 6 | 6 | 4 | 0 |
-| Streaming | 3 | 3 | 2 | 0 |
-| **Total** | **64** | **62** | **33** | **2** |
+| Category | Sync/Async | Base Path | Endpoints | Default Permission |
+|----------|------------|-----------|-----------|--------------------|
+| **Core** | Sync | `/api/` | 10 | Authenticated |
+| **Orchestrator** | Mixed | `/api/orchestrator/` | 24 | Owner |
+| **Inference** | **Async** | `/api/inference/` | 8 | Owner |
+| **Compiler** | **Async** | `/api/compile/` | 4 | Authenticated |
+| **Credentials** | Mixed | `/api/credentials/` | 10 | Owner |
+| **Nodes** | Sync | `/api/nodes/` | 3 | Authenticated |
+| **Logs** | **Async** | `/api/logs/` | 7 | Authenticated |
+| **Streaming** | Mixed | `/api/streaming/` | 5 | Owner |
+
+---
+*Updated: 2026-02-05*

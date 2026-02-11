@@ -1,11 +1,11 @@
 """
 Core Node Handlers
 
-Essential nodes for data manipulation, HTTP requests, and code execution.
+Essential nodes for data manipulation and code execution.
+
+NOTE: HTTPRequestNode has been moved to integration_nodes.py for consistency.
 """
 import json
-import httpx
-from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 from .base import (
@@ -15,128 +15,11 @@ from .base import (
     FieldType,
     HandleDef,
     NodeExecutionResult,
+    NodeItem,
 )
 
 if TYPE_CHECKING:
     from compiler.schemas import ExecutionContext
-
-
-class HTTPRequestNode(BaseNodeHandler):
-    """
-    Make HTTP requests to external APIs.
-    
-    Supports GET, POST, PUT, DELETE with headers and body.
-    """
-    
-    node_type = "http_request"
-    name = "HTTP Request"
-    category = NodeCategory.ACTION.value
-    description = "Make an HTTP request to an API"
-    icon = "🌐"
-    color = "#3b82f6"  # Blue
-    
-    fields = [
-        FieldConfig(
-            name="method",
-            label="Method",
-            field_type=FieldType.SELECT,
-            options=["GET", "POST", "PUT", "PATCH", "DELETE"],
-            default="GET"
-        ),
-        FieldConfig(
-            name="url",
-            label="URL",
-            field_type=FieldType.STRING,
-            placeholder="https://api.example.com/endpoint",
-            description="Full URL to request"
-        ),
-        FieldConfig(
-            name="headers",
-            label="Headers",
-            field_type=FieldType.JSON,
-            required=False,
-            default={},
-            description="HTTP headers as JSON object"
-        ),
-        FieldConfig(
-            name="body",
-            label="Body",
-            field_type=FieldType.JSON,
-            required=False,
-            default={},
-            description="Request body (for POST/PUT/PATCH)"
-        ),
-        FieldConfig(
-            name="timeout",
-            label="Timeout (seconds)",
-            field_type=FieldType.NUMBER,
-            default=30,
-            required=False
-        ),
-    ]
-    
-    outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
-    ]
-    
-    async def execute(
-        self,
-        input_data: dict[str, Any],
-        config: dict[str, Any],
-        context: 'ExecutionContext'
-    ) -> NodeExecutionResult:
-        method = config.get("method", "GET")
-        url = config.get("url", "")
-        headers = config.get("headers", {})
-        body = config.get("body", {})
-        timeout = config.get("timeout", 30)
-        
-        if not url:
-            return NodeExecutionResult(
-                success=False,
-                error="URL is required",
-                output_handle="error"
-            )
-        
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    json=body if method in ["POST", "PUT", "PATCH"] else None,
-                )
-                
-                # Try to parse JSON response
-                try:
-                    response_data = response.json()
-                except json.JSONDecodeError:
-                    response_data = response.text
-                
-                return NodeExecutionResult(
-                    success=True,
-                    data={
-                        "status_code": response.status_code,
-                        "headers": dict(response.headers),
-                        "body": response_data,
-                        "url": str(response.url),
-                    },
-                    output_handle="success" if response.status_code < 400 else "error"
-                )
-                
-        except httpx.TimeoutException:
-            return NodeExecutionResult(
-                success=False,
-                error=f"Request timed out after {timeout}s",
-                output_handle="error"
-            )
-        except Exception as e:
-            return NodeExecutionResult(
-                success=False,
-                error=str(e),
-                output_handle="error"
-            )
 
 
 class CodeNode(BaseNodeHandler):
@@ -164,8 +47,7 @@ class CodeNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Success", handle_type="success"),
     ]
     
     async def execute(
@@ -180,42 +62,63 @@ class CodeNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="No code provided",
-                output_handle="error"
+                output_handle="output-0"
             )
         
+        # Normalize input to items format
+        if isinstance(input_data, list):
+            items = input_data
+        elif isinstance(input_data, dict) and "json" in input_data:
+            items = [input_data]
+        else:
+            items = [{"json": input_data}]
+        
         try:
-            # Create safe execution environment
-            local_vars = {
-                "data": input_data,
-                "context": {
-                    "execution_id": str(context.execution_id),
-                    "user_id": context.user_id,
-                    "workflow_id": context.workflow_id,
-                },
-            }
+            output_items = []
             
-            # Wrap code in function for return support
-            wrapped_code = f"""
-    def __execute():
-    {chr(10).join('    ' + line for line in code.split(chr(10)))}
-        return locals().get('result', {{}})
-    __result__ = __execute()
-    """
-            
-            exec(wrapped_code, {"__builtins__": __builtins__}, local_vars)
-            result = local_vars.get("__result__", {})
+            for idx, item in enumerate(items):
+                item_data = item.get("json", item) if isinstance(item, dict) else {}
+                
+                # Create safe execution environment
+                local_vars = {
+                    "data": item_data,
+                    "$json": item_data,  # n8n style access
+                    "$item": item,
+                    "$itemIndex": idx,
+                    "context": {
+                        "execution_id": str(context.execution_id),
+                        "user_id": context.user_id,
+                        "workflow_id": context.workflow_id,
+                    },
+                }
+                
+                # Wrap code in function for return support
+                wrapped_code = f"""
+def __execute(data, context):
+{chr(10).join('    ' + line for line in code.split(chr(10)))}
+    return locals().get('result', {{}})
+__result__ = __execute(data, context)
+"""
+                
+                exec(wrapped_code, {"__builtins__": __builtins__}, local_vars)
+                result = local_vars.get("__result__", {})
+                
+                output_items.append(NodeItem(
+                    json=result if isinstance(result, dict) else {"result": result},
+                    pairedItem={"item": idx}
+                ))
             
             return NodeExecutionResult(
                 success=True,
-                data=result if isinstance(result, dict) else {"result": result},
-                output_handle="success"
+                items=output_items,
+                output_handle="output-0"
             )
             
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Code execution failed: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -259,12 +162,29 @@ class SetNode(BaseNodeHandler):
         values = config.get("values", {})
         keep_input = config.get("keep_input", True)
         
-        if keep_input:
-            result = {**input_data, **values}
+        # Normalize input to items format
+        if isinstance(input_data, list):
+            items = input_data
+        elif isinstance(input_data, dict) and "json" in input_data:
+            items = [input_data]
         else:
-            result = values
+            items = [{"json": input_data}]
         
-        return NodeExecutionResult(success=True, data=result)
+        output_items = []
+        for idx, item in enumerate(items):
+            item_data = item.get("json", item) if isinstance(item, dict) else {}
+            
+            if keep_input:
+                result = {**item_data, **values}
+            else:
+                result = values
+            
+            output_items.append(NodeItem(
+                json=result,
+                pairedItem={"item": idx}
+            ))
+        
+        return NodeExecutionResult(success=True, items=output_items)
 
 
 class IfNode(BaseNodeHandler):
@@ -320,40 +240,93 @@ class IfNode(BaseNodeHandler):
         operator = config.get("operator", "equals")
         compare_value = config.get("value", "")
         
-        # Get field value using dot notation
-        field_value = input_data
+        # Normalize input to items format
+        if isinstance(input_data, list):
+            items = input_data
+        elif isinstance(input_data, dict) and "json" in input_data:
+            items = [input_data]
+        else:
+            items = [{"json": input_data}]
+        
+        output_items = []
+        for idx, item in enumerate(items):
+            item_data = item.get("json", item) if isinstance(item, dict) else {}
+            
+            # Get field value using dot notation
+            field_value = item_data
+            try:
+                for key in field_path.split("."):
+                    field_value = field_value[key]
+            except (KeyError, TypeError):
+                field_value = None
+            
+            # Evaluate condition
+            result = False
+            
+            if operator == "equals":
+                result = str(field_value) == str(compare_value)
+            elif operator == "not_equals":
+                result = str(field_value) != str(compare_value)
+            elif operator == "contains":
+                result = str(compare_value) in str(field_value)
+            elif operator == "greater_than":
+                try:
+                    result = float(field_value) > float(compare_value)
+                except (ValueError, TypeError):
+                    result = False
+            elif operator == "less_than":
+                try:
+                    result = float(field_value) < float(compare_value)
+                except (ValueError, TypeError):
+                    result = False
+            elif operator == "is_empty":
+                result = field_value is None or field_value == "" or field_value == []
+            elif operator == "is_not_empty":
+                result = field_value is not None and field_value != "" and field_value != []
+            
+            output_items.append(NodeItem(
+                json=item_data,
+                pairedItem={"item": idx}
+            ))
+        
+        # For IF node, all items go to the same output based on first item's condition
+        # (n8n behavior - can be enhanced for per-item routing later)
+        first_item = items[0] if items else {"json": {}}
+        first_data = first_item.get("json", first_item) if isinstance(first_item, dict) else {}
+        
+        field_value = first_data
         try:
             for key in field_path.split("."):
                 field_value = field_value[key]
         except (KeyError, TypeError):
             field_value = None
         
-        # Evaluate condition
-        result = False
-        
+        # Evaluate for routing decision
+        route_result = False
         if operator == "equals":
-            result = str(field_value) == str(compare_value)
+            route_result = str(field_value) == str(compare_value)
         elif operator == "not_equals":
-            result = str(field_value) != str(compare_value)
+            route_result = str(field_value) != str(compare_value)
         elif operator == "contains":
-            result = str(compare_value) in str(field_value)
+            route_result = str(compare_value) in str(field_value)
         elif operator == "greater_than":
             try:
-                result = float(field_value) > float(compare_value)
+                route_result = float(field_value) > float(compare_value)
             except (ValueError, TypeError):
-                result = False
+                route_result = False
         elif operator == "less_than":
             try:
-                result = float(field_value) < float(compare_value)
+                route_result = float(field_value) < float(compare_value)
             except (ValueError, TypeError):
-                result = False
+                route_result = False
         elif operator == "is_empty":
-            result = field_value is None or field_value == "" or field_value == []
+            route_result = field_value is None or field_value == "" or field_value == []
         elif operator == "is_not_empty":
-            result = field_value is not None and field_value != "" and field_value != []
+            route_result = field_value is not None and field_value != "" and field_value != []
         
         return NodeExecutionResult(
             success=True,
-            data=input_data,
-            output_handle="true" if result else "false"
+            items=output_items,
+            output_handle="true" if route_result else "false"
         )
+

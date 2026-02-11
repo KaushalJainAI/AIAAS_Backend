@@ -44,6 +44,7 @@ class GmailNode(BaseNodeHandler):
             name="credential",
             label="Gmail Credential",
             field_type=FieldType.CREDENTIAL,
+            credential_type="google-oauth2",
             description="Select your Gmail OAuth credential"
         ),
         FieldConfig(
@@ -84,8 +85,7 @@ class GmailNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -109,7 +109,7 @@ class GmailNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="To and Subject are required",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         # Get OAuth access token
@@ -118,7 +118,7 @@ class GmailNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Gmail OAuth credential not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         access_token = creds["access_token"]
@@ -165,7 +165,7 @@ class GmailNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Gmail API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
@@ -178,14 +178,14 @@ class GmailNode(BaseNodeHandler):
                         "to": to,
                         "subject": subject,
                     },
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Gmail error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -209,6 +209,7 @@ class SlackNode(BaseNodeHandler):
             name="credential",
             label="Slack Bot Token",
             field_type=FieldType.CREDENTIAL,
+            credential_type="slack",
             description="Select your Slack credential"
         ),
         FieldConfig(
@@ -250,8 +251,7 @@ class SlackNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -271,14 +271,14 @@ class SlackNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Channel and Message are required",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         if operation == "reply_to_thread" and not thread_ts:
             return NodeExecutionResult(
                 success=False,
                 error="thread_ts is required for reply_to_thread operation",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         # Get bot token
@@ -287,7 +287,7 @@ class SlackNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Slack bot token not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         bot_token = creds["bot_token"]
@@ -318,7 +318,7 @@ class SlackNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Slack HTTP error: {response.text}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
@@ -327,7 +327,7 @@ class SlackNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Slack API error: {data.get('error', 'Unknown error')}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 return NodeExecutionResult(
@@ -337,14 +337,14 @@ class SlackNode(BaseNodeHandler):
                         "channel": data.get("channel"),
                         "thread_ts": data.get("message", {}).get("thread_ts"),
                     },
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Slack error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -368,6 +368,7 @@ class GoogleSheetsNode(BaseNodeHandler):
             name="credential",
             label="Google Credential",
             field_type=FieldType.CREDENTIAL,
+            credential_type="google-oauth2",
             description="Select your Google OAuth credential"
         ),
         FieldConfig(
@@ -412,8 +413,7 @@ class GoogleSheetsNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -433,7 +433,7 @@ class GoogleSheetsNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Spreadsheet ID is required",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         # Get OAuth access token
@@ -442,7 +442,7 @@ class GoogleSheetsNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Google OAuth credential not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         access_token = creds["access_token"]
@@ -471,7 +471,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error=f"Sheets API error: {error_msg}",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     data = response.json()
@@ -482,7 +482,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                             "range": data.get("range"),
                             "row_count": len(data.get("values", [])),
                         },
-                        output_handle="success"
+                        output_handle="output-0"
                     )
                 
                 elif operation == "write_range":
@@ -490,7 +490,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Values are required for write operation",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.put(
@@ -509,7 +509,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error=f"Sheets API error: {error_msg}",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     data = response.json()
@@ -520,7 +520,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                             "updated_rows": data.get("updatedRows"),
                             "updated_cells": data.get("updatedCells"),
                         },
-                        output_handle="success"
+                        output_handle="output-0"
                     )
                 
                 elif operation == "append_rows":
@@ -528,7 +528,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Values are required for append operation",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.post(
@@ -550,7 +550,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error=f"Sheets API error: {error_msg}",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     data = response.json()
@@ -561,7 +561,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                             "updated_range": updates.get("updatedRange"),
                             "updated_rows": updates.get("updatedRows"),
                         },
-                        output_handle="success"
+                        output_handle="output-0"
                     )
                 
                 elif operation == "clear_range":
@@ -579,7 +579,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error=f"Sheets API error: {error_msg}",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     data = response.json()
@@ -588,21 +588,21 @@ class GoogleSheetsNode(BaseNodeHandler):
                         data={
                             "cleared_range": data.get("clearedRange"),
                         },
-                        output_handle="success"
+                        output_handle="output-0"
                     )
                 
                 else:
                     return NodeExecutionResult(
                         success=False,
                         error=f"Unknown operation: {operation}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                     
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Google Sheets error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -623,11 +623,11 @@ class DiscordNode(BaseNodeHandler):
     
     fields = [
         FieldConfig(
-            name="webhook_url",
-            label="Webhook URL",
-            field_type=FieldType.STRING,
-            placeholder="https://discord.com/api/webhooks/...",
-            description="Discord webhook URL"
+            name="credential",
+            label="Discord Webhook",
+            field_type=FieldType.CREDENTIAL,
+            credential_type="discord_webhook",
+            description="Select your Discord Webhook credential"
         ),
         FieldConfig(
             name="content",
@@ -681,19 +681,23 @@ class DiscordNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        webhook_url = config.get("webhook_url", "")
+        credential_id = config.get("credential")
         content = config.get("content", "")
         username = config.get("username", "")
         avatar_url = config.get("avatar_url", "")
         embeds = config.get("embeds", [])
         tts = config.get("tts", "false") == "true"
         
-        if not webhook_url:
+        # Get Webhook URL from credential
+        creds = context.get_credential(credential_id) if credential_id else None
+        if not creds or "webhook_url" not in creds:
             return NodeExecutionResult(
                 success=False,
-                error="Webhook URL is required",
+                error="Discord Webhook credential not configured",
                 output_handle="error"
             )
+        
+        webhook_url = creds["webhook_url"]
         
         if not content and not embeds:
             return NodeExecutionResult(
@@ -767,6 +771,7 @@ class NotionNode(BaseNodeHandler):
             name="credential",
             label="Notion API Key",
             field_type=FieldType.CREDENTIAL,
+            credential_type="notion",
             description="Select your Notion integration credential"
         ),
         FieldConfig(
@@ -811,8 +816,7 @@ class NotionNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -834,7 +838,7 @@ class NotionNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Notion API key not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         api_key = creds["api_key"]
@@ -852,7 +856,7 @@ class NotionNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Database ID is required for create_page",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     payload = {
@@ -871,7 +875,7 @@ class NotionNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Page ID is required for get_page",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.get(
@@ -884,7 +888,7 @@ class NotionNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Page ID is required for update_page",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.patch(
@@ -898,7 +902,7 @@ class NotionNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Database ID is required for query_database",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     payload = {}
@@ -916,7 +920,7 @@ class NotionNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Database ID is required for create_database_item",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     payload = {
@@ -934,7 +938,7 @@ class NotionNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Unknown operation: {operation}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 if response.status_code not in (200, 201):
@@ -946,21 +950,21 @@ class NotionNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Notion API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
                     data=data,
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Notion error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -984,6 +988,7 @@ class AirtableNode(BaseNodeHandler):
             name="credential",
             label="Airtable API Key",
             field_type=FieldType.CREDENTIAL,
+            credential_type="airtable",
             description="Select your Airtable credential"
         ),
         FieldConfig(
@@ -1033,8 +1038,7 @@ class AirtableNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -1055,7 +1059,7 @@ class AirtableNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Base ID and Table Name are required",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         # Get API key
@@ -1064,7 +1068,7 @@ class AirtableNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Airtable API key not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         api_key = creds["api_key"]
@@ -1089,7 +1093,7 @@ class AirtableNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Record ID is required for get operation",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.get(
@@ -1102,7 +1106,7 @@ class AirtableNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Record ID is required for update operation",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.patch(
@@ -1116,7 +1120,7 @@ class AirtableNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Record ID is required for delete operation",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.delete(
@@ -1139,7 +1143,7 @@ class AirtableNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Unknown operation: {operation}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 if response.status_code not in (200, 201):
@@ -1151,21 +1155,21 @@ class AirtableNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Airtable API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
                     data=data,
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Airtable error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -1189,6 +1193,7 @@ class TelegramNode(BaseNodeHandler):
             name="credential",
             label="Bot Token",
             field_type=FieldType.CREDENTIAL,
+            credential_type="telegram",
             description="Select your Telegram bot credential"
         ),
         FieldConfig(
@@ -1241,8 +1246,7 @@ class TelegramNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -1259,12 +1263,43 @@ class TelegramNode(BaseNodeHandler):
         document_url = config.get("document_url", "")
         parse_mode = config.get("parse_mode", "")
         
+        # 1. Context Awareness: Try to find chat_id in previous outputs if not provided
+        if not chat_id:
+            # Look for telegram trigger data or any output with chat info
+            for node_output in context.node_outputs.values():
+                items = node_output if isinstance(node_output, list) else [node_output]
+                for item in items:
+                    json_data = item.get("json", {}) if isinstance(item, dict) else {}
+                    # Check for direct 'chat' object (standard trigger output)
+                    if "chat" in json_data and "id" in json_data["chat"]:
+                        chat_id = str(json_data["chat"]["id"])
+                        break
+                    # Check for 'from' or 'message' objects
+                    message_data = json_data.get("message", {})
+                    if "chat" in message_data and "id" in message_data["chat"]:
+                        chat_id = str(message_data["chat"]["id"])
+                        break
+                if chat_id:
+                    break
+                    
         if not chat_id:
             return NodeExecutionResult(
                 success=False,
-                error="Chat ID is required",
-                output_handle="error"
+                error="Chat ID is required and could not be found in execution context",
+                output_handle="output-0"
             )
+
+        # 2. Robust ID Handling: Prefix with @ for non-numeric usernames
+        chat_id = str(chat_id).strip()
+        if not chat_id.startswith('@') and not chat_id.lstrip('-').isdigit():
+            chat_id = f"@{chat_id}"
+            
+        # 3. Smart Escaping for MarkdownV2
+        if parse_mode == "MarkdownV2" and text:
+            # Characters that MUST be escaped in MarkdownV2 except for code blocks/links
+            escape_chars = r'_*[]()~`>#+-=|{}.!'
+            import re
+            text = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
         
         # Get bot token
         creds = context.get_credential(credential_id) if credential_id else None
@@ -1272,7 +1307,7 @@ class TelegramNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Telegram bot token not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         bot_token = creds["bot_token"]
@@ -1290,7 +1325,7 @@ class TelegramNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Text is required for send_message",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     payload["text"] = text
                     endpoint = f"{base_url}/sendMessage"
@@ -1300,7 +1335,7 @@ class TelegramNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Photo URL is required for send_photo",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     payload["photo"] = photo_url
                     if text:
@@ -1312,7 +1347,7 @@ class TelegramNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Document URL is required for send_document",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     payload["document"] = document_url
                     if text:
@@ -1323,7 +1358,7 @@ class TelegramNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Unknown operation: {operation}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 response = await client.post(endpoint, json=payload)
@@ -1337,7 +1372,7 @@ class TelegramNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Telegram API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
@@ -1346,7 +1381,7 @@ class TelegramNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Telegram error: {data.get('description', 'Unknown error')}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 result = data.get("result", {})
@@ -1357,14 +1392,14 @@ class TelegramNode(BaseNodeHandler):
                         "chat_id": result.get("chat", {}).get("id"),
                         "date": result.get("date"),
                     },
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Telegram error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -1388,6 +1423,7 @@ class TrelloNode(BaseNodeHandler):
             name="credential",
             label="Trello API Credential",
             field_type=FieldType.CREDENTIAL,
+            credential_type="trello",
             description="Select your Trello credential (API key + token)"
         ),
         FieldConfig(
@@ -1447,8 +1483,7 @@ class TrelloNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -1472,7 +1507,7 @@ class TrelloNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Trello API credentials not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         api_key = creds["api_key"]
@@ -1487,7 +1522,7 @@ class TrelloNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="List ID and Name are required for create_card",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     params = {**auth_params, "idList": list_id, "name": name}
@@ -1506,7 +1541,7 @@ class TrelloNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Card ID is required for update_card",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     params = auth_params.copy()
@@ -1527,7 +1562,7 @@ class TrelloNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Card ID is required for get_card",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.get(
@@ -1540,7 +1575,7 @@ class TrelloNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Card ID is required for delete_card",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.delete(
@@ -1553,7 +1588,7 @@ class TrelloNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Board ID is required for get_board_lists",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.get(
@@ -1565,28 +1600,28 @@ class TrelloNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Unknown operation: {operation}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 if response.status_code not in (200, 201):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Trello API error: {response.text}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
                     data=data,
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"Trello error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -1610,6 +1645,7 @@ class GitHubNode(BaseNodeHandler):
             name="credential",
             label="GitHub Token",
             field_type=FieldType.CREDENTIAL,
+            credential_type="github",
             description="Select your GitHub personal access token"
         ),
         FieldConfig(
@@ -1667,8 +1703,7 @@ class GitHubNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -1690,7 +1725,7 @@ class GitHubNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="Repository owner and name are required",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         # Get token
@@ -1699,7 +1734,7 @@ class GitHubNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="GitHub token not configured",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         token = creds["token"]
@@ -1717,7 +1752,7 @@ class GitHubNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Title is required for create_issue",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     payload = {"title": title}
@@ -1737,7 +1772,7 @@ class GitHubNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Issue number is required for update_issue",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     payload = {}
@@ -1759,7 +1794,7 @@ class GitHubNode(BaseNodeHandler):
                         return NodeExecutionResult(
                             success=False,
                             error="Issue number is required for get_issue",
-                            output_handle="error"
+                            output_handle="output-0"
                         )
                     
                     response = await client.get(
@@ -1777,7 +1812,7 @@ class GitHubNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"Unknown operation: {operation}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 if response.status_code not in (200, 201):
@@ -1789,21 +1824,21 @@ class GitHubNode(BaseNodeHandler):
                     return NodeExecutionResult(
                         success=False,
                         error=f"GitHub API error: {error_msg}",
-                        output_handle="error"
+                        output_handle="output-0"
                     )
                 
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
                     data=data,
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"GitHub error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )
 
 
@@ -1881,8 +1916,7 @@ class HTTPRequestNode(BaseNodeHandler):
     ]
     
     outputs = [
-        HandleDef(id="success", label="Success", handle_type="success"),
-        HandleDef(id="error", label="Error", handle_type="error"),
+        HandleDef(id="output-0", label="Output"),
     ]
     
     async def execute(
@@ -1903,7 +1937,7 @@ class HTTPRequestNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error="URL is required",
-                output_handle="error"
+                output_handle="output-0"
             )
         
         try:
@@ -1938,18 +1972,18 @@ class HTTPRequestNode(BaseNodeHandler):
                         "headers": dict(response.headers),
                         "body": response_data,
                     },
-                    output_handle="success"
+                    output_handle="output-0"
                 )
                 
         except httpx.TimeoutException:
             return NodeExecutionResult(
                 success=False,
                 error=f"Request timeout after {timeout} seconds",
-                output_handle="error"
+                output_handle="output-0"
             )
         except Exception as e:
             return NodeExecutionResult(
                 success=False,
                 error=f"HTTP request error: {str(e)}",
-                output_handle="error"
+                output_handle="output-0"
             )

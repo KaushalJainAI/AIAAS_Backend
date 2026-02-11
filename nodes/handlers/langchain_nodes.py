@@ -1,15 +1,23 @@
-from typing import Any, Dict, List
-from pydantic import Field
+from typing import Any, Dict, TYPE_CHECKING
 
-from nodes.handlers.base import BaseNodeHandler, FieldType, FieldConfig
-from compiler.schemas import ExecutionContext
+from nodes.handlers.base import (
+    BaseNodeHandler,
+    FieldType,
+    FieldConfig,
+    HandleDef,
+    NodeExecutionResult,
+)
 from langchain_community.tools import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
+
+if TYPE_CHECKING:
+    from compiler.schemas import ExecutionContext
 
 # We can add more tools here or dynamic loading
 TOOLS = {
     "wikipedia": WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
 }
+
 
 class LangChainToolNode(BaseNodeHandler):
     """
@@ -19,6 +27,8 @@ class LangChainToolNode(BaseNodeHandler):
     name = "LangChain Tool"
     category = "integration"
     description = "Execute a standard LangChain tool"
+    icon = "🔗"
+    color = "#10b981"
     
     fields = [
         FieldConfig(
@@ -36,34 +46,47 @@ class LangChainToolNode(BaseNodeHandler):
             required=True
         )
     ]
+    
+    outputs = [
+        HandleDef(id="output", label="Output"),
+        HandleDef(id="error", label="Error", handle_type="error"),
+    ]
 
-    async def execute(self, input_data: Dict[str, Any], config: Dict[str, Any], context: ExecutionContext) -> Any:
+    async def execute(
+        self,
+        input_data: Dict[str, Any],
+        config: Dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> NodeExecutionResult:
         tool_name = config.get("tool_name")
         query = config.get("query")
         
-        # Support dynamic input via {{ }} if passed (resolved by runner before this)
-        # But if the user wants to use upstream data, they can map it.
-        # Here we assume 'query' might need resolution if it wasn't already handled by the generic runner.
-        # The generic runner usually resolves {{ }} before calling execute.
-        
         if tool_name not in TOOLS:
-            raise ValueError(f"Unknown tool: {tool_name}")
+            return NodeExecutionResult(
+                success=False,
+                error=f"Unknown tool: {tool_name}",
+                output_handle="error"
+            )
             
         tool = TOOLS[tool_name]
         
-        # Tools usually block, so we might need run_in_executor if they aren't async native
-        # valid run methods: invoke, run
         try:
-             # Most LC tools are sync compatible. run() is the standard entry point.
-             # async_run might be available
-             import asyncio
-             if hasattr(tool, "arun"):
-                 result = await tool.arun(query)
-             else:
-                 # Run sync tool in thread pool
-                 result = await asyncio.to_thread(tool.run, query)
+            import asyncio
+            if hasattr(tool, "arun"):
+                result = await tool.arun(query)
+            else:
+                # Run sync tool in thread pool
+                result = await asyncio.to_thread(tool.run, query)
                  
-             return {"result": result}
+            return NodeExecutionResult(
+                success=True,
+                data={"result": result},
+                output_handle="output"
+            )
         except Exception as e:
-            raise Exception(f"Tool execution failed: {str(e)}")
+            return NodeExecutionResult(
+                success=False,
+                error=f"Tool execution failed: {str(e)}",
+                output_handle="error"
+            )
 

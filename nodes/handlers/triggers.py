@@ -40,7 +40,7 @@ class ManualTriggerNode(BaseNodeHandler):
     
     fields = []
     inputs = []  # Triggers have no inputs
-    outputs = [HandleDef(id="output", label="On trigger")]
+    outputs = [HandleDef(id="output-0", label="On trigger")]
     
     async def execute(
         self,
@@ -48,6 +48,10 @@ class ManualTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
+        # Add a small perceptual delay so the user sees the "Running" state
+        import asyncio
+        await asyncio.sleep(0.8)
+        
         return NodeExecutionResult(
             success=True,
             data={
@@ -55,8 +59,9 @@ class ManualTriggerNode(BaseNodeHandler):
                 "execution_id": str(context.execution_id),
                 "trigger_type": "manual"
             },
-            output_handle="output"
+            output_handle="output-0"
         )
+
 
 
 
@@ -109,7 +114,7 @@ class WebhookTriggerNode(BaseNodeHandler):
     ]
     inputs = []
     outputs = [
-        HandleDef(id="output", label="On webhook")
+        HandleDef(id="output-0", label="On webhook")
     ]
     
     async def execute(
@@ -130,7 +135,7 @@ class WebhookTriggerNode(BaseNodeHandler):
                 "query": input_data.get("query", {}),
                 "url": input_data.get("url", ""),
             },
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -184,7 +189,7 @@ class ScheduleTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On schedule")]
+    outputs = [HandleDef(id="output-0", label="On schedule")]
     
     async def execute(
         self,
@@ -209,7 +214,7 @@ class ScheduleTriggerNode(BaseNodeHandler):
         return NodeExecutionResult(
             success=True,
             data=data,
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -233,6 +238,7 @@ class EmailTriggerNode(BaseNodeHandler):
             name="credential",
             label="Email Credential",
             field_type=FieldType.CREDENTIAL,
+            credential_type="email",
             description="IMAP email account credential"
         ),
         FieldConfig(
@@ -269,7 +275,7 @@ class EmailTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On email")]
+    outputs = [HandleDef(id="output-0", label="On email")]
     
     async def execute(
         self,
@@ -291,7 +297,7 @@ class EmailTriggerNode(BaseNodeHandler):
                 "date": input_data.get("date", ""),
                 "message_id": input_data.get("message_id", ""),
             },
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -350,7 +356,7 @@ class FormTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On submit")]
+    outputs = [HandleDef(id="output-0", label="On submit")]
     
     async def execute(
         self,
@@ -367,7 +373,7 @@ class FormTriggerNode(BaseNodeHandler):
                 "submitter_ip": input_data.get("ip_address", ""),
                 "user_agent": input_data.get("user_agent", ""),
             },
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -391,6 +397,7 @@ class SlackTriggerNode(BaseNodeHandler):
             name="credential",
             label="Slack Credential",
             field_type=FieldType.CREDENTIAL,
+            credential_type="slack",
             description="Slack bot token credential"
         ),
         FieldConfig(
@@ -419,7 +426,7 @@ class SlackTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On event")]
+    outputs = [HandleDef(id="output-0", label="On event")]
     
     async def execute(
         self,
@@ -440,7 +447,7 @@ class SlackTriggerNode(BaseNodeHandler):
                 "thread_ts": input_data.get("thread_ts", ""),
                 "event_data": input_data,
             },
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -464,6 +471,7 @@ class GoogleSheetsTriggerNode(BaseNodeHandler):
             name="credential",
             label="Google Credential",
             field_type=FieldType.CREDENTIAL,
+            credential_type="google-oauth2",
             description="Google OAuth credential with Sheets access"
         ),
         FieldConfig(
@@ -498,7 +506,7 @@ class GoogleSheetsTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On change")]
+    outputs = [HandleDef(id="output-0", label="On change")]
     
     async def execute(
         self,
@@ -518,7 +526,7 @@ class GoogleSheetsTriggerNode(BaseNodeHandler):
                 "row_data": input_data.get("row_data", {}),
                 "change_type": input_data.get("change_type", ""),
             },
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -542,6 +550,7 @@ class GitHubTriggerNode(BaseNodeHandler):
             name="credential",
             label="GitHub Token",
             field_type=FieldType.CREDENTIAL,
+            credential_type="github",
             description="GitHub personal access token"
         ),
         FieldConfig(
@@ -568,7 +577,7 @@ class GitHubTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On event")]
+    outputs = [HandleDef(id="output-0", label="On event")]
     
     async def execute(
         self,
@@ -588,7 +597,7 @@ class GitHubTriggerNode(BaseNodeHandler):
                 "ref": input_data.get("ref", ""),
                 "payload": input_data.get("payload", {}),
             },
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -612,6 +621,7 @@ class DiscordTriggerNode(BaseNodeHandler):
             name="bot_token",
             label="Bot Token",
             field_type=FieldType.CREDENTIAL,
+            credential_type="discord_bot",
             description="Discord bot token credential"
         ),
         FieldConfig(
@@ -640,7 +650,7 @@ class DiscordTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On event")]
+    outputs = [HandleDef(id="output-0", label="On event")]
     
     async def execute(
         self,
@@ -661,7 +671,7 @@ class DiscordTriggerNode(BaseNodeHandler):
                 "timestamp": input_data.get("timestamp", ""),
                 "event_data": input_data,
             },
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -685,6 +695,7 @@ class TelegramTriggerNode(BaseNodeHandler):
             name="credential",
             label="Bot Token",
             field_type=FieldType.CREDENTIAL,
+            credential_type="telegram",
             description="Telegram bot token credential"
         ),
         FieldConfig(
@@ -714,7 +725,7 @@ class TelegramTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On update")]
+    outputs = [HandleDef(id="output-0", label="On update")]
     
     async def execute(
         self,
@@ -723,19 +734,61 @@ class TelegramTriggerNode(BaseNodeHandler):
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
         # Telegram update data comes from input_data
+        # Standardize extraction based on update type
+        message = input_data.get("message", {})
+        # Handle callback queries or edited messages if present
+        if not message:
+            message = input_data.get("edited_message", {})
+        if not message and "callback_query" in input_data:
+            message = input_data["callback_query"].get("message", {})
+            
+        chat = message.get("chat", {})
+        user = message.get("from", {})
+        # For direct message updates, 'from' is at top level of message
+        # For callbacks, user is 'from' in callback_query
+        if "callback_query" in input_data:
+            user = input_data["callback_query"].get("from", {})
+            
+        text = message.get("text", "")
+        # If no text (e.g. photo), check caption
+        if not text:
+            text = message.get("caption", "")
+        
+        # Command parsing
+        command = ""
+        args = ""
+        if text and text.startswith("/"):
+            parts = text.split(" ", 1)
+            # Handle /command@botname syntax
+            cmd_part = parts[0].replace("/", "")
+            if "@" in cmd_part:
+                cmd_part = cmd_part.split("@")[0]
+            command = cmd_part
+            args = parts[1] if len(parts) > 1 else ""
+            
         return NodeExecutionResult(
             success=True,
             data={
                 "triggered_at": datetime.now().isoformat(),
                 "update_id": input_data.get("update_id", ""),
-                "message": input_data.get("message", {}),
-                "chat": input_data.get("chat", {}),
-                "from": input_data.get("from", {}),
-                "text": input_data.get("text", ""),
-                "command": input_data.get("command", ""),
+                "chat_id": chat.get("id"),
+                "text": text,
+                "command": command,
+                "args": args,
+                "user": {
+                    "id": user.get("id"),
+                    "username": user.get("username"),
+                    "first_name": user.get("first_name"),
+                    "last_name": user.get("last_name"),
+                    "language_code": user.get("language_code"),
+                },
+                "chat": chat,
+                # Include full raw objects for advanced use
+                "message": message,
+                "raw_update": input_data,
                 "trigger_type": config.get("trigger_on", "message"),
             },
-            output_handle="output"
+            output_handle="output-0"
         )
 
 
@@ -778,7 +831,7 @@ class RssFeedTriggerNode(BaseNodeHandler):
         ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On new item")]
+    outputs = [HandleDef(id="output-0", label="On new item")]
     
     async def execute(
         self,

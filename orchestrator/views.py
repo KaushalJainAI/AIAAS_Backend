@@ -7,11 +7,62 @@ from uuid import UUID
 
 from django.shortcuts import get_object_or_404
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from adrf.decorators import api_view
+from rest_framework.decorators import permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from asgiref.sync import sync_to_async
 
 from .models import Workflow, WorkflowVersion, HITLRequest, ConversationMessage
+from compiler.validators import (
+    validate_dag,
+    validate_credentials,
+    validate_node_configs,
+    validate_type_compatibility,
+)
+from logs.models import ExecutionLog
+
+
+def is_functionally_identical(nodes1, edges1, nodes2, edges2):
+    """
+    Compare two workflow definitions functionally.
+    Ignores layout/aesthetic properties like 'position' or 'selected'.
+    """
+    def sanitize_nodes(nodes):
+        sanitized = []
+        for node in nodes:
+            # Create a clean version of the node with only logic-affecting properties
+            n = {
+                'id': node.get('id'),
+                'type': node.get('type'),
+                'nodeType': node.get('nodeType') or node.get('data', {}).get('nodeType'),
+                'data': {
+                    'config': node.get('data', {}).get('config', {}),
+                    'nodeType': node.get('data', {}).get('nodeType'),
+                    # Exclude 'label', 'icon', 'color' if they don't affect logic? 
+                    # Usually 'config' is the main logic part.
+                }
+            }
+            sanitized.append(n)
+        # Sort by ID for deterministic comparison
+        return sorted(sanitized, key=lambda x: str(x.get('id', '')))
+
+    def sanitize_edges(edges):
+        sanitized = []
+        for edge in edges:
+            e = {
+                'id': edge.get('id'),
+                'source': edge.get('source'),
+                'target': edge.get('target'),
+                'sourceHandle': edge.get('sourceHandle'),
+                'targetHandle': edge.get('targetHandle'),
+            }
+            sanitized.append(e)
+        # Sort by source+target for deterministic comparison
+        return sorted(sanitized, key=lambda x: f"{x.get('source')}-{x.get('target')}-{x.get('sourceHandle')}")
+
+    return sanitize_nodes(nodes1) == sanitize_nodes(nodes2) and \
+           sanitize_edges(edges1) == sanitize_edges(edges2)
 
 
 # ======================== Workflow CRUD API ========================
@@ -154,7 +205,61 @@ def workflow_detail(request, workflow_id: int):
         if 'workflow_settings' in data:
             workflow.workflow_settings = data['workflow_settings']
         if 'status' in data:
-            workflow.status = data['status']
+            new_status = data['status']
+            if new_status == 'active' and workflow.status != 'active':
+                # Run validations before allowing deployment
+                temp_nodes = data.get('nodes', workflow.nodes)
+                temp_edges = data.get('edges', workflow.edges)
+                
+                # 1. Static Validation
+                errors = []
+                errors.extend(validate_dag(temp_nodes, temp_edges))
+                errors.extend(validate_node_configs(temp_nodes))
+                
+                from credentials.models import Credential
+                user_credentials = set(Credential.objects.filter(user=request.user).values_list('name', flat=True))
+                errors.extend(validate_credentials(temp_nodes, user_credentials))
+                errors.extend(validate_type_compatibility(temp_nodes, temp_edges))
+                
+                if errors:
+                    # Convert Pydantic error models to dicts for JSON response
+                    error_details = [
+                        e.model_dump(by_alias=True) if hasattr(e, 'model_dump') else str(e) 
+                        for e in errors
+                    ]
+                    return Response({
+                        "error": "Validation failed",
+                        "message": "Workflow settings or structure are invalid.",
+                        "details": error_details
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # 2. Strict Runtime Validation: Functional Proof of Success
+                successful_executions = ExecutionLog.objects.filter(
+                    workflow=workflow, 
+                    status='completed'
+                ).order_by('-completed_at')
+                
+                proof_found = False
+                for log in successful_executions:
+                    snapshot = log.workflow_snapshot
+                    if not snapshot:
+                        continue
+                        
+                    snap_nodes = snapshot.get('nodes', [])
+                    snap_edges = snapshot.get('edges', [])
+                    
+                    if is_functionally_identical(temp_nodes, temp_edges, snap_nodes, snap_edges):
+                        proof_found = True
+                        break
+                
+                if not proof_found:
+                    return Response({
+                        "error": "Deployment rejected",
+                        "message": "The current workflow configuration has not been successfully tested yet. Please run a successful test before deploying.",
+                        "tip": "Moving nodes (layout changes) is allowed, but changing node settings or connections requires a new successful run."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+            workflow.status = new_status
         if 'icon' in data:
             workflow.icon = data['icon']
         if 'color' in data:
@@ -205,7 +310,7 @@ def workflow_detail(request, workflow_id: int):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def execute_workflow(request, workflow_id: int):
+async def execute_workflow(request, workflow_id: int):
     """
     Start executing a workflow.
     
@@ -213,10 +318,11 @@ def execute_workflow(request, workflow_id: int):
         - input_data: Initial input data (optional)
         - async: Return immediately with execution_id (default: true)
     """
-    from executor.orchestrator import get_orchestrator
-    import asyncio
+    from executor.king import get_orchestrator
     
-    workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
+    workflow = await Workflow.objects.filter(id=workflow_id, user=request.user).afirst()
+    if not workflow:
+        return Response({'error': 'Workflow not found'}, status=status.HTTP_404_NOT_FOUND)
     
     input_data = request.data.get('input_data', {})
     is_async = request.data.get('async', True)
@@ -226,7 +332,7 @@ def execute_workflow(request, workflow_id: int):
     
     # Auto-inject user credentials
     from executor.credential_utils import get_user_credentials
-    user_credentials = get_user_credentials(request.user.id)
+    user_credentials = await sync_to_async(get_user_credentials)(request.user.id)
     
     # Build workflow JSON
     workflow_json = {
@@ -237,16 +343,13 @@ def execute_workflow(request, workflow_id: int):
     }
     
     # Start execution
-    async def start():
-        return await orchestrator.start(
-            workflow_json=workflow_json,
-            user_id=request.user.id,
-            input_data=input_data,
-            credentials=user_credentials,
-            supervision=workflow.supervision_level,  # Use workflow's setting
-        )
-    
-    handle = asyncio.run(start())
+    handle = await orchestrator.start(
+        workflow_json=workflow_json,
+        user_id=request.user.id,
+        input_data=input_data,
+        credentials=user_credentials,
+        supervision=workflow.supervision_level,  # Use workflow's setting
+    )
     
     return Response({
         'execution_id': str(handle.execution_id),
@@ -258,13 +361,12 @@ def execute_workflow(request, workflow_id: int):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def pause_execution(request, execution_id: str):
+async def pause_execution(request, execution_id: str):
     """Pause a running execution."""
-    from executor.orchestrator import get_orchestrator
-    import asyncio
+    from executor.king import get_orchestrator
     
     orchestrator = get_orchestrator()
-    result = asyncio.run(orchestrator.pause(UUID(execution_id), request.user.id))
+    result = await orchestrator.pause(UUID(execution_id), request.user.id)
     
     if result:
         return Response({'status': 'paused', 'execution_id': execution_id})
@@ -273,13 +375,12 @@ def pause_execution(request, execution_id: str):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def resume_execution(request, execution_id: str):
+async def resume_execution(request, execution_id: str):
     """Resume a paused execution."""
-    from executor.orchestrator import get_orchestrator
-    import asyncio
+    from executor.king import get_orchestrator
     
     orchestrator = get_orchestrator()
-    result = asyncio.run(orchestrator.resume(UUID(execution_id), request.user.id))
+    result = await orchestrator.resume(UUID(execution_id), request.user.id)
     
     if result:
         return Response({'status': 'resumed', 'execution_id': execution_id})
@@ -288,13 +389,12 @@ def resume_execution(request, execution_id: str):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def stop_execution(request, execution_id: str):
+async def stop_execution(request, execution_id: str):
     """Stop/cancel an execution."""
-    from executor.orchestrator import get_orchestrator
-    import asyncio
+    from executor.king import get_orchestrator
     
     orchestrator = get_orchestrator()
-    result = asyncio.run(orchestrator.stop(UUID(execution_id), request.user.id))
+    result = await orchestrator.stop(UUID(execution_id), request.user.id)
     
     if result:
         return Response({'status': 'stopped', 'execution_id': execution_id})
@@ -305,7 +405,7 @@ def stop_execution(request, execution_id: str):
 @permission_classes([IsAuthenticated])
 def execution_status(request, execution_id: str):
     """Get current execution status."""
-    from executor.orchestrator import get_orchestrator
+    from executor.king import get_orchestrator
     
     orchestrator = get_orchestrator()
     handle = orchestrator.get_status(UUID(execution_id), request.user.id)
@@ -362,7 +462,7 @@ def pending_hitl_requests(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def respond_to_hitl(request, request_id: str):
+async def respond_to_hitl(request, request_id: str):
     """
     Respond to a HITL request.
     
@@ -371,15 +471,16 @@ def respond_to_hitl(request, request_id: str):
         - value: Response value (for clarification)
         - message: Optional message
     """
-    from executor.orchestrator import get_orchestrator
-    import asyncio
+    from executor.king import get_orchestrator
     
     try:
-        hitl_request = HITLRequest.objects.get(
+        hitl_request = await HITLRequest.objects.filter(
             request_id=request_id,
             user=request.user,
             status='pending'
-        )
+        ).afirst()
+        if not hitl_request:
+            raise HITLRequest.DoesNotExist()
     except HITLRequest.DoesNotExist:
         return Response({'error': 'Request not found or already responded'}, status=404)
     
@@ -403,14 +504,14 @@ def respond_to_hitl(request, request_id: str):
         'message': message,
     }
     hitl_request.responded_at = timezone.now()
-    hitl_request.save()
+    await hitl_request.asave()
     
     # Notify orchestrator
     orchestrator = get_orchestrator()
-    asyncio.run(orchestrator.respond_to_hitl(
+    await orchestrator.respond_to_hitl(
         request_id=request_id,
         response={'action': action, 'value': value},
-    ))
+    )
     
     return Response({
         'request_id': request_id,
@@ -577,7 +678,7 @@ def restore_version(request, workflow_id: int, version_id: int):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def generate_workflow(request):
+async def generate_workflow(request):
     """
     Generate a workflow from natural language description.
     
@@ -585,7 +686,6 @@ def generate_workflow(request):
         - description: What the workflow should do
         - credential_id: LLM credential ID (optional)
     """
-    import asyncio
     from .ai_generator import get_ai_generator
     
     description = request.data.get('description', '')
@@ -597,14 +697,11 @@ def generate_workflow(request):
     
     generator = get_ai_generator()
     
-    async def generate():
-        return await generator.generate(
-            description=description,
-            user_id=request.user.id,
-            credential_id=credential_id,
-        )
-    
-    result = asyncio.run(generate())
+    result = await generator.generate(
+        description=description,
+        user_id=request.user.id,
+        credential_id=credential_id,
+    )
     
     if 'error' in result:
         return Response(result, status=400)
@@ -614,11 +711,11 @@ def generate_workflow(request):
         base_name = result.get('name', 'Generated Workflow')
         name = base_name
         counter = 1
-        while Workflow.objects.filter(user=request.user, name=name).exists():
+        while await Workflow.objects.filter(user=request.user, name=name).aexists():
             name = f"{base_name} ({counter})"
             counter += 1
             
-        workflow = Workflow.objects.create(
+        workflow = await Workflow.objects.acreate(
             user=request.user,
             name=name,
             description=result.get('description', description),
@@ -634,7 +731,7 @@ def generate_workflow(request):
     conv_id = conversation_id or str(uuid4())
     
     # User message
-    ConversationMessage.objects.create(
+    await ConversationMessage.objects.acreate(
         user=request.user,
         conversation_id=conv_id,
         role='user',
@@ -647,7 +744,7 @@ def generate_workflow(request):
     if result.get('saved'):
         ai_content += f"\n\nWorkflow ID: {result.get('workflow_id')}"
         
-    ConversationMessage.objects.create(
+    await ConversationMessage.objects.acreate(
         user=request.user,
         conversation_id=conv_id,
         role='assistant',
@@ -666,7 +763,7 @@ def generate_workflow(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def modify_workflow(request, workflow_id: int):
+async def modify_workflow(request, workflow_id: int):
     """
     Modify a workflow using natural language.
     
@@ -674,10 +771,12 @@ def modify_workflow(request, workflow_id: int):
         - modification: What to change
         - credential_id: LLM credential ID (optional)
     """
-    import asyncio
     from .ai_generator import get_ai_generator
     
-    workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
+    workflow = await Workflow.objects.filter(id=workflow_id, user=request.user).afirst()
+    if not workflow:
+        return Response({'error': 'Workflow not found'}, status=status.HTTP_404_NOT_FOUND)
+        
     modification = request.data.get('modification', '')
     credential_id = request.data.get('credential_id')
     conversation_id = request.data.get('conversation_id')
@@ -694,15 +793,12 @@ def modify_workflow(request, workflow_id: int):
     
     generator = get_ai_generator()
     
-    async def modify():
-        return await generator.modify(
-            workflow=current_workflow,
-            modification=modification,
-            user_id=request.user.id,
-            credential_id=credential_id,
-        )
-    
-    result = asyncio.run(modify())
+    result = await generator.modify(
+        workflow=current_workflow,
+        modification=modification,
+        user_id=request.user.id,
+        credential_id=credential_id,
+    )
     
     if 'error' in result:
         return Response(result, status=400)
@@ -715,7 +811,7 @@ def modify_workflow(request, workflow_id: int):
             base_name = new_name
             name = base_name
             counter = 1
-            while Workflow.objects.filter(user=request.user, name=name).exclude(id=workflow.id).exists():
+            while await Workflow.objects.filter(user=request.user, name=name).exclude(id=workflow.id).aexists():
                 name = f"{base_name} ({counter})"
                 counter += 1
             workflow.name = name
@@ -723,7 +819,7 @@ def modify_workflow(request, workflow_id: int):
         workflow.description = result.get('description', workflow.description)
         workflow.nodes = result.get('nodes', workflow.nodes)
         workflow.edges = result.get('edges', workflow.edges)
-        workflow.save()
+        await workflow.asave()
         result['applied'] = True
 
     # Save to conversation history
@@ -731,7 +827,7 @@ def modify_workflow(request, workflow_id: int):
     conv_id = conversation_id or str(uuid4())
     
     # User message
-    ConversationMessage.objects.create(
+    await ConversationMessage.objects.acreate(
         user=request.user,
         conversation_id=conv_id,
         workflow=workflow,
@@ -743,7 +839,7 @@ def modify_workflow(request, workflow_id: int):
     # AI response
     ai_content = f"I've modified the workflow based on your request.\n\nChanges:\n{result.get('explanation', 'Workflow updated successfully.')}"
     
-    ConversationMessage.objects.create(
+    await ConversationMessage.objects.acreate(
         user=request.user,
         conversation_id=conv_id,
         workflow=workflow,
@@ -762,12 +858,14 @@ def modify_workflow(request, workflow_id: int):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def suggest_improvements(request, workflow_id: int):
+async def suggest_improvements(request, workflow_id: int):
     """Get AI suggestions for workflow improvements."""
-    import asyncio
     from .ai_generator import get_ai_generator
     
-    workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
+    workflow = await Workflow.objects.filter(id=workflow_id, user=request.user).afirst()
+    if not workflow:
+        return Response({'error': 'Workflow not found'}, status=status.HTTP_404_NOT_FOUND)
+    
     credential_id = request.query_params.get('credential_id')
     
     current_workflow = {
@@ -778,14 +876,11 @@ def suggest_improvements(request, workflow_id: int):
     
     generator = get_ai_generator()
     
-    async def suggest():
-        return await generator.suggest_improvements(
-            workflow=current_workflow,
-            user_id=request.user.id,
-            credential_id=credential_id,
-        )
-    
-    suggestions = asyncio.run(suggest())
+    suggestions = await generator.suggest_improvements(
+        workflow=current_workflow,
+        user_id=request.user.id,
+        credential_id=credential_id,
+    )
     
     return Response({
         'workflow_id': workflow_id,
@@ -797,7 +892,7 @@ def suggest_improvements(request, workflow_id: int):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def context_aware_chat(request):
+async def context_aware_chat(request):
     """
     Send a context-aware chat message.
     
@@ -808,7 +903,6 @@ def context_aware_chat(request):
         - conversation_id: Optional conversation ID
         - credential_id: LLM credential ID
     """
-    import asyncio
     from .chat_context import ContextAwareChat
     
     message = request.data.get('message', '')
@@ -822,18 +916,80 @@ def context_aware_chat(request):
     
     chat = ContextAwareChat(user_id=request.user.id)
     
-    async def send():
-        return await chat.send_message(
-            message=message,
-            workflow_id=workflow_id,
-            node_id=node_id,
-            conversation_id=conversation_id,
-            credential_id=credential_id,
-        )
-    
-    result = asyncio.run(send())
+    result = await chat.send_message(
+        message=message,
+        workflow_id=workflow_id,
+        node_id=node_id,
+        conversation_id=conversation_id,
+        credential_id=credential_id,
+    )
     
     return Response(result)
+
+
+# ======================== Partial Execution API ========================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def execute_partial(request, workflow_id: int = None):
+    """
+    Execute a single node with provided input and config.
+    Used for "Test Step" functionality in the UI.
+    
+    Request body:
+        - node_id: ID of the node
+        - node_type: Type of the node
+        - input_data: Input data for the node
+        - config: Node configuration
+    """
+    from uuid import uuid4
+    from nodes.handlers.registry import get_registry
+    from compiler.schemas import ExecutionContext
+    
+    import logging
+    logger = logging.getLogger(__name__)
+
+    node_id = request.data.get('node_id')
+    node_type = request.data.get('node_type')
+    input_data = request.data.get('input_data', {})
+    config = request.data.get('config', {})
+    
+    if not node_id or not node_type:
+        logger.error(f"Partial execution missing required fields: node_id={node_id}, node_type={node_type}")
+        return Response({'error': 'node_id and node_type are required'}, status=400)
+    
+    registry = get_registry()
+    
+    if not registry.has_handler(node_type):
+        logger.error(f"Partial execution unknown node type: {node_type}")
+        return Response({'error': f'Unknown node type: {node_type}'}, status=400)
+    
+    handler = registry.get_handler(node_type)
+    
+    logger.info(f"Executing partial node: {node_type} ({node_id})")
+    
+    # Create context
+    context = ExecutionContext(
+        execution_id=uuid4(),
+        user_id=request.user.id,
+        workflow_id=workflow_id or 0,
+        node_id=node_id
+    )
+    
+    try:
+        result = await handler.execute(input_data, config, context)
+        
+        if result.success:
+            # Return items array in n8n-compatible format
+            items = [item.model_dump() for item in result.items]
+            return Response({'items': items})
+        else:
+            return Response({'error': result.error}, status=400)
+            
+    except Exception as e:
+        import traceback
+        logger.error(f"Partial execution failed: {e}\n{traceback.format_exc()}")
+        return Response({'error': str(e)}, status=500)
 
 
 # ======================== Thought History API ========================
