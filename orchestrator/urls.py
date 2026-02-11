@@ -4,6 +4,7 @@ Orchestrator App URL Configuration
 from django.urls import path
 
 from . import views
+from .export_views import export_workflow_zip
 
 app_name = 'orchestrator'
 
@@ -48,5 +49,8 @@ urlpatterns = [
     # Templates & Testing
     path('workflows/<int:workflow_id>/test/', views.test_workflow, name='test_workflow'),
     path('workflows/<int:workflow_id>/clone/', views.clone_workflow, name='clone_workflow'),
+    
+    # Standalone Export
+    path('workflows/<int:workflow_id>/export/', export_workflow_zip, name='export_workflow'),
 ]
 

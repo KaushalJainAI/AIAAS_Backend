@@ -52,7 +52,7 @@ def execute_workflow_async(
     }
     
     async def run():
-        orchestrator = get_orchestrator()
+        orchestrator = get_orchestrator(user_id)
         handle = await orchestrator.start(
             workflow_json=workflow_json,
             user_id=user_id,
@@ -303,7 +303,7 @@ def test_workflow_async(self, workflow_id: int):
         return {"error": f"Failed to generate test input: {e}"}
 
     async def run_test():
-        orchestrator = get_orchestrator()
+        orchestrator = get_orchestrator(workflow.user_id)
         
         # Start execution
         handle = await orchestrator.start(

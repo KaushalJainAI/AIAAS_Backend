@@ -114,15 +114,24 @@ class MCPClientManager:
                 return output_data[0]
             return output_data
 
-async def get_all_tools_from_all_servers() -> List[Dict[str, Any]]:
-    """Helper to aggregate tools from all active servers."""
+async def get_all_tools_from_all_servers(user_id: int | None = None) -> List[Dict[str, Any]]:
+    """Helper to aggregate tools from all active servers visible to a user.
+    
+    Returns tools from:
+    - System-wide servers (user=NULL)
+    - Servers owned by the specified user
+    """
+    from django.db.models import Q
+    
+    qs = MCPServer.objects.filter(enabled=True)
+    if user_id is not None:
+        qs = qs.filter(Q(user__isnull=True) | Q(user_id=user_id))
+    
     tools = []
-    async for server in MCPServer.objects.filter(enabled=True):
+    async for server in qs:
         try:
             manager = MCPClientManager(server.id)
             server_tools = await manager.list_tools()
-            # Namespace tools to avoid collision? e.g. "server_name:tool_name"
-            # For now, just add a 'server_id' field
             for t in server_tools:
                 t['server_id'] = server.id
                 t['server_name'] = server.name

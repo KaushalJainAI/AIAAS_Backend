@@ -219,7 +219,10 @@ Modification request: {modification}
 
 Output the complete modified workflow as valid JSON only:"""
     
-    def __init__(self, llm_type: str = "openrouter", llm_model: str = "google/gemini-2.0-flash-exp:free"):
+    def __init__(self, user_id: int | None = None, llm_type: str = "openrouter", llm_model: str = "google/gemini-2.0-flash-exp:free"):
+        # Identity
+        self.user_id = user_id
+
         # State tracking (thread-safe access)
         self._lock = Lock()
         self._executions: dict[UUID, ExecutionHandle] = {}
@@ -237,7 +240,7 @@ Output the complete modified workflow as valid JSON only:"""
         self._registry = None  # Lazy loaded
         
         # Design-time context cache (for workflow generation ONLY)
-        self._design_contexts: dict[int, dict] = {}  # user_id -> context
+        self._design_context: dict = {}  # Context for the specific user instance
         
         # Callbacks
         self._on_state_change: Callable[[ExecutionHandle], None] | None = None
@@ -257,15 +260,17 @@ Output the complete modified workflow as valid JSON only:"""
 
     # --- Authorization Helpers ---
     
-    def _check_execution_auth(self, execution_id: UUID, user_id: int) -> ExecutionHandle:
+    def _check_execution_auth(self, execution_id: UUID, user_id: int | None = None) -> ExecutionHandle:
         """
         Verify user owns the execution. Raises AuthorizationError if not.
         """
         handle = self._executions.get(execution_id)
         if not handle:
             raise AuthorizationError(f"Execution {execution_id} not found")
-        if handle.user_id != user_id:
-            logger.warning(f"User {user_id} attempted to access execution {execution_id} owned by {handle.user_id}")
+        
+        effective_user_id = user_id or self.user_id
+        if handle.user_id != effective_user_id:
+            logger.warning(f"User {effective_user_id} attempted to access execution {execution_id} owned by {handle.user_id}")
             raise AuthorizationError("Not authorized to access this execution")
         return handle
 
@@ -296,7 +301,7 @@ Output the complete modified workflow as valid JSON only:"""
     async def _call_llm(
         self,
         prompt: str,
-        user_id: int,
+        user_id: int | None = None,
         credential_id: str | None = None
     ) -> str:
         """Call LLM to generate response. Uses configured llm_type and llm_model."""
@@ -309,9 +314,11 @@ Output the complete modified workflow as valid JSON only:"""
         
         handler = registry.get_handler(self.llm_type)
         
+        effective_user_id = user_id or self.user_id
+        
         context = ExecutionContext(
             execution_id=uuid4(),
-            user_id=user_id,
+            user_id=effective_user_id,
             workflow_id=0
         )
         
@@ -375,8 +382,8 @@ Output the complete modified workflow as valid JSON only:"""
 
     async def create_workflow_from_intent(
         self, 
-        user_id: int, 
-        prompt: str,
+        user_id: int | None = None, 
+        prompt: str = "",
         credential_id: str | None = None
     ) -> dict:
         """
@@ -388,18 +395,18 @@ Output the complete modified workflow as valid JSON only:"""
         Runtime execution does NOT use this - it uses goal-based control.
         """
         logger.info(f"King Agent generating workflow for user {user_id}: {prompt}")
-        
         try:
+            effective_user_id = user_id or self.user_id
             # Try finding similar templates first (uses ChromaDB knowledge base)
             strategy, template = await self._decide_generation_strategy(prompt)
             
             if strategy == "reuse" and template:
-                return await self._clone_template(template, prompt, user_id, modify=False)
+                return await self._clone_template(template, prompt, effective_user_id, modify=False)
             elif strategy == "clone" and template:
-                return await self._clone_template(template, prompt, user_id, modify=True)
+                return await self._clone_template(template, prompt, effective_user_id, modify=True)
             
             # Default: Generate from scratch using LLM
-            return await self._generate_workflow_from_scratch(prompt, user_id, credential_id)
+            return await self._generate_workflow_from_scratch(prompt, effective_user_id, credential_id)
             
         except Exception as e:
             logger.error(f"Failed to generate workflow: {e}")
@@ -464,7 +471,8 @@ Output the complete modified workflow as valid JSON only:"""
             description=description
         )
         
-        response = await self._call_llm(prompt, user_id, credential_id)
+        effective_user_id = user_id or self.user_id
+        response = await self._call_llm(prompt, effective_user_id, credential_id)
         workflow = self._parse_json_response(response)
         
         if not self._validate_workflow(workflow):
@@ -476,7 +484,7 @@ Output the complete modified workflow as valid JSON only:"""
         self,
         workflow: dict,
         modification: str,
-        user_id: int,
+        user_id: int | None = None,
         credential_id: str | None = None,
     ) -> dict:
         """
@@ -493,7 +501,8 @@ Output the complete modified workflow as valid JSON only:"""
             modification=modification
         )
         
-        response = await self._call_llm(prompt, user_id, credential_id)
+        effective_user_id = user_id or self.user_id
+        response = await self._call_llm(prompt, effective_user_id, credential_id)
         
         try:
             modified = self._parse_json_response(response)
@@ -579,7 +588,7 @@ Output the complete modified workflow as valid JSON only:"""
         
         return response
 
-    def submit_human_response(self, request_id: str, response: Any, user_id: int) -> bool:
+    def submit_human_response(self, request_id: str, response: Any, user_id: int | None = None) -> bool:
         """
         External API calls this to answer the King.
         Returns True if successful, False if request not found or unauthorized.
@@ -591,9 +600,10 @@ Output the complete modified workflow as valid JSON only:"""
             logger.warning(f"HITL response for unknown request: {request_id}")
             return False
         
+        effective_user_id = user_id or self.user_id
         # Verify user owns this request
-        if request.user_id != user_id:
-            logger.warning(f"User {user_id} attempted to respond to HITL request owned by {request.user_id}")
+        if request.user_id != effective_user_id:
+            logger.warning(f"User {effective_user_id} attempted to respond to HITL request owned by {request.user_id}")
             return False
         
         if request_id in self._hitl_responses:
@@ -601,12 +611,16 @@ Output the complete modified workflow as valid JSON only:"""
             return True
         return False
 
+    def respond_to_hitl(self, request_id: str, response: Any, user_id: int | None = None) -> bool:
+        """Alias for submit_human_response to match views.py naming."""
+        return self.submit_human_response(request_id, response, user_id)
+
     # --- Execution Management (uses RUNTIME context, NOT knowledge base) ---
 
     async def start(
         self,
         workflow_json: dict,
-        user_id: int,
+        user_id: int | None = None,
         input_data: dict[str, Any] | None = None,
         credentials: dict[str, Any] | None = None,
         workflow_version_id: int | None = None,
@@ -644,10 +658,11 @@ Output the complete modified workflow as valid JSON only:"""
         execution_id = uuid4()
         workflow_id = workflow_json.get('id', 0)
         
+        effective_user_id = user_id or self.user_id
         handle = ExecutionHandle(
             execution_id=execution_id,
             workflow_id=workflow_id,
-            user_id=user_id,
+            user_id=effective_user_id,
             workflow_version_id=workflow_version_id,
             state=ExecutionState.PENDING,
             started_at=timezone.now(),
@@ -673,7 +688,7 @@ Output the complete modified workflow as valid JSON only:"""
             await exec_logger.start_execution_async(
                 execution_id=execution_id,
                 workflow_id=workflow_id,
-                user_id=user_id,
+                user_id=effective_user_id,
                 trigger_type="manual", # Default to manual for now
                 input_data=input_data,
                 nesting_depth=nesting_depth,
@@ -866,7 +881,7 @@ Output the complete modified workflow as valid JSON only:"""
 
     # --- Controls (with user authorization) ---
 
-    async def pause(self, execution_id: UUID, user_id: int) -> bool:
+    async def pause(self, execution_id: UUID, user_id: int | None = None) -> bool:
         """Pause execution. Requires authorization."""
         self._check_execution_auth(execution_id, user_id)
         
@@ -880,7 +895,7 @@ Output the complete modified workflow as valid JSON only:"""
             return True
         return False
 
-    async def resume(self, execution_id: UUID, user_id: int) -> bool:
+    async def resume(self, execution_id: UUID, user_id: int | None = None) -> bool:
         """Resume execution. Requires authorization."""
         self._check_execution_auth(execution_id, user_id)
         
@@ -894,7 +909,7 @@ Output the complete modified workflow as valid JSON only:"""
             return True
         return False
     
-    async def stop(self, execution_id: UUID, user_id: int) -> bool:
+    async def stop(self, execution_id: UUID, user_id: int | None = None) -> bool:
         """Stop/cancel execution. Requires authorization."""
         self._check_execution_auth(execution_id, user_id)
         
@@ -910,7 +925,7 @@ Output the complete modified workflow as valid JSON only:"""
             return True
         return False
         
-    def get_status(self, execution_id: UUID, user_id: int) -> ExecutionHandle | None:
+    def get_status(self, execution_id: UUID, user_id: int | None = None) -> ExecutionHandle | None:
         """Get execution status. Requires authorization."""
         try:
             return self._check_execution_auth(execution_id, user_id)
@@ -934,14 +949,20 @@ Output the complete modified workflow as valid JSON only:"""
         self._safe_callback(self._on_progress, execution_id, node_id, progress)
 
 
-# Global Instance
-_orchestrator: KingOrchestrator | None = None
+# User-specific Orchestrator Registry
+_user_orchestrators: dict[int, KingOrchestrator] = {}
 
-def get_orchestrator() -> KingOrchestrator:
-    global _orchestrator
-    if _orchestrator is None:
-        _orchestrator = KingOrchestrator()
-    return _orchestrator
+def get_orchestrator(user_id: int | None = None) -> KingOrchestrator:
+    """
+    Get a per-user KingOrchestrator instance.
+    If no user_id is provided, returns a default/system instance (id=0).
+    """
+    effective_user_id = user_id if user_id is not None else 0
+    
+    if effective_user_id not in _user_orchestrators:
+        _user_orchestrators[effective_user_id] = KingOrchestrator(user_id=effective_user_id)
+    
+    return _user_orchestrators[effective_user_id]
 
 # Compatibility alias
 WorkflowOrchestrator = KingOrchestrator

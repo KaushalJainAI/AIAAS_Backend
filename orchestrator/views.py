@@ -328,7 +328,7 @@ async def execute_workflow(request, workflow_id: int):
     is_async = request.data.get('async', True)
     
     # Get orchestrator
-    orchestrator = get_orchestrator()
+    orchestrator = get_orchestrator(request.user.id)
     
     # Auto-inject user credentials
     from executor.credential_utils import get_user_credentials
@@ -365,8 +365,8 @@ async def pause_execution(request, execution_id: str):
     """Pause a running execution."""
     from executor.king import get_orchestrator
     
-    orchestrator = get_orchestrator()
-    result = await orchestrator.pause(UUID(execution_id), request.user.id)
+    orchestrator = get_orchestrator(request.user.id)
+    result = await orchestrator.pause(UUID(execution_id))
     
     if result:
         return Response({'status': 'paused', 'execution_id': execution_id})
@@ -379,8 +379,8 @@ async def resume_execution(request, execution_id: str):
     """Resume a paused execution."""
     from executor.king import get_orchestrator
     
-    orchestrator = get_orchestrator()
-    result = await orchestrator.resume(UUID(execution_id), request.user.id)
+    orchestrator = get_orchestrator(request.user.id)
+    result = await orchestrator.resume(UUID(execution_id))
     
     if result:
         return Response({'status': 'resumed', 'execution_id': execution_id})
@@ -393,8 +393,8 @@ async def stop_execution(request, execution_id: str):
     """Stop/cancel an execution."""
     from executor.king import get_orchestrator
     
-    orchestrator = get_orchestrator()
-    result = await orchestrator.stop(UUID(execution_id), request.user.id)
+    orchestrator = get_orchestrator(request.user.id)
+    result = await orchestrator.stop(UUID(execution_id))
     
     if result:
         return Response({'status': 'stopped', 'execution_id': execution_id})
@@ -407,8 +407,8 @@ def execution_status(request, execution_id: str):
     """Get current execution status."""
     from executor.king import get_orchestrator
     
-    orchestrator = get_orchestrator()
-    handle = orchestrator.get_status(UUID(execution_id), request.user.id)
+    orchestrator = get_orchestrator(request.user.id)
+    handle = orchestrator.get_status(UUID(execution_id))
     
     if not handle:
         return Response({'error': 'Execution not found or not authorized'}, status=404)
@@ -507,7 +507,7 @@ async def respond_to_hitl(request, request_id: str):
     await hitl_request.asave()
     
     # Notify orchestrator
-    orchestrator = get_orchestrator()
+    orchestrator = get_orchestrator(request.user.id)
     await orchestrator.respond_to_hitl(
         request_id=request_id,
         response={'action': action, 'value': value},
@@ -686,20 +686,18 @@ async def generate_workflow(request):
         - description: What the workflow should do
         - credential_id: LLM credential ID (optional)
     """
-    from .ai_generator import get_ai_generator
-    
     description = request.data.get('description', '')
     credential_id = request.data.get('credential_id')
     conversation_id = request.data.get('conversation_id')
     
     if not description:
         return Response({'error': 'Description is required'}, status=400)
+
+    from executor.king import get_orchestrator
+    orchestrator = get_orchestrator(request.user.id)
     
-    generator = get_ai_generator()
-    
-    result = await generator.generate(
-        description=description,
-        user_id=request.user.id,
+    result = await orchestrator.create_workflow_from_intent(
+        prompt=description,
         credential_id=credential_id,
     )
     
@@ -771,7 +769,6 @@ async def modify_workflow(request, workflow_id: int):
         - modification: What to change
         - credential_id: LLM credential ID (optional)
     """
-    from .ai_generator import get_ai_generator
     
     workflow = await Workflow.objects.filter(id=workflow_id, user=request.user).afirst()
     if not workflow:
@@ -791,12 +788,12 @@ async def modify_workflow(request, workflow_id: int):
         'edges': workflow.edges,
     }
     
-    generator = get_ai_generator()
+    from executor.king import get_orchestrator
+    orchestrator = get_orchestrator(request.user.id)
     
-    result = await generator.modify(
+    result = await orchestrator.modify_workflow(
         workflow=current_workflow,
         modification=modification,
-        user_id=request.user.id,
         credential_id=credential_id,
     )
     
@@ -860,7 +857,7 @@ async def modify_workflow(request, workflow_id: int):
 @permission_classes([IsAuthenticated])
 async def suggest_improvements(request, workflow_id: int):
     """Get AI suggestions for workflow improvements."""
-    from .ai_generator import get_ai_generator
+    from executor.king import get_orchestrator
     
     workflow = await Workflow.objects.filter(id=workflow_id, user=request.user).afirst()
     if not workflow:
@@ -874,13 +871,19 @@ async def suggest_improvements(request, workflow_id: int):
         'edges': workflow.edges,
     }
     
-    generator = get_ai_generator()
+    orchestrator = get_orchestrator(request.user.id)
     
-    suggestions = await generator.suggest_improvements(
-        workflow=current_workflow,
-        user_id=request.user.id,
-        credential_id=credential_id,
-    )
+    import json
+    prompt = f"""Analyze this workflow and suggest improvements:
+{json.dumps(current_workflow, indent=2)}
+
+Provide suggestions as a JSON array of objects with 'title', 'description', and 'priority' (high/medium/low)."""
+    
+    try:
+        response = await orchestrator._call_llm(prompt, credential_id=credential_id)
+        suggestions = orchestrator._parse_json_response(response)
+    except Exception:
+        suggestions = []
     
     return Response({
         'workflow_id': workflow_id,
