@@ -21,6 +21,7 @@ from compiler.validators import (
     validate_type_compatibility,
 )
 from logs.models import ExecutionLog
+from executor.trigger_manager import get_trigger_manager
 
 
 def is_functionally_identical(nodes1, edges1, nodes2, edges2):
@@ -260,6 +261,20 @@ def workflow_detail(request, workflow_id: int):
                     }, status=status.HTTP_400_BAD_REQUEST)
 
             workflow.status = new_status
+            
+            # Trigger Lifecycle Management
+            try:
+                mgr = get_trigger_manager()
+                if new_status == 'active':
+                    # Only register if we're moving TO active
+                    mgr.register_triggers(workflow)
+                elif new_status in ('draft', 'paused', 'archived'):
+                    # Clear triggers if moving FROM active
+                    mgr.unregister_triggers(workflow.id)
+            except Exception as e:
+                # Log but don't fail the request if trigger registration fails
+                logger.error(f"Failed to manage triggers for workflow {workflow.id}: {e}")
+
         if 'icon' in data:
             workflow.icon = data['icon']
         if 'color' in data:
@@ -1064,6 +1079,168 @@ def test_workflow(request, workflow_id: int):
     })
 
 
+# ============================================================
+# Export Views (merged from export_views.py)
+# ============================================================
+
+import io
+import zipfile
+import tempfile
+from pathlib import Path
+from django.core.management import call_command
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def export_workflow_zip(request, workflow_id):
+    """
+    Export a workflow as a standalone Flask app ZIP file.
+    
+    POST /api/workflows/{workflow_id}/export/
+    → Returns: application/zip
+    """
+    from orchestrator.models import Workflow
+    from django.http import HttpResponse
+
+    # Verify ownership
+    try:
+        workflow = Workflow.objects.get(id=workflow_id, user=request.user)
+    except Workflow.DoesNotExist:
+        return HttpResponse(
+            '{"error": "Workflow not found"}',
+            content_type='application/json',
+            status=404
+        )
+
+    # Generate into a temp directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir) / 'export'
+        output_dir.mkdir()
+
+        # Call the management command programmatically
+        try:
+            call_command(
+                'export_standalone',
+                workflow_id,
+                output_dir=str(output_dir),
+                zip=False,  # We'll ZIP it ourselves for the response
+            )
+        except Exception as e:
+            return HttpResponse(
+                f'{{"error": "Export failed: {str(e)}"}}',
+                content_type='application/json',
+                status=500
+            )
+
+        # Find the generated folder (named after the workflow)
+        export_folders = [d for d in output_dir.iterdir() if d.is_dir()]
+        if not export_folders:
+            return HttpResponse(
+                '{"error": "Export produced no output"}',
+                content_type='application/json',
+                status=500
+            )
+
+        export_folder = export_folders[0]
+        safe_name = export_folder.name
+
+        # Create ZIP in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for file in export_folder.rglob('*'):
+                if file.is_file():
+                    arcname = str(Path(safe_name) / file.relative_to(export_folder))
+                    zf.write(file, arcname)
+
+        zip_buffer.seek(0)
+
+        response = HttpResponse(zip_buffer.read(), content_type='application/zip')
+        response['Content-Disposition'] = f'attachment; filename="{safe_name}.zip"'
+        return response
+
+
+# ============================================================
+# Webhook Views (merged from webhook_views.py)
+# ============================================================
+
+import json as _json
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from executor.trigger_manager import get_trigger_manager
+from executor.tasks import execute_workflow_async
+
+import logging as _logging
+_webhook_logger = _logging.getLogger(__name__)
+
+
+@csrf_exempt
+def receive_webhook(request, user_id, webhook_path):
+    """
+    Public entry point for external webhooks.
+    Matches user_id and path in Redis registry.
+    """
+    mgr = get_trigger_manager()
+    config = mgr.lookup_webhook(user_id, webhook_path)
+    
+    if not config:
+        _webhook_logger.warning(f"Webhook not found: {user_id}/{webhook_path}")
+        return JsonResponse({"error": "Webhook not found"}, status=404)
+
+    # 1. Validate Method
+    allowed_method = config.get("method", "POST").upper()
+    if request.method != allowed_method:
+        return JsonResponse({"error": f"Method {request.method} not allowed. Use {allowed_method}"}, status=405)
+
+    # 2. Validate Authentication (Simple)
+    auth_type = config.get("authentication", "none")
+    if auth_type != "none":
+        auth_key = config.get("auth_key", "")
+        if auth_type == "header":
+            if auth_key not in request.headers:
+                return JsonResponse({"error": "Unauthorized - Missing Header"}, status=401)
+        elif auth_type == "query":
+            if auth_key not in request.GET:
+                return JsonResponse({"error": "Unauthorized - Missing Query Parameter"}, status=401)
+
+    # 3. Parse Body
+    body_data = {}
+    if request.body:
+        try:
+            body_data = _json.loads(request.body)
+        except _json.JSONDecodeError:
+            # If not JSON, try POST form data
+            if request.POST:
+                body_data = dict(request.POST)
+            else:
+                # Raw body if it's text or something else
+                body_data = {"raw": request.body.decode('utf-8', errors='ignore')}
+
+    # 4. Build input_data for execution
+    input_data = {
+        "headers": dict(request.headers),
+        "body": body_data,
+        "query": dict(request.GET),
+        "method": request.method,
+        "url": request.build_absolute_uri(),
+        "trigger_type": "webhook",
+    }
+
+    # 5. Dispatch Execution
+    workflow_id = config.get("workflow_id")
+    target_user_id = config.get("user_id")
+    
+    _webhook_logger.info(f"Triggering workflow {workflow_id} via webhook {user_id}/{webhook_path}")
+    
+    # We use .delay() to send it to Celery
+    task = execute_workflow_async.delay(
+        workflow_id=workflow_id,
+        user_id=target_user_id,
+        input_data=input_data
+    )
+
+    return JsonResponse({
+        "status": "accepted",
+        "execution_id": task.id,
+        "message": "Workflow execution queued"
+    }, status=202)
 

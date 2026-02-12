@@ -200,6 +200,27 @@ class BaseNodeHandler(ABC):
         """
         pass
     
+    async def poll(
+        self,
+        config: dict[str, Any],
+        state: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """
+        Poll for new items.
+        
+        This should be implemented by triggers that pull data (Email, RSS, etc.).
+        
+        Args:
+            config: Node configuration
+            state: Persistent trigger state (cursor)
+            context: Orchestration context
+            
+        Returns:
+            tuple (list_of_new_items, updated_state)
+        """
+        return [], state
+    
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         """
         Validate node configuration.

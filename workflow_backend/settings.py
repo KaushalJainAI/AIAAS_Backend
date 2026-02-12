@@ -280,7 +280,7 @@ LOGGING = {
     'disable_existing_loggers': False,
     'filters': {
         'sensitive_data': {
-            '()': 'core.logging_filters.SensitiveDataFilter',
+            '()': 'core.security.SensitiveDataFilter',
         },
     },
     'handlers': {

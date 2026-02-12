@@ -4,6 +4,7 @@ URL configuration for workflow_backend project.
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
+from orchestrator.views import receive_webhook
 
 
 def health_check(request):
@@ -44,6 +45,9 @@ urlpatterns = [
     # Templates
     # Templates
     path('api/orchestrator/templates/', include('templates.urls')),
+    
+    # Webhooks (Public)
+    path('api/webhooks/<int:user_id>/<path:webhook_path>', receive_webhook, name='webhook_receiver'),
     
     # MCP
     path('api/mcp/', include('mcp_integration.urls')),

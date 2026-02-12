@@ -81,19 +81,119 @@ def execute_workflow_async(
 
 
 @shared_task
-def execute_scheduled_workflows():
+def execute_scheduled_workflow(workflow_id: int, user_id: int):
     """
-    Check and execute workflows that are due for scheduled execution.
-    Called periodically via Celery Beat.
+    Execute a single scheduled workflow. Called by Celery Beat.
+    
+    This is triggered automatically at the interval configured in 
+    the ScheduleTriggerNode's config (cron or interval).
     """
-    from orchestrator.models import Workflow
+    from django.utils import timezone
+    logger.info(f"Executing scheduled workflow {workflow_id} for user {user_id}")
     
-    # Find workflows with active schedules
-    # TODO: Implement schedule parsing and matching
-    logger.info("Checking scheduled workflows...")
+    # We reuse the existing execute_workflow_async logic by calling it directly 
+    # as a task so it runs in the worker pool.
+    execute_workflow_async.delay(
+        workflow_id=workflow_id,
+        user_id=user_id,
+        input_data={
+            "trigger_type": "schedule",
+            "triggered_at": timezone.now().isoformat(),
+        }
+    )
+    return {"status": "triggered", "workflow_id": workflow_id}
+
+
+@shared_task(bind=True)
+def poll_workflow_trigger(self, workflow_id: int, node_id: str):
+    """
+    Poll a specific trigger node for new items.
+    Used for Email, RSS, Sheets, etc.
+    """
+    import asyncio
+    import redis
+    from django.conf import settings
+    from orchestrator.models import Workflow, TriggerState
+    from nodes.registry import get_registry
+    from compiler.schemas import ExecutionContext
+    from credentials.manager import get_credential_manager
     
-    # Placeholder for schedule implementation
-    return {"checked": 0, "executed": 0}
+    # 1. Acquire Distributed Lock (for horizontal scalability)
+    r = redis.from_url(settings.CELERY_BROKER_URL)
+    lock_key = f"lock:poll:{workflow_id}:{node_id}"
+    # 5 minute lock, with non-blocking check
+    lock = r.lock(lock_key, timeout=300, blocking_timeout=0)
+    
+    if not lock.acquire(blocking=False):
+        logger.warning(f"Poll task for {workflow_id}:{node_id} already running elsewhere.")
+        return {"status": "skipped", "reason": "lock_active"}
+
+    try:
+        # 2. Fetch Workflow and Node Config
+        try:
+            workflow = Workflow.objects.get(id=workflow_id)
+        except Workflow.DoesNotExist:
+            return {"error": "Workflow not found"}
+
+        node = next((n for n in workflow.nodes if n['id'] == node_id), None)
+        if not node:
+            return {"error": f"Node {node_id} not found in workflow {workflow_id}"}
+            
+        node_type = node.get('data', {}).get('nodeType')
+        config = node.get('data', {}).get('config', {})
+        
+        # 3. Load Handler
+        registry = get_registry()
+        handler = registry.get_handler(node_type)
+        if not handler:
+            return {"error": f"Handler for {node_type} not found"}
+
+        # 4. Get Current State (Cursor)
+        trigger_state_obj, _ = TriggerState.objects.get_or_create(
+            workflow=workflow,
+            node_id=node_id
+        )
+        
+        # 5. Build Context (needed for credentials/poll)
+        cred_manager = get_credential_manager()
+        # In a real environment, we'd fetch all relevant credentials for this workflow
+        # For poll, we usually only need the one specified in config
+        credentials = {}
+        target_cred_name = config.get("credential")
+        if target_cred_name:
+            creds = asyncio.run(cred_manager.get_workflow_credentials(workflow))
+            credentials = {c['name']: c['data'] for c in creds}
+
+        context = ExecutionContext(
+            workflow_id=str(workflow_id),
+            execution_id=f"poll_{workflow_id}_{node_id}",
+            credentials=credentials
+        )
+
+        # 6. Execute Poll
+        new_items, updated_state = asyncio.run(handler.poll(config, trigger_state_obj.state, context))
+
+        # 7. Dispatch Executions
+        if new_items:
+            logger.info(f"Poll for {node_type} found {len(new_items)} new items")
+            for item in new_items:
+                execute_workflow_async.delay(
+                    workflow_id=workflow_id,
+                    user_id=workflow.user_id,
+                    input_data=item # This will be passed to Node.execute as input_data
+                )
+            
+            # 8. Save Updated State
+            trigger_state_obj.state = updated_state
+            trigger_state_obj.save()
+
+        return {"status": "success", "new_items": len(new_items)}
+
+    except Exception as e:
+        logger.exception(f"Polling failed for {workflow_id}:{node_id}: {e}")
+        return {"status": "error", "message": str(e)}
+    finally:
+        lock.release()
 
 
 # ======================== Document Processing Tasks ========================

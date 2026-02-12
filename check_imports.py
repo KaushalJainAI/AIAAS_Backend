@@ -1,91 +1,129 @@
+"""
+Import Checker — Verifies every Python module in the project can be imported.
+
+Runs each import in a subprocess with a timeout so one bad module
+can't hang the entire check.
+
+Usage:
+    python check_imports.py          # check all modules
+    python check_imports.py core     # check only modules starting with 'core'
+"""
 import os
 import sys
 import subprocess
-import traceback
+import time
 
-def get_python_modules(start_dir):
+# Directories to skip entirely
+SKIP_DIRS = {
+    'venv', '.git', '__pycache__', 'media', 'static',
+    'templates', 'docs', 'migrations', '.gemini',
+}
+
+# Files to skip (not real importable modules)
+SKIP_FILES = {
+    'check_imports.py', 'extract_chat_id.py', 'populate_credentials.py',
+    'manage.py', 'conftest.py',
+}
+
+# Per-subprocess timeout in seconds
+TIMEOUT_SECONDS = 15
+
+
+def get_python_modules(start_dir, prefix_filter=None):
+    """Walk the project and find all importable .py modules."""
     modules = []
     for root, dirs, files in os.walk(start_dir):
-        # Skip certain directories
-        if any(skip in root for skip in ['venv', '.git', '__pycache__', 'media', 'static', 'templates']):
-            continue
-            
-        for file in files:
-            if file.endswith('.py') and file != '__init__.py' and file != 'check_imports.py':
-                # Convert path to module name
-                relative_path = os.path.relpath(os.path.join(root, file), start_dir)
-                base_name = os.path.splitext(relative_path)[0]
-                module_name = base_name.replace(os.path.sep, '.')
-                # Only include modules that look like they are part of a package (have an __init__.py in their path or are top-level)
-                modules.append(module_name)
+        # Prune skipped directories in-place so os.walk doesn't descend
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+
+        for fname in files:
+            if not fname.endswith('.py') or fname == '__init__.py':
+                continue
+            if fname in SKIP_FILES:
+                continue
+
+            relative = os.path.relpath(os.path.join(root, fname), start_dir)
+            module = os.path.splitext(relative)[0].replace(os.sep, '.')
+
+            # Skip root-level scripts that aren't inside a package
+            if '.' not in module:
+                continue
+
+            if prefix_filter and not module.startswith(prefix_filter):
+                continue
+
+            modules.append(module)
     return sorted(modules)
 
-def check_module(module_name):
-    """Try to import a module in a fresh subprocess."""
-    script = f"""
-import os
-import django
-import importlib
-import sys
 
-# Set up Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'workflow_backend.settings')
-try:
-    django.setup()
-    importlib.import_module('{module_name}')
-    sys.exit(0)
-except Exception as e:
-    import traceback
-    print(traceback.format_exc())
-    sys.exit(1)
-"""
-    # Use the same python executable
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True
+def check_module(module_name):
+    """Import a module in a fresh subprocess with a timeout."""
+    script = (
+        "import os, django, importlib, sys;"
+        "os.environ.setdefault('DJANGO_SETTINGS_MODULE','workflow_backend.settings');"
+        "django.setup();"
+        f"importlib.import_module('{module_name}')"
     )
-    return result.returncode == 0, result.stdout + result.stderr
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECONDS,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        return result.returncode == 0, (result.stdout + result.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return False, f"TIMEOUT after {TIMEOUT_SECONDS}s"
+
 
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    modules = get_python_modules(base_dir)
-    
-    # Filter out script files in the root that aren't meant to be modules
-    root_scripts = [f for f in os.listdir(base_dir) if f.endswith('.py') and f != '__init__.py']
-    # We'll check everything for now as the user asked for "each file"
-    
-    print(f"Checking {len(modules)} modules for import errors using subprocesses...\n")
-    
-    failed_modules = []
+
+    # Optional filter: python check_imports.py core
+    prefix = sys.argv[1] if len(sys.argv) > 1 else None
+
+    modules = get_python_modules(base_dir, prefix_filter=prefix)
+    total = len(modules)
+    print(f"Checking {total} modules{f' (filter: {prefix}*)' if prefix else ''}...\n")
+
+    failed = []
     passed = 0
-    
-    for i, module in enumerate(modules):
-        # print(f"[{i+1}/{len(modules)}] {module}...", end="\r")
-        success, output = check_module(module)
-        if success:
+    t0 = time.time()
+
+    for i, module in enumerate(modules, 1):
+        print(f"  [{i}/{total}] {module}...", end=" ", flush=True)
+        ok, output = check_module(module)
+        if ok:
+            print("OK")
             passed += 1
         else:
-            print(f"FAIL: {module}")
-            failed_modules.append((module, output))
+            print("FAIL")
+            failed.append((module, output))
 
-    print(f"\nSummary: {passed} passed, {len(failed_modules)} failed.")
-    
-    if failed_modules:
-        print("\nErrors Found:")
-        for module, error in failed_modules:
-            print("-" * 40)
-            print(f"Module: {module}")
-            # print(error)
-            # Only print the last few lines of the traceback to keep it clean
-            lines = error.strip().splitlines()
-            if len(lines) > 10:
-                print("...")
-                print("\n".join(lines[-10:]))
+    elapsed = time.time() - t0
+    print(f"\n{'='*50}")
+    print(f"Done in {elapsed:.1f}s — {passed} passed, {len(failed)} failed")
+
+    if failed:
+        print(f"\n{'='*50}")
+        print("FAILURES:\n")
+        for module, error in failed:
+            print(f"--- {module} ---")
+            # Show last 8 lines of traceback to keep output readable
+            lines = error.splitlines()
+            if len(lines) > 8:
+                print("  ...")
+                for line in lines[-8:]:
+                    print(f"  {line}")
             else:
-                print("\n".join(lines))
+                for line in lines:
+                    print(f"  {line}")
+            print()
         return False
+
     return True
+
 
 if __name__ == "__main__":
     success = main()

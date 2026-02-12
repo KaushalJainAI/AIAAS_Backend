@@ -4,7 +4,7 @@ Orchestrator App URL Configuration
 from django.urls import path
 
 from . import views
-from .export_views import export_workflow_zip
+from .views import export_workflow_zip
 
 app_name = 'orchestrator'
 

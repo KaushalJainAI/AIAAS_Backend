@@ -547,3 +547,22 @@ class WorkflowCloneHistory(models.Model):
     
     created_at = models.DateTimeField(auto_now_add=True)
 
+
+class TriggerState(models.Model):
+    """
+    Stores persistent state (cursors) for polling triggers.
+    Example: last email UID, last row index, last seen RSS GUIDs.
+    """
+    workflow = models.ForeignKey(Workflow, on_delete=models.CASCADE, related_name='trigger_states')
+    node_id = models.CharField(max_length=100)  # The specific node on the canvas
+    state = models.JSONField(default=dict)      # The cursor (e.g. {"last_id": 123})
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('workflow', 'node_id')
+        verbose_name = "Trigger State"
+        verbose_name_plural = "Trigger States"
+
+    def __str__(self):
+        return f"State for {self.workflow.name} - Node {self.node_id}"
+

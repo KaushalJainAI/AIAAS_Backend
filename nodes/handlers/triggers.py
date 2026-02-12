@@ -300,6 +300,99 @@ class EmailTriggerNode(BaseNodeHandler):
             output_handle="output-0"
         )
 
+    async def poll(
+        self,
+        config: dict[str, Any],
+        state: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """
+        Poll IMAP for new emails since last seen UID.
+        """
+        import imaplib
+        import email
+        from email.header import decode_header
+        
+        credential = context.credentials.get(config.get("credential")) if context.credentials else None
+        if not credential:
+            return [], state
+
+        host = credential.get("host")
+        user = credential.get("user")
+        password = credential.get("password")
+        port = int(credential.get("port", 993))
+        mailbox = config.get("mailbox", "INBOX")
+
+        if not all([host, user, password]):
+            return [], state
+
+        try:
+            # Use sync imaplib in a thread or just run it (Celery allows sync)
+            # For simplicity and reliability in Celery workers:
+            mail = imaplib.IMAP4_SSL(host, port)
+            mail.login(user, password)
+            mail.select(mailbox)
+
+            # Get current UIDVALIDITY to ensure mailbox hasn't been recreated
+            resp, data = mail.status(mailbox, '(UIDVALIDITY)')
+            current_validity = data[0].decode().split('UIDVALIDITY ')[1].rstrip(')') if resp == 'OK' else None
+            
+            last_validity = state.get("uid_validity")
+            last_uid = state.get("last_uid", 0)
+
+            # Reset cursor if mailbox changed
+            if current_validity != last_validity:
+                last_uid = 0
+                last_validity = current_validity
+
+            # Search for emails with UID > last_uid
+            search_crit = f"UID {last_uid + 1}:*"
+            resp, data = mail.uid('search', None, search_crit)
+            
+            new_items = []
+            max_uid = last_uid
+
+            if resp == 'OK' and data[0]:
+                uids = data[0].split()
+                for uid_bytes in uids:
+                    uid = int(uid_bytes)
+                    if uid <= last_uid: continue
+                    max_uid = max(max_uid, uid)
+
+                    # Fetch email
+                    resp, msg_data = mail.uid('fetch', uid_bytes, '(RFC822)')
+                    if resp != 'OK': continue
+                    
+                    raw_email = msg_data[0][1]
+                    msg = email.message_from_bytes(raw_email)
+                    
+                    # Basic parsing
+                    subject = decode_header(msg.get("Subject", ""))[0][0]
+                    if isinstance(subject, bytes): subject = subject.decode()
+                    
+                    sender = msg.get("From", "")
+                    
+                    # Filtering
+                    if config.get("filter_sender") and config.get("filter_sender") not in sender:
+                        continue
+                    if config.get("filter_subject") and config.get("filter_subject").lower() not in subject.lower():
+                        continue
+
+                    new_items.append({
+                        "from": sender,
+                        "subject": subject,
+                        "date": msg.get("Date", ""),
+                        "message_id": msg.get("Message-ID", ""),
+                        "uid": uid
+                    })
+
+            mail.logout()
+            return new_items, {"last_uid": max_uid, "uid_validity": last_validity}
+
+        except Exception as e:
+            print(f"Email Poll error: {e}")
+            return [], state
+
 
 
 class FormTriggerNode(BaseNodeHandler):
@@ -522,12 +615,55 @@ class GoogleSheetsTriggerNode(BaseNodeHandler):
                 "spreadsheet_id": config.get("spreadsheet_id", ""),
                 "sheet_name": config.get("sheet_name", "Sheet1"),
                 "trigger_type": config.get("trigger_on", "new_row"),
-                "row_number": input_data.get("row_number", 0),
                 "row_data": input_data.get("row_data", {}),
                 "change_type": input_data.get("change_type", ""),
             },
             output_handle="output-0"
         )
+
+    async def poll(
+        self,
+        config: dict[str, Any],
+        state: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """
+        Poll Google Sheets for new rows based on row index.
+        """
+        # Placeholder for Google API client logic
+        # In a real implementation, this would use the token from context.credentials
+        spreadsheet_id = config.get("spreadsheet_id")
+        sheet_name = config.get("sheet_name", "Sheet1")
+        if not spreadsheet_id:
+            return [], state
+
+        last_row = state.get("last_row", 0)
+        
+        try:
+            # This is where the Google Sheets API call would go
+            # Example logic using a hypothetical helper or direct HTTP
+            # For now, we simulate the logic of finding 'new rows'
+            
+            # 1. Fetch current max row count (or all rows)
+            # 2. Filter for index > last_row
+            # 3. Return those as new_items
+            
+            # Since we can't actually call Google here, we'll provide the structural logic
+            new_items = []
+            current_max_row = last_row # Simulation
+            
+            # Logic:
+            # resp = await google_client.get(f"{spreadsheet_id}/values/{sheet_name}!A{last_row+1}:ZZ")
+            # rows = resp.get('values', [])
+            # for i, row in enumerate(rows):
+            #     new_items.append({"row_number": last_row + i + 1, "row_data": row})
+            # current_max_row = last_row + len(rows)
+
+            return new_items, {"last_row": current_max_row}
+            
+        except Exception as e:
+            print(f"Google Sheets Poll error: {e}")
+            return [], state
 
 
 
@@ -791,6 +927,67 @@ class TelegramTriggerNode(BaseNodeHandler):
             output_handle="output-0"
         )
 
+    async def poll(
+        self,
+        config: dict[str, Any],
+        state: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """
+        Poll Telegram for new updates using offset.
+        """
+        credential = context.credentials.get(config.get("credential")) if context.credentials else None
+        token = credential.get("bot_token") if credential else None
+        
+        if not token:
+            return [], state
+
+        offset = state.get("offset", 0)
+        url = f"https://api.telegram.org/bot{token}/getUpdates"
+        params = {"offset": offset, "timeout": 10}
+        
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                
+            data = response.json()
+            if not data.get("ok"):
+                return [], state
+                
+            updates = data.get("result", [])
+            new_items = []
+            max_update_id = offset - 1
+            
+            for update in updates:
+                update_id = update.get("update_id")
+                max_update_id = max(max_update_id, update_id)
+                
+                # Basic filtering by update type if needed
+                trigger_on = config.get("trigger_on", "message")
+                
+                is_match = False
+                if trigger_on == "message" and "message" in update: is_match = True
+                elif trigger_on == "edited_message" and "edited_message" in update: is_match = True
+                elif trigger_on == "callback_query" and "callback_query" in update: is_match = True
+                elif trigger_on == "command":
+                    msg = update.get("message", {})
+                    text = msg.get("text", "")
+                    target_cmd = config.get("command", "")
+                    if text.startswith(f"/{target_cmd}"):
+                        is_match = True
+                
+                if is_match:
+                    new_items.append(update)
+
+            # Update offset for next poll
+            new_offset = max_update_id + 1
+            return new_items, {"offset": new_offset}
+            
+        except Exception as e:
+            print(f"Telegram Poll error: {e}")
+            return [], state
+
 
 
 class RssFeedTriggerNode(BaseNodeHandler):
@@ -852,8 +1049,82 @@ class RssFeedTriggerNode(BaseNodeHandler):
                 "author": input_data.get("author", ""),
                 "content": input_data.get("content", ""),
             },
-            output_handle="output"
+            output_handle="output-0"
         )
+
+    async def poll(
+        self,
+        config: dict[str, Any],
+        state: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """
+        Poll RSS feed for new items using sliding window for GUIDs.
+        """
+        import xml.etree.ElementTree as ET
+        feed_url = config.get("feed_url")
+        if not feed_url:
+            return [], state
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(feed_url)
+                response.raise_for_status()
+                
+            root = ET.fromstring(response.content)
+            items = []
+            
+            # Identify items (RSS 2.0 or Atom)
+            if root.tag.endswith('rss'):
+                raw_items = root.findall('.//item')
+            elif root.tag.endswith('feed'):
+                raw_items = root.findall('{http://www.w3.org/2005/Atom}entry')
+            else:
+                raw_items = []
+
+            seen_guids = state.get("seen_guids", [])
+            window_size = state.get("window_size", 100)
+            new_items = []
+            
+            for item in raw_items:
+                # Get unique ID
+                guid = None
+                if root.tag.endswith('rss'):
+                    guid_el = item.find('guid')
+                    guid = guid_el.text if guid_el is not None else item.find('link').text
+                    title = item.find('title').text if item.find('title') is not None else ""
+                    link = item.find('link').text if item.find('link') is not None else ""
+                else:
+                    guid_el = item.find('{http://www.w3.org/2005/Atom}id')
+                    guid = guid_el.text if guid_el is not None else item.find('{http://www.w3.org/2005/Atom}link').get('href')
+                    title = item.find('{http://www.w3.org/2005/Atom}title').text if item.find('{http://www.w3.org/2005/Atom}title') is not None else ""
+                    link_el = item.find('{http://www.w3.org/2005/Atom}link')
+                    link = link_el.get('href') if link_el is not None else ""
+
+                if guid and guid not in seen_guids:
+                    # Apply Title Filter if present
+                    title_filter = config.get("title_filter")
+                    if title_filter and title_filter.lower() not in title.lower():
+                        continue
+                        
+                    new_items.append({
+                        "title": title,
+                        "link": link,
+                        "guid": guid,
+                        # Add other fields as needed
+                    })
+                    seen_guids.append(guid)
+
+            # Apply Sliding Window: Keep only the last N GUIDs
+            if len(seen_guids) > window_size:
+                seen_guids = seen_guids[-window_size:]
+
+            return new_items, {"seen_guids": seen_guids, "window_size": window_size}
+            
+        except Exception as e:
+            # We don't want a single feed error to crash the poller
+            print(f"RSS Poll error for {feed_url}: {e}")
+            return [], state
 
 
 

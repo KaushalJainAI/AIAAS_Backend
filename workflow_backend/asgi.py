@@ -21,7 +21,6 @@ django_asgi_app = get_asgi_application()
 
 # Import routing after Django setup
 from streaming.routing import websocket_urlpatterns
-from core.channels_middleware import JWTAuthMiddleware
 
 application = ProtocolTypeRouter({
     # HTTP requests handled by Django
@@ -30,9 +29,7 @@ application = ProtocolTypeRouter({
     # WebSocket connections with authentication
     "websocket": AllowedHostsOriginValidator(
         AuthMiddlewareStack(
-            JWTAuthMiddleware(
-                URLRouter(websocket_urlpatterns)
-            )
+            URLRouter(websocket_urlpatterns)
         )
     ),
 })
