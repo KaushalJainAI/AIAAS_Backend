@@ -1216,14 +1216,29 @@ def receive_webhook(request, user_id, webhook_path):
                 body_data = {"raw": request.body.decode('utf-8', errors='ignore')}
 
     # 4. Build input_data for execution
+    github_event = request.headers.get('X-GitHub-Event')
+    is_github = github_event or config.get("node_type") == "github_trigger"
+    
     input_data = {
         "headers": dict(request.headers),
         "body": body_data,
         "query": dict(request.GET),
         "method": request.method,
         "url": request.build_absolute_uri(),
-        "trigger_type": "webhook",
     }
+
+    if is_github:
+        input_data.update({
+            "trigger_type": "github",
+            "event": github_event or "push", # Default to push if node_type matched but header missing
+            "action": body_data.get("action", ""),
+            "payload": body_data,
+            "sender": body_data.get("sender", {}),
+            "ref": body_data.get("ref", ""),
+        })
+    else:
+        input_data["trigger_type"] = "webhook"
+
 
     # 5. Dispatch Execution
     workflow_id = config.get("workflow_id")

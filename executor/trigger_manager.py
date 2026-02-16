@@ -39,10 +39,14 @@ class TriggerManager:
             node_type = data.get('nodeType')
             config = data.get('config', {})
             
-            if node_type == "webhook_trigger":
+            if node_type == "webhook_trigger" or node_type == "github_trigger":
                 path = config.get("path", "").strip("/")
                 if not path:
-                    continue
+                    # For GitHub, we might fall back to repo name if path is missing
+                    if node_type == "github_trigger" and config.get("repository"):
+                        path = f"github/{config.get('repository').replace('/', '-')}"
+                    else:
+                        continue
                     
                 key = f"webhook:{user_id}/{path}"
                 webhook_config = {
@@ -51,11 +55,13 @@ class TriggerManager:
                     "method": config.get("method", "POST"),
                     "authentication": config.get("authentication", "none"),
                     "auth_key": config.get("auth_key", ""),
+                    "node_type": node_type,
                 }
                 
                 self._redis.set(key, json.dumps(webhook_config))
                 registered_keys.append(key)
-                logger.info(f"Registered webhook: {key} for workflow {workflow_id}")
+                logger.info(f"Registered {node_type}: {key} for workflow {workflow_id}")
+
 
             elif node_type == "schedule_trigger":
                 self._register_schedule(workflow, config)

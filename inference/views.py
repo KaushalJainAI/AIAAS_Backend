@@ -38,14 +38,15 @@ async def document_list(request):
     Now properly async with ADRF!
     """
     if request.method == 'GET':
-        # Wrap database query in sync_to_async
-        docs = await sync_to_async(list)(
-            Document.objects.filter(user=request.user).order_by('-created_at')
-        )
-        
-        return Response({
-            'documents': [
-                {
+        def get_serialized_docs():
+            my_docs = Document.objects.filter(user=request.user).select_related('user').order_by('-created_at')
+            public_docs = Document.objects.exclude(user=request.user)\
+                .filter(sharing_mode__in=['shared_read', 'shared_write'])\
+                .select_related('user')\
+                .order_by('-shared_at')
+
+            def serialize_doc(d):
+                return {
                     'id': d.id,
                     'title': d.name,
                     'filename': d.name,
@@ -57,10 +58,17 @@ async def document_list(request):
                     'created_at': d.created_at,
                     'updated_at': d.updated_at,
                     'sharing_mode': d.sharing_mode,
+                    'status': d.status,
+                    'author_name': d.user.get_full_name() or d.user.username
                 }
-                for d in docs
-            ]
-        })
+
+            return {
+                'my_documents': [serialize_doc(d) for d in my_docs],
+                'public_documents': [serialize_doc(d) for d in public_docs]
+            }
+
+        data = await sync_to_async(get_serialized_docs)()
+        return Response(data)
     
     elif request.method == 'POST':
         name = request.data.get('name', 'Untitled')

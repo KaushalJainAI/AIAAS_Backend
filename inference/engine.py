@@ -7,8 +7,11 @@ Implements:
 - RAG query pipeline for context-aware LLM responses
 """
 import logging
-from typing import Any
+import asyncio
+import numpy as np
+from typing import Any, List, Dict, Optional
 from dataclasses import dataclass
+from asgiref.sync import sync_to_async
 
 logger = logging.getLogger(__name__)
 
@@ -41,30 +44,38 @@ class KnowledgeBase:
         self._documents = {}  # chunk_id -> (doc_id, content, metadata)
         self._embedder = None
         self._initialized = False
+        self._lock = asyncio.Lock()
     
     async def initialize(self):
         """Initialize the vector store and embedder."""
         if self._initialized:
             return
         
-        try:
-            import faiss
-            import numpy as np
-            from sentence_transformers import SentenceTransformer
+        async with self._lock:
+            if self._initialized:
+                return
             
-            # Load embedding model
-            self._embedder = SentenceTransformer('all-MiniLM-L6-v2')
-            
-            # Create FAISS index (384 dimensions for MiniLM)
-            self._index = faiss.IndexFlatIP(384)  # Inner product for cosine similarity
-            self._initialized = True
-            
-            logger.info("Knowledge base initialized with FAISS and MiniLM embedder")
-            
-        except ImportError as e:
-            logger.warning(f"FAISS or sentence-transformers not installed: {e}")
-            self._initialized = False
-    
+            try:
+                import faiss
+                from sentence_transformers import SentenceTransformer
+                
+                # Load embedding model in a thread
+                def load_model():
+                    logger.info("Loading SentenceTransformer model: all-MiniLM-L6-v2")
+                    return SentenceTransformer('all-MiniLM-L6-v2')
+                
+                self._embedder = await asyncio.to_thread(load_model)
+                
+                # Create FAISS index (384 dimensions for MiniLM)
+                self._index = faiss.IndexFlatIP(384)  # Inner product for cosine similarity
+                self._initialized = True
+                
+                logger.info("Knowledge base initialized with FAISS and MiniLM embedder")
+                
+            except ImportError as e:
+                logger.warning(f"FAISS or sentence-transformers not installed: {e}")
+                self._initialized = False
+
     async def has_document(self, doc_id: int) -> bool:
         """Check if document already exists in the knowledge base."""
         # Simple linear scan. For production, maintain a separate set of doc_ids.
@@ -80,26 +91,14 @@ class KnowledgeBase:
         metadata: dict | None = None,
         chunk_size: int = 500,
         chunk_overlap: int = 50
-        ) -> list[str]:
+    ) -> List[str]:
         """
         Add a document to the knowledge base.
-        
-        Args:
-            doc_id: Document ID in database
-            content: Document text content
-            metadata: Additional metadata
-            chunk_size: Characters per chunk
-            chunk_overlap: Overlap between chunks
-            
-        Returns:
-            List of chunk IDs created
         """
         if not self._initialized:
             await self.initialize()
             if not self._initialized:
                 return []
-        
-        import numpy as np
         
         # Chunk the document
         chunks = self._chunk_text(content, chunk_size, chunk_overlap)
@@ -108,8 +107,9 @@ class KnowledgeBase:
         for i, chunk in enumerate(chunks):
             chunk_id = f"doc_{doc_id}_chunk_{i}"
             
-            # Generate embedding
-            embedding = self._embedder.encode([chunk])[0]
+            # Generate embedding using to_thread
+            embeddings = await asyncio.to_thread(self._embedder.encode, [chunk])
+            embedding = embeddings[0]
             embedding = embedding / np.linalg.norm(embedding)  # Normalize
             
             # Add to index
@@ -127,25 +127,19 @@ class KnowledgeBase:
         query: str,
         top_k: int = 5,
         min_score: float = 0.3
-        ) -> list[SearchResult]:
+    ) -> List[SearchResult]:
         """
         Search the knowledge base.
-        
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            min_score: Minimum similarity score
-            
-        Returns:
-            List of SearchResult objects
         """
+        if not self._initialized:
+            await self.initialize()
+            
         if not self._initialized or self._index.ntotal == 0:
             return []
         
-        import numpy as np
-        
-        # Generate query embedding
-        query_embedding = self._embedder.encode([query])[0]
+        # Generate query embedding using to_thread
+        query_embeddings = await asyncio.to_thread(self._embedder.encode, [query])
+        query_embedding = query_embeddings[0]
         query_embedding = query_embedding / np.linalg.norm(query_embedding)
         
         # Search
@@ -174,26 +168,22 @@ class KnowledgeBase:
     async def embed_text(self, text: str) -> Any:
         """
         Generate embedding for a text string.
-        
-        Args:
-            text: Input text
-            
-        Returns:
-            Numpy array of embedding
         """
         if not self._initialized:
             await self.initialize()
             if not self._initialized:
                 return None
-                
-        return self._embedder.encode([text])[0]
+        
+        # Use to_thread for CPU-bound encoding
+        embeddings = await asyncio.to_thread(self._embedder.encode, [text])
+        return embeddings[0]
     
     def _chunk_text(
         self,
         text: str,
         chunk_size: int,
         overlap: int
-        ) -> list[str]:
+    ) -> List[str]:
         """Split text into overlapping chunks."""
         chunks = []
         start = 0
@@ -218,8 +208,6 @@ class KnowledgeBase:
     
     async def delete_document(self, doc_id: int) -> bool:
         """Remove a document from the knowledge base."""
-        # Note: FAISS doesn't support deletion directly
-        # For production, use a proper vector DB like Chroma or Pinecone
         logger.warning("Document deletion not implemented for FAISS")
         return False
     
@@ -234,16 +222,6 @@ class KnowledgeBase:
 class RAGPipeline:
     """
     Retrieval-Augmented Generation pipeline.
-    
-    Combines knowledge base search with LLM generation.
-    
-    Usage:
-        pipeline = RAGPipeline(kb=knowledge_base)
-        response = await pipeline.query(
-            question="What is X?",
-            llm_node="openai",
-            context=execution_context
-        )
     """
     
     def __init__(self, knowledge_base: KnowledgeBase):
@@ -257,20 +235,9 @@ class RAGPipeline:
         top_k: int = 5,
         credential_id: str | None = None,
         context: Any = None
-    ) -> dict:
+    ) -> Dict:
         """
         Run a RAG query.
-        
-        Args:
-            question: User's question
-            user_id: User making the query
-            llm_type: LLM to use (openai, gemini, ollama)
-            top_k: Number of context chunks to retrieve
-            credential_id: LLM credential ID
-            context: Execution context
-            
-        Returns:
-            Dict with answer, sources, and metadata
         """
         # Search knowledge base
         results = await self.kb.search(question, top_k=top_k)
@@ -358,56 +325,28 @@ class RAGPipeline:
             }
 
 
-# User Knowledge Base Manager - Provides per-user isolation
 class UserKnowledgeBaseManager:
     """
     Manages per-user knowledge bases for data isolation.
-    
-    Each user has their own isolated FAISS index.
-    A separate platform KB exists for opted-in shared documents.
-    
-    Usage:
-        manager = get_kb_manager()
-        user_kb = manager.get_user_kb(user_id)
-        await user_kb.initialize()
-        await user_kb.add_document(...)
     """
     
     def __init__(self):
-        self._user_kbs: dict[int, KnowledgeBase] = {}
+        self._user_kbs: Dict[int, KnowledgeBase] = {}
         self._platform_kb: KnowledgeBase | None = None
-        self._lock = None  # For thread safety in async context
     
     def get_user_kb(self, user_id: int) -> KnowledgeBase:
-        """
-        Get or create a knowledge base for a specific user.
-        
-        Args:
-            user_id: The user's ID
-            
-        Returns:
-            User-specific KnowledgeBase instance
-        """
         if user_id not in self._user_kbs:
             logger.info(f"Creating new knowledge base for user {user_id}")
             self._user_kbs[user_id] = KnowledgeBase()
         return self._user_kbs[user_id]
     
     def get_platform_kb(self) -> KnowledgeBase:
-        """
-        Get the shared platform knowledge base.
-        Contains documents that users have opted to share.
-        
-        Returns:
-            Platform-wide shared KnowledgeBase instance
-        """
         if self._platform_kb is None:
             logger.info("Creating platform knowledge base")
             self._platform_kb = KnowledgeBase()
         return self._platform_kb
     
     def clear_user_kb(self, user_id: int) -> bool:
-        """Clear a user's knowledge base (e.g., when they delete all documents)."""
         if user_id in self._user_kbs:
             self._user_kbs[user_id].clear()
             del self._user_kbs[user_id]
@@ -415,8 +354,7 @@ class UserKnowledgeBaseManager:
             return True
         return False
     
-    def get_stats(self) -> dict:
-        """Get statistics about knowledge bases."""
+    def get_stats(self) -> Dict:
         return {
             'user_count': len(self._user_kbs),
             'user_ids': list(self._user_kbs.keys()),
@@ -429,7 +367,6 @@ _kb_manager: UserKnowledgeBaseManager | None = None
 
 
 def get_kb_manager() -> UserKnowledgeBaseManager:
-    """Get the global knowledge base manager instance."""
     global _kb_manager
     if _kb_manager is None:
         _kb_manager = UserKnowledgeBaseManager()
@@ -437,39 +374,21 @@ def get_kb_manager() -> UserKnowledgeBaseManager:
 
 
 def get_user_knowledge_base(user_id: int) -> KnowledgeBase:
-    """Convenience function to get a user's knowledge base."""
     return get_kb_manager().get_user_kb(user_id)
 
 
 def get_platform_knowledge_base() -> KnowledgeBase:
-    """Convenience function to get the platform knowledge base."""
     return get_kb_manager().get_platform_kb()
 
 
-# Legacy compatibility - will use user_id=0 as fallback
-# DEPRECATED: Use get_user_knowledge_base(user_id) instead
 def get_knowledge_base() -> KnowledgeBase:
-    """
-    DEPRECATED: Use get_user_knowledge_base(user_id) for proper isolation.
-    This returns a fallback KB and logs a warning.
-    """
     logger.warning("get_knowledge_base() is deprecated. Use get_user_knowledge_base(user_id) instead.")
-    return get_kb_manager().get_user_kb(0)  # Fallback to user 0
+    return get_kb_manager().get_user_kb(0)
 
 
 def get_rag_pipeline(user_id: int | None = None) -> RAGPipeline:
-    """
-    Get RAG pipeline for a specific user.
-    
-    Args:
-        user_id: User ID for user-specific KB. If None, uses platform KB.
-        
-    Returns:
-        RAGPipeline configured with appropriate knowledge base
-    """
     if user_id is not None:
         kb = get_user_knowledge_base(user_id)
     else:
         kb = get_platform_knowledge_base()
     return RAGPipeline(kb)
-

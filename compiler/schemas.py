@@ -246,7 +246,29 @@ class ExecutionContext(BaseModel):
             path = expr[6:]
             return self.get_variable(path)
 
+        # 4. event handling (Alias for global input/trigger data)
+        elif expr.startswith("event.") or expr == "event":
+            path = expr[6:] if expr.startswith("event.") else ""
+            # The global input is stored in node_outputs["_input_global"]
+            global_input = self.node_outputs.get("_input_global", {})
+            
+            # For GitHub triggers normalized by receive_webhook, 
+            # the primary payload is often under 'body' or 'payload'
+            # but we also allow direct access if it's at the top level.
+            val = self._get_value_by_path(global_input, path)
+            
+            # If not found at top level, try diving into 'body' or 'payload'
+            # which are common containers in AIAAS input_data
+            if val is None and path:
+                if "body" in global_input:
+                    val = self._get_value_by_path(global_input["body"], path)
+                if val is None and "payload" in global_input:
+                    val = self._get_value_by_path(global_input["payload"], path)
+            
+            return val
+
         return None
+
 
     def _get_value_by_path(self, obj: Any, path: str) -> Any:
         """Helper to navigate nested structures like 'json.data[0].id' or 'data["score"]'."""

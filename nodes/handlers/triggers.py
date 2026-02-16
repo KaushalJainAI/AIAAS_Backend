@@ -711,7 +711,16 @@ class GitHubTriggerNode(BaseNodeHandler):
             placeholder="main",
             description="Only trigger for specific branch"
         ),
+        FieldConfig(
+            name="include_raw",
+            label="Include Raw Payload",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="Include the full raw GitHub payload in the output"
+        ),
     ]
+
     inputs = []
     outputs = [HandleDef(id="output-0", label="On event")]
     
@@ -721,20 +730,64 @@ class GitHubTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        # GitHub webhook data comes from input_data
+        # Extract raw data from the webhook input
+        payload = input_data.get("payload", {})
+        event_type = input_data.get("event", "unknown")
+        
+        # Normalize repo and branch info
+        repo_full_name = payload.get('repository', {}).get('full_name', config.get("repository", ""))
+        branch = payload.get('ref', '').split('/')[-1] if payload.get('ref') else None
+
+        # Process commits for code changes
+        commits = [c for c in payload.get('commits', []) if c.get('distinct')]
+        diff_entries = []
+        total_adds = 0
+        total_dels = 0
+
+        for commit in commits:
+            total_adds += commit.get('stats', {}).get('additions', 0)
+            total_dels += commit.get('stats', {}).get('deletions', 0)
+            for file in commit.get('files', []):
+                diff_entries.append({
+                    "file": file.get('filename'),
+                    "status": file.get('status'),
+                    "patch": file.get('patch', '')  # This is the code change
+                })
+
+        # Build the normalized output for the AI node
+        normalized_data = {
+            # New refined structure
+            "project_context": {
+                "repository": repo_full_name,
+                "branch": branch,
+                "head_sha": payload.get('after'),
+                "sender": payload.get('sender', {}).get('login')
+            },
+            "change_summary": {
+                "commit_count": len(commits),
+                "total_additions": total_adds,
+                "total_deletions": total_dels,
+                "messages": [c.get('message') for c in commits]
+            },
+            "code_changes": diff_entries,
+            "raw_payload": payload if config.get("include_raw", False) else {},
+            
+            # Backward compatibility keys
+            "triggered_at": datetime.now().isoformat(),
+            "repository": repo_full_name,
+            "event": event_type,
+            "action": input_data.get("action", ""),
+            "sender": payload.get('sender', {}),
+            "ref": input_data.get("ref", ""),
+            "payload": payload,
+        }
+
         return NodeExecutionResult(
             success=True,
-            data={
-                "triggered_at": datetime.now().isoformat(),
-                "repository": config.get("repository", ""),
-                "event": input_data.get("event", ""),
-                "action": input_data.get("action", ""),
-                "sender": input_data.get("sender", {}),
-                "ref": input_data.get("ref", ""),
-                "payload": input_data.get("payload", {}),
-            },
+            data=normalized_data,
             output_handle="output-0"
         )
+
 
 
 
