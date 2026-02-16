@@ -16,6 +16,7 @@ daphne>=4.0
 
 # Task Queue
 celery>=5.3
+django-celery-beat>=2.5
 redis>=5.0
 
 # LangChain & LangGraph (Workflow Execution)

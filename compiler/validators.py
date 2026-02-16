@@ -174,7 +174,7 @@ def validate_credentials(
     
     Args:
         nodes: List of node definitions
-        user_credentials: Set of credential IDs the user has
+        user_credentials: Set of credential IDs (as strings) the user has
     
     Returns:
         List of CompileError for missing credentials

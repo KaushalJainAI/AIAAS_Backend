@@ -704,6 +704,21 @@ class GitHubTriggerNode(BaseNodeHandler):
             description="Array of GitHub events to listen for"
         ),
         FieldConfig(
+            name="credential",
+            label="GitHub Token",
+            field_type=FieldType.CREDENTIAL,
+            credential_type="github",
+            required=False,
+            description="Select a GitHub credential for private repos or to fetch detailed diffs"
+        ),
+        FieldConfig(
+            name="repository",
+            label="Repository Name",
+            field_type=FieldType.STRING,
+            placeholder="owner/repo",
+            description="Repository to watch (e.g. 'octocat/hello-world')"
+        ),
+        FieldConfig(
             name="branch_filter",
             label="Branch Filter",
             field_type=FieldType.STRING,
@@ -744,15 +759,69 @@ class GitHubTriggerNode(BaseNodeHandler):
         total_adds = 0
         total_dels = 0
 
-        for commit in commits:
-            total_adds += commit.get('stats', {}).get('additions', 0)
-            total_dels += commit.get('stats', {}).get('deletions', 0)
-            for file in commit.get('files', []):
-                diff_entries.append({
-                    "file": file.get('filename'),
-                    "status": file.get('status'),
-                    "patch": file.get('patch', '')  # This is the code change
-                })
+        # Try to fetch actual patches if we have repo and commits
+        before_sha = payload.get('before')
+        after_sha = payload.get('after')
+        
+        # We need a token to fetch private repo details or to avoid rate limits
+        credential_id = config.get("credential")
+        creds = context.get_credential(credential_id) if credential_id else None
+        # Try to find any github credential if not specified
+        if not creds:
+            for c_id, c_data in context.credentials.items():
+                if isinstance(c_data, dict) and "token" in c_data:
+                    creds = c_data
+                    break
+        
+        token = creds.get("token") if creds else None
+        
+        if repo_full_name and after_sha:
+            try:
+                # Use GitHub API to fetch the actual diff
+                headers = {"Accept": "application/vnd.github.v3+json"}
+                if token:
+                    headers["Authorization"] = f"token {token}"
+                
+                async with httpx.AsyncClient(timeout=20) as client:
+                    if before_sha and before_sha != "0000000000000000000000000000000000000000":
+                        # Multi-commit push: use compare API
+                        url = f"https://api.github.com/repos/{repo_full_name}/compare/{before_sha}...{after_sha}"
+                    else:
+                        # First push or single commit: use commit API
+                        url = f"https://api.github.com/repos/{repo_full_name}/commits/{after_sha}"
+                    
+                    response = await client.get(url, headers=headers)
+                    if response.status_code == 200:
+                        api_data = response.json()
+                        files = api_data.get('files', [])
+                        
+                        # Extract stats from API data
+                        stats = api_data.get('stats', {})
+                        total_adds = stats.get('additions', 0)
+                        total_dels = stats.get('deletions', 0)
+
+                        for file in files:
+                            diff_entries.append({
+                                "file": file.get('filename'),
+                                "status": file.get('status'),
+                                "patch": file.get('patch', '')  # This is the actual code change!
+                            })
+            except Exception as e:
+                # Log error but continue with whatever data we HAVE from the payload
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to fetch GitHub diff data: {e}")
+
+        # If API failed or was skipped, fallback to payload summaries if present (rare)
+        if not diff_entries:
+            for commit in commits:
+                total_adds += commit.get('stats', {}).get('additions', 0)
+                total_dels += commit.get('stats', {}).get('deletions', 0)
+                for file in commit.get('files', []): # Some webhooks might have this if configured
+                    diff_entries.append({
+                        "file": file.get('filename'),
+                        "status": file.get('status'),
+                        "patch": file.get('patch', '')
+                    })
 
         # Build the normalized output for the AI node
         normalized_data = {

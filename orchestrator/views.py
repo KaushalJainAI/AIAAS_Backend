@@ -3,6 +3,7 @@ Orchestrator App API Views
 
 Workflow CRUD, execution control, and HITL endpoints.
 """
+import logging
 from uuid import UUID
 
 from django.shortcuts import get_object_or_404
@@ -22,6 +23,8 @@ from compiler.validators import (
 )
 from logs.models import ExecutionLog
 from executor.trigger_manager import get_trigger_manager
+
+logger = logging.getLogger(__name__)
 
 
 def is_functionally_identical(nodes1, edges1, nodes2, edges2):
@@ -218,7 +221,7 @@ def workflow_detail(request, workflow_id: int):
                 errors.extend(validate_node_configs(temp_nodes))
                 
                 from credentials.models import Credential
-                user_credentials = set(Credential.objects.filter(user=request.user).values_list('name', flat=True))
+                user_credentials = set(map(str, Credential.objects.filter(user=request.user).values_list('id', flat=True)))
                 errors.extend(validate_credentials(temp_nodes, user_credentials))
                 errors.extend(validate_type_compatibility(temp_nodes, temp_edges))
                 
