@@ -5,7 +5,7 @@ Models for compilation results and execution context.
 """
 from uuid import UUID
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import re
 import copy
 
@@ -61,6 +61,10 @@ class ExecutionContext(BaseModel):
         default_factory=dict,
         description="Workflow-level variables"
     )
+    skills: list[dict] = Field(
+        default_factory=list,
+        description="Active skills for this workflow (title, content)"
+    )
     warnings: list[CompileError] = Field(
         default_factory=list,
         description="Runtime warnings captured during execution"
@@ -93,7 +97,16 @@ class ExecutionContext(BaseModel):
     # Configuration
     timeout_seconds: int = Field(default=300, description="Overall execution timeout")
     
-    # Subworkflow tracking
+    # Validators to handle None values from state
+    @field_validator('node_outputs', 'credentials', 'variables', 'loop_stats', mode='before')
+    @classmethod
+    def allow_none_for_dicts(cls, v: Any) -> dict:
+        return v if v is not None else {}
+
+    @field_validator('skills', 'executed_nodes', 'current_input', mode='before')
+    @classmethod
+    def allow_none_for_lists(cls, v: Any) -> list:
+        return v if v is not None else []
     nesting_depth: int = Field(default=0, description="Current nesting depth")
     max_nesting_depth: int = Field(default=3, description="Maximum allowed nesting depth")
     workflow_chain: list[int] = Field(default_factory=list, description="Chain of parent workflow IDs")
@@ -103,6 +116,15 @@ class ExecutionContext(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
     
     # ==================== Helper Methods ====================
+    def add_warning(self, message: str, node_id: str = None) -> None:
+        """Add a runtime warning."""
+        self.warnings.append(CompileError(
+            node_id=node_id or self.current_node_id,
+            error_type="runtime_warning",
+            type="warning",
+            message=message
+        ))
+
     def get_node_output(self, node_id: str) -> Any:
         """
         Get the output from a previously executed node.
@@ -383,17 +405,35 @@ class ExecutionContext(BaseModel):
         
         return items
     
-    def get_credential(self, credential_id: str) -> Any:
+    async def get_credential(self, credential_id: str | int) -> Any:
         """
         Get a decrypted credential by ID.
-        
-        Args:
-            credential_id: ID or name of the credential
-            
-        Returns:
-            Decrypted credential data, or None if not found
+        Preferentially serves pre-injected credentials for stability and speed.
         """
-        return self.credentials.get(credential_id)
+        if not credential_id:
+            return None
+            
+        str_id = str(credential_id)
+        
+        # 1. Check if already injected (Primary path)
+        if str_id in self.credentials:
+            return self.credentials[str_id]
+            
+        # 2. Lazy loading fallback (Only if not pre-injected)
+        # This ensures nodes created dynamically or missing from initial scan still work.
+        try:
+            from credentials.manager import get_credential_manager
+            manager = get_credential_manager()
+            data = await manager.get_credential(credential_id, user_id=self.user_id)
+            if data:
+                # Cache for subsequent access in this execution context
+                self.credentials[str_id] = data
+                return data
+        except Exception as e:
+            from logs.logger import logger
+            logger.error(f"Failed to fetch credential {credential_id}: {e}")
+            
+        return None
     
     def set_variable(self, name: str, value: Any) -> None:
         """Set a workflow-level variable."""

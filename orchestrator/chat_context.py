@@ -165,7 +165,7 @@ class ContextAwareChat:
         )
     """
     
-    def __init__(self, user_id: int, llm_type: str = "openai"):
+    def __init__(self, user_id: int, llm_type: str = "openrouter"):
         self.user_id = user_id
         self.llm_type = llm_type
     

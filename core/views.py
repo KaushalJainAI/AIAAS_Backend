@@ -20,6 +20,7 @@ from .serializers import (
     APIKeySerializer,
     APIKeyCreateSerializer,
     UsageTrackingSerializer,
+    GoogleLoginSerializer,
 )
 from .permissions import IsOwner
 
@@ -90,20 +91,16 @@ class GoogleLoginView(APIView):
     throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
-        code = request.data.get('code')
-        if not code:
-             return Response({'error': 'Code is required'}, status=status.HTTP_400_BAD_REQUEST)
-             
         from credentials.oauth import GoogleOAuthProvider
         from django.conf import settings
         from django.contrib.auth import get_user_model
         from rest_framework_simplejwt.tokens import RefreshToken
         
-        # 1. Exchange Code
-        # We need to make sure we use the LOGIN callback URI, not the default if they differ.
-        # But in settings we set GOOGLE_OAUTH_REDIRECT_URI.
-        # Frontend MUST use the same redirect_uri to initiate flow.
-        redirect_uri = request.data.get('redirect_uri', settings.GOOGLE_OAUTH_REDIRECT_URI)
+        serializer = GoogleLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        code = serializer.validated_data['code']
+        redirect_uri = serializer.validated_data.get('redirect_uri', settings.GOOGLE_OAUTH_REDIRECT_URI)
         
         provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
         

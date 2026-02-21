@@ -113,15 +113,17 @@ class GmailNode(BaseNodeHandler):
             )
         
         # Get OAuth access token
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "access_token" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        access_token = creds.get("access_token") if creds else None
+        
+        if not access_token:
             return NodeExecutionResult(
                 success=False,
                 error="Gmail OAuth credential not configured",
                 output_handle="output-0"
             )
-        
-        access_token = creds["access_token"]
+            
+        access_token = access_token.strip()
         
         try:
             # Create email message
@@ -282,18 +284,27 @@ class SlackNode(BaseNodeHandler):
             )
         
         # Get bot token
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "bot_token" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        # Support both 'token' (database) and 'bot_token' (old/internal name)
+        bot_token = (creds.get("token") or creds.get("bot_token") if creds else None)
+        
+        if not bot_token:
             return NodeExecutionResult(
                 success=False,
                 error="Slack bot token not configured",
                 output_handle="output-0"
             )
-        
-        bot_token = creds["bot_token"]
+            
+        # Security: Strip whitespace/newlines
+        bot_token = bot_token.strip()
         
         try:
             async with httpx.AsyncClient(timeout=30) as client:
+                headers = {
+                    "Authorization": f"Bearer {bot_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "AIAAS/1.0"
+                }
                 payload = {
                     "channel": channel,
                     "text": message,
@@ -307,10 +318,7 @@ class SlackNode(BaseNodeHandler):
                 
                 response = await client.post(
                     "https://slack.com/api/chat.postMessage",
-                    headers={
-                        "Authorization": f"Bearer {bot_token}",
-                        "Content-Type": "application/json; charset=utf-8",
-                    },
+                    headers=headers,
                     json=payload,
                 )
                 
@@ -437,15 +445,17 @@ class GoogleSheetsNode(BaseNodeHandler):
             )
         
         # Get OAuth access token
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "access_token" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        access_token = creds.get("access_token") if creds else None
+        
+        if not access_token:
             return NodeExecutionResult(
                 success=False,
                 error="Google OAuth credential not configured",
                 output_handle="output-0"
             )
-        
-        access_token = creds["access_token"]
+            
+        access_token = access_token.strip()
         base_url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
         safe_range = quote(range_notation, safe="")
         
@@ -454,6 +464,7 @@ class GoogleSheetsNode(BaseNodeHandler):
                 headers = {
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
                 }
                 
                 if operation == "read_range":
@@ -689,15 +700,17 @@ class DiscordNode(BaseNodeHandler):
         tts = config.get("tts", "false") == "true"
         
         # Get Webhook URL from credential
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "webhook_url" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        webhook_url = creds.get("webhook_url") if creds else None
+        
+        if not webhook_url:
             return NodeExecutionResult(
                 success=False,
                 error="Discord Webhook credential not configured",
                 output_handle="error"
             )
-        
-        webhook_url = creds["webhook_url"]
+            
+        webhook_url = webhook_url.strip()
         
         if not content and not embeds:
             return NodeExecutionResult(
@@ -833,15 +846,17 @@ class NotionNode(BaseNodeHandler):
         filter_obj = config.get("filter", {})
         
         # Get API key
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "api_key" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = creds.get("api_key") if creds else None
+        
+        if not api_key:
             return NodeExecutionResult(
                 success=False,
                 error="Notion API key not configured",
                 output_handle="output-0"
             )
-        
-        api_key = creds["api_key"]
+            
+        api_key = api_key.strip()
         
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -1063,15 +1078,17 @@ class AirtableNode(BaseNodeHandler):
             )
         
         # Get API key
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "api_key" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = creds.get("api_key") if creds else None
+        
+        if not api_key:
             return NodeExecutionResult(
                 success=False,
                 error="Airtable API key not configured",
                 output_handle="output-0"
             )
-        
-        api_key = creds["api_key"]
+            
+        api_key = api_key.strip()
         base_url = f"https://api.airtable.com/v0/{base_id}/{quote(table_name)}"
         
         try:
@@ -1243,6 +1260,14 @@ class TelegramNode(BaseNodeHandler):
             required=False,
             description="Message formatting mode"
         ),
+        FieldConfig(
+            name="message_limit",
+            label="Message Limit",
+            field_type=FieldType.NUMBER,
+            required=False,
+            default=4096,
+            description="Truncate message if it exceeds this length (Default: 4096)"
+        ),
     ]
     
     outputs = [
@@ -1262,6 +1287,22 @@ class TelegramNode(BaseNodeHandler):
         photo_url = config.get("photo_url", "")
         document_url = config.get("document_url", "")
         parse_mode = config.get("parse_mode", "")
+        message_limit = config.get("message_limit", 4096)
+        
+        # Truncate text if needed
+        if text and message_limit:
+            try:
+                limit = int(message_limit)
+                if len(text) > limit:
+                    truncation_notice = "\n... (message truncated)"
+                    # Ensure we have space for the notice
+                    effective_limit = limit - len(truncation_notice)
+                    if effective_limit > 0:
+                        text = text[:effective_limit] + truncation_notice
+                    else:
+                        text = text[:limit]
+            except (ValueError, TypeError):
+                pass  # Ignore invalid limit values
         
         # 1. Context Awareness: Try to find chat_id in previous outputs if not provided
         if not chat_id:
@@ -1302,15 +1343,17 @@ class TelegramNode(BaseNodeHandler):
             text = re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
         
         # Get bot token
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "bot_token" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        bot_token = creds.get("bot_token") if creds else None
+        
+        if not bot_token:
             return NodeExecutionResult(
                 success=False,
                 error="Telegram bot token not configured",
                 output_handle="output-0"
             )
-        
-        bot_token = creds["bot_token"]
+            
+        bot_token = bot_token.strip()
         base_url = f"https://api.telegram.org/bot{bot_token}"
         
         try:
@@ -1502,16 +1545,19 @@ class TrelloNode(BaseNodeHandler):
         labels = config.get("labels", "")
         
         # Get API credentials
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "api_key" not in creds or "token" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = creds.get("api_key") if creds else None
+        token = creds.get("token") if creds else None
+        
+        if not api_key or not token:
             return NodeExecutionResult(
                 success=False,
                 error="Trello API credentials not configured",
                 output_handle="output-0"
             )
-        
-        api_key = creds["api_key"]
-        token = creds["token"]
+            
+        api_key = api_key.strip()
+        token = token.strip()
         
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -1729,15 +1775,17 @@ class GitHubNode(BaseNodeHandler):
             )
         
         # Get token
-        creds = context.get_credential(credential_id) if credential_id else None
-        if not creds or "token" not in creds:
+        creds = await context.get_credential(credential_id) if credential_id else None
+        token = creds.get("token") if creds else None
+        
+        if not token:
             return NodeExecutionResult(
                 success=False,
                 error="GitHub token not configured",
                 output_handle="output-0"
             )
-        
-        token = creds["token"]
+            
+        token = token.strip()
         
         try:
             async with httpx.AsyncClient(timeout=60) as client:

@@ -7,7 +7,22 @@ class InferenceConfig(AppConfig):
 
     def ready(self):
         """Trigger background initialization of the knowledge base."""
+        import sys
+        import os
         import threading
+        
+        # Avoid running during management commands like migrate or makemigrations
+        if any(cmd in sys.argv for cmd in ['migrate', 'makemigrations', 'collectstatic', 'test']):
+            return
+
+        # Avoid running in the reloader main process; only run in the child worker
+        # Alternatively, if we want it early, we can allow it, but for DB warnings,
+        # we want to be careful.
+        if os.environ.get('RUN_MAIN') != 'true' and os.environ.get('DJANGO_SETTINGS_MODULE'):
+            # In development (with reloader), RUN_MAIN is not set in the parent process.
+            # We skip parent to avoid duplicate loading of large models.
+            return
+
         from .engine import get_platform_knowledge_base
         
         def warm_up():

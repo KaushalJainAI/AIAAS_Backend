@@ -4,8 +4,11 @@ Node Registry Singleton
 Central registry for all available node handlers.
 Provides node discovery and schema generation for frontend.
 """
+import logging
 from typing import Type
-from .base import BaseNodeHandler, NodeSchema
+from nodes.handlers.base import BaseNodeHandler, NodeSchema
+
+logger = logging.getLogger(__name__)
 
 
 class NodeRegistry:
@@ -132,21 +135,16 @@ def get_registry() -> NodeRegistry:
     """Get the global NodeRegistry instance"""
     registry = NodeRegistry.get_instance()
     
-    # Lazy registration of core nodes to avoid circular imports?
-    # Or just register them here if they aren't auto-discovered.
-    # Assuming we need to manually register if not done elsewhere.
-    # Checking existing code flow... 
-    # Usually registration happens at app startup or module import.
-    # Let's import and register here to be safe and ensure they exist.
-    
-    from .core_nodes import CodeNode, SetNode, IfNode
-    from .logic_nodes import LoopNode, SplitInBatchesNode
-    from .subworkflow_node import SubworkflowNodeHandler
-    from .integration_nodes import (
+    # Use absolute imports to avoid circular/ambiguous import issues in Django
+    from nodes.handlers.core_nodes import CodeNode, SetNode
+    from nodes.handlers.logic_nodes import LoopNode, SplitInBatchesNode, IfNode, EndNode
+    from nodes.handlers.utility_nodes import NotificationNode
+    from nodes.handlers.subworkflow_node import SubworkflowNodeHandler
+    from nodes.handlers.integration_nodes import (
         GmailNode, SlackNode, GoogleSheetsNode, DiscordNode, NotionNode,
         AirtableNode, TelegramNode, TrelloNode, GitHubNode, HTTPRequestNode
     )
-    from .triggers import (
+    from nodes.handlers.triggers import (
         ManualTriggerNode, WebhookTriggerNode, ScheduleTriggerNode, EmailTriggerNode,
         FormTriggerNode, SlackTriggerNode, GoogleSheetsTriggerNode, GitHubTriggerNode,
         DiscordTriggerNode, TelegramTriggerNode, RssFeedTriggerNode, FileTriggerNode,
@@ -165,13 +163,23 @@ def get_registry() -> NodeRegistry:
         registry.register(SplitInBatchesNode)
         registry.register(SubworkflowNodeHandler)
         
-        # Register MCP
-        from mcp_integration.nodes import MCPToolNode
-        registry.register(MCPToolNode)
+        # Register Utility
+        registry.register(EndNode)
+        registry.register(NotificationNode)
+        
+        # Register MCP (Optional)
+        try:
+            from mcp_integration.nodes import MCPToolNode
+            registry.register(MCPToolNode)
+        except (ImportError, ModuleNotFoundError) as e:
+            logger.warning(f"Could not register MCPToolNode: {e}")
 
-        # Register LangChain
-        from .langchain_nodes import LangChainToolNode
-        registry.register(LangChainToolNode)
+        # Register LangChain (Optional)
+        try:
+            from nodes.handlers.langchain_nodes import LangChainToolNode
+            registry.register(LangChainToolNode)
+        except (ImportError, ModuleNotFoundError) as e:
+            logger.warning(f"Could not register LangChainToolNode: {e}")
         
         # Register Integrations
         registry.register(GmailNode)
@@ -183,10 +191,10 @@ def get_registry() -> NodeRegistry:
         registry.register(TelegramNode)
         registry.register(TrelloNode)
         registry.register(GitHubNode)
-        registry.register(HTTPRequestNode) # Using the improved version from integration_nodes
+        registry.register(HTTPRequestNode)
         
         # Register AI / LLM Nodes
-        from .llm_nodes import OpenAINode, GeminiNode, OllamaNode, PerplexityNode, OpenRouterNode
+        from nodes.handlers.llm_nodes import OpenAINode, GeminiNode, OllamaNode, PerplexityNode, OpenRouterNode
         registry.register(OpenAINode)
         registry.register(GeminiNode)
         registry.register(OllamaNode)

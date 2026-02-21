@@ -74,3 +74,23 @@ class TemplateListItemSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             return WorkflowBookmark.objects.filter(template=obj, user=request.user).exists()
         return False
+
+class TemplateFilterSerializer(serializers.Serializer):
+    """Serializer for template list query parameters."""
+    category = serializers.CharField(required=False, allow_null=True)
+    sort = serializers.ChoiceField(choices=['rating', 'usage_count', 'newest', 'trending'], default='usage_count')
+    min_rating = serializers.FloatField(required=False, min_value=0, max_value=5)
+
+class TemplateSearchSerializer(serializers.Serializer):
+    """Serializer for template search parameters."""
+    query = serializers.CharField(required=False, allow_blank=True, default='')
+    category = serializers.CharField(required=False, allow_null=True)
+    min_rating = serializers.FloatField(required=False, min_value=0, max_value=5)
+    sort = serializers.ChoiceField(choices=['relevance', 'rating', 'usage_count', 'newest'], default='relevance')
+    page = serializers.IntegerField(default=1, min_value=1)
+    page_size = serializers.IntegerField(default=12, min_value=1, max_value=50)
+
+class TemplateRateSerializer(serializers.Serializer):
+    """Serializer for template rating."""
+    stars = serializers.IntegerField(min_value=1, max_value=5)
+    review = serializers.CharField(required=False, allow_blank=True, default='')

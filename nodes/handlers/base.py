@@ -6,11 +6,20 @@ and LangGraph compatibility.
 """
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Callable
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from compiler.schemas import ExecutionContext
+
+class NodeExecutionError(Exception):
+    """Standardized error for node execution failures."""
+    def __init__(self, message: str, node_id: str = None, item_index: int = None, details: dict = None):
+        super().__init__(message)
+        self.message = message
+        self.node_id = node_id
+        self.item_index = item_index
+        self.details = details or {}
 
 
 # ==================== Enums ====================
@@ -26,6 +35,7 @@ class FieldType(str, Enum):
     CODE = "code"
     CREDENTIAL = "credential"
     FILE = "file"
+    SKILLS = "skills"
 
 
 class NodeCategory(str, Enum):
@@ -37,6 +47,7 @@ class NodeCategory(str, Enum):
     INTEGRATION = "integration"
     AI = "ai"
     UTILITY = "utility"
+    SUB_WORKFLOW = "sub_workflow"
 
 
 # ==================== Pydantic Models ====================
@@ -292,9 +303,9 @@ class BaseNodeHandler(ABC):
         Uses the minimum of:
         - Parent's remaining timeout budget
         - Child workflow's configured timeout
-        - Default timeout of 60 seconds
+        - Default timeout of 10 minutes
         """
-        default_timeout = 60000  # 60s default
+        default_timeout = 600000  # 10 minutes default
         
         # Get parent's remaining time budget
         parent_remaining = getattr(parent_context, 'timeout_budget_ms', default_timeout)
@@ -321,7 +332,7 @@ class BaseNodeHandler(ABC):
         
         # Track nesting depth
         current_depth = getattr(parent_context, 'nesting_depth', 0)
-        max_depth = getattr(parent_context, 'max_nesting_depth', 3)
+        max_depth = getattr(parent_context, 'max_nesting_depth', 3) # 3 is the maximum depth of nesting of workflows
         
         # Get workflow_id from child_workflow
         workflow_id = None
@@ -356,4 +367,49 @@ class BaseNodeHandler(ABC):
         child_context.parent_context = parent_context
         
         return child_context
+
+    def _process_items(
+        self, 
+        items: list[NodeItem], 
+        func: Callable[[dict], Any],
+        context: 'ExecutionContext' = None
+    ) -> list[NodeItem]:
+        """
+        Standardized item processing loop for all nodes.
+        
+        Args:
+            items: List of NodeItems to process
+            func: Function to apply to each item's JSON data
+            context: Execution context for metadata/error reporting
+            
+        Returns:
+            List of new NodeItems
+        """
+        output_items = []
+        for idx, item in enumerate(items):
+            try:
+                # Apply transformation logic for a single item
+                result = func(item.json)
+                
+                # Normalize result to dict
+                if not isinstance(result, dict):
+                    result = {"result": result}
+                
+                # Create output item and preserve traceability
+                output_items.append(NodeItem(
+                    json=result,
+                    pairedItem={"item": idx}
+                ))
+            except Exception as e:
+                # Capture structured error per item
+                if context:
+                    context.add_warning(f"Error at index {idx}: {str(e)}")
+                
+                # Standard error response format
+                output_items.append(NodeItem(
+                    json={"error": str(e), "success": False},
+                    pairedItem={"item": idx}
+                ))
+                
+        return output_items
 

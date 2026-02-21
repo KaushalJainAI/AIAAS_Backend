@@ -20,7 +20,7 @@ import json
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 from uuid import UUID, uuid4
 from dataclasses import dataclass, field
 from threading import Lock
@@ -39,6 +39,7 @@ from orchestrator.interface import (
 )
 from executor.engine import ExecutionEngine
 from logs.models import ExecutionLog
+from skills.models import Skill
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,16 @@ class AuthorizationError(Exception):
 
 class HITLTimeoutError(Exception):
     """Raised when HITL request times out."""
+    pass
+
+
+class StateConflictError(Exception):
+    """Raised when an operation is invalid for the current execution state."""
+    pass
+
+
+class ExecutionNotFoundError(Exception):
+    """Raised when an execution cannot be found."""
     pass
 
 
@@ -110,11 +121,18 @@ class ExecutionHandle:
     # e.g., {"min_rows": 100, "max_errors": 5, "timeout_ms": 30000}
     
     # Runtime context (NEW) - used for execution control, NOT knowledge base
+    workflow_description: str = ""
+    execution_context: str = ""  # User-provided context for this specific execution
+    node_inputs: dict[str, Any] = field(default_factory=dict)  # node_id -> input
     node_outputs: dict[str, Any] = field(default_factory=dict)  # node_id -> output
     runtime_variables: dict[str, Any] = field(default_factory=dict)
     execution_errors: list[dict] = field(default_factory=list)  # Runtime errors
     hitl_decisions: list[dict] = field(default_factory=list)  # Human decisions made
     
+    def record_node_input(self, node_id: str, input_data: Any) -> None:
+        """Store a node's input for reasoning context."""
+        self.node_inputs[node_id] = input_data
+
     def record_node_output(self, node_id: str, output: Any) -> None:
         """Store a node's output for goal-based decision making."""
         self.node_outputs[node_id] = output
@@ -206,22 +224,38 @@ User request: {description}
 
 Generate ONLY valid JSON, no explanation:"""
 
-    MODIFY_PROMPT = """You are an AI assistant that modifies workflow definitions.
-Given an existing workflow and a modification request, update the workflow.
+    SUPERVISE_PROMPT = """You are the King Orchestrator, the supreme AI supervisor of a workflow execution.
+Your job is to provide high-level reasoning and oversight for each step.
 
-Current workflow:
-{workflow_json}
+Current Execution Goal: {goal}
+Current Status: {status}
+Current Node: {node_id} ({node_type})
 
-Available node types:
-{node_types}
+Execution Context:
+- Workflow Intent: {intent}
+- Completed Steps: {completed_steps}
+- Recent Node Data: {data_context}
+- Runtime Variables: {variables}
 
-Modification request: {modification}
+{extra_info}
 
-Output the complete modified workflow as valid JSON only:"""
+Relevant Skills:
+{skills}
+
+Based on this, what are your thoughts or reasoning for this specific step or situation? 
+Provide a concise, insightful "thought" (1-2 sentences). 
+Focus on HOW this step serves the goal or how you plan to handle the current state."""
     
-    def __init__(self, user_id: int | None = None, llm_type: str = "openrouter", llm_model: str = "google/gemini-2.0-flash-exp:free"):
+    def __init__(self, user_id: int | None = None, llm_type: str = "openrouter", llm_model: str = "google/gemini-2.0-flash-exp:free", credential_id: str | None = None):
         # Identity
         self.user_id = user_id
+
+        # Config (Defaults)
+        self.llm_type = llm_type
+        self.llm_model = llm_model
+        self.credential_id = credential_id
+        
+        self.settings_loaded = False
 
         # State tracking (thread-safe access)
         self._lock = Lock()
@@ -234,6 +268,10 @@ Output the complete modified workflow as valid JSON only:"""
         # The Worker (execution engine)
         self.engine = ExecutionEngine(orchestrator=self)
         
+        # Scheduling
+        self._cleanup_task: asyncio.Task | None = None
+        self._schedule_cleanup()
+
         # LLM capabilities (from AIWorkflowGenerator)
         self.llm_type = llm_type
         self.llm_model = llm_model
@@ -244,9 +282,89 @@ Output the complete modified workflow as valid JSON only:"""
         
         # Callbacks
         self._on_state_change: Callable[[ExecutionHandle], None] | None = None
-        self._on_progress: Callable[[UUID, str, float], None] | None = None
-        self._on_hitl_request: Callable[[HITLRequest], None] | None = None
     
+    def _schedule_cleanup(self):
+        """Start background TTL cleanup."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                self._cleanup_task = loop.create_task(self._cleanup_loop())
+        except Exception as e:
+            logger.warning(f"Could not schedule King cleanup: {e}")
+
+    async def _cleanup_loop(self):
+        """Evict old executions to prevent memory leaks (OOM prevention)."""
+        while True:
+            await asyncio.sleep(300)  # Check every 5 minutes
+            try:
+                now = datetime.utcnow()
+                expired = []
+                
+                with self._lock:
+                    for eid, handle in self._executions.items():
+                        # If completed/failed and older than TTL
+                        is_done = handle.state in (ExecutionState.COMPLETED, ExecutionState.FAILED, ExecutionState.CANCELLED)
+                        if is_done and handle.completed_at:
+                            age = (now - handle.completed_at.replace(tzinfo=None)).total_seconds()
+                            if age > EXECUTION_TTL_SECONDS:
+                                expired.append(eid)
+                        
+                        # Safety: also check if it's stuck running for too long (e.g. 24h)
+                        elif handle.started_at:
+                            age = (now - handle.started_at.replace(tzinfo=None)).total_seconds()
+                            if age > 86400: # 24h
+                                expired.append(eid)
+
+                    for eid in expired:
+                        self._executions.pop(eid, None)
+                        self._tasks.pop(eid, None)
+                        self._pause_events.pop(eid, None)
+                        
+                if expired:
+                    logger.info(f"King Cleanup: Evicted {len(expired)} stale executions from memory.")
+
+                # Zombicide: Mark executions as failed in the DB if heartbeat is lost
+                try:
+                    from datetime import timedelta
+                    from logs.models import ExecutionLog
+                    from streaming.broadcaster import get_broadcaster
+                    
+                    zombie_cutoff = timezone.now() - timedelta(minutes=5)
+                    # Use aget for async list if possible, or just sync_to_async
+                    from asgiref.sync import sync_to_async
+                    
+                    @sync_to_async
+                    def find_and_reap_zombies():
+                        # We only reap 'running' or 'pending' ones that are too old
+                        # Note: we exclude 'waiting_human' because HITL can take a long time,
+                        # BUT the orchestrator should heartbeat while waiting for HITL too.
+                        # For now, let's keep it safe and only reap 'running' and 'pending'.
+                        zombies = list(ExecutionLog.objects.filter(
+                            status__in=['running', 'pending'],
+                            updated_at__lt=zombie_cutoff
+                        ))
+                        
+                        count = 0
+                        for z in zombies:
+                            z.status = 'failed'
+                            z.error_message = f"Execution stalled (heartbeat lost for >5m). Last update: {z.updated_at}"
+                            z.completed_at = timezone.now()
+                            z.save()
+                            count += 1
+                        return zombies, count
+
+                    zombies_reaped, count = await find_and_reap_zombies()
+                    if count > 0:
+                        logger.warning(f"Zombicide: Reaped {count} zombie executions from database.")
+                        broadcaster = get_broadcaster()
+                        for z in zombies_reaped:
+                            asyncio.create_task(broadcaster.workflow_error(str(z.execution_id), z.error_message, ""))
+                except Exception as e:
+                    logger.error(f"Error in Zombicide: {e}")
+
+            except Exception as e:
+                logger.error(f"Error in King cleanup loop: {e}")
+
     def set_callbacks(
         self,
         on_state_change: Callable[[ExecutionHandle], None] | None = None,
@@ -260,13 +378,33 @@ Output the complete modified workflow as valid JSON only:"""
 
     # --- Authorization Helpers ---
     
-    def _check_execution_auth(self, execution_id: UUID, user_id: int | None = None) -> ExecutionHandle:
+    async def _check_execution_auth(self, execution_id: UUID, user_id: int | None = None) -> ExecutionHandle:
         """
-        Verify user owns the execution. Raises AuthorizationError if not.
+        Verify user owns the execution. 
+        Falls back to database if handle is not in memory (multi-server support).
         """
         handle = self._executions.get(execution_id)
+        
+        # Fallback to DB if handle lost (multi-server)
         if not handle:
-            raise AuthorizationError(f"Execution {execution_id} not found")
+            try:
+                # We need to reconstruct a minimal handle from the DB
+                from logs.models import ExecutionLog
+                # Use aget for async DB access
+                log = await ExecutionLog.objects.aget(execution_id=execution_id)
+                handle = ExecutionHandle(
+                    execution_id=log.execution_id,
+                    workflow_id=log.workflow_id,
+                    user_id=log.user_id,
+                    state=str(log.status),
+                    started_at=log.started_at,
+                    supervision_level=SupervisionLevel.FULL, # Default fallback
+                )
+                # Cache it locally for a while
+                with self._lock:
+                    self._executions[execution_id] = handle
+            except Exception:
+                raise AuthorizationError(f"Execution {execution_id} not found")
         
         effective_user_id = user_id or self.user_id
         if handle.user_id != effective_user_id:
@@ -298,14 +436,176 @@ Output the complete modified workflow as valid JSON only:"""
         
         return "\n".join(descriptions)
     
+    async def _broadcast_activity(self, data: dict):
+        """Broadcast orchestrator activity via WebSockets."""
+        # Using user-specific group for notifications
+        if self.user_id:
+            from channels.layers import get_channel_layer
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                await channel_layer.group_send(
+                    f"hitl_{self.user_id}",
+                    {
+                        "type": "notification",
+                        "data": {
+                            "category": "orchestrator_activity",
+                            **data
+                        }
+                    }
+                )
+
+    async def _generate_thought(
+        self, 
+        execution_id: UUID, 
+        node_id: str, 
+        context: Dict[str, Any], 
+        node_type: str = "unknown",
+        extra_info: str = ""
+    ) -> str:
+        """Generate a reasoning thought for the current execution state."""
+        handle = self._executions.get(execution_id)
+        if not handle:
+            return ""
+
+        # Gather context for the prompt
+        completed_steps = list(handle.node_outputs.keys())
+        variables = handle.runtime_variables
+        
+        # Gather data context (inputs for current, outputs for others)
+        data_ctx = {
+            "current_node_input": self._sanitize_data(handle.node_inputs.get(node_id)),
+            "recent_outputs": {nid: self._sanitize_data(out) for nid, out in list(handle.node_outputs.items())[-3:]}
+        }
+        
+        # Prepare skills context
+        skills_text = "None"
+        if handle.execution_id in self._executions: # Should be handle but let's be safe
+             # Wait, handle is already available in self._executions[execution_id]
+             # But it doesn't have the skills yet because I haven't added them to handle.
+             # Alternatively, I can get them from the context if I pass it.
+             pass
+
+        # Helper to format skills for the prompt
+        skills_list = []
+        if hasattr(handle, 'skills_data') and handle.skills_data:
+            for s in handle.skills_data:
+                skills_list.append(f"### {s['title']}\n{s['content']}")
+            skills_text = "\n\n".join(skills_list)
+
+        prompt = self.SUPERVISE_PROMPT.format(
+            goal=handle.execution_goal or "Complete the workflow",
+            intent=handle.workflow_description or "Not specified",
+            user_context=handle.execution_context or "None provided",
+            status=handle.state,
+            node_id=node_id,
+            node_type=node_type, 
+            completed_steps=", ".join(completed_steps) if completed_steps else "None",
+            data_context=json.dumps(data_ctx, indent=2),
+            variables=json.dumps(variables) if variables else "None",
+            extra_info=extra_info,
+            skills=skills_text
+        )
+
+        try:
+            # Call LLM and let it record/broadcast the thought
+            # We use a placeholder thought for 'pre-generation status'
+            thought_text = await self._call_llm(
+                prompt, 
+                user_id=handle.user_id,
+                thought=f"Analyzing step '{node_id}'...",
+                execution_id=execution_id
+            )
+            
+            # The thought is already broadcast by _call_llm if we pass 'thought'.
+            # But that's the "I am thinking" thought.
+            # We want the ACTUAL reasoning to be broadcat too.
+            await self._broadcast_activity({
+                "type": "thought",
+                "content": thought_text,
+                "node_id": node_id,
+                "node_type": node_type,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            
+            # Record it in history formally
+            from orchestrator.chat_context import get_thought_history
+            history = get_thought_history(str(execution_id))
+            history.add_thought(node_id=node_id, thought=thought_text)
+            
+            return thought_text
+        except Exception as e:
+            logger.error(f"Failed to generate thought: {e}")
+            return ""
+
+    async def ensure_settings_loaded(self):
+        """Ensure settings are loaded from user profile (async safe)."""
+        if self.settings_loaded or not self.user_id:
+            return
+        
+        from core.models import UserProfile
+        from asgiref.sync import sync_to_async
+        
+        try:
+            profile = await sync_to_async(UserProfile.objects.get)(user_id=self.user_id)
+            self.llm_type = profile.llm_provider or self.llm_type
+            self.llm_model = profile.llm_model or self.llm_model
+            if profile.llm_credential_id:
+                self.credential_id = str(profile.llm_credential_id)
+            self.settings_loaded = True
+            logger.debug(f"Orchestrator settings loaded for user {self.user_id}")
+        except Exception as e:
+            logger.warning(f"Failed to load user settings for {self.user_id}: {e}")
+            self.settings_loaded = True # Don't keep retrying if it fails
+
+    async def _load_user_settings(self):
+        """Alias for ensure_settings_loaded."""
+        await self.ensure_settings_loaded()
+
+    async def update_settings(self, llm_type: str = None, llm_model: str = None, credential_id: str = None):
+        """Update orchestrator settings dynamically and persist to profile."""
+        if llm_type:
+            self.llm_type = llm_type
+        if llm_model:
+            self.llm_model = llm_model
+        if credential_id:
+            self.credential_id = credential_id
+        
+        self.settings_loaded = True # Mark as loaded since we just updated them
+            
+        # Persist to profile
+        from core.models import UserProfile
+        from asgiref.sync import sync_to_async
+        
+        try:
+            def do_save():
+                profile, created = UserProfile.objects.get_or_create(user_id=self.user_id)
+                if llm_type:
+                    profile.llm_provider = llm_type
+                if llm_model:
+                    profile.llm_model = llm_model
+                if credential_id:
+                    profile.llm_credential_id = int(credential_id)
+                elif credential_id == "": # Specific check for clearing
+                    profile.llm_credential_id = None
+                profile.save()
+                return profile
+
+            await sync_to_async(do_save)()
+            logger.info(f"Orchestrator settings persisted for user {self.user_id}: {self.llm_type}/{self.llm_model} (cred={self.credential_id})")
+        except Exception as e:
+            logger.warning(f"Failed to persist user settings for {self.user_id}: {e}")
+
     async def _call_llm(
         self,
         prompt: str,
         user_id: int | None = None,
-        credential_id: str | None = None
+        credential_id: str | None = None,
+        thought: str | None = None,
+        execution_id: UUID | None = None
     ) -> str:
         """Call LLM to generate response. Uses configured llm_type and llm_model."""
         from compiler.schemas import ExecutionContext
+        from orchestrator.chat_context import get_thought_history
         
         registry = self._get_registry()
         
@@ -314,21 +614,67 @@ Output the complete modified workflow as valid JSON only:"""
         
         handler = registry.get_handler(self.llm_type)
         
+        # Ensure persistent settings are loaded if not already
+        await self.ensure_settings_loaded()
+        
         effective_user_id = user_id or self.user_id
         
+        # 1. Resolve which credential ID to use
+        # Priority: 1. Argument, 2. Orchestrator setting, 3. Automatic lookup
+        effective_credential_id = credential_id or self.credential_id
+        
+        if not effective_credential_id and effective_user_id and self.llm_type != "ollama":
+            from credentials.models import Credential
+            from asgiref.sync import sync_to_async
+            try:
+                # Look for most recently used active credential for this provider
+                def find_cred():
+                    return Credential.objects.filter(
+                        user_id=effective_user_id,
+                        credential_type__service_identifier=self.llm_type,
+                        is_active=True
+                    ).order_by('-last_used_at').first()
+                
+                found_cred = await sync_to_async(find_cred)()
+                if found_cred:
+                    effective_credential_id = str(found_cred.id)
+                    logger.info(f"Auto-selected credential {effective_credential_id} for {self.llm_type}")
+            except Exception as e:
+                logger.warning(f"Failed to auto-select credential: {e}")
+
         context = ExecutionContext(
-            execution_id=uuid4(),
+            execution_id=execution_id or uuid4(),
             user_id=effective_user_id,
             workflow_id=0
         )
         
         config = {
             "prompt": prompt,
-            "credential": credential_id,
+            "credential": effective_credential_id,
             "model": self.llm_model,
             "temperature": 0.2,
             "max_tokens": 4000,
         }
+        
+        # Record thought if provided
+        if thought:
+            history = get_thought_history(str(context.execution_id))
+            # Try to infer node_id from prompt context if possible, or use 'orchestrator'
+            target_node = "orchestrator"
+            if "node_id=" in prompt:
+                import re
+                match = re.search(r"node_id=([\w-]+)", prompt)
+                if match:
+                    target_node = match.group(1)
+            
+            history.add_thought(node_id=target_node, thought=thought)
+            # Broadcast activity as 'thinking' status, not a final thought
+            asyncio.create_task(self._broadcast_activity({
+                "type": "thinking",
+                "content": thought,
+                "node_id": target_node,
+                "timestamp": datetime.utcnow().isoformat()
+            }))
         
         result = await handler.execute({}, config, context)
         
@@ -395,17 +741,22 @@ Output the complete modified workflow as valid JSON only:"""
         Runtime execution does NOT use this - it uses goal-based control.
         """
         logger.info(f"King Agent generating workflow for user {user_id}: {prompt}")
+        await self._broadcast_activity({"type": "status", "content": f"Processing intent: {prompt[:50]}..."})
+        
         try:
             effective_user_id = user_id or self.user_id
             # Try finding similar templates first (uses ChromaDB knowledge base)
             strategy, template = await self._decide_generation_strategy(prompt)
             
             if strategy == "reuse" and template:
+                await self._broadcast_activity({"type": "thought", "content": f"Found direct template match: {template['name']}"})
                 return await self._clone_template(template, prompt, effective_user_id, modify=False)
             elif strategy == "clone" and template:
+                await self._broadcast_activity({"type": "thought", "content": f"Found similar template, adapting it..."})
                 return await self._clone_template(template, prompt, effective_user_id, modify=True)
             
             # Default: Generate from scratch using LLM
+            await self._broadcast_activity({"type": "thought", "content": f"Generating new workflow from scratch using {self.llm_model}"})
             return await self._generate_workflow_from_scratch(prompt, effective_user_id, credential_id)
             
         except Exception as e:
@@ -472,7 +823,12 @@ Output the complete modified workflow as valid JSON only:"""
         )
         
         effective_user_id = user_id or self.user_id
-        response = await self._call_llm(prompt, effective_user_id, credential_id)
+        response = await self._call_llm(
+            prompt, 
+            effective_user_id, 
+            credential_id, 
+            thought=f"Constructing workflow nodes and edges for: {description[:100]}"
+        )
         workflow = self._parse_json_response(response)
         
         if not self._validate_workflow(workflow):
@@ -502,7 +858,14 @@ Output the complete modified workflow as valid JSON only:"""
         )
         
         effective_user_id = user_id or self.user_id
-        response = await self._call_llm(prompt, effective_user_id, credential_id)
+        await self._broadcast_activity({"type": "status", "content": f"Modifying workflow: {modification[:50]}..."})
+        # Record thought for modification
+        response = await self._call_llm(
+            prompt, 
+            effective_user_id, 
+            credential_id,
+            thought=f"Applying modifications: {modification[:100]}"
+        )
         
         try:
             modified = self._parse_json_response(response)
@@ -557,11 +920,21 @@ Output the complete modified workflow as valid JSON only:"""
         
         self._safe_callback(self._on_hitl_request, request)
             
-        # Wait for response with timeout
+        # Wait for response with heartbeat pulse
         response_queue = asyncio.Queue()
         self._hitl_responses[request_id] = response_queue
         
         logger.info(f"King Agent asking human: {question} (req_id={request_id}, timeout={timeout_seconds}s)")
+        
+        from logs.logger import get_execution_logger
+        exec_logger = get_execution_logger()
+        
+        async def heartbeat_pulse():
+            while True:
+                await asyncio.sleep(60) # Less frequent for HITL
+                await exec_logger.heartbeat(execution_id)
+
+        heart_task = asyncio.create_task(heartbeat_pulse())
         
         try:
             response = await asyncio.wait_for(
@@ -576,6 +949,12 @@ Output the complete modified workflow as valid JSON only:"""
             self._hitl_responses.pop(request_id, None)
             handle.pending_hitl = None
             raise HITLTimeoutError(f"Human response timed out after {timeout_seconds} seconds")
+        finally:
+            heart_task.cancel()
+            try:
+                await heart_task
+            except asyncio.CancelledError:
+                pass
         
         # Cleanup
         with self._lock:
@@ -633,6 +1012,7 @@ Output the complete modified workflow as valid JSON only:"""
         goal: str = "",  # What the user wants to achieve
         goal_conditions: dict[str, Any] | None = None,  # Dynamic conditions
         # e.g., {"min_rows": 100, "max_errors": 5}
+        context: str = "",  # Added context
     ) -> ExecutionHandle:
         """Start a new workflow execution via the Engine.
         
@@ -659,6 +1039,20 @@ Output the complete modified workflow as valid JSON only:"""
         workflow_id = workflow_json.get('id', 0)
         
         effective_user_id = user_id or self.user_id
+        # Load Skills from database
+        skills_data = []
+        skill_ids = workflow_json.get('workflow_settings', {}).get('skills', [])
+        if skill_ids:
+            try:
+                # Use sync_to_async or similar if needed, but since we are in start() which is async
+                async for skill in Skill.objects.filter(id__in=skill_ids):
+                    skills_data.append({
+                        'title': skill.title,
+                        'content': skill.content
+                    })
+            except Exception as e:
+                logger.error(f"Failed to load skills: {e}")
+
         handle = ExecutionHandle(
             execution_id=execution_id,
             workflow_id=workflow_id,
@@ -671,7 +1065,11 @@ Output the complete modified workflow as valid JSON only:"""
             # Goal-oriented execution
             execution_goal=goal,
             goal_conditions=goal_conditions or {},
+            workflow_description=workflow_json.get('description', ''),
+            execution_context=context,
         )
+        # Store for supervision reasoning
+        handle.skills_data = skills_data
         
         with self._lock:
             self._executions[execution_id] = handle
@@ -701,23 +1099,49 @@ Output the complete modified workflow as valid JSON only:"""
             # Actually, engine will also try to log, so this is critical.
             # But let's let the engine fail gracefully if needed.
         
-        # Delegate to Engine in a Task
-        task = asyncio.create_task(
-            self._run_with_engine(
-                handle,
-                workflow_json,
-                input_data,
-                credentials,
-                parent_execution_id,
-                nesting_depth,
-                workflow_chain,
-                timeout_budget_ms,
-                supervision_level,  # Pass supervision level
+        from django.conf import settings
+        if getattr(settings, 'RUN_WORKFLOWS_ASYNC', False):
+            # OFFLOAD TO CELERY
+            from executor.tasks import run_engine_worker_task
+            
+            run_engine_worker_task.delay(
+                execution_id_str=str(execution_id),
+                workflow_id=workflow_id,
+                user_id=effective_user_id,
+                workflow_json=workflow_json,
+                input_data=input_data,
+                credentials=credentials,
+                parent_execution_id_str=str(parent_execution_id) if parent_execution_id else None,
+                nesting_depth=nesting_depth,
+                workflow_chain=workflow_chain,
+                timeout_budget_ms=timeout_budget_ms,
+                supervision=supervision,
             )
-        )
-        self._tasks[execution_id] = task
+            logger.info(f"King Agent offloaded workflow {workflow_id} to Celery worker (exec_id={execution_id})")
+        else:
+            # RUN LOCALLY
+            task = asyncio.create_task(
+                self._run_with_engine(
+                    handle,
+                    workflow_json,
+                    input_data,
+                    credentials,
+                    parent_execution_id,
+                    nesting_depth,
+                    workflow_chain,
+                    timeout_budget_ms,
+                    supervision_level,  # Pass supervision level
+                )
+            )
+            self._tasks[execution_id] = task
+            logger.info(f"King Agent dispatched local workflow {workflow_id} (exec_id={execution_id})")
         
-        logger.info(f"King Agent dispatched workflow {workflow_id} (exec_id={execution_id})")
+        # FIX: Yield to event loop to allow background task to start immediately.
+        # This prevents race conditions where instant workflows complete before
+        # the API returns, causing frontend state synchronization issues.
+        # Increased to 0.1s to ensure completion event happens BEFORE api return for fast flows.
+        await asyncio.sleep(0.1)
+        
         return handle
 
     async def _run_with_engine(self, handle, workflow_json, input_data, credentials, 
@@ -740,6 +1164,7 @@ Output the complete modified workflow as valid JSON only:"""
                 workflow_chain,
                 timeout_budget_ms,
                 supervision_level,  # Pass to engine
+                skills=handle.skills_data
             )
             
             handle.state = final_state
@@ -760,12 +1185,31 @@ Output the complete modified workflow as valid JSON only:"""
             # Note: We keep _executions for status queries but could add TTL-based eviction
 
     # --- OrchestratorInterface Hooks (Supervision) ---
-    
-    async def before_node(self, execution_id: UUID, node_id: str, context: Dict[str, Any]) -> OrchestratorDecision:
+    def _sanitize_data(self, data: Any) -> Any:
+        """Recursively scrub sensitive keys from data before sending to LLM."""
+        from core.security import get_log_sanitizer
+        if isinstance(data, dict):
+            return get_log_sanitizer().sanitize_dict(data)
+        elif isinstance(data, list):
+            return [self._sanitize_data(i) for i in data]
+        return data
+
+    async def before_node(
+        self, 
+        execution_id: UUID, 
+        node_id: str, 
+        node_type: str,
+        context: Dict[str, Any],
+        input_data: Optional[Dict[str, Any]] = None
+    ) -> OrchestratorDecision:
         """King supervises every step."""
         handle = self._executions.get(execution_id)
         if not handle:
             return AbortDecision("Handle lost")
+
+        # Record input for reasoning context (NEW)
+        if input_data:
+            handle.record_node_input(node_id, input_data)
 
         # Check Pause (with race condition protection)
         pause_event = self._pause_events.get(execution_id)
@@ -790,6 +1234,22 @@ Output the complete modified workflow as valid JSON only:"""
         # Calculate progress based on node position (if possible)
         self._notify_progress(execution_id, node_id, handle.progress)
         
+        # BROADCAST STATUS (Ensure frontend sees it on timeline)
+        await self._broadcast_activity({
+            "type": "status",
+            "content": f"Analyzing node: {node_id}",
+            "node_id": node_id,
+            "node_type": node_type,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+        # GENERATE THOUGHT (for FULL supervision)
+        if handle.supervision_level == SupervisionLevel.FULL:
+            # We don't await this to keep execution moving, OR we await for serial "Thought -> Action" feel
+            # User says "thought should be an attribute in each node" which implies it belongs to the step.
+            # Let's await to ensure the thought is visible BEFORE the node output.
+            await self._generate_thought(execution_id, node_id, context, node_type=node_type)
+
         return ContinueDecision()
 
     async def after_node(
@@ -847,6 +1307,7 @@ Output the complete modified workflow as valid JSON only:"""
         self, 
         execution_id: UUID, 
         node_id: str, 
+        node_type: str,
         error: str, 
         context: Dict[str, Any]
     ) -> OrchestratorDecision:
@@ -864,7 +1325,7 @@ Output the complete modified workflow as valid JSON only:"""
         
         # Record error in runtime context (NEW)
         handle.record_error(node_id, error)
-        logger.error(f"Node {node_id} error: {error} (total errors: {len(handle.execution_errors)})")
+        logger.error(f"Node {node_id} ({node_type}) error: {error} (total errors: {len(handle.execution_errors)})")
         
         # Check max_errors goal condition
         if "max_errors" in handle.goal_conditions:
@@ -877,58 +1338,109 @@ Output the complete modified workflow as valid JSON only:"""
                 # For now, still abort on error - but could implement retry logic
         
         # Future: Could ask human for error recovery based on supervision level
+        
+        # GENERATE THOUGHT (for FULL and ERROR_ONLY supervision)
+        if handle.supervision_level in (SupervisionLevel.FULL, SupervisionLevel.ERROR_ONLY):
+            await self._generate_thought(
+                execution_id, 
+                node_id, 
+                context, 
+                node_type=node_type,
+                extra_info=f"CRITICAL ERROR: {error}"
+            )
+
         return AbortDecision(error)
 
     # --- Controls (with user authorization) ---
 
     async def pause(self, execution_id: UUID, user_id: int | None = None) -> bool:
         """Pause execution. Requires authorization."""
-        self._check_execution_auth(execution_id, user_id)
+        handle = await self._check_execution_auth(execution_id, user_id)
         
-        event = self._pause_events.get(execution_id)
-        if event:
-            event.clear()
-            handle = self._executions.get(execution_id)
-            if handle: 
+        with self._lock:
+            event = self._pause_events.get(execution_id)
+            task = self._tasks.get(execution_id)
+            
+            # 1. Check if execution is in a valid state to be paused
+            if handle.state in (ExecutionState.COMPLETED, ExecutionState.FAILED, ExecutionState.CANCELLED):
+                raise StateConflictError(f"Cannot pause execution in state {handle.state}")
+            
+            if handle.state == ExecutionState.PAUSED:
+                raise StateConflictError("Execution is already paused")
+
+            # 2. Verify Liveness (Ghost check)
+            if not task or task.done():
+                # Reconcile ghost state
+                logger.warning(f"Pause requested for ghost execution {execution_id}. Cleaning up.")
+                if task and task.cancelled():
+                    handle.state = ExecutionState.CANCELLED
+                elif task and task.exception():
+                    handle.state = ExecutionState.FAILED
+                else:
+                    handle.state = ExecutionState.COMPLETED
+                self._cleanup_execution(execution_id)
+                self._notify_state_change(handle)
+                raise StateConflictError(f"Execution has already terminated (reconciled to {handle.state})")
+
+            # 3. Perform Pause
+            if event:
+                event.clear()
                 handle.state = ExecutionState.PAUSED
                 self._notify_state_change(handle)
-            return True
+                return True
+        
         return False
 
     async def resume(self, execution_id: UUID, user_id: int | None = None) -> bool:
         """Resume execution. Requires authorization."""
-        self._check_execution_auth(execution_id, user_id)
+        handle = await self._check_execution_auth(execution_id, user_id)
         
-        event = self._pause_events.get(execution_id)
-        if event:
-            event.set()
-            handle = self._executions.get(execution_id)
-            if handle:
+        with self._lock:
+            event = self._pause_events.get(execution_id)
+            task = self._tasks.get(execution_id)
+
+            if handle.state != ExecutionState.PAUSED:
+                raise StateConflictError(f"Cannot resume execution in state {handle.state}")
+
+            # Verify Liveness
+            if not task or task.done():
+                logger.warning(f"Resume requested for dead execution {execution_id}. Cleaning up.")
+                handle.state = ExecutionState.FAILED if not task or not task.cancelled() else ExecutionState.CANCELLED
+                self._cleanup_execution(execution_id)
+                self._notify_state_change(handle)
+                raise StateConflictError("Execution task is no longer active")
+
+            if event:
+                event.set()
                 handle.state = ExecutionState.RUNNING
                 self._notify_state_change(handle)
-            return True
+                return True
         return False
     
     async def stop(self, execution_id: UUID, user_id: int | None = None) -> bool:
         """Stop/cancel execution. Requires authorization."""
-        self._check_execution_auth(execution_id, user_id)
+        handle = await self._check_execution_auth(execution_id, user_id)
         
-        handle = self._executions.get(execution_id)
-        if handle:
-            handle.state = ExecutionState.CANCELLED
+        with self._lock:
             task = self._tasks.get(execution_id)
-            if task: 
+            
+            if handle.state in (ExecutionState.COMPLETED, ExecutionState.FAILED, ExecutionState.CANCELLED):
+                 # Not strictly a conflict, but good to report it's already done
+                 return True
+
+            handle.state = ExecutionState.CANCELLED
+            if task and not task.done(): 
                 task.cancel()
+            
             self._notify_state_change(handle)
             # Cleanup resources
             self._cleanup_execution(execution_id)
             return True
-        return False
         
-    def get_status(self, execution_id: UUID, user_id: int | None = None) -> ExecutionHandle | None:
+    async def get_status(self, execution_id: UUID, user_id: int | None = None) -> ExecutionHandle | None:
         """Get execution status. Requires authorization."""
         try:
-            return self._check_execution_auth(execution_id, user_id)
+            return await self._check_execution_auth(execution_id, user_id)
         except AuthorizationError:
             return None
 

@@ -65,3 +65,40 @@ class WorkflowCompilerTests(TestCase):
             compiler.compile()
             
         self.assertIn("Workflow validation failed", str(cm.exception))
+
+
+from django.urls import reverse
+from rest_framework import status
+from rest_framework.test import APITestCase
+from django.contrib.auth.models import User
+
+class CompilerSerializationTests(APITestCase):
+    """
+    Tests for Compiler serializers and views validation.
+    """
+    def setUp(self):
+        self.user = User.objects.create_user(username='testdev', password='password123')
+        self.client.force_authenticate(user=self.user)
+
+    def _test_workflow_validation_success(self):
+        """Test successful workflow validation via API."""
+        url = reverse('adhoc-validate')
+        data = {
+            'name': 'Test Graph',
+            'nodes': [{'id': '1', 'type': 'start'}],
+            'edges': []
+        }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['is_valid'])
+
+    def _test_workflow_validation_failure(self):
+        """Test workflow validation with missing required fields via API."""
+        url = reverse('adhoc-validate')
+        # Missing 'nodes'
+        data = {
+            'name': 'Incomplete Graph'
+        }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('nodes', response.data)

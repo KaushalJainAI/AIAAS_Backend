@@ -1,39 +1,23 @@
-"""
-Execution Logger - Database Logging for Workflow Executions
-
-Records workflow and node execution history to the database.
-
-Architecture:
-- ExecutionLogger: High-level interface for logging operations
-- Creates ExecutionLog entries for workflow runs
-- Creates NodeExecutionLog entries for each node
-
-Usage:
-    logger = ExecutionLogger()
-    exec_log = logger.start_execution(workflow, user, 'manual', input_data)
-    
-    logger.log_node_start(exec_log.execution_id, node_id, node_type, node_name, input_data)
-    logger.log_node_complete(exec_log.execution_id, node_id, success, output, error, duration)
-    
-    logger.complete_execution(exec_log.execution_id, output_data, 'completed')
-"""
+import asyncio
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict, List
 from uuid import UUID
 
 from django.utils import timezone
 from django.db import transaction
+from asgiref.sync import sync_to_async
 
 from .models import ExecutionLog, NodeExecutionLog, AuditEntry
-from streaming.broadcaster import send_event_sync
+from streaming.broadcaster import get_broadcaster
+from core.security import get_log_sanitizer
 
 logger = logging.getLogger(__name__)
 
 
 class ExecutionLogger:
     """
-    Writes execution logs to the database.
+    Writes execution logs to the database with internal buffering for scale.
     
     Provides a clean interface for recording:
     - Workflow execution start/end
@@ -41,9 +25,104 @@ class ExecutionLogger:
     - Errors and stack traces
     - Audit entries for sensitive actions
     
-    Thread-safe: Uses Django's transaction management.
+    Scaling:
+    - Buffers NodeExecutionLog entries in memory.
+    - Flushes to DB periodically to reduce IOPS.
     """
     
+    # Scaling Config
+    MAX_BUFFER_SIZE = 5
+    FLUSH_INTERVAL_SECONDS = 0.5
+    
+    _instance = None
+    _buffer: Dict[UUID, List[Dict[str, Any]]] = {}
+    _flush_tasks: Dict[UUID, asyncio.Task] = {}
+    _lock = asyncio.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(ExecutionLogger, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        # Initialization is handled via class-level attributes for true singleton behavior
+        pass
+
+    async def _get_buffer(self, execution_id: UUID) -> List[Dict[str, Any]]:
+        async with self._lock:
+            if execution_id not in self._buffer:
+                self._buffer[execution_id] = []
+            return self._buffer[execution_id]
+
+    def _schedule_flush(self, execution_id: UUID):
+        """Schedule a background task to flush logs for this execution."""
+        if execution_id in self._flush_tasks and not self._flush_tasks[execution_id].done():
+            return
+            
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._periodic_flush(execution_id))
+            self._flush_tasks[execution_id] = task
+        except RuntimeError:
+            # Fallback if no loop is running (rare in this app)
+            pass
+
+    async def _periodic_flush(self, execution_id: UUID):
+        """Periodically flush logs for an execution."""
+        try:
+            await asyncio.sleep(self.FLUSH_INTERVAL_SECONDS)
+            await self.flush_execution_logs(execution_id)
+        except Exception as e:
+            logger.error(f"Error in periodic flush for {execution_id}: {e}")
+        finally:
+            async with self._lock:
+                self._flush_tasks.pop(execution_id, None)
+
+    async def flush_execution_logs(self, execution_id: UUID):
+        """Atomic batch write of all buffered logs for a specific execution."""
+        async with self._lock:
+            logs_to_flush = self._buffer.pop(execution_id, [])
+            
+        if not logs_to_flush:
+            return
+
+        try:
+            @sync_to_async
+            def write_logs_batch():
+                with transaction.atomic():
+                    try:
+                        exec_log = ExecutionLog.objects.get(execution_id=execution_id)
+                    except ExecutionLog.DoesNotExist:
+                        logger.error(f"Execution {execution_id} lost during log flush.")
+                        return
+
+                    for entry in logs_to_flush:
+                        op = entry.get('_op')
+                        node_id = entry.get('node_id')
+                        
+                        if op == 'start':
+                            NodeExecutionLog.objects.create(
+                                execution=exec_log,
+                                **{k: v for k, v in entry.items() if not k.startswith('_')}
+                            )
+                        elif op == 'complete':
+                            # Update the latest 'running' log for this specific node
+                            NodeExecutionLog.objects.filter(
+                                execution=exec_log, 
+                                node_id=node_id, 
+                                status='running'
+                            ).update(**{k: v for k, v in entry.items() if not k.startswith('_')})
+                        elif op == 'error':
+                            NodeExecutionLog.objects.filter(
+                                execution=exec_log, 
+                                node_id=node_id
+                            ).update(**{k: v for k, v in entry.items() if not k.startswith('_')})
+            
+            await write_logs_batch()
+            logger.debug(f"Scale: Flushed {len(logs_to_flush)} logs for {execution_id}")
+        except Exception as e:
+            logger.error(f"Critical Log Failure for {execution_id}: {e}")
+
     def start_execution(
         self,
         workflow,
@@ -55,33 +134,12 @@ class ExecutionLogger:
         timeout_budget_ms: int | None = None,
         workflow_snapshot: dict | None = None
     ) -> ExecutionLog:
-        """
-        Create a new execution log entry when workflow starts.
-        
-        Args:
-            workflow: Workflow model instance
-            user: User model instance running the workflow
-            trigger_type: How it was triggered ('manual', 'schedule', 'webhook', 'api')
-            input_data: Initial input data for the workflow
-            parent_execution_id: ID of parent execution if subworkflow
-            nesting_depth: Current nesting depth
-            timeout_budget_ms: Timeout budget for this execution
-            workflow_snapshot: Snapshot of workflow definition
-            
-        Returns:
-            The created ExecutionLog instance
-        """
-        logger.info(
-            f"Starting execution log for workflow {workflow.id} "
-            f"(trigger: {trigger_type})"
-        )
-        
-        # Update workflow stats
+        """Create a new execution log entry when workflow starts."""
         from django.db.models import F
         workflow.execution_count = F('execution_count') + 1
         workflow.last_executed_at = timezone.now()
         workflow.save(update_fields=['execution_count', 'last_executed_at'])
-        workflow.refresh_from_db()  # Refresh to get the incremented value if needed later
+        workflow.refresh_from_db()
 
         exec_log = ExecutionLog.objects.create(
             workflow=workflow,
@@ -96,7 +154,6 @@ class ExecutionLogger:
             timeout_budget_ms=timeout_budget_ms,
             workflow_snapshot=workflow_snapshot or {}
         )
-        
         return exec_log
     
     async def start_execution_async(
@@ -111,39 +168,14 @@ class ExecutionLogger:
         timeout_budget_ms: int | None = None,
         workflow_snapshot: dict | None = None
     ) -> ExecutionLog:
-        """
-        Async version of start_execution that accepts IDs instead of model instances.
-        
-        Args:
-            execution_id: UUID to use for this execution
-            workflow_id: ID of the workflow
-            user_id: ID of the user running the workflow
-            trigger_type: How it was triggered
-            input_data: Initial input data
-            parent_execution_id: ID of parent execution if subworkflow
-            nesting_depth: Current nesting depth
-            timeout_budget_ms: Timeout budget for this execution
-            workflow_snapshot: Snapshot of workflow definition
-            
-        Returns:
-            The created ExecutionLog instance
-        """
-        from asgiref.sync import sync_to_async
+        """Async version of start_execution."""
         from orchestrator.models import Workflow
         from django.contrib.auth import get_user_model
         
         User = get_user_model()
-        
-        # Fetch models asynchronously
         workflow = await sync_to_async(Workflow.objects.get)(id=workflow_id)
         user = await sync_to_async(User.objects.get)(id=user_id)
         
-        logger.info(
-            f"Starting execution log {execution_id} for workflow {workflow_id} "
-            f"(trigger: {trigger_type})"
-        )
-        
-        # Create with specified execution_id
         @sync_to_async
         def create_log():
             from django.db.models import F
@@ -166,8 +198,7 @@ class ExecutionLogger:
                 workflow_snapshot=workflow_snapshot or {}
             )
         
-        exec_log = await create_log()
-        return exec_log
+        return await create_log()
     
     async def complete_execution(
         self,
@@ -177,44 +208,23 @@ class ExecutionLogger:
         error_message: str = '',
         error_node_id: str = ''
     ) -> ExecutionLog | None:
-        """
-        Mark an execution as completed (success or failure).
+        """Mark execution complete, calculate stats, and flush final logs."""
+        await self.flush_execution_logs(execution_id)
         
-        Args:
-            execution_id: UUID of the execution
-            output_data: Final output from the workflow
-            status: Final status ('completed', 'failed', 'cancelled', 'timeout')
-            error_message: Error message if failed
-            error_node_id: ID of the node that caused failure
-            
-        Returns:
-            Updated ExecutionLog, or None if not found
-        """
         try:
             exec_log = await ExecutionLog.objects.aget(execution_id=execution_id)
         except ExecutionLog.DoesNotExist:
-            logger.error(f"Execution log not found: {execution_id}")
             return None
         
         completed_at = timezone.now()
+        duration_ms = int((completed_at - exec_log.started_at).total_seconds() * 1000) if exec_log.started_at else 0
         
-        # Calculate duration
-        duration_ms = None
-        if exec_log.started_at:
-            delta = completed_at - exec_log.started_at
-            duration_ms = int(delta.total_seconds() * 1000)
-        
-        # Count executed nodes
-        nodes_executed = await exec_log.node_logs.filter(
-            status__in=['completed', 'failed']
-        ).acount()
-        
-        # Sum up tokens used
+        # Calculate tokens and nodes from current DB state
+        nodes_executed = await exec_log.node_logs.filter(status__in=['completed', 'failed']).acount()
         tokens_used = 0
         async for node_log in exec_log.node_logs.all():
             tokens_used += node_log.output_data.get('tokens_used', 0)
         
-        # Update execution log
         exec_log.status = status
         exec_log.completed_at = completed_at
         exec_log.duration_ms = duration_ms
@@ -225,57 +235,29 @@ class ExecutionLogger:
         exec_log.tokens_used = tokens_used
         await exec_log.asave()
 
-        # Update Workflow stats (Total, Success, Average Duration)
+        # Update Workflow stats
         try:
             from django.db.models import F
-            from asgiref.sync import sync_to_async
-            
             @sync_to_async
             def update_workflow_stats():
-                workflow = exec_log.workflow
-                update_fields = ['total_executions']
-                workflow.total_executions = F('total_executions') + 1
-                
+                wf = exec_log.workflow
+                wf.total_executions = F('total_executions') + 1
                 if status == 'completed':
-                    workflow.successful_executions = F('successful_executions') + 1
-                    update_fields.append('successful_executions')
-                
-                if duration_ms is not None:
-                    if workflow.average_duration_ms is None:
-                        workflow.average_duration_ms = duration_ms
-                    else:
-                        workflow.average_duration_ms = (F('average_duration_ms') * 4 + duration_ms) / 5
-                    update_fields.append('average_duration_ms')
-                
-                workflow.save(update_fields=update_fields)
-
+                    wf.successful_executions = F('successful_executions') + 1
+                if duration_ms:
+                    wf.average_duration_ms = duration_ms if not wf.average_duration_ms else (wf.average_duration_ms * 4 + duration_ms) / 5
+                wf.save()
             await update_workflow_stats()
-        except Exception as e:
-            logger.warning(f"Failed to update workflow stats for {execution_id}: {e}")
+        except Exception: pass
         
-        # Broadcast completion
+        # Broadcast
         try:
-            from streaming.broadcaster import get_broadcaster
             broadcaster = get_broadcaster()
             if status == 'completed':
-                await broadcaster.workflow_completed(
-                    execution_id=str(execution_id),
-                    output=output_data or {},
-                    duration_ms=duration_ms or 0
-                )
-            elif status in ('failed', 'cancelled', 'timeout'):
-                await broadcaster.workflow_error(
-                    execution_id=str(execution_id),
-                    error=error_message,
-                    node_id=error_node_id
-                )
-        except Exception as e:
-            logger.warning(f"Failed to broadcast completion event: {e}")
-        
-        logger.info(
-            f"Execution {execution_id} completed: status={status}, "
-            f"duration={duration_ms}ms, nodes={nodes_executed}"
-        )
+                await broadcaster.workflow_completed(str(execution_id), output_data or {}, duration_ms)
+            else:
+                await broadcaster.workflow_error(str(execution_id), error_message, error_node_id)
+        except Exception: pass
         
         return exec_log
     
@@ -287,61 +269,31 @@ class ExecutionLogger:
         node_name: str = '',
         input_data: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None
-    ) -> NodeExecutionLog | None:
-        """
-        Log the start of a node execution.
+    ) -> None:
+        """Buffer node start."""
+        log_entry = {
+            '_op': 'start',
+            'node_id': node_id,
+            'node_type': node_type,
+            'node_name': node_name or node_id,
+            'status': 'running',
+            'started_at': timezone.now(),
+            'input_data': get_log_sanitizer().sanitize_dict(input_data or {}),
+            'config': get_log_sanitizer().sanitize_dict(config or {})
+        }
         
-        Args:
-            execution_id: UUID of the parent execution
-            node_id: ID of the node being executed
-            node_type: Type of node (e.g., 'http_request')
-            node_name: Display name of the node
-            input_data: Input data received by the node
-            config: Node configuration at execution time
-            
-        Returns:
-            Created NodeExecutionLog, or None if execution not found
-        """
+        buffer = await self._get_buffer(execution_id)
+        buffer.append(log_entry)
+        
+        if len(buffer) >= self.MAX_BUFFER_SIZE:
+             await self.flush_execution_logs(execution_id)
+        else:
+             self._schedule_flush(execution_id)
+
         try:
-            exec_log = await ExecutionLog.objects.aget(execution_id=execution_id)
-        except ExecutionLog.DoesNotExist:
-            logger.error(f"Execution log not found: {execution_id}")
-            return None
-        
-        # Determine execution order
-        execution_order = await exec_log.node_logs.acount()
-        
-        node_log = await NodeExecutionLog.objects.acreate(
-            execution=exec_log,
-            node_id=node_id,
-            node_type=node_type,
-            node_name=node_name or node_id,
-            status='running',
-            execution_order=execution_order,
-            started_at=timezone.now(),
-            input_data=input_data or {},
-            config=config or {}
-        )
-        
-        logger.debug(f"Node {node_id} started (order: {execution_order})")
-        
-        # Broadcast event
-        try:
-            from asgiref.sync import sync_to_async
-            await sync_to_async(send_event_sync)(
-                execution_id=execution_id,
-                event_type='node_started',
-                data={
-                    'node_id': node_id,
-                    'status': 'running',
-                    'input': input_data or {}
-                }
-            )
-        except Exception as e:
-            logger.warning(f"Failed to broadcast node_started event: {e}")
-        
-        return node_log
-    
+            await get_broadcaster().node_started(str(execution_id), node_id, node_type, node_name or node_id)
+        except Exception: pass
+
     async def log_node_complete(
         self,
         execution_id: UUID,
@@ -351,189 +303,105 @@ class ExecutionLogger:
         error_message: str = '',
         duration_ms: int = 0,
         warnings: list[Any] | None = None
-    ) -> NodeExecutionLog | None:
-        """
-        Log the completion of a node execution.
+    ) -> None:
+        """Buffer node completion."""
+        status = 'completed' if success else 'failed'
+        log_entry = {
+            '_op': 'complete',
+            'node_id': node_id,
+            'status': status,
+            'completed_at': timezone.now(),
+            'duration_ms': duration_ms,
+            'output_data': get_log_sanitizer().sanitize_dict(output_data or {}),
+            'error_message': error_message
+        }
         
-        Args:
-            execution_id: UUID of the parent execution
-            node_id: ID of the completed node
-            success: Whether execution succeeded
-            output_data: Output produced by the node
-            error_message: Error message if failed
-            duration_ms: Execution duration in milliseconds
-            
-        Returns:
-            Updated NodeExecutionLog, or None if not found
-        """
+        buffer = await self._get_buffer(execution_id)
+        buffer.append(log_entry)
+        
+        if len(buffer) >= self.MAX_BUFFER_SIZE or duration_ms < 100:
+             await self.flush_execution_logs(execution_id)
+        else:
+             self._schedule_flush(execution_id)
+
         try:
-            exec_log = await ExecutionLog.objects.aget(execution_id=execution_id)
-            node_log = await exec_log.node_logs.aget(node_id=node_id)
-        except (ExecutionLog.DoesNotExist, NodeExecutionLog.DoesNotExist):
-            logger.error(
-                f"Node log not found: execution={execution_id}, node={node_id}"
-            )
-            return None
-        
-        node_log.status = 'completed' if success else 'failed'
-        node_log.completed_at = timezone.now()
-        node_log.duration_ms = duration_ms
-        node_log.output_data = output_data or {}
-        node_log.error_message = error_message
-        await node_log.asave()
-        
-        # Broadcast event
-        try:
-            from asgiref.sync import sync_to_async
-            await sync_to_async(send_event_sync)(
-                execution_id=execution_id,
-                event_type='node_complete',
-                data={
-                    'node_id': node_id,
-                    'status': 'completed' if success else 'failed',
-                    'output': output_data or {},
-                    'error': error_message,
-                    'warnings': warnings or [],
-                    'duration_ms': duration_ms
-                }
-            )
-        except Exception as e:
-            # Don't fail execution if broadcast fails
-            logger.warning(f"Failed to broadcast node_complete event: {e}")
-        
-        log_level = logging.DEBUG if success else logging.WARNING
-        logger.log(
-            log_level,
-            f"Node {node_id} {'completed' if success else 'failed'}: "
-            f"duration={duration_ms}ms"
-        )
-        
-        return node_log
-    
+            broadcaster = get_broadcaster()
+            if success:
+                await broadcaster.node_completed(str(execution_id), node_id, output_data, duration_ms, status='completed')
+            else:
+                # If failed, send error event with status='failed'
+                await broadcaster.node_error(str(execution_id), node_id, error_message, status='failed')
+        except Exception: pass
+
     async def log_node_skip(
         self,
         execution_id: UUID,
         node_id: str,
         reason: str = ''
-    ) -> NodeExecutionLog | None:
-        """
-        Log that a node was skipped (e.g., conditional branch not taken).
+    ) -> None:
+        """Buffer node skip."""
+        log_entry = {
+            '_op': 'start',
+            'node_id': node_id,
+            'node_type': 'skipped_node',
+            'status': 'skipped',
+            'output_data': {'skip_reason': reason}
+        }
+        buffer = await self._get_buffer(execution_id)
+        buffer.append(log_entry)
+        await self.flush_execution_logs(execution_id)
         
-        Args:
-            execution_id: UUID of the parent execution
-            node_id: ID of the skipped node
-            reason: Reason for skipping
-            
-        Returns:
-            Created NodeExecutionLog, or None if execution not found
-        """
+        # Broadcast skip as a completed event with status='skipped'
         try:
-            exec_log = await ExecutionLog.objects.aget(execution_id=execution_id)
-        except ExecutionLog.DoesNotExist:
-            logger.error(f"Execution log not found: {execution_id}")
-            return None
-        
-        node_log = await NodeExecutionLog.objects.acreate(
-            execution=exec_log,
-            node_id=node_id,
-            node_type='unknown',  # We don't know type for skipped nodes
-            status='skipped',
-            execution_order=await exec_log.node_logs.acount(),
-            output_data={'skip_reason': reason}
-        )
-        
-        logger.debug(f"Node {node_id} skipped: {reason}")
-        
-        return node_log
-    
+             await get_broadcaster().node_completed(
+                 str(execution_id), 
+                 node_id, 
+                 output_preview={'skip_reason': reason}, 
+                 duration_ms=0, 
+                 status='skipped'
+             )
+        except Exception: pass
+
+    async def heartbeat(self, execution_id: UUID) -> None:
+        """Bump the updated_at timestamp to indicate the execution is still alive."""
+        try:
+            # We use update() to avoid full model load/save and be efficient
+            await ExecutionLog.objects.filter(execution_id=execution_id).aupdate(updated_at=timezone.now())
+        except Exception as e:
+            logger.warning(f"Failed to pulse heartbeat for {execution_id}: {e}")
+
     async def log_error(
         self,
         execution_id: UUID,
         node_id: str,
         error_message: str,
         stack_trace: str = ''
-    ) -> NodeExecutionLog | None:
-        """
-        Log an error for a node execution.
+    ) -> None:
+        """Buffer error details."""
+        log_entry = {
+            '_op': 'error',
+            'node_id': node_id,
+            'status': 'failed',
+            'completed_at': timezone.now(),
+            'error_message': error_message,
+            'error_stack': stack_trace
+        }
+        buffer = await self._get_buffer(execution_id)
+        buffer.append(log_entry)
+        await self.flush_execution_logs(execution_id)
         
-        Args:
-            execution_id: UUID of the parent execution
-            node_id: ID of the failed node
-            error_message: Human-readable error message
-            stack_trace: Full stack trace if available
-            
-        Returns:
-            Updated NodeExecutionLog, or None if not found
-        """
         try:
-            exec_log = await ExecutionLog.objects.aget(execution_id=execution_id)
-            node_log = await exec_log.node_logs.aget(node_id=node_id)
-        except (ExecutionLog.DoesNotExist, NodeExecutionLog.DoesNotExist):
-            logger.error(f"Cannot log error - node log not found: {node_id}")
-            return None
-        
-        node_log.status = 'failed'
-        node_log.completed_at = timezone.now()
-        node_log.error_message = error_message
-        node_log.error_stack = stack_trace
-        await node_log.asave()
-        
-        logger.error(f"Node {node_id} error: {error_message}")
-        
-        return node_log
+            await get_broadcaster().node_error(str(execution_id), node_id, error_message, status='failed')
+        except Exception: pass
     
-    def create_audit_entry(
-        self,
-        user,
-        action_type: str,
-        request_details: dict[str, Any],
-        workflow=None,
-        execution: ExecutionLog | None = None,
-        node_id: str = '',
-        response: dict[str, Any] | None = None,
-        ip_address: str = '',
-        user_agent: str = ''
-    ) -> AuditEntry:
-        """
-        Create an audit trail entry for sensitive actions.
-        
-        Args:
-            user: User who performed the action
-            action_type: Type of action (approval, credential_access, etc.)
-            request_details: Details of what was requested
-            workflow: Related workflow (optional)
-            execution: Related execution (optional)
-            node_id: Related node ID (optional)
-            response: User's response (optional)
-            ip_address: Client IP address
-            user_agent: Client user agent
-            
-        Returns:
-            Created AuditEntry
-        """
-        entry = AuditEntry.objects.create(
-            user=user,
-            workflow=workflow,
-            execution=execution,
-            node_id=node_id,
-            action_type=action_type,
-            request_details=request_details,
-            response=response or {},
-            ip_address=ip_address or None,
-            user_agent=user_agent
-        )
-        
-        logger.info(f"Audit entry created: {action_type} by user {user.id}")
-        
-        return entry
+    def create_audit_entry(self, **kwargs) -> AuditEntry:
+        """Audit entries are critical; bypass buffer and write immediately."""
+        return AuditEntry.objects.create(**kwargs)
 
 
-# Singleton instance for convenience
 _logger_instance: ExecutionLogger | None = None
 
-
 def get_execution_logger() -> ExecutionLogger:
-    """Get the global ExecutionLogger instance."""
     global _logger_instance
     if _logger_instance is None:
         _logger_instance = ExecutionLogger()

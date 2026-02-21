@@ -59,6 +59,34 @@ class ExecutionStreamView(APIView):
             """Generate SSE events."""
             broadcaster = get_broadcaster()
             
+            # --- FIX: Initial State Sync ---
+            # Check if execution is already done to catch missed events.
+            try:
+                # Use aget for async access to refresh status
+                current_exec = await ExecutionLog.objects.aget(execution_id=execution_id)
+                if current_exec.status in ('completed', 'failed', 'cancelled'):
+                    # It's already done! Send the final event immediately.
+                    data = {
+                        'status': current_exec.status,
+                        'output': current_exec.output_data,
+                        'duration_ms': current_exec.duration_ms,
+                    }
+                    if current_exec.status == 'failed':
+                         data['error'] = current_exec.error_message
+                         data['node_id'] = current_exec.error_node_id
+                    
+                    event_type = 'workflow_complete' if current_exec.status == 'completed' else 'workflow_error'
+                    
+                    # Yield formatted SSE
+                    yield StreamEvent(
+                        event_type=event_type,
+                        data=data
+                    ).format_sse()
+                    return
+            except Exception as e:
+                logger.error(f"Failed to check initial status for {execution_id}: {e}")
+            # -------------------------------
+            
             try:
                 async for event in broadcaster.stream_execution(
                     str(execution_id),
@@ -111,14 +139,12 @@ class ExecutionEventsHistoryView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Get query params
-        after_sequence = request.query_params.get('after_sequence', 0)
-        limit = min(int(request.query_params.get('limit', 100)), 500)
+        from .serializers import StreamHistoryFilterSerializer
+        serializer = StreamHistoryFilterSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
         
-        try:
-            after_sequence = int(after_sequence)
-        except ValueError:
-            after_sequence = 0
+        after_sequence = serializer.validated_data['after_sequence']
+        limit = serializer.validated_data['limit']
         
         # Get events from database
         events = StreamEventModel.objects.filter(

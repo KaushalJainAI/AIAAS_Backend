@@ -15,6 +15,12 @@ from rest_framework.response import Response
 from asgiref.sync import sync_to_async
 
 from .models import Workflow, WorkflowVersion, HITLRequest, ConversationMessage
+from .serializers import (
+    WorkflowSerializer, 
+    WorkflowVersionSerializer, 
+    HITLRequestSerializer, 
+    ConversationMessageSerializer
+)
 from compiler.validators import (
     validate_dag,
     validate_credentials,
@@ -23,6 +29,7 @@ from compiler.validators import (
 )
 from logs.models import ExecutionLog
 from executor.trigger_manager import get_trigger_manager
+from executor.king import AuthorizationError, StateConflictError
 
 logger = logging.getLogger(__name__)
 
@@ -85,51 +92,25 @@ def workflow_list(request):
         if status_filter:
             qs = qs.filter(status=status_filter)
         
-        workflows = list(qs.order_by('-updated_at').values(
-            'id', 'name', 'slug', 'description', 'status',
-            'icon', 'color', 'tags', 'execution_count',
-            'last_executed_at', 'created_at', 'updated_at'
-        ))
-        
-        # Add node count
-        for w in workflows:
-            wf = qs.get(id=w['id'])
-            w['node_count'] = len(wf.nodes) if isinstance(wf.nodes, list) else 0
-        
-        return Response(workflows)
+        serializer = WorkflowSerializer(qs.order_by('-updated_at'), many=True)
+        return Response(serializer.data)
     
     elif request.method == 'POST':
-        data = request.data
+        # Use serializer for initial validation
+        serializer = WorkflowSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         
-        # Ensure unique name
-        base_name = data.get('name', 'Untitled Workflow')
+        # Ensure unique name (manual logic preserved as requested by nature of app)
+        base_name = serializer.validated_data.get('name', 'Untitled Workflow')
         name = base_name
         counter = 1
         while Workflow.objects.filter(user=request.user, name=name).exists():
             name = f"{base_name} ({counter})"
             counter += 1
         
-        workflow = Workflow.objects.create(
-            user=request.user,
-            name=name,
-            description=data.get('description', ''),
-            nodes=data.get('nodes', []),
-            edges=data.get('edges', []),
-            viewport=data.get('viewport', {}),
-            workflow_settings=data.get('workflow_settings', {}),
-            status=data.get('status', 'draft'),
-            icon=data.get('icon', ''),
-            color=data.get('color', '#6366f1'),
-            tags=data.get('tags', []),
-        )
+        workflow = serializer.save(user=request.user, name=name)
         
-        return Response({
-            'id': workflow.id,
-            'name': workflow.name,
-            'slug': workflow.slug,
-            'status': workflow.status,
-            'created_at': workflow.created_at,
-        }, status=status.HTTP_201_CREATED)
+        return Response(WorkflowSerializer(workflow).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET', 'PUT', 'DELETE'])
@@ -143,39 +124,26 @@ def workflow_detail(request, workflow_id: int):
     workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
     
     if request.method == 'GET':
-        return Response({
-            'id': workflow.id,
-            'name': workflow.name,
-            'slug': workflow.slug,
-            'description': workflow.description,
-            'nodes': workflow.nodes,
-            'edges': workflow.edges,
-            'viewport': workflow.viewport,
-            'workflow_settings': workflow.workflow_settings,
-            'supervision_level': workflow.supervision_level,
-            'llm_provider': workflow.llm_provider,
-            'llm_model': workflow.llm_model,
-            'llm_credential_id': workflow.llm_credential_id,
-            'status': workflow.status,
-            'icon': workflow.icon,
-            'color': workflow.color,
-            'tags': workflow.tags,
-            'execution_count': workflow.execution_count,
-            'last_executed_at': workflow.last_executed_at,
-            'created_at': workflow.created_at,
-            'updated_at': workflow.updated_at,
-        })
+        return Response(WorkflowSerializer(workflow).data)
     
     elif request.method == 'PUT':
-        data = request.data
+        # Use serializer for update validation
+        serializer = WorkflowSerializer(workflow, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
         
         # VERSIONING: Create a snapshot of the current state before update
-        # This ensures "Never mutate without versioning" rule
         last_version = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number').first()
         next_version_num = (last_version.version_number + 1) if last_version else 1
         
-        # Limit version history to 10 versions
-        MAX_VERSIONS = 10
+        # [OMITTED VERSION LIMIT LOGIC FOR BREVITY - PRESERVED IN ACTUAL FILE]
+        # (I will keep the version limit logic in the actual implementation)
+        
+        # VERSIONING: Create a snapshot of the current state before update
+        last_version = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number').first()
+        next_version_num = (last_version.version_number + 1) if last_version else 1
+        
+        # Limit version history to 50 versions
+        MAX_VERSIONS = 50
         current_versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('version_number')
         if current_versions.count() >= MAX_VERSIONS:
             # Delete oldest versions to keep total at MAX_VERSIONS after new one
@@ -195,133 +163,185 @@ def workflow_detail(request, workflow_id: int):
             change_summary="Auto-saved before modification",
         )
 
-        # Update fields
-        if 'name' in data:
-            workflow.name = data['name']
-        if 'description' in data:
-            workflow.description = data['description']
-        if 'nodes' in data:
-            workflow.nodes = data['nodes']
-        if 'edges' in data:
-            workflow.edges = data['edges']
-        if 'viewport' in data:
-            workflow.viewport = data['viewport']
-        if 'workflow_settings' in data:
-            workflow.workflow_settings = data['workflow_settings']
-        if 'status' in data:
-            new_status = data['status']
-            if new_status == 'active' and workflow.status != 'active':
-                # Run validations before allowing deployment
-                temp_nodes = data.get('nodes', workflow.nodes)
-                temp_edges = data.get('edges', workflow.edges)
-                
-                # 1. Static Validation
-                errors = []
-                errors.extend(validate_dag(temp_nodes, temp_edges))
-                errors.extend(validate_node_configs(temp_nodes))
-                
-                from credentials.models import Credential
-                user_credentials = set(map(str, Credential.objects.filter(user=request.user).values_list('id', flat=True)))
-                errors.extend(validate_credentials(temp_nodes, user_credentials))
-                errors.extend(validate_type_compatibility(temp_nodes, temp_edges))
-                
-                if errors:
-                    # Convert Pydantic error models to dicts for JSON response
-                    error_details = [
-                        e.model_dump(by_alias=True) if hasattr(e, 'model_dump') else str(e) 
-                        for e in errors
-                    ]
-                    return Response({
-                        "error": "Validation failed",
-                        "message": "Workflow settings or structure are invalid.",
-                        "details": error_details
-                    }, status=status.HTTP_400_BAD_REQUEST)
-                
-                # 2. Strict Runtime Validation: Functional Proof of Success
-                successful_executions = ExecutionLog.objects.filter(
-                    workflow=workflow, 
-                    status='completed'
-                ).order_by('-completed_at')
-                
-                proof_found = False
-                for log in successful_executions:
-                    snapshot = log.workflow_snapshot
-                    if not snapshot:
-                        continue
-                        
-                    snap_nodes = snapshot.get('nodes', [])
-                    snap_edges = snapshot.get('edges', [])
-                    
-                    if is_functionally_identical(temp_nodes, temp_edges, snap_nodes, snap_edges):
-                        proof_found = True
-                        break
-                
-                if not proof_found:
-                    return Response({
-                        "error": "Deployment rejected",
-                        "message": "The current workflow configuration has not been successfully tested yet. Please run a successful test before deploying.",
-                        "tip": "Moving nodes (layout changes) is allowed, but changing node settings or connections requires a new successful run."
-                    }, status=status.HTTP_400_BAD_REQUEST)
-
-            workflow.status = new_status
+        # Perform custom logic for status change if present
+        new_status = serializer.validated_data.get('status')
+        if new_status == 'active' and workflow.status != 'active':
+            # Run validations before allowing deployment
+            temp_nodes = serializer.validated_data.get('nodes', workflow.nodes)
+            temp_edges = serializer.validated_data.get('edges', workflow.edges)
             
+            # 1. Static Validation
+            errors = []
+            errors.extend(validate_dag(temp_nodes, temp_edges))
+            errors.extend(validate_node_configs(temp_nodes))
+            
+            from credentials.models import Credential
+            user_credentials = set(map(str, Credential.objects.filter(user=request.user).values_list('id', flat=True)))
+            errors.extend(validate_credentials(temp_nodes, user_credentials))
+            errors.extend(validate_type_compatibility(temp_nodes, temp_edges))
+            
+            if errors:
+                # Convert Pydantic error models to dicts for JSON response
+                error_details = [
+                    e.model_dump(by_alias=True) if hasattr(e, 'model_dump') else str(e) 
+                    for e in errors
+                ]
+                return Response({
+                    "error": "Validation failed",
+                    "message": "Workflow settings or structure are invalid.",
+                    "details": error_details
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 2. Strict Runtime Validation: Functional Proof of Success
+            from logs.models import ExecutionLog
+            successful_executions = ExecutionLog.objects.filter(
+                workflow=workflow, 
+                status='completed'
+            ).order_by('-completed_at')
+            
+            proof_found = False
+            for log in successful_executions:
+                snapshot = log.workflow_snapshot
+                if not snapshot:
+                    continue
+                    
+                snap_nodes = snapshot.get('nodes', [])
+                snap_edges = snapshot.get('edges', [])
+                
+                if is_functionally_identical(temp_nodes, temp_edges, snap_nodes, snap_edges):
+                    proof_found = True
+                    break
+            
+            if not proof_found:
+                return Response({
+                    "error": "Deployment rejected",
+                    "message": "The current workflow configuration has not been successfully tested yet. Please run a successful test before deploying.",
+                    "tip": "Moving nodes (layout changes) is allowed, but changing node settings or connections requires a new successful run."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
             # Trigger Lifecycle Management
             try:
+                from executor.trigger_manager import get_trigger_manager
                 mgr = get_trigger_manager()
-                if new_status == 'active':
-                    # Only register if we're moving TO active
-                    mgr.register_triggers(workflow)
-                elif new_status in ('draft', 'paused', 'archived'):
-                    # Clear triggers if moving FROM active
-                    mgr.unregister_triggers(workflow.id)
+                mgr.register_triggers(workflow)
             except Exception as e:
                 # Log but don't fail the request if trigger registration fails
                 logger.error(f"Failed to manage triggers for workflow {workflow.id}: {e}")
+        elif new_status and new_status in ('draft', 'paused', 'archived') and workflow.status == 'active':
+            try:
+                from executor.trigger_manager import get_trigger_manager
+                mgr = get_trigger_manager()
+                mgr.unregister_triggers(workflow.id)
+            except Exception as e:
+                logger.error(f"Failed to unregister triggers for workflow {workflow.id}: {e}")
 
-        if 'icon' in data:
-            workflow.icon = data['icon']
-        if 'color' in data:
-            workflow.color = data['color']
-        if 'tags' in data:
-            workflow.tags = data['tags']
-        if 'supervision_level' in data:
-            # Validate supervision level
-            valid_levels = ['error_only', 'full', 'none']
-            if data['supervision_level'] in valid_levels:
-                workflow.supervision_level = data['supervision_level']
-        
-        # LLM provider settings
-        if 'llm_provider' in data:
-            valid_providers = ['openrouter', 'openai', 'gemini', 'ollama', 'perplexity']
-            if data['llm_provider'] in valid_providers:
-                workflow.llm_provider = data['llm_provider']
-        if 'llm_model' in data:
-            workflow.llm_model = data['llm_model']
-        if 'llm_credential_id' in data:
-            from credentials.models import Credential
-            cred_id = data['llm_credential_id']
-            if cred_id:
-                # Validate credential belongs to user
-                try:
-                    cred = Credential.objects.get(id=cred_id, user=request.user)
-                    workflow.llm_credential = cred
-                except Credential.DoesNotExist:
-                    pass  # Ignore invalid credential
-            else:
-                workflow.llm_credential = None
-        
-        workflow.save()
+        # Save through serializer
+        workflow = serializer.save()
         
         return Response({
-            'id': workflow.id,
-            'name': workflow.name,
-            'updated_at': workflow.updated_at,
+            **WorkflowSerializer(workflow).data,
             'version_created': next_version_num
         })
     
     elif request.method == 'DELETE':
         workflow.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def deploy_workflow(request, workflow_id: int):
+    """
+    Validates and activates a workflow.
+    Ensures the workflow structure is valid and has a successful test run.
+    """
+    workflow = await Workflow.objects.filter(id=workflow_id, user=request.user).afirst()
+    if not workflow:
+        return Response({'error': 'Workflow not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # 1. Static Validation
+    errors = []
+    errors.extend(validate_dag(workflow.nodes, workflow.edges))
+    errors.extend(validate_node_configs(workflow.nodes))
+    
+    from credentials.models import Credential
+    user_credentials = set(map(str, await sync_to_async(list)(Credential.objects.filter(user=request.user).values_list('id', flat=True))))
+    errors.extend(validate_credentials(workflow.nodes, user_credentials))
+    errors.extend(validate_type_compatibility(workflow.nodes, workflow.edges))
+    
+    if errors:
+        error_details = [
+            e.model_dump(by_alias=True) if hasattr(e, 'model_dump') else str(e) 
+            for e in errors
+        ]
+        return Response({
+            "error": "Validation failed",
+            "message": "Workflow settings or structure are invalid.",
+            "details": error_details
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # 2. Strict Runtime Validation: Check for Proof of Success
+    successful_executions = await sync_to_async(list)(ExecutionLog.objects.filter(
+        workflow=workflow, 
+        status='completed'
+    ).order_by('-id')[:1]) # Get last success
+    
+    proof_found = False
+    for log in successful_executions:
+        snapshot = log.workflow_snapshot
+        if snapshot and is_functionally_identical(workflow.nodes, workflow.edges, snapshot.get('nodes', []), snapshot.get('edges', [])):
+            proof_found = True
+            break
+            
+    if not proof_found:
+        return Response({
+            "error": "Deployment rejected",
+            "message": "The current workflow configuration has not been successfully tested yet. Please run a successful test before deploying.",
+            "tip": "Moving nodes (layout changes) is allowed, but changing node settings or connections requires a new successful run."
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    workflow.status = 'active'
+    await workflow.asave()
+    
+    # Register Triggers
+    try:
+        mgr = get_trigger_manager()
+        await sync_to_async(mgr.register_triggers)(workflow)
+    except Exception as e:
+        logger.exception(f"Failed to register triggers for workflow {workflow.id}: {e}")
+        return Response({'error': f'Deployment partially failed: {str(e)}'}, status=500)
+    
+    return Response({
+        'status': 'active',
+        'message': 'Workflow deployed successfully'
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def undeploy_workflow(request, workflow_id: int):
+    """
+    Deactivates a workflow and unregisters its triggers.
+    """
+    workflow = await Workflow.objects.filter(id=workflow_id, user=request.user).afirst()
+    if not workflow:
+        return Response({'error': 'Workflow not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    workflow.status = 'draft' # Move back to draft
+    await workflow.asave()
+    
+    # Unregister Triggers
+    try:
+        mgr = get_trigger_manager()
+        await sync_to_async(mgr.unregister_triggers)(workflow.id)
+    except Exception as e:
+        logger.exception(f"Failed to unregister triggers for workflow {workflow.id}: {e}")
+        return Response({'error': f'Undeployment cleanup failed: {str(e)}'}, status=500)
+        
+    return Response({
+        'status': 'draft',
+        'message': 'Workflow undeployed successfully'
+    })
 
 
 # ======================== Execution Control API ========================
@@ -348,10 +368,15 @@ async def execute_workflow(request, workflow_id: int):
     # Get orchestrator
     orchestrator = get_orchestrator(request.user.id)
     
-    # Auto-inject user credentials
-    from executor.credential_utils import get_user_credentials
-    user_credentials = await sync_to_async(get_user_credentials)(request.user.id)
+    # Apply user's LLM settings for orchestrator thought generation
+    llm_provider = request.data.get('llm_provider')
+    llm_model = request.data.get('llm_model')
+    llm_credential = request.data.get('llm_credential')
+    if llm_provider or llm_model or llm_credential:
+        await orchestrator.update_settings(llm_type=llm_provider, llm_model=llm_model, credential_id=llm_credential)
     
+    # Auto-inject user credentials
+    from executor.credential_utils import get_workflow_credentials
     # Build workflow JSON
     workflow_json = {
         'id': workflow.id,
@@ -360,13 +385,18 @@ async def execute_workflow(request, workflow_id: int):
         'settings': workflow.workflow_settings,
     }
     
-    # Start execution
+    # Decrypt ONLY required credentials for this workflow
+    from asgiref.sync import sync_to_async
+    active_creds = await sync_to_async(get_workflow_credentials)(request.user.id, workflow_json)
+    
+    # Start Execution via Orchestrator
     handle = await orchestrator.start(
         workflow_json=workflow_json,
         user_id=request.user.id,
         input_data=input_data,
-        credentials=user_credentials,
-        supervision=workflow.supervision_level,  # Use workflow's setting
+        credentials=active_creds, # Pass injected creds
+        supervision=workflow.supervision_level, 
+        context=workflow.context,
     )
     
     return Response({
@@ -375,6 +405,35 @@ async def execute_workflow(request, workflow_id: int):
         'state': handle.state.value,
         'started_at': handle.started_at,
     })
+    
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def update_orchestrator_settings(request):
+    """
+    Update the orchestrator's LLM settings (provider & model).
+    Called from the Orchestrator page when user changes the model config.
+    """
+    from executor.king import get_orchestrator
+    
+    llm_provider = request.data.get('llm_provider')
+    llm_model = request.data.get('llm_model')
+    llm_credential = request.data.get('llm_credential')
+    
+    if not llm_provider and not llm_model and not llm_credential:
+        return Response({'error': 'No settings provided'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    orchestrator = get_orchestrator(request.user.id)
+    await orchestrator.update_settings(llm_type=llm_provider, llm_model=llm_model, credential_id=llm_credential)
+    
+    return Response({
+        'status': 'ok',
+        'llm_type': orchestrator.llm_type,
+        'llm_model': orchestrator.llm_model,
+        'credential_id': orchestrator.credential_id,
+    })
+
 
 
 @api_view(['POST'])
@@ -384,11 +443,20 @@ async def pause_execution(request, execution_id: str):
     from executor.king import get_orchestrator
     
     orchestrator = get_orchestrator(request.user.id)
-    result = await orchestrator.pause(UUID(execution_id))
+    
+    try:
+        exec_uuid = UUID(execution_id)
+        result = await orchestrator.pause(exec_uuid)
+    except ValueError:
+        return Response({'error': 'Invalid execution ID format'}, status=status.HTTP_400_BAD_REQUEST)
+    except AuthorizationError:
+        return Response({'error': 'Execution not found or not authorized'}, status=status.HTTP_404_NOT_FOUND)
+    except StateConflictError as e:
+        return Response({'error': str(e)}, status=status.HTTP_409_CONFLICT)
     
     if result:
         return Response({'status': 'paused', 'execution_id': execution_id})
-    return Response({'error': 'Could not pause execution'}, status=400)
+    return Response({'error': 'Could not pause execution due to an internal orchestrator state issue'}, status=500)
 
 
 @api_view(['POST'])
@@ -398,11 +466,20 @@ async def resume_execution(request, execution_id: str):
     from executor.king import get_orchestrator
     
     orchestrator = get_orchestrator(request.user.id)
-    result = await orchestrator.resume(UUID(execution_id))
+    
+    try:
+        exec_uuid = UUID(execution_id)
+        result = await orchestrator.resume(exec_uuid)
+    except ValueError:
+        return Response({'error': 'Invalid execution ID format'}, status=status.HTTP_400_BAD_REQUEST)
+    except AuthorizationError:
+        return Response({'error': 'Execution not found or not authorized'}, status=status.HTTP_404_NOT_FOUND)
+    except StateConflictError as e:
+        return Response({'error': str(e)}, status=status.HTTP_409_CONFLICT)
     
     if result:
         return Response({'status': 'resumed', 'execution_id': execution_id})
-    return Response({'error': 'Could not resume execution'}, status=400)
+    return Response({'error': 'Could not resume execution due to an internal orchestrator state issue'}, status=500)
 
 
 @api_view(['POST'])
@@ -412,21 +489,36 @@ async def stop_execution(request, execution_id: str):
     from executor.king import get_orchestrator
     
     orchestrator = get_orchestrator(request.user.id)
-    result = await orchestrator.stop(UUID(execution_id))
+    
+    try:
+        exec_uuid = UUID(execution_id)
+        result = await orchestrator.stop(exec_uuid)
+    except ValueError:
+        return Response({'error': 'Invalid execution ID format'}, status=status.HTTP_400_BAD_REQUEST)
+    except AuthorizationError:
+        return Response({'error': 'Execution not found or not authorized'}, status=status.HTTP_404_NOT_FOUND)
+    except StateConflictError as e:
+        # Stop is usually idempotent, but if we raise a conflict, return it
+        return Response({'error': str(e)}, status=status.HTTP_409_CONFLICT)
     
     if result:
         return Response({'status': 'stopped', 'execution_id': execution_id})
-    return Response({'error': 'Could not stop execution'}, status=400)
+    return Response({'error': 'Could not stop execution'}, status=500)
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def execution_status(request, execution_id: str):
+async def execution_status(request, execution_id: str):
     """Get current execution status."""
     from executor.king import get_orchestrator
     
     orchestrator = get_orchestrator(request.user.id)
-    handle = orchestrator.get_status(UUID(execution_id))
+    
+    try:
+        exec_uuid = UUID(execution_id)
+        handle = await orchestrator.get_status(exec_uuid)
+    except ValueError:
+        return Response({'error': 'Invalid execution ID format'}, status=status.HTTP_400_BAD_REQUEST)
     
     if not handle:
         return Response({'error': 'Execution not found or not authorized'}, status=404)
@@ -460,22 +552,8 @@ def pending_hitl_requests(request):
         status='pending'
     ).order_by('-created_at')
     
-    result = [
-        {
-            'request_id': str(r.request_id),
-            'type': r.request_type,
-            'title': r.title,
-            'message': r.message,
-            'options': r.options,
-            'node_id': r.node_id,
-            'execution_id': str(r.execution.execution_id) if r.execution else None,
-            'timeout_seconds': r.timeout_seconds,
-            'created_at': r.created_at,
-        }
-        for r in requests
-    ]
-    
-    return Response({'pending': result, 'count': len(result)})
+    serializer = HITLRequestSerializer(requests, many=True)
+    return Response({'pending': serializer.data, 'count': len(serializer.data)})
 
 
 @api_view(['POST'])
@@ -567,9 +645,9 @@ def conversation_messages(request, conversation_id: str = None):
         messages = ConversationMessage.objects.filter(
             user=request.user,
             conversation_id=conversation_id
-        ).order_by('created_at').values('role', 'content', 'metadata', 'created_at')
+        ).order_by('created_at')
         
-        return Response({'messages': list(messages)})
+        return Response({'messages': ConversationMessageSerializer(messages, many=True).data})
     
     elif request.method == 'POST':
         content = request.data.get('content', '')
@@ -631,45 +709,36 @@ def workflow_versions(request, workflow_id: int):
     workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
     
     if request.method == 'GET':
-        versions = list(
-            WorkflowVersion.objects
-            .filter(workflow=workflow)
-            .order_by('-version_number')
-            .values('id', 'version_number', 'label', 'change_summary', 'created_at')
-        )
-        return Response({'versions': versions})
+        versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number')
+        return Response({'versions': WorkflowVersionSerializer(versions, many=True).data})
     
-    elif request.method == 'POST':
+        # Use serializer for validation
+        serializer = WorkflowVersionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
         # Get next version number
         last_version = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number').first()
         next_version = (last_version.version_number + 1) if last_version else 1
         
-        # Limit version history to 10 versions
+        # Limit version history logic (redundant but kept for specific manual triggers)
         MAX_VERSIONS = 10
         current_versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('version_number')
         if current_versions.count() >= MAX_VERSIONS:
-            # Delete oldest versions to keep total at MAX_VERSIONS after new one
             to_delete_count = current_versions.count() - MAX_VERSIONS + 1
             if to_delete_count > 0:
                 to_delete_ids = list(current_versions.values_list('id', flat=True)[:to_delete_count])
                 WorkflowVersion.objects.filter(id__in=to_delete_ids).delete()
 
-        version = WorkflowVersion.objects.create(
+        version = serializer.save(
             workflow=workflow,
             version_number=next_version,
-            label=request.data.get('label', ''),
             nodes=workflow.nodes,
             edges=workflow.edges,
             workflow_settings=workflow.workflow_settings,
-            created_by=request.user,
-            change_summary=request.data.get('change_summary', ''),
+            created_by=request.user
         )
         
-        return Response({
-            'id': version.id,
-            'version_number': version.version_number,
-            'created_at': version.created_at,
-        }, status=status.HTTP_201_CREATED)
+        return Response(WorkflowVersionSerializer(version).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['POST'])
@@ -707,12 +776,18 @@ async def generate_workflow(request):
     description = request.data.get('description', '')
     credential_id = request.data.get('credential_id')
     conversation_id = request.data.get('conversation_id')
+    provider = request.data.get('provider')
+    model = request.data.get('model')
     
     if not description:
         return Response({'error': 'Description is required'}, status=400)
 
     from executor.king import get_orchestrator
     orchestrator = get_orchestrator(request.user.id)
+    
+    # Update settings if provided
+    if provider or model:
+        orchestrator.update_settings(llm_type=provider, llm_model=model)
     
     result = await orchestrator.create_workflow_from_intent(
         prompt=description,
@@ -795,19 +870,18 @@ async def modify_workflow(request, workflow_id: int):
     modification = request.data.get('modification', '')
     credential_id = request.data.get('credential_id')
     conversation_id = request.data.get('conversation_id')
+    provider = request.data.get('provider')
+    model = request.data.get('model')
     
     if not modification:
         return Response({'error': 'Modification description is required'}, status=400)
-    
-    current_workflow = {
-        'name': workflow.name,
-        'description': workflow.description,
-        'nodes': workflow.nodes,
-        'edges': workflow.edges,
-    }
-    
+
     from executor.king import get_orchestrator
     orchestrator = get_orchestrator(request.user.id)
+    
+    # Update settings if provided
+    if provider or model:
+        orchestrator.update_settings(llm_type=provider, llm_model=model)
     
     result = await orchestrator.modify_workflow(
         workflow=current_workflow,
@@ -931,11 +1005,12 @@ async def context_aware_chat(request):
     node_id = request.data.get('node_id')
     conversation_id = request.data.get('conversation_id')
     credential_id = request.data.get('credential_id')
+    provider = request.data.get('provider')
     
     if not message:
         return Response({'error': 'Message is required'}, status=400)
     
-    chat = ContextAwareChat(user_id=request.user.id)
+    chat = ContextAwareChat(user_id=request.user.id, llm_type=provider or 'openrouter')
     
     result = await chat.send_message(
         message=message,
@@ -970,34 +1045,65 @@ async def execute_partial(request, workflow_id: int = None):
     import logging
     logger = logging.getLogger(__name__)
 
-    node_id = request.data.get('node_id')
-    node_type = request.data.get('node_type')
-    input_data = request.data.get('input_data', {})
-    config = request.data.get('config', {})
-    
-    if not node_id or not node_type:
-        logger.error(f"Partial execution missing required fields: node_id={node_id}, node_type={node_type}")
-        return Response({'error': 'node_id and node_type are required'}, status=400)
-    
-    registry = get_registry()
-    
-    if not registry.has_handler(node_type):
-        logger.error(f"Partial execution unknown node type: {node_type}")
-        return Response({'error': f'Unknown node type: {node_type}'}, status=400)
-    
-    handler = registry.get_handler(node_type)
-    
-    logger.info(f"Executing partial node: {node_type} ({node_id})")
-    
-    # Create context
-    context = ExecutionContext(
-        execution_id=uuid4(),
-        user_id=request.user.id,
-        workflow_id=workflow_id or 0,
-        node_id=node_id
-    )
-    
+    logger.debug(f"Partial execution request: {request.data}")
     try:
+        node_id = request.data.get('node_id')
+        node_type = request.data.get('node_type')
+        input_data = request.data.get('input_data', {})
+        config = request.data.get('config', {})
+        
+        # Also try to get workflow_id from request data if not in URL
+        if not workflow_id:
+            raw_workflow_id = request.data.get('workflow_id')
+            if raw_workflow_id:
+                try:
+                    workflow_id = int(raw_workflow_id)
+                except (ValueError, TypeError):
+                    pass
+        
+        if not node_id or not node_type:
+            logger.error(f"Partial execution missing required fields: node_id={node_id}, node_type={node_type}")
+            return Response({'detail': 'node_id and node_type are required'}, status=400)
+        
+        registry = get_registry()
+        
+        if not registry.has_handler(node_type):
+            logger.error(f"Partial execution unknown node type: {node_type}")
+            return Response({'detail': f'Unknown node type: {node_type}'}, status=400)
+        
+        handler = registry.get_handler(node_type)
+        
+        # --- Fetch credentials referenced in the node config ---
+        credentials = {}
+        # Support multiple field names for the credential ID
+        credential_id = config.get('credential') or config.get('credential_id') or config.get('credentialId')
+        
+        if credential_id:
+            from credentials.manager import CredentialManager
+            cred_manager = CredentialManager()
+            try:
+                cred_data = await cred_manager.get_credential(
+                    credential_id=credential_id,
+                    user_id=request.user.id
+                )
+                if cred_data:
+                    # Store under both raw and string key to handle int/string mismatches
+                    credentials[credential_id] = cred_data
+                    credentials[str(credential_id)] = cred_data
+                else:
+                    logger.warning(f"Credential {credential_id} not found for user {request.user.id}")
+            except Exception as e:
+                logger.error(f"Failed to fetch credential {credential_id}: {e}")
+        
+        # Create context with credentials
+        context = ExecutionContext(
+            execution_id=uuid4(),
+            user_id=request.user.id,
+            workflow_id=workflow_id or 0,
+            node_id=node_id,
+            credentials=credentials,
+        )
+        
         result = await handler.execute(input_data, config, context)
         
         if result.success:
@@ -1005,12 +1111,14 @@ async def execute_partial(request, workflow_id: int = None):
             items = [item.model_dump() for item in result.items]
             return Response({'items': items})
         else:
-            return Response({'error': result.error}, status=400)
+            error_msg = result.error or "Unknown node execution error"
+            logger.warning(f"Partial execution handler returned error: {error_msg}")
+            return Response({'detail': error_msg}, status=400)
             
     except Exception as e:
         import traceback
-        logger.error(f"Partial execution failed: {e}\n{traceback.format_exc()}")
-        return Response({'error': str(e)}, status=500)
+        logger.error(f"Partial execution failed with exception: {e}\n{traceback.format_exc()}")
+        return Response({'detail': str(e)}, status=500)
 
 
 # ======================== Thought History API ========================
@@ -1262,3 +1370,106 @@ def receive_webhook(request, user_id, webhook_path):
         "message": "Workflow execution queued"
     }, status=202)
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def background_tasks(request):
+    """
+    Get active background tasks for the user.
+    
+    Includes:
+    - Running workflow executions
+    - Document processing/indexing tasks (if possible to track)
+    """
+    from logs.models import ExecutionLog
+    from django.utils import timezone
+    from datetime import timedelta
+    
+    # Get running executions from the last 24 hours
+    since = timezone.now() - timedelta(hours=24)
+    
+    # On-demand Zombicide: Mark executions as failed if heartbeat is lost
+    try:
+        zombie_cutoff = timezone.now() - timedelta(minutes=5)
+        # We REAP 'running' and 'pending' that haven't been touched in 5m
+        
+        @sync_to_async
+        def find_and_reap_zombies(cutoff, user_id):
+            zombies = ExecutionLog.objects.filter(
+                user_id=user_id,
+                status__in=['running', 'pending'],
+                updated_at__lt=cutoff
+            )
+            zombie_ids = list(zombies.values_list('execution_id', flat=True))
+            if zombie_ids:
+                zombies.update(
+                    status='failed',
+                    error_message='Execution stalled (heartbeat loss detected during active task check)',
+                    completed_at=timezone.now()
+                )
+            return zombie_ids
+
+        zombie_ids = await find_and_reap_zombies(zombie_cutoff, request.user.id)
+        
+        if zombie_ids:
+            logger.warning(f"On-demand Zombicide for user {request.user.id}: Reaped {len(zombie_ids)} zombies.")
+            # Broadcast failures
+            from streaming.broadcaster import get_broadcaster
+            broadcaster = get_broadcaster()
+            for eid in zombie_ids:
+                asyncio.create_task(broadcaster.workflow_error(str(eid), "Stalled", ""))
+    except Exception as e:
+        logger.error(f"Error in on-demand Zombicide: {e}")
+
+    active_executions = []
+    async for log in ExecutionLog.objects.filter(
+        user_id=request.user.id,
+        status__in=['running', 'pending', 'waiting_human'],
+        created_at__gt=since
+    ).select_related('workflow').order_by('-created_at'):
+        active_executions.append({
+            'id': str(log.execution_id),
+            'type': 'workflow_execution',
+            'name': log.workflow.name if log.workflow else f"Execution {str(log.execution_id)[:8]}",
+            'status': log.status,
+            'started_at': log.created_at.isoformat(),
+            'workflow_id': log.workflow_id,
+            'supervision_level': log.workflow.supervision_level if log.workflow else 'none',
+        })
+    
+    history_executions = []
+    async for log in ExecutionLog.objects.filter(
+        user_id=request.user.id,
+        status__in=['completed', 'failed', 'cancelled']
+    ).select_related('workflow').order_by('-created_at')[:10]:
+        history_executions.append({
+            'id': str(log.execution_id),
+            'type': 'workflow_execution',
+            'name': log.workflow.name if log.workflow else f"Execution {str(log.execution_id)[:8]}",
+            'status': log.status,
+            'started_at': log.created_at.isoformat(),
+            'workflow_id': log.workflow_id,
+            'supervision_level': log.workflow.supervision_level if log.workflow else 'none',
+        })
+    
+    return Response({
+        'tasks': active_executions,
+        'history': history_executions,
+        'count': len(active_executions)
+    })
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def thought_history(request, execution_id):
+    """
+    Get AI thought history for a specific execution.
+    """
+    from .chat_context import get_thought_history
+    
+    history = get_thought_history(str(execution_id))
+    thoughts = history.get_thoughts()
+    
+    return Response({
+        'execution_id': str(execution_id),
+        'thoughts': thoughts,
+        'summary': history.to_summary()
+    })

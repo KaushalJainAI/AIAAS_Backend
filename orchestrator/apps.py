@@ -12,13 +12,15 @@ class OrchestratorConfig(AppConfig):
         """
         import sys
         import os
+        import orchestrator.signals  # Register signals
 
         # Avoid running during management commands like migrate or makemigrations
-        if any(cmd in sys.argv for cmd in ['migrate', 'makemigrations', 'collectstatic', 'test']):
+        if any(cmd in sys.argv for cmd in ['migrate', 'makemigrations', 'collectstatic', 'test', 'showmigrations']):
             return
 
-        # Avoid running in the main process if we're in a reloader process
-        if os.environ.get('RUN_MAIN') == 'true' or not os.environ.get('DJANGO_SETTINGS_MODULE'):
+        # Only run in the reloader's child process (where the actual app runs)
+        # to avoid triggering DB warnings and duplicate registrations.
+        if os.environ.get('RUN_MAIN') != 'true' and os.environ.get('DJANGO_SETTINGS_MODULE'):
             return
 
         try:

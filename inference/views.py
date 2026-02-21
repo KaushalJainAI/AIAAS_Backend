@@ -27,6 +27,7 @@ from .engine import (
 
 from .utils import validate_file_upload
 from django.core.exceptions import ValidationError
+from .serializers import DocumentSerializer, RagSearchSerializer, RagQuerySerializer
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
@@ -40,31 +41,13 @@ async def document_list(request):
     if request.method == 'GET':
         def get_serialized_docs():
             my_docs = Document.objects.filter(user=request.user).select_related('user').order_by('-created_at')
-            public_docs = Document.objects.exclude(user=request.user)\
-                .filter(sharing_mode__in=['shared_read', 'shared_write'])\
+            public_docs = Document.objects.filter(sharing_mode__in=['shared_read', 'shared_write'])\
                 .select_related('user')\
                 .order_by('-shared_at')
 
-            def serialize_doc(d):
-                return {
-                    'id': d.id,
-                    'title': d.name,
-                    'filename': d.name,
-                    'file_type': d.file_type,
-                    'file_size': d.file_size,
-                    'chunk_count': d.chunk_count,
-                    'is_shared': d.is_shared,
-                    'shared_at': d.shared_at,
-                    'created_at': d.created_at,
-                    'updated_at': d.updated_at,
-                    'sharing_mode': d.sharing_mode,
-                    'status': d.status,
-                    'author_name': d.user.get_full_name() or d.user.username
-                }
-
             return {
-                'my_documents': [serialize_doc(d) for d in my_docs],
-                'public_documents': [serialize_doc(d) for d in public_docs]
+                'my_documents': DocumentSerializer(my_docs, many=True).data,
+                'public_documents': DocumentSerializer(public_docs, many=True).data
             }
 
         data = await sync_to_async(get_serialized_docs)()
@@ -113,18 +96,7 @@ async def document_list(request):
         from .tasks import process_document
         threading.Thread(target=process_document, args=(doc.id,)).start()
         
-        return Response({
-            'id': doc.id,
-            'title': doc.name,
-            'filename': doc.name,
-            'file_type': doc.file_type,
-            'file_size': doc.file_size,
-            'chunk_count': 0,
-            'is_shared': doc.is_shared,
-            'created_at': doc.created_at,
-            'updated_at': doc.updated_at,
-            'status': 'pending', 
-        }, status=status.HTTP_201_CREATED)
+        return Response(DocumentSerializer(doc).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET', 'DELETE'])
@@ -140,20 +112,7 @@ async def document_detail(request, document_id: int):
     )
     
     if request.method == 'GET':
-        return Response({
-            'id': doc.id,
-            'title': doc.name,
-            'filename': doc.name,
-            'content': doc.content_text,
-            'file_type': doc.file_type,
-            'file_size': doc.file_size,
-            'chunk_count': doc.chunk_count,
-            'is_shared': doc.is_shared,
-            'shared_at': doc.shared_at,
-            'metadata': doc.metadata,
-            'created_at': doc.created_at,
-            'updated_at': doc.updated_at,
-        })
+        return Response(DocumentSerializer(doc).data)
     
     elif request.method == 'DELETE':
         # Delete asynchronously
@@ -191,10 +150,7 @@ async def document_share(request, document_id: int):
     await sync_to_async(doc.save)()
     
     return Response({
-        'id': doc.id,
-        'is_shared': doc.is_shared,
-        'sharing_mode': doc.sharing_mode,
-        'shared_at': doc.shared_at,
+        **DocumentSerializer(doc).data,
         'message': f'Document set to {doc.sharing_mode}'
     })
 
@@ -205,12 +161,12 @@ async def rag_search(request):
     """
     Search documents using RAG.
     """
-    query = request.data.get('query', '')
-    top_k = int(request.data.get('top_k', 5))
-    include_platform = request.data.get('include_platform', False)
+    serializer = RagSearchSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
     
-    if not query:
-        return Response({'error': 'Query is required'}, status=400)
+    query = serializer.validated_data['query']
+    top_k = serializer.validated_data['top_k']
+    include_platform = serializer.validated_data['include_platform']
     
     # Search user's personal KB
     user_kb = get_user_knowledge_base(request.user.id)
@@ -253,13 +209,13 @@ async def rag_query(request):
     """
     Ask a question using RAG pipeline.
     """
-    question = request.data.get('question', '')
-    llm_type = request.data.get('llm_type', 'openai')
-    credential_id = request.data.get('credential_id')
-    top_k = int(request.data.get('top_k', 5))
+    serializer = RagQuerySerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
     
-    if not question:
-        return Response({'error': 'Question is required'}, status=400)
+    question = serializer.validated_data['question']
+    llm_type = serializer.validated_data['llm_type']
+    credential_id = serializer.validated_data.get('credential_id')
+    top_k = serializer.validated_data['top_k']
     
     # Use user-specific RAG pipeline
     pipeline = get_rag_pipeline(user_id=request.user.id)

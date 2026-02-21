@@ -49,7 +49,9 @@ class OrchestratorInterface(ABC):
         self,
         execution_id: UUID,
         node_id: str,
-        context: Dict[str, Any]
+        node_type: str,
+        context: Dict[str, Any],
+        input_data: Optional[Dict[str, Any]] = None
     ) -> OrchestratorDecision:
         """
         Called before a node is executed.
@@ -75,6 +77,7 @@ class OrchestratorInterface(ABC):
         self,
         execution_id: UUID,
         node_id: str,
+        node_type: str,
         error: str,
         context: Dict[str, Any]
     ) -> OrchestratorDecision:

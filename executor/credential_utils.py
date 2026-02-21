@@ -1,4 +1,5 @@
-from typing import Any, Dict
+from typing import Any, Dict, Set
+import json
 from credentials.models import Credential
 
 def get_user_credentials(user_id: int) -> Dict[str, Any]:
@@ -47,5 +48,51 @@ def get_user_credentials(user_id: int) -> Dict[str, Any]:
             # Log error but don't fail entire execution
             print(f"Failed to decrypt credential {cred.id}: {e}")
             continue
+            
+
+def get_workflow_credentials(user_id: int, workflow_json: dict) -> Dict[str, Any]:
+    """
+    Identify and decrypt ONLY the credentials referenced in a workflow.
+    This provides security by least privilege (not loading all user keys)
+    while maintaining the stable 'pre-injection' model.
+    """
+    referenced_ids: Set[str] = set()
+    
+    # 1. Scan nodes for credential usage
+    nodes = workflow_json.get('nodes', [])
+    for node in nodes:
+        data = node.get('data', {})
+        # Check common credential field names in n8n-style nodes
+        cred_id = data.get('credential') or data.get('credential_id') or data.get('credentialId')
+        if cred_id:
+            referenced_ids.add(str(cred_id))
+            
+    if not referenced_ids:
+        return {}
+        
+    # 2. Fetch and decrypt only referenced ones
+    credentials = Credential.objects.filter(
+        user_id=user_id,
+        id__in=[rid for rid in referenced_ids if rid.isdigit()],
+        is_active=True
+    ).select_related('credential_type')
+    
+    result = {}
+    for cred in credentials:
+        try:
+            data = cred.get_credential_data()
+            str_id = str(cred.id)
+            result[str_id] = data
+            result[f"cred_{str_id}"] = data
+            
+            # Also map by service identifier for nodes that look up by type
+            if cred.credential_type.service_identifier:
+                result[cred.credential_type.service_identifier] = data
+                
+            # Security: Mark as injected so we can audit if needed
+            result[str_id]['_injected'] = True
+            
+        except Exception as e:
+            print(f"Failed to decrypt referenced credential {cred.id}: {e}")
             
     return result

@@ -16,6 +16,12 @@ from rest_framework.response import Response
 from asgiref.sync import sync_to_async
 
 from .models import ExecutionLog, NodeExecutionLog, AuditEntry
+from .serializers import (
+    AnalyticsFilterSerializer, 
+    AuditFilterSerializer, 
+    ExecutionListFilterSerializer,
+    AuditExportSerializer
+)
 
 
 # ======================== Insights/Analytics API ========================
@@ -26,8 +32,11 @@ async def execution_statistics(request):
     """
     Get execution statistics for the authenticated user.
     """
-    days = int(request.query_params.get('days', 30))
-    workflow_id = request.query_params.get('workflow_id')
+    serializer = AnalyticsFilterSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    days = serializer.validated_data['days']
+    workflow_id = serializer.validated_data.get('workflow_id')
     
     def get_stats():
         start_date = timezone.now() - timedelta(days=days)
@@ -185,7 +194,10 @@ async def cost_breakdown(request):
     """
     Get token/credit usage breakdown.
     """
-    days = int(request.query_params.get('days', 30))
+    serializer = AnalyticsFilterSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    days = serializer.validated_data['days']
     
     def get_costs():
         start_date = timezone.now() - timedelta(days=days)
@@ -264,10 +276,15 @@ async def audit_list(request):
     """
     List audit entries for the user.
     """
-    action_type = request.query_params.get('action_type')
-    workflow_id = request.query_params.get('workflow_id')
-    limit = min(int(request.query_params.get('limit', 50)), 100)
-    offset = int(request.query_params.get('offset', 0))
+    serializer = AuditFilterSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    params = serializer.validated_data
+    
+    action_type = params.get('action_type')
+    workflow_id = params.get('workflow_id')
+    limit = params['limit']
+    offset = params['offset']
     
     def get_audit():
         qs = AuditEntry.objects.filter(user=request.user)
@@ -303,8 +320,11 @@ async def audit_export(request):
     """
     Export audit entries as JSON or CSV.
     """
-    export_format = request.query_params.get('format', 'json')
-    days = int(request.query_params.get('days', 30))
+    serializer = AuditExportSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    export_format = serializer.validated_data['format']
+    days = serializer.validated_data['days']
     
     def generate_export():
         from django.http import HttpResponse
@@ -364,10 +384,15 @@ async def execution_list(request):
     """
     List executions for the user.
     """
-    workflow_id = request.query_params.get('workflow_id')
-    exec_status = request.query_params.get('status')
-    limit = min(int(request.query_params.get('limit', 20)), 100)
-    offset = int(request.query_params.get('offset', 0))
+    serializer = ExecutionListFilterSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    params = serializer.validated_data
+    
+    workflow_id = params.get('workflow_id')
+    exec_status = params.get('status')
+    limit = params['limit']
+    offset = params['offset']
     
     def get_executions():
         qs = ExecutionLog.objects.filter(user=request.user)

@@ -1,7 +1,7 @@
 """
-Custom Node Loader
+Node Loader
 
-Dynamically load and validate custom node classes from user-provided code.
+Dynamically load and validate node classes from user-provided code.
 """
 import ast
 import logging
@@ -38,14 +38,14 @@ BLOCKED_IMPORTS = {
 REQUIRED_ATTRIBUTES = {'node_type', 'name', 'category'}
 
 
-class CustomNodeValidationError(Exception):
-    """Raised when custom node validation fails."""
+class NodeValidationError(Exception):
+    """Raised when node validation fails."""
     pass
 
 
-class CustomNodeLoader:
+class NodeLoader:
     """
-    Dynamically load and validate custom node classes from user code.
+    Dynamically load and validate node classes from user code.
     
     Security measures:
     - AST analysis to detect dangerous imports
@@ -53,10 +53,10 @@ class CustomNodeLoader:
     - Restricted execution environment
     
     Usage:
-        loader = CustomNodeLoader()
+        loader = NodeLoader()
         errors = loader.validate_code(code_string)
         if not errors:
-            node_class = loader.load_from_code(code_string, "my_custom_node")
+            node_class = loader.load_from_code(code_string, "my_node")
     """
     
     def __init__(self):
@@ -68,7 +68,7 @@ class CustomNodeLoader:
     
     def validate_code(self, code: str) -> list[str]:
         """
-        Validate custom node code before execution.
+        Validate node code before execution.
         
         Args:
             code: Python source code as string
@@ -132,12 +132,12 @@ class CustomNodeLoader:
             The loaded node handler class
             
         Raises:
-            CustomNodeValidationError: If code is invalid
+            NodeValidationError: If code is invalid
         """
         # Validate first
         errors = self.validate_code(code)
         if errors:
-            raise CustomNodeValidationError(f"Validation failed: {'; '.join(errors)}")
+            raise NodeValidationError(f"Validation failed: {'; '.join(errors)}")
         
         # Create a module spec and execute code
         spec = importlib.util.spec_from_loader(
@@ -161,7 +161,7 @@ class CustomNodeLoader:
         try:
             exec(code, module.__dict__)
         except Exception as e:
-            raise CustomNodeValidationError(f"Code execution failed: {e}")
+            raise NodeValidationError(f"Code execution failed: {e}")
         
         # Find the handler class
         handler_class = None
@@ -175,12 +175,12 @@ class CustomNodeLoader:
                 break
         
         if handler_class is None:
-            raise CustomNodeValidationError("No BaseNodeHandler subclass found")
+            raise NodeValidationError("No BaseNodeHandler subclass found")
         
         # Validate the class
         class_errors = self.validate_class(handler_class)
         if class_errors:
-            raise CustomNodeValidationError(f"Class validation failed: {'; '.join(class_errors)}")
+            raise NodeValidationError(f"Class validation failed: {'; '.join(class_errors)}")
         
         return handler_class
     
@@ -241,7 +241,7 @@ def load_custom_node_from_db(custom_node_id: int) -> Type[BaseNodeHandler] | Non
         logger.error(f"Custom node {custom_node_id} not found")
         return None
     
-    loader = CustomNodeLoader()
+    loader = NodeLoader()
     
     try:
         handler_class = loader.load_from_code(
@@ -249,6 +249,6 @@ def load_custom_node_from_db(custom_node_id: int) -> Type[BaseNodeHandler] | Non
             f"custom_node_{custom_node_id}"
         )
         return handler_class
-    except CustomNodeValidationError as e:
+    except NodeValidationError as e:
         logger.error(f"Failed to load custom node {custom_node_id}: {e}")
         return None

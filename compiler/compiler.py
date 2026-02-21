@@ -56,6 +56,7 @@ class WorkflowState(TypedDict):
     workflow_chain: list[int]
     parent_execution_id: str | None
     timeout_budget_ms: int | None
+    skills: list[dict]
 
 
 class WorkflowCompiler:
@@ -245,32 +246,13 @@ class WorkflowCompiler:
             if state.get('status') in ['failed', 'cancelled', 'paused']:
                 return state
 
-            # Before Hook (only for FULL supervision)
-            # Import here to avoid circular import
-            from orchestrator.interface import SupervisionLevel
+            # 1. Initialize Context and Logger (MUST BE TOP FOR ALL PATHS)
+            from compiler.schemas import ExecutionContext
+            from logs.logger import get_execution_logger
             
-            should_call_before = (
-                orchestrator and 
-                supervision_level not in (SupervisionLevel.ERROR_ONLY, SupervisionLevel.NONE, 'error_only', 'none')
-            )
+            logger_instance = get_execution_logger()
             
-            if should_call_before:
-                decision = await orchestrator.before_node(execution_id, node_id, state)
-                if isinstance(decision, AbortDecision):
-                    state['status'] = 'failed'
-                    state['error'] = decision.reason
-                    return state
-                if isinstance(decision, PauseDecision):
-                    state['status'] = 'paused'
-                    return state
-
             try:
-                if not registry.has_handler(node_type):
-                     raise ValueError(f"Unknown node type: {node_type}")
-                
-                handler = registry.get_handler(node_type)
-                
-                # 1. Create Context (Empty Initial Input)
                 context = ExecutionContext(
                     execution_id=execution_id,
                     user_id=state['user_id'],
@@ -285,10 +267,70 @@ class WorkflowCompiler:
                     workflow_chain=state.get('workflow_chain', []),
                     parent_execution_id=state.get('parent_execution_id'),
                     timeout_budget_ms=state.get('timeout_budget_ms'),
+                    skills=state.get('skills', []),
                     current_input=[],
                 )
+            except Exception as e:
+                # Catch Pydantic validation or other early errors
+                state['error'] = f"Context initialization failed: {str(e)}"
+                state['status'] = 'failed'
+                logger.error(f"Early node failure: {state['error']}")
+                try:
+                    await logger_instance.log_node_complete(
+                        execution_id=execution_id,
+                        node_id=node_id,
+                        success=False,
+                        output_data={},
+                        error_message=state['error'],
+                        duration_ms=0
+                    )
+                except: pass
+                return state
+
+            # Before Hook (only for FULL supervision)
+            # Import here to avoid circular import
+            from orchestrator.interface import SupervisionLevel
+            
+            should_call_before = (
+                orchestrator and 
+                supervision_level not in (SupervisionLevel.ERROR_ONLY, SupervisionLevel.NONE, 'error_only', 'none')
+            )
+            
+            if should_call_before:
+                # 1. Resolve Input Items (needed for orchestrator context)
+                items = context.get_input_for_node(node_id, self.edges)
+                context.current_input = items
                 
-                # 2. Resolve Input Items
+                input_data = {}
+                if items:
+                    first_item = items[0]
+                    if isinstance(first_item, dict):
+                        input_data.update(first_item.get("json", first_item))
+
+                try:
+                    decision = await asyncio.wait_for(
+                        orchestrator.before_node(execution_id, node_id, node_type, state, input_data=input_data),
+                        timeout=20
+                    )
+                    if isinstance(decision, AbortDecision):
+                        state['status'] = 'failed'
+                        state['error'] = decision.reason
+                        return state
+                    if isinstance(decision, PauseDecision):
+                        state['status'] = 'paused'
+                        return state
+                except asyncio.TimeoutError:
+                    logger.warning(f"Orchestrator 'before_node' timed out for {node_id}")
+                except Exception as e:
+                    logger.error(f"Orchestrator 'before_node' failed: {e}")
+
+            try:
+                if not registry.has_handler(node_type):
+                     raise ValueError(f"Unknown node type: {node_type}")
+                
+                handler = registry.get_handler(node_type)
+                
+                # Resolve inputs (using already initialized context)
                 items = context.get_input_for_node(node_id, self.edges)
                 context.current_input = items
                 
@@ -311,7 +353,6 @@ class WorkflowCompiler:
                         input_data.update(injected_input[0].get("json", injected_input[0]))
 
                 # Log start
-                logger_instance = get_execution_logger()
                 await logger_instance.log_node_start(
                     execution_id=execution_id,
                     node_id=node_id,
@@ -390,8 +431,20 @@ class WorkflowCompiler:
                         supervision_level not in (SupervisionLevel.NONE, 'none')
                     )
                     if should_call_error:
-                        err_decision = await orchestrator.on_error(execution_id, node_id, result.error, state)
-                        if isinstance(err_decision, AbortDecision):
+                        try:
+                            err_decision = await asyncio.wait_for(
+                                orchestrator.on_error(execution_id, node_id, node_type, result.error, state),
+                                timeout=20
+                            )
+                            if isinstance(err_decision, AbortDecision):
+                                state['error'] = result.error
+                                state['status'] = 'failed'
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Orchestrator 'on_error' timed out for {node_id}")
+                            state['error'] = result.error
+                            state['status'] = 'failed'
+                        except Exception as e:
+                            logger.error(f"Orchestrator 'on_error' failed: {e}")
                             state['error'] = result.error
                             state['status'] = 'failed'
                         # Retry not implemented in this reduced scope
@@ -419,21 +472,44 @@ class WorkflowCompiler:
                         supervision_level not in (SupervisionLevel.ERROR_ONLY, SupervisionLevel.NONE, 'error_only', 'none')
                     )
                     if should_call_after:
-                        post_decision = await orchestrator.after_node(
-                            execution_id, node_id, 
-                            {'items': serialized_items, 'output_handle': result.output_handle}, 
-                            state
-                        )
-                        if isinstance(post_decision, AbortDecision):
-                            state['status'] = 'failed'
-                            state['error'] = post_decision.reason
-                        elif isinstance(post_decision, PauseDecision):
-                            state['status'] = 'paused'
+                        try:
+                            post_decision = await asyncio.wait_for(
+                                orchestrator.after_node(
+                                    execution_id, node_id, 
+                                    {'items': serialized_items, 'output_handle': result.output_handle}, 
+                                    state
+                                ),
+                                timeout=20
+                            )
+                            if isinstance(post_decision, AbortDecision):
+                                state['status'] = 'failed'
+                                state['error'] = post_decision.reason
+                            elif isinstance(post_decision, PauseDecision):
+                                state['status'] = 'paused'
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Orchestrator 'after_node' timed out for {node_id}")
+                        except Exception as e:
+                            logger.error(f"Orchestrator 'after_node' failed: {e}")
 
             except Exception as e:
                 state['error'] = f"Node {node_id} error: {str(e)}"
                 state['status'] = 'failed'
                 logger.exception(f"Node execution failed: {node_id}")
+                
+                # CRITICAL FIX: Report completion to logger/broadcaster even on crash
+                # Without this, the UI stays stuck in "Executing"
+                try:
+                    await logger_instance.log_node_complete(
+                        execution_id=execution_id,
+                        node_id=node_id,
+                        success=False,
+                        output_data={},
+                        error_message=str(e),
+                        duration_ms=0,
+                        status='failed'
+                    )
+                except Exception as log_err:
+                    logger.error(f"Failed to log node crash: {log_err}")
 
             return state
 

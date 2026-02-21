@@ -179,42 +179,41 @@ Instead of writing a custom Python class for every potential third-party service
 
 This allows the platform to support hundreds of integrations day-one, just by pointing to an MCP server configuration.
 
-## 👤 User Management
-*"Who are you, and what can you do?"*
+## 👤 User Management & 🔐 Credentials
+*"Who are you, what can you do, and what are your secrets?"*
 
-Every request starts here. The system knows who you are (JWT/API key), what tier you're on (free/pro/enterprise), and tracks your usage. Rate limits protect the system. Permissions ensure you only see your own workflows.
+Every request starts here. The system knows who you are, what tier you're on, and tracks your usage. Rate limits protect the system. Permissions ensure you only see your own workflows.
+
+API keys are encrypted in the database using Fernet symmetric encryption and are strictly scoped to the creating user. When AI generates workflows, it uses placeholders—a local LLM maps those to your real credentials, which are only decrypted in-memory during execution.
+> 📚 See [PERMISSIONS.md](./PERMISSIONS.md) for endpoint authorization details.
+> 📚 See [CREDENTIALS_SYSTEM.md](./CREDENTIALS_SYSTEM.md) for the credential encryption and usage lifecycle.
 
 ## 🧩 Node System  
 *"The building blocks of automation"*
 
-Each node is a self-contained Python class. **HTTP Request** knows how to call APIs. **Code** executes custom JavaScript/Python. **IF** routes data based on conditions. **OpenAI** talks to LLMs.
-
-Users and AI can create **custom nodes**—upload a Python file, and it becomes a new block in the palette.
+Each node is a self-contained Python class. **HTTP Request** knows how to call APIs. **Code** executes custom Python. **IF** routes data based on conditions. **OpenAI** talks to LLMs. Users and AI can create **custom nodes**.
+> 📚 See [NODES.md](./NODES.md) for the full registry of available nodes, loop support, and the node directory structure.
 
 ## ⚙️ Compiler
 *"Ensuring your workflow will actually work"*
 
-Before execution, the compiler checks everything:
-- **DAG Check**: No loops, no orphan nodes
-- **Credentials Check**: Do you have the API keys each node needs?
-- **Type Check**: Does Node A's output match Node B's input?
+Before execution, the compiler checks the DAG for cycles, verifies credential ownership, and ensures type compatibility between nodes before building an executable LangGraph StateGraph.
+> 📚 See [COMPILATION_PROCESS.md](./COMPILATION_PROCESS.md) for the exact steps and validation logic.
 
-Only valid workflows get compiled into LangGraph execution plans.
-
-## ▶️ Execution Engine ("The Worker")
+## ▶️ Execution Engine ("The Worker") & 🗃️ State Management
 *"Deterministic, reliable execution"*
 
-The execution engine (`engine.py`) takes a compiled graph and runs it. It doesn't "think"—it obeys. It handles retries, state persistence, and error catching. It reports status back to the King.
+The execution engine (`engine.py`) takes a compiled graph and runs it deterministically. Data flow is strictly typed, moving from the global `WorkflowState` into isolated `ExecutionContext` sandboxes for each node to prevent malicious mutation.
+> 📚 See [DRY_RUN.md](./DRY_RUN.md) for a complete step-by-step trace of a workflow execution from API payload to database completion.
+> 📚 See [NODE_EXECUTION.md](./NODE_EXECUTION.md) for the micro-details of a single node's execution sandbox and expression evaluation.
+> 📚 See [STATE_MANAGEMENT.md](./STATE_MANAGEMENT.md) for the schema definitions of `WorkflowState`, `ExecutionContext`, and `NodeItem` representing data flow.
 
 ## 👑 King Agent (Orchestrator)
 *"The intelligent supervisor"*
 
-The King (`king.py`) is the brain. It:
-1.  **Translates Intent**: "Run the monthly report" -> workflow execution.
-2.  **Supervises**: watches the Worker, handling pauses and stops.
-3.  **Handles Humans**: If the Worker gets stuck, the King asks the user for help (HITL).
-
-The Orchestrator is a **LangGraph ReAct agent** that uses your workflow system as its toolkit. It can create, run, modify, and combine automations via natural language.
+The King (`king.py`) is the brain. It translates intent into workflow execution, supervises the worker, and handles human intervention (HITL).
+> 📚 See [ORCHESTRATOR_CONTEXT_DESIGN.md](./ORCHESTRATOR_CONTEXT_DESIGN.md) for the orchestrator's memory hierarchy, dynamic context injection, and conversation capabilities.
+> 📚 See [orchestrator.md](./orchestrator.md) for the high-level vision of the King Agent vs. the deterministic engine.
 
 ### Architecture
 ```
@@ -460,362 +459,11 @@ User can design: "On error → Send Slack alert"
 
 ---
 
-# Part 3: Security Hardening
+# Part 3: Additional Documentation
 
-> 🚨 **Critical Issues Identified from Agentic-AI Backend Analysis**
+The monolithic implementation plan has been broken down to improve readability. 
 
-The following security loopholes were discovered in the existing Agentic-AI implementation (`host.py`, `host.py`, `langgraph_super_agent.py`, `connections.py`). These MUST be addressed in the Django backend:
+Please refer to the following documents for detailed specifications on these topics:
 
-## 🔴 Critical Security Fixes
-
-### 1. Authentication & Authorization
-**Current Issue**: Flask endpoints have no auth - anyone can call `/chat`, `/clearMem`.
-
-**Fix Required**:
-```python
-# core/authentication.py
-class JWTAuthentication:
-    """JWT-based authentication for API requests"""
-    pass
-
-class APIKeyAuthentication:
-    """API key authentication for programmatic access"""
-    pass
-
-# Every endpoint must have:
-@permission_classes([IsAuthenticated])
-```
-
-**Checklist**:
-- [x] JWT token generation/validation
-- [x] API key per user with rotation support
-- [x] Permission classes per endpoint
-- [x] Admin-only routes protection
-
----
-
-### 2. Rate Limiting
-**Current Issue**: No rate limiting = DoS vulnerability, cost explosion from LLM calls.
-
-**Fix Required**:
-```python
-# core/middleware.py
-from django_ratelimit.decorators import ratelimit
-
-# Apply per-endpoint limits:
-# - /compile: 10/minute  
-# - /execute: 5/minute
-# - /stream: 20 connections
-```
-
-**Tier-based limits**:
-| Tier | Compile | Execute | Stream |
-|------|---------|---------|--------|
-| Free | 10/min | 5/min | 5 |
-| Pro | 100/min | 50/min | 20 |
-| Enterprise | Unlimited | 200/min | 100 |
-
----
-
-### 3. Input Sanitization (Prompt Injection)
-**Current Issue**: User input passed directly to LLM without sanitization.
-
-**Fix Required**:
-```python
-# core/security.py
-class InputSanitizer:
-    """
-    Sanitize user inputs before LLM processing:
-    - Strip prompt injection patterns
-    - Limit input length
-    - Escape special characters
-    - Block known malicious patterns
-    """
-    
-    BLOCKED_PATTERNS = [
-        r"ignore previous instructions",
-        r"system prompt",
-        r"</?(system|user|assistant)>",
-    ]
-```
-
----
-
-### 4. Request Timeouts
-**Current Issue**: No timeout on agent execution - can hang indefinitely.
-
-**Fix Required**:
-```python
-# executor/runner.py
-import asyncio
-
-async def execute_with_timeout(workflow, timeout=300):
-    try:
-        result = await asyncio.wait_for(
-            execute_workflow(workflow),
-            timeout=timeout
-        )
-    except asyncio.TimeoutError:
-        logger.error("Workflow execution timed out")
-        return {"error": "Execution timeout", "success": False}
-```
-
-**Timeouts**:
-- Workflow execution: 5 minutes (configurable)
-- Individual node: 60 seconds
-- HTTP requests: 30 seconds
-
----
-
-### 5. Secrets Management
-**Current Issue**: API keys in `.env` shared across all agents, logs may contain sensitive data.
-
-**Fix Required**:
-- [x] Per-user credential isolation (already in checklist)
-- [x] Encryption at rest for credentials (AES-256)
-- [x] Audit logging for credential access
-- [x] Log sanitization (strip PII, secrets before logging)
-
-```python
-# core/logging.py
-class SanitizedLogger:
-    SENSITIVE_PATTERNS = [
-        r"api_key[\"']?\s*[:=]\s*[\"'][^\"']+[\"']",
-        r"password[\"']?\s*[:=]\s*[\"'][^\"']+[\"']",
-        r"Bearer\s+[A-Za-z0-9\-._~+/]+=*",
-    ]
-    
-    def sanitize(self, message):
-        for pattern in self.SENSITIVE_PATTERNS:
-            message = re.sub(pattern, "[REDACTED]", message)
-        return message
-```
-
----
-
-### 6. CORS Configuration
-**Current Issue**: No CORS headers configured.
-
-**Fix Required**:
-```python
-# settings.py
-CORS_ALLOWED_ORIGINS = [
-    "https://yourfrontend.com",
-]
-CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-```
-
----
-
-### 7. Thread Safety
-**Current Issue**: Shared orchestrator singleton across threads without locking.
-
-**Fix Required**: 
-- Use async execution context per-request
-- Implement proper state isolation
-- Use thread-local storage for user context
-
----
-
-## 🟠 Architecture Improvements
-
-### 8. Human-in-the-Loop Implementation
-**Current Issue**: README mentions approval gates but they're not implemented.
-
-**Fix Required**:
-```python
-# orchestrator/approval.py
-class ApprovalGate:
-    """
-    Block execution for sensitive operations:
-    - Database modifications
-    - File operations
-    - External API calls (non-whitelisted)
-    - Credential access
-    """
-    
-    APPROVAL_REQUIRED = [
-        "database_write",
-        "file_delete",
-        "external_api",
-        "credential_access",
-    ]
-    
-    async def request_approval(self, user_id, operation, details):
-        # Send notification to user
-        # Block until approved or timeout
-        pass
-```
-
----
-
-### 9. Message Queue for Scaling
-**Current Issue**: In-memory queue loses messages on restart, max 5 messages.
-
-**Fix Required**:
-- Use Redis/Celery for task queue
-- Persistent message storage
-- Horizontal scaling support
-
----
-
-### 10. Secure Agent Method Execution
-**Current Issue**: Dynamic `getattr` allows LLM to potentially call any method.
-
-**Fix Required**:
-```python
-# executor/safe_executor.py
-ALLOWED_METHODS = {
-    "Chatbot": ["chat"],
-    "WebSearchingAgent": ["run", "search"],
-    "DatabaseOrchestrator": ["query"],
-}
-
-def safe_execute(agent_name, method_name, *args, **kwargs):
-    if method_name not in ALLOWED_METHODS.get(agent_name, []):
-        raise SecurityError(f"Method {method_name} not allowed on {agent_name}")
-    # proceed with execution
-```
-
----
-
-## 📊 Security Summary
-
-
-| Priority | Issue | Status | Effort |
-|----------|-------|--------|--------|
-| 🔴 Critical | No Authentication | ✅ Done | 4h |
-| 🔴 Critical | No Rate Limiting | ✅ Done | 2h |
-| 🔴 Critical | Prompt Injection | ✅ Done | 3h |
-| 🔴 Critical | No Timeouts | ✅ Done | 1h |
-| 🟠 High | Secrets in Logs | ✅ Done | 2h |
-| 🟠 High | CORS Config | ✅ Done | 0.5h |
-| 🟠 High | Thread Safety | ✅ Done | 3h |
-| 🟠 High | Approval Gates | ✅ Done | 4h |
-| 🟡 Medium | Message Queue | ✅ Done | 4h |
-| 🟡 Medium | Safe Method Exec | ✅ Done | 2h |
-
-**Total Security Hardening: ~25.5 hours (COMPLETED)**
-
----
-
-# Part 4: Frontend-Driven API Requirements
-
-> Features implemented in the frontend that require backend API support
-
-## 💬 AI Chat API
-*"Backend for the AI assistant sidebar"*
-
-The frontend has an AI Chat panel that requires:
-- Streaming chat responses (SSE)
-- Conversation history storage
-- Context awareness (current workflow, selected node)
-
-**Endpoints Required**:
-```
-POST /api/chat/message          # Send message, get streaming response
-GET  /api/chat/history          # Get conversation history
-DELETE /api/chat/history        # Clear conversation
-GET  /api/chat/context/:workflowId  # Get workflow context
-```
-
----
-
-## 📁 Documents API
-*"Knowledge base and file management"*
-
-The frontend has a Documents page for knowledge management:
-
-**Endpoints Required**:
-```
-GET    /api/documents           # List all documents
-POST   /api/documents           # Upload document
-GET    /api/documents/:id       # Get document content
-DELETE /api/documents/:id       # Delete document
-POST   /api/documents/search    # RAG search across documents
-```
-
----
-
-## 📊 Insights/Analytics API
-*"Execution metrics and usage tracking"*
-
-The frontend has an Insights dashboard showing:
-- Execution counts over time
-- Success/failure rates
-- Credit usage per workflow
-- API cost tracking
-
-**Endpoints Required**:
-```
-GET /api/insights/executions    # Execution stats (daily/weekly/monthly)
-GET /api/insights/workflows     # Per-workflow statistics
-GET /api/insights/costs         # API cost breakdown
-GET /api/insights/credits       # Credit usage history
-```
-
----
-
-## 🧠 Orchestrator Streaming API
-*"Real-time AI thinking/planning visibility"*
-
-The frontend has an Orchestrator page showing:
-- AI thinking steps
-- Planning decisions
-- Execution progress
-- Pending HITL actions
-
-**Endpoints Required**:
-```
-WS   /ws/orchestrator/:executionId     # WebSocket for real-time updates
-GET  /api/orchestrator/pending         # Get all pending HITL requests
-POST /api/orchestrator/respond/:id     # Respond to HITL request
-GET  /api/orchestrator/history/:id     # Get execution thought history
-```
-
-**Event Types** (pushed via WebSocket):
-- `orchestrator:thinking` - AI is analyzing
-- `orchestrator:planning` - AI is planning steps
-- `orchestrator:executing` - Node execution started
-- `orchestrator:waiting` - Awaiting human input
-- `orchestrator:completed` - Step completed
-- `orchestrator:error` - Error occurred
-
----
-
-## 📜 Audit Trail API
-*"Logging human decisions for compliance"*
-
-Track all HITL decisions for audit purposes:
-
-**Endpoints Required**:
-```
-GET /api/audit                  # List audit entries (paginated)
-GET /api/audit/workflow/:id     # Audit entries for specific workflow
-GET /api/audit/export           # Export audit log (CSV/JSON)
-```
-
-## 🧩 Templates API
-*"Marketplace for workflow blueprints"*
-
-**Endpoints Required**:
-```
-GET  /api/templates             # List available templates
-GET  /api/templates/:id         # Get template details
-POST /api/templates/search      # Semantic search
-POST /api/templates/publish/:id # Publish workflow as template
-```
-
-**Security Features**:
-- Credential scrubbing (removes API keys before publish)
-- PII detection (warns about potential data leaks)
-
----
-
-**Audit Entry Fields**:
-- `timestamp`, `user_id`, `workflow_id`, `node_id`
-- `action_type` (approval/clarification/error_recovery)
-- `request_details`, `response`, `response_time_ms`
-
----
+*   🔒 **[Security Hardening](./SECURITY_HARDENING.md)**: Details the critical security fixes implemented from the Agentic-AI backend analysis (Auth, Rate Limiting, Prompt Injection, Timeouts, etc.) and architecture improvements.
+*   🌐 **[Frontend API Requirements](./FRONTEND_API_REQUIREMENTS.md)**: Details the API endpoints required by the frontend application (Chat, Documents, Insights, Orchestrator Streaming, Audit Trail, Templates).

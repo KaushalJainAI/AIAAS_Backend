@@ -13,6 +13,7 @@ from asgiref.sync import sync_to_async
 from orchestrator.models import Workflow
 from credentials.models import Credential
 from .compiler import WorkflowCompiler, WorkflowCompilationError
+from .serializers import WorkflowDefinitionSerializer, CompilationResultSerializer
 
 
 class CompileWorkflowView(APIView):
@@ -61,7 +62,7 @@ class CompileWorkflowView(APIView):
             # compile() is sync, wrap it
             await sync_to_async(compiler.compile)()
             
-            return Response({
+            result_data = {
                 'success': True,
                 'errors': [],
                 'warnings': [], 
@@ -70,7 +71,8 @@ class CompileWorkflowView(APIView):
                     'node_count': len(workflow.nodes),
                     'edge_count': len(workflow.edges),
                 }
-            }, status=status.HTTP_200_OK)
+            }
+            return Response(CompilationResultSerializer(result_data).data, status=status.HTTP_200_OK)
             
         except WorkflowCompilationError as e:
             serialized_errors = []
@@ -82,13 +84,14 @@ class CompileWorkflowView(APIView):
                 else:
                     serialized_errors.append({'message': str(err), 'code': 'COMPILATION_ERROR', 'type': 'error'})
 
-            return Response({
+            result_data = {
                 'success': False,
                 'errors': serialized_errors,
                 'warnings': [],
                 'execution_plan': {},
                 'stats': {}
-            }, status=status.HTTP_400_BAD_REQUEST)
+            }
+            return Response(CompilationResultSerializer(result_data).data, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ValidateWorkflowView(APIView):
@@ -140,9 +143,11 @@ class AdHocValidateWorkflowView(APIView):
     permission_classes = [IsAuthenticated]
     
     async def post(self, request):
-        data = request.data
-        nodes = data.get('nodes', [])
-        edges = data.get('edges', [])
+        serializer = WorkflowDefinitionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        nodes = serializer.validated_data.get('nodes', [])
+        edges = serializer.validated_data.get('edges', [])
         
         # Determine credentials
         def get_cred_ids():
@@ -159,7 +164,7 @@ class AdHocValidateWorkflowView(APIView):
         workflow_data = {
             'nodes': nodes,
             'edges': edges,
-            'settings': {}
+            'settings': serializer.validated_data.get('settings', {})
         }
         
         compiler = WorkflowCompiler(

@@ -69,13 +69,23 @@ class CredentialSerializer(serializers.ModelSerializer):
         fields_response = []
         for field_def in schema:
             key = field_def.get('name')
+            is_public = field_def.get('public', False)
+            field_type = field_def.get('type', 'text')
             
             value = full_data.get(key, '')
+            
+            # Mask sensitive values if they exist and are not marked as public
+            if value and not is_public and field_type in ['password', 'secret', 'token']:
+                # Show only last 4 chars for better UX, or just stars
+                if len(str(value)) > 8:
+                    value = f"********{str(value)[-4:]}"
+                else:
+                    value = "********"
             
             fields_response.append({
                 'key': key,
                 'label': field_def.get('label', key),
-                'type': field_def.get('type', 'text'),
+                'type': field_type,
                 'value': value
             })
             
@@ -146,3 +156,14 @@ class CredentialSerializer(serializers.ModelSerializer):
         
         if save:
             credential.save()
+
+class CredentialOAuthInitSerializer(serializers.Serializer):
+    """Serializer for OAuth initialization parameters."""
+    redirect_uri = serializers.URLField(required=True)
+    scopes = serializers.ListField(child=serializers.CharField(), required=False)
+
+class CredentialOAuthCallbackSerializer(serializers.Serializer):
+    """Serializer for OAuth callback parameters."""
+    code = serializers.CharField(required=True)
+    redirect_uri = serializers.URLField(required=True)
+    name = serializers.CharField(required=False, default='Google Account')

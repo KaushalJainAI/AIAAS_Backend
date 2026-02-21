@@ -51,6 +51,12 @@ urlpatterns = [
     
     # MCP
     path('api/mcp/', include('mcp_integration.urls')),
+
+    # Skills
+    path('api/', include('skills.urls')),
+    
+    # Standalone Chat
+    path('api/chat/', include('chat.urls')),
 ]
 
 

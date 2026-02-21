@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from django.utils import timezone
+from asgiref.sync import sync_to_async
 
 from compiler.compiler import WorkflowCompiler, WorkflowCompilationError
 from logs.models import ExecutionLog
@@ -46,13 +47,14 @@ class ExecutionEngine:
         workflow_id: int,
         user_id: int,
         workflow_json: dict,
-        input_data: dict[str, Any],
-        credentials: dict[str, Any],
+        input_data: dict[str, Any] = None,
+        credentials: dict[str, Any] = None,
         parent_execution_id: UUID | None = None,
         nesting_depth: int = 0,
         workflow_chain: list[int] | None = None,
         timeout_budget_ms: int | None = None,
         supervision_level: 'SupervisionLevel' = None,
+        skills: list[dict] | None = None,
     ) -> ExecutionState:
         """
         Run a workflow from start to finish (or until paused/failed).
@@ -78,9 +80,15 @@ class ExecutionEngine:
         # 2. Compile & Build Graph (Single Pass)
         graph = None
         try:
-            # Pass used credentials so they are validated
-            used_creds = set(credentials.keys()) if credentials else set()
-            compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=used_creds)
+            # Pass all user credential IDs so they are used for validation
+            # We fetch IDs only to satisfy compile-time validation without pre-decrypting data
+            from credentials.models import Credential
+            def get_user_cred_ids():
+                return set(map(str, Credential.objects.filter(user_id=user_id).values_list('id', flat=True)))
+            
+            all_user_cred_ids = await sync_to_async(get_user_cred_ids)()
+            
+            compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=all_user_cred_ids)
             
             # Direct compilation to StateGraph
             # Pass orchestrator and supervision level for hook filtering
@@ -116,19 +124,27 @@ class ExecutionEngine:
             "current_node": "",
             "node_outputs": {}, 
             "variables": {},
-            "credentials": credentials,
+            "credentials": credentials or {},
             "error": None,
             "status": "running",
             "nesting_depth": nesting_depth,
             "workflow_chain": workflow_chain or [],
             "parent_execution_id": str(parent_execution_id) if parent_execution_id else None,
-            "timeout_budget_ms": timeout_budget_ms
+            "timeout_budget_ms": timeout_budget_ms,
+            "skills": skills or []
         }
         
         # Map input to entry points (if needed, or just dump in node_outputs)
         # For simplicity, we put input in special keys as before
         # Ideally the specific trigger nodes pull this out
-        initial_state["node_outputs"]["_input_global"] = input_data
+        initial_state["node_outputs"]["_input_global"] = input_data or {}
+        
+        async def heartbeat_pulse():
+            while True:
+                await asyncio.sleep(30)
+                await exec_logger.heartbeat(execution_id)
+
+        heartbeat_task = asyncio.create_task(heartbeat_pulse())
         
         try:
             # 4. Invoke Graph
@@ -177,3 +193,9 @@ class ExecutionEngine:
                 error_message=str(e)
             )
             return ExecutionState.FAILED
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass

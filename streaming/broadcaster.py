@@ -332,7 +332,8 @@ class SSEBroadcaster:
         execution_id: str,
         node_id: str,
         output_preview: Optional[dict] = None,
-        duration_ms: int = 0
+        duration_ms: int = 0,
+        status: str = 'completed'
     ):
         """Send node completed event."""
         await self.send_event(
@@ -340,9 +341,9 @@ class SSEBroadcaster:
             self.EVENT_NODE_COMPLETE,
             {
                 'node_id': node_id,
-                'output_preview': output_preview,
+                'output': output_preview,
                 'duration_ms': duration_ms,
-                'status': 'completed',
+                'status': status,
             }
         )
     
@@ -350,7 +351,8 @@ class SSEBroadcaster:
         self,
         execution_id: str,
         node_id: str,
-        error: str
+        error: str,
+        status: str = 'failed'
     ):
         """Send node error event."""
         await self.send_event(
@@ -359,7 +361,7 @@ class SSEBroadcaster:
             {
                 'node_id': node_id,
                 'error': error,
-                'status': 'failed',
+                'status': status,
             }
         )
     

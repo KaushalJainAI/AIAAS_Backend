@@ -119,6 +119,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return data
 
 
+class GoogleLoginSerializer(serializers.Serializer):
+    """Serializer for Google OAuth login parameters."""
+    code = serializers.CharField(required=True)
+    redirect_uri = serializers.CharField(required=False)
+
 class ChangePasswordSerializer(serializers.Serializer):
     """Password change validation"""
     old_password = serializers.CharField(required=True, write_only=True)

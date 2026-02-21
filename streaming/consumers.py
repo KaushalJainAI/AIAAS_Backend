@@ -120,7 +120,9 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
                     'status': node_log.status,
                     'output': node_log.output_data,
                     'error': node_log.error_message,
-                    'duration_ms': node_log.duration_ms
+                    'duration_ms': node_log.duration_ms,
+                    'started_at': node_log.started_at.isoformat() if node_log.started_at else None,
+                    'completed_at': node_log.completed_at.isoformat() if node_log.completed_at else None
                 })
             
             if initial_state:
@@ -444,6 +446,13 @@ class HITLNotificationConsumer(AsyncWebsocketConsumer):
         await self.send_json({
             'type': 'new_request',
             'data': event.get('request', {})
+        })
+
+    async def notification(self, event):
+        """Handle generic notifications (like orchestrator activities)."""
+        await self.send_json({
+            'type': 'notification',
+            'data': event.get('data', {})
         })
     
     @database_sync_to_async

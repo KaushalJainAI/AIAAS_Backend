@@ -106,7 +106,8 @@ class CredentialManager:
             if credential.access_token:
                 from cryptography.fernet import Fernet
                 fernet = Fernet(credential._get_encryption_key())
-                data['access_token'] = fernet.decrypt(credential.access_token).decode()
+                token_bytes = bytes(credential.access_token)
+                data['access_token'] = fernet.decrypt(token_bytes).decode()
             
             # Update last used
             credential.last_used_at = timezone.now()

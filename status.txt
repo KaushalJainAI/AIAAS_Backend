@@ -1,0 +1,91 @@
+﻿ M .gitignore
+ D DEPLOYMENT.md
+ D DOCUMENTATION.md
+ M compiler/compiler.py
+ M compiler/schemas.py
+ M compiler/tests.py
+ M compiler/views.py
+ M core/models.py
+ M core/serializers.py
+ M core/views.py
+ M credentials/manager.py
+ M credentials/models.py
+ M credentials/serializers.py
+ M credentials/tests.py
+ M credentials/views.py
+ M docs/archive/COMPILATION_PROCESS.md
+ M docs/archive/DRY_RUN.md
+ M docs/archive/IMPLEMENTATION_PLAN.md
+ D docs/archive/ORCHESTRATOR_CONTEXT_DESIGN.md
+ D docs/archive/ORCHESTRATOR_DRY_RUN.md
+ D docs/archive/orchestrator.md
+ M executor/credential_utils.py
+ M executor/engine.py
+ M executor/king.py
+ M executor/tasks.py
+ M executor/trigger_manager.py
+ D extract_chat_id.py
+ M inference/apps.py
+ M inference/tests.py
+ M inference/views.py
+ M logs/logger.py
+ M logs/tests.py
+ M logs/views.py
+ M nodes/handlers/base.py
+ M nodes/handlers/core_nodes.py
+ D nodes/handlers/custom_loader.py
+ M nodes/handlers/integration_nodes.py
+ M nodes/handlers/llm_nodes.py
+ M nodes/handlers/logic_nodes.py
+ M nodes/handlers/registry.py
+ M nodes/handlers/triggers.py
+ M nodes/models.py
+ M nodes/urls.py
+ M nodes/views.py
+ M orchestrator/apps.py
+ M orchestrator/chat_context.py
+ M orchestrator/interface.py
+ M orchestrator/models.py
+ M orchestrator/tests.py
+ M orchestrator/urls.py
+ M orchestrator/views.py
+ M streaming/broadcaster.py
+ M streaming/consumers.py
+ M streaming/tests.py
+ M streaming/views.py
+ M templates/admin.py
+ M templates/serializers.py
+ M templates/tests.py
+ M templates/views.py
+ M workflow_backend/settings.py
+ M workflow_backend/urls.py
+?? README.md
+?? browserOS/
+?? chat/
+?? cleanup_stuck_exec.py
+?? compiler/serializers.py
+?? core/migrations/0002_userprofile_llm_credential_id_userprofile_llm_model_and_more.py
+?? diff.patch
+?? docs/archive/FRONTEND_API_REQUIREMENTS.md
+?? docs/archive/NODE_EXECUTION.md
+?? docs/archive/SECURITY_HARDENING.md
+?? docs/archive/STATE_MANAGEMENT.md
+?? docs/archive/WORKFLOW_DEPLOYMENT.md
+?? inference/serializers.py
+?? logs/serializers.py
+?? nodes/handlers/node_loader.py
+?? nodes/handlers/test_secure_nodes.py
+?? nodes/handlers/utility_nodes.py
+?? nodes/migrations/0002_aiprovider_aimodel.py
+?? orchestrator/migrations/0007_workflow_context.py
+?? orchestrator/serializers.py
+?? orchestrator/signals.py
+?? orchestrator/tests_partial.py
+?? orchestrator/tests_security.py
+?? populate_models.py
+?? populate_skills.py
+?? run_tests_verbose.py
+?? skills/
+?? staged_diff.patch
+?? status.txt
+?? streaming/serializers.py

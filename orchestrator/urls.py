@@ -12,6 +12,8 @@ urlpatterns = [
     # Workflow CRUD
     path('workflows/', views.workflow_list, name='workflow_list'),
     path('workflows/<int:workflow_id>/', views.workflow_detail, name='workflow_detail'),
+    path('workflows/<int:workflow_id>/deploy/', views.deploy_workflow, name='deploy_workflow'),
+    path('workflows/<int:workflow_id>/undeploy/', views.undeploy_workflow, name='undeploy_workflow'),
     
     # Version History
     path('workflows/<int:workflow_id>/versions/', views.workflow_versions, name='workflow_versions'),
@@ -41,6 +43,12 @@ urlpatterns = [
     path('ai/generate/', views.generate_workflow, name='generate_workflow'),
     path('workflows/<int:workflow_id>/ai/modify/', views.modify_workflow, name='modify_workflow'),
     path('workflows/<int:workflow_id>/ai/suggest/', views.suggest_improvements, name='suggest_improvements'),
+    
+    # Background Tasks
+    path('background-tasks/', views.background_tasks, name='background_tasks'),
+    
+    # Settings
+    path('settings/update/', views.update_orchestrator_settings, name='update_orchestrator_settings'),
     
     # Thought History
     path('executions/<str:execution_id>/thoughts/', views.thought_history, name='thought_history'),

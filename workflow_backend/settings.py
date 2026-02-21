@@ -64,6 +64,9 @@ INSTALLED_APPS = [
     'streaming',
     'templates',
     'mcp_integration',
+    'skills',
+    'chat',
+    'django_celery_beat',
 ]
 
 MIDDLEWARE = [
@@ -109,6 +112,9 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
+        'OPTIONS': {
+            'timeout': 20,
+        }
     }
 }
 
@@ -202,7 +208,7 @@ REST_FRAMEWORK = {
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=360),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
@@ -247,6 +253,9 @@ CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
+
+# Flag to enable background execution via Celery workers
+RUN_WORKFLOWS_ASYNC = os.environ.get('RUN_WORKFLOWS_ASYNC', 'False') == 'True'
 
 # ============================================
 # Credential Encryption

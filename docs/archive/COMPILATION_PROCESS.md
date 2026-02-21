@@ -45,18 +45,18 @@ This phase runs exactly when execution is requested (or during a dry-run check).
 
 **Output**: An executable `CompiledStateGraph` (LangGraph Runnable).
 
-## Runtime execution
+## Runtime Execution
 
-The Orchestrator calls `compiler.compile(orchestrator=self)` to get the graph, then invokes it `await graph.ainvoke(initial_state)`.
+The `ExecutionEngine` is responsible for orchestrating the compilation and execution process. It instantiates the compiler and calls `compiler.compile(orchestrator=effective_orchestrator, supervision_level=supervision_level)`, passing the configured supervision level (`FULL`, `ERROR_ONLY`, or `NONE`) to dictate which orchestrator hooks are injected into the graph.
 
 ### Architecture:
 
 *   **State**: A typed `WorkflowState` dictionary matches the execution context (variables, outputs, current node, status).
-*   **Orchestrator Injection**: The compiler injects the running `WorkflowOrchestrator` instance into every node function, allowing for real-time control (Pause/Resume/Cancel) during execution.
+*   **Orchestrator Injection**: Depending on the `supervision_level`, the compiler selectively injects the `KingOrchestrator`'s hooks (`before_node`, `after_node`, `on_error`) into every node wrapper function, allowing for real-time AI supervision and control (Pause/Resume/Cancel).
 
 ## Example Flow
 
-1.  **Orchestrator** receives execute request.
-2.  **Orchestrator** instantiates `WorkflowCompiler(json, user_creds)`.
-3.  **Compiler** validates and builds the graph in <80ms.
-4.  **Orchestrator** invokes the graph directly.
+1.  **Orchestrator** (King) initiates execution and delegates to the **ExecutionEngine**.
+2.  **ExecutionEngine** instantiates `WorkflowCompiler(json, user_creds)`.
+3.  **Compiler** validates and builds the graph logically in <80ms, applying appropriate supervision hooks.
+4.  **ExecutionEngine** invokes the graph, allowing LangGraph to execute the flow directly while reporting back to the Orchestrator via hooks.

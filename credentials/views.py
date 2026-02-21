@@ -4,7 +4,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from .models import Credential, CredentialType, CredentialAuditLog
-from .serializers import CredentialSerializer, CredentialTypeSerializer, CredentialAuditLogSerializer
+from .serializers import (
+    CredentialSerializer, 
+    CredentialTypeSerializer, 
+    CredentialAuditLogSerializer,
+    CredentialOAuthInitSerializer,
+    CredentialOAuthCallbackSerializer
+)
 from asgiref.sync import sync_to_async
 
 class CredentialTypeViewSet(viewsets.ReadOnlyModelViewSet):
@@ -135,24 +141,24 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
     def init(self, request):
         """
         Generate Google Authorization URL.
-        Query Params:
-          - redirect_uri: callback URL on frontend
-          - scopes: optional list of scopes (defaults to Sheets/Drive if not specified)
         """
         from .oauth import GoogleOAuthProvider
         
-        redirect_uri = request.query_params.get('redirect_uri')
-        if not redirect_uri:
-            return Response({'error': 'redirect_uri query param is required'}, status=400)
+        serializer = CredentialOAuthInitSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        
+        redirect_uri = serializer.validated_data['redirect_uri']
+        scopes = serializer.validated_data.get('scopes')
             
         # Default scopes for our main integration use cases (Sheets, etc)
-        default_scopes = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive.readonly'
-        ]
+        if not scopes:
+            scopes = [
+                'https://www.googleapis.com/auth/spreadsheets',
+                'https://www.googleapis.com/auth/drive.readonly'
+            ]
         
         provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
-        url = provider.get_auth_url(scopes=default_scopes)
+        url = provider.get_auth_url(scopes=scopes)
         
         return Response({'url': url})
 
@@ -160,20 +166,16 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
     async def callback(self, request):
         """
         Exchange code for tokens and create/update Credential.
-        Body:
-          - code: authorization code
-          - redirect_uri: callback URL used
-          - name: name for the credential
         """
         from .oauth import GoogleOAuthProvider
         from .models import Credential, CredentialType
         
-        code = request.data.get('code')
-        redirect_uri = request.data.get('redirect_uri')
-        name = request.data.get('name', 'Google Account')
+        serializer = CredentialOAuthCallbackSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         
-        if not code or not redirect_uri:
-            return Response({'error': 'code and redirect_uri are required'}, status=400)
+        code = serializer.validated_data['code']
+        redirect_uri = serializer.validated_data['redirect_uri']
+        name = serializer.validated_data['name']
             
         provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
         
@@ -192,13 +194,17 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         except CredentialType.DoesNotExist:
              return Response({'error': 'Google OAuth2 credential type not found in system'}, status=500)
              
+        # Encrypt tokens before saving
+        from cryptography.fernet import Fernet
+        fernet = Fernet(Credential._get_encryption_key())
+        
         # Create Credential
         credential = await sync_to_async(Credential.objects.create)(
             user=request.user,
             credential_type=cred_type,
             name=name,
-            access_token=token_data.get('access_token', '').encode(),
-            refresh_token=token_data.get('refresh_token', '').encode(),
+            access_token=fernet.encrypt(token_data.get('access_token', '').encode()),
+            refresh_token=fernet.encrypt(token_data.get('refresh_token', '').encode()),
         )
         
         # Also store expiration if available

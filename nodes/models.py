@@ -129,3 +129,46 @@ class CustomNode(models.Model):
     def is_ready(self):
         """Check if node is ready for use"""
         return self.status == 'approved' and self.is_validated
+
+
+class AIProvider(models.Model):
+    """
+    AI model providers (e.g., OpenAI, Gemini, Ollama).
+    """
+    name = models.CharField(max_length=100, unique=True)
+    slug = models.SlugField(max_length=100, unique=True)
+    description = models.TextField(blank=True)
+    icon = models.CharField(max_length=50, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'AI Provider'
+        verbose_name_plural = 'AI Providers'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class AIModel(models.Model):
+    """
+    Specific AI models belonging to a provider.
+    """
+    provider = models.ForeignKey(AIProvider, on_delete=models.CASCADE, related_name='models')
+    name = models.CharField(max_length=100)
+    value = models.CharField(max_length=150, unique=True, help_text='The technical name/ID of the model')
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    is_free = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'AI Model'
+        verbose_name_plural = 'AI Models'
+        ordering = ['provider', 'name']
+
+    def __str__(self):
+        return f"{self.provider.name} - {self.name}"

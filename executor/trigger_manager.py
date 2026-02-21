@@ -56,6 +56,7 @@ class TriggerManager:
                     "authentication": config.get("authentication", "none"),
                     "auth_key": config.get("auth_key", ""),
                     "node_type": node_type,
+                    "node_id": node.get("id"),
                 }
                 
                 self._redis.set(key, json.dumps(webhook_config))

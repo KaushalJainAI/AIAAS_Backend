@@ -19,6 +19,53 @@ logger = logging.getLogger(__name__)
 
 # ======================== Workflow Execution Tasks ========================
 
+@shared_task(bind=True, max_retries=3)
+def run_engine_worker_task(self, execution_id_str: str, workflow_id: int, user_id: int, 
+                    workflow_json: dict, input_data: dict, credentials: dict,
+                    parent_execution_id_str: str = None, nesting_depth: int = 0,
+                    workflow_chain: list = None, timeout_budget_ms: int = None,
+                    supervision: str = "full"):
+    """
+    Background worker that runs the ExecutionEngine for a pre-started execution.
+    This is what allows horizontal scaling of workflow runs.
+    """
+    import asyncio
+    from executor.engine import ExecutionEngine
+    from executor.king import get_orchestrator
+    
+    execution_id = UUID(execution_id_str)
+    parent_id = UUID(parent_execution_id_str) if parent_execution_id_str else None
+    
+    # Get the system orchestrator (user_id=0 for shared context or specific user)
+    orchestrator = get_orchestrator(user_id)
+    engine = ExecutionEngine(orchestrator=orchestrator)
+    
+    logger.info(f"Celery worker taking over execution {execution_id}")
+    
+    # Run the async engine in the celery sync worker
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        import nest_asyncio
+        nest_asyncio.apply()
+        
+    result_state = loop.run_until_complete(engine.run_workflow(
+        execution_id=execution_id,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        workflow_json=workflow_json,
+        input_data=input_data,
+        credentials=credentials,
+        parent_execution_id=parent_id,
+        nesting_depth=nesting_depth,
+        workflow_chain=workflow_chain,
+        timeout_budget_ms=timeout_budget_ms,
+        supervision_level=supervision,
+    ))
+    
+    logger.info(f"Celery worker completed execution {execution_id} with state {result_state}")
+    return str(result_state)
+
+
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def execute_workflow_async(
     self,

@@ -12,7 +12,10 @@ from .serializers import (
     WorkflowTemplateSerializer, 
     TemplateListItemSerializer,
     WorkflowRatingSerializer,
-    TemplateCommentSerializer
+    TemplateCommentSerializer,
+    TemplateFilterSerializer,
+    TemplateSearchSerializer,
+    TemplateRateSerializer
 )
 from .services import TemplateService
 
@@ -27,26 +30,27 @@ def template_list(request):
     """
     List available templates with filtering and pagination.
     """
-    category = request.query_params.get('category')
-    sort = request.query_params.get('sort', 'usage_count')
-    min_rating = request.query_params.get('min_rating')
+    serializer = TemplateFilterSerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    
+    params = serializer.validated_data
     
     queryset = WorkflowTemplate.objects.filter(status='production')
     
-    if category:
-        queryset = queryset.filter(category=category)
-    if min_rating:
-        queryset = queryset.filter(average_rating__gte=float(min_rating))
+    if params.get('category'):
+        queryset = queryset.filter(category=params['category'])
+    if params.get('min_rating'):
+        queryset = queryset.filter(average_rating__gte=params['min_rating'])
         
     # Sort mapping
     sort_options = {
         'rating': '-average_rating',
         'usage_count': '-usage_count',
         'newest': '-created_at',
-        'trending': '-fork_count' # Simple trending for now
+        'trending': '-fork_count'
     }
     
-    queryset = queryset.order_by(sort_options.get(sort, '-usage_count'))
+    queryset = queryset.order_by(sort_options.get(params['sort'], '-usage_count'))
     
     paginator = TemplatePagination()
     page = paginator.paginate_queryset(queryset, request)
@@ -73,21 +77,19 @@ async def template_search(request):
     """
     Hybrid semantic + fuzzy search with pagination.
     """
-    query = request.data.get('query', '')
-    category = request.data.get('category')
-    min_rating = request.data.get('min_rating')
-    sort = request.data.get('sort', 'relevance')
-    page = int(request.data.get('page', 1))
-    page_size = int(request.data.get('page_size', 12))
+    serializer = TemplateSearchSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    
+    params = serializer.validated_data
     
     service = TemplateService()
     results = await service.hybrid_search(
-        query=query,
-        category=category,
-        min_rating=min_rating,
-        sort=sort,
-        page=page,
-        page_size=page_size
+        query=params['query'],
+        category=params['category'],
+        min_rating=params['min_rating'],
+        sort=params['sort'],
+        page=params['page'],
+        page_size=params['page_size']
     )
     
     @sync_to_async
@@ -114,11 +116,11 @@ async def rate_template(request, pk):
     # aget for template
     template = await WorkflowTemplate.objects.aget(pk=pk)
     
-    stars = request.data.get('stars')
-    review = request.data.get('review', '')
+    serializer = TemplateRateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
     
-    if not stars or not (1 <= int(stars) <= 5):
-        return Response({'error': 'Stars must be between 1 and 5'}, status=400)
+    stars = serializer.validated_data['stars']
+    review = serializer.validated_data['review']
     
     @sync_to_async
     def update_rating():

@@ -56,6 +56,23 @@ class UserProfile(models.Model):
         help_text='Total credits used historically'
     )
     
+    # Credential/AI Preferences (Global for Orchestrator/King)
+    llm_provider = models.CharField(
+        max_length=30,
+        default='openrouter',
+        help_text='Global LLM provider for internal AI reasoning'
+    )
+    llm_model = models.CharField(
+        max_length=150,
+        default='google/gemini-2.0-flash-exp:free',
+        help_text='Global LLM model for internal AI reasoning'
+    )
+    llm_credential_id = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text='Default credential ID for King Orchestrator'
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

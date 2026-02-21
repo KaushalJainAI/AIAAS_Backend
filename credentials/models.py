@@ -204,7 +204,11 @@ class Credential(models.Model):
         
         try:
             fernet = Fernet(self._get_encryption_key())
-            decrypted = fernet.decrypt(self.encrypted_data)
+            # Ensure we are working with bytes (SQLite/Postgres might return memoryview)
+            encrypted_bytes = bytes(self.encrypted_data) if self.encrypted_data else b""
+            if not encrypted_bytes:
+                return {}
+            decrypted = fernet.decrypt(encrypted_bytes)
             return json.loads(decrypted.decode())
         except Exception as e:
             # Don't expose original exception message (key error, padding, etc) in logs if it contains sensitive info

@@ -48,9 +48,9 @@ class ManualTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        # Add a small perceptual delay so the user sees the "Running" state
-        import asyncio
-        await asyncio.sleep(0.8)
+        # User requested instant execution, removing artificial delay
+        # import asyncio
+        # await asyncio.sleep(0.8)
         
         return NodeExecutionResult(
             success=True,
@@ -765,7 +765,7 @@ class GitHubTriggerNode(BaseNodeHandler):
         
         # We need a token to fetch private repo details or to avoid rate limits
         credential_id = config.get("credential")
-        creds = context.get_credential(credential_id) if credential_id else None
+        creds = await context.get_credential(credential_id) if credential_id else None
         # Try to find any github credential if not specified
         if not creds:
             for c_id, c_data in context.credentials.items():

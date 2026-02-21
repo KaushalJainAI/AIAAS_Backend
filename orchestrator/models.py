@@ -41,6 +41,11 @@ class Workflow(models.Model):
         blank=True,
         help_text='Description of what this workflow does'
     )
+    context = models.TextField(
+        blank=True,
+        default="",
+        help_text='Context for the AI Supervisor to understand the workflow goal and execution nuance.'
+    )
     
     # Workflow Definition
     nodes = models.JSONField(
