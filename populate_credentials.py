@@ -2,15 +2,22 @@ import os
 import django
 import sys
 
-# Setup Django environment
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'workflow_backend.settings')
-django.setup()
-
 from credentials.models import CredentialType
 
 def populate_types():
+    standard_api_key_schema = [
+        {
+            "id": "apiKey",
+            "name": "apiKey",
+            "type": "string",
+            "required": True,
+            "description": "The API Key for this service",
+            "isPassword": True
+        }
+    ]
+
     types = [
+        # --- EXISTING CREDENTIAL TYPES ---
         {
             'name': 'OpenAI',
             'slug': 'openai',
@@ -180,15 +187,99 @@ def populate_types():
             'fields_schema': [
                 {'name': 'bot_token', 'label': 'Bot Token', 'type': 'password', 'required': True}
             ]
+        },
+        # --- NEW AI PROVIDER CREDENTIAL TYPES ---
+        {
+            'name': 'Anthropic API',
+            'slug': 'anthropic',
+            'description': 'API Key for Anthropic Claude',
+            'icon': '🎭',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'OpenRouter API',
+            'slug': 'openrouter',
+            'description': 'API Key for OpenRouter.ai',
+            'icon': '🛣️',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'Hugging Face API',
+            'slug': 'huggingface',
+            'description': 'Access Token for Hugging Face Inference API',
+            'icon': '🤗',
+            'auth_method': 'bearer',
+            'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'Mistral API',
+            'slug': 'mistral',
+            'description': 'API Key for Mistral AI',
+            'icon': '🌪️',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'xAI API (Grok)',
+            'slug': 'xai',
+            'description': 'API Key for xAI',
+            'icon': '✖️',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'DeepSeek API',
+            'slug': 'deepseek',
+            'description': 'API Key for DeepSeek',
+            'icon': '🐳',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'Cohere API',
+            'slug': 'cohere',
+            'description': 'API Key for Cohere',
+            'icon': '🪐',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'Groq API',
+            'slug': 'groq',
+            'description': 'API Key for Groq Cloud',
+            'icon': '⚡',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
         }
     ]
 
-    for t in types:
-        ct, created = CredentialType.objects.update_or_create(
-            slug=t['slug'],
-            defaults=t
-        )
-        print(f"{'Created' if created else 'Updated'} credential type: {t['name']}")
+    for cred_data in types:
+        slug = cred_data['slug']
+        defaults = {
+            'name': cred_data['name'],
+            'description': cred_data.get('description', ''),
+            'icon': cred_data.get('icon', ''),
+            'auth_method': cred_data.get('auth_method', 'api_key'),
+            'fields_schema': cred_data.get('fields_schema', []),
+            'is_active': True
+        }
+        # Only set service_identifier if it would not cause a collision 
+        # or if it's already set on the existing object.
+        # To be safe, for new records we'll just set it to the slug if it's uniquely identifying.
+        # But actually, the DB has unique=True on service_identifier.
+        # So we'll only set it if explicitly provided in the dict.
+        if 'service_identifier' in cred_data:
+            defaults['service_identifier'] = cred_data['service_identifier']
 
-if __name__ == '__main__':
+        obj, created = CredentialType.objects.update_or_create(
+            slug=slug,
+            defaults=defaults
+        )
+        print(f"{'Created' if created else 'Updated'} credential type: {obj.name} (slug: {slug})")
+
+    print("Credential population complete.")
+
+if __name__ == "__main__":
     populate_types()

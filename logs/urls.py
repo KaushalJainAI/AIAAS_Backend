@@ -20,4 +20,6 @@ urlpatterns = [
     # Execution History
     path('executions/', views.execution_list, name='execution_list'),
     path('executions/<str:execution_id>/', views.execution_detail, name='execution_detail'),
+    path('executions/<str:execution_id>/activities/', views.execution_activity_logs, name='execution_activity_logs'),
+    path('executions/<str:execution_id>/narrative/', views.execution_narrative, name='execution_narrative'),
 ]

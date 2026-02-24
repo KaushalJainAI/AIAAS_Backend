@@ -53,18 +53,22 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
         self.groups: list[str] = []
     
     async def connect(self):
-        """Handle WebSocket connection."""
+        """Handle WebSocket connection request."""
         # Get execution_id from URL
         self.execution_id = self.scope['url_route']['kwargs'].get('execution_id')
+        
+        await self.accept() # Accept first to avoid HTTP 403 drops
         
         # Get user from scope
         user = self.scope.get('user')
         if not user or not user.is_authenticated:
+            logger.error(f"Execution WS CONNECTION REJECTED. User in scope: {user}")
             # Reject unauthenticated connections
             await self.close(code=4001)
             return
         
         self.user_id = user.pk
+        logger.info(f"Execution WS CONNECTION ACCEPTED for User ID: {self.user_id}, Execution: {self.execution_id}")
         
         # Verify user has access to this execution
         if self.execution_id:
@@ -83,7 +87,6 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(user_group, self.channel_name)
         self.groups.append(user_group)
         
-        await self.accept()
         
         # Send connection confirmation
         await self.send_json({
@@ -385,16 +388,19 @@ class HITLNotificationConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         """Handle connection."""
+        await self.accept() # Accept first so we don't drop with HTTP 403
+        
         user = self.scope.get('user')
         if not user or not user.is_authenticated:
+            logger.error(f"WS CONNECTION REJECTED. User in scope: {user}")
             await self.close(code=4001)
             return
         
         self.user_id = user.pk
+        logger.info(f"WS CONNECTION ACCEPTED for User ID: {self.user_id}")
         self.group_name = f"hitl_{self.user_id}"
         
         await self.channel_layer.group_add(self.group_name, self.channel_name)
-        await self.accept()
         
         # Send pending HITL requests
         pending = await self._get_pending_requests()

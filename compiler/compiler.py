@@ -310,7 +310,7 @@ class WorkflowCompiler:
                 try:
                     decision = await asyncio.wait_for(
                         orchestrator.before_node(execution_id, node_id, node_type, state, input_data=input_data),
-                        timeout=20
+                        timeout=120
                     )
                     if isinstance(decision, AbortDecision):
                         state['status'] = 'failed'
@@ -321,6 +321,13 @@ class WorkflowCompiler:
                         return state
                 except asyncio.TimeoutError:
                     logger.warning(f"Orchestrator 'before_node' timed out for {node_id}")
+                    # Notify user that orchestrator is slow
+                    if hasattr(orchestrator, '_broadcast_activity'):
+                        asyncio.create_task(orchestrator._broadcast_activity({
+                            "type": "error",
+                            "content": f"Orchestrator LLM is taking too long to reason before {node_id}. Continuing without supervision.",
+                            "node_id": node_id
+                        }))
                 except Exception as e:
                     logger.error(f"Orchestrator 'before_node' failed: {e}")
 
@@ -434,13 +441,20 @@ class WorkflowCompiler:
                         try:
                             err_decision = await asyncio.wait_for(
                                 orchestrator.on_error(execution_id, node_id, node_type, result.error, state),
-                                timeout=20
+                                timeout=120
                             )
                             if isinstance(err_decision, AbortDecision):
                                 state['error'] = result.error
                                 state['status'] = 'failed'
                         except asyncio.TimeoutError:
                             logger.warning(f"Orchestrator 'on_error' timed out for {node_id}")
+                            # Notify user
+                            if hasattr(orchestrator, '_broadcast_activity'):
+                                asyncio.create_task(orchestrator._broadcast_activity({
+                                    "type": "error",
+                                    "content": f"Orchestrator LLM is not responding after error at {node_id}. Aborting.",
+                                    "node_id": node_id
+                                }))
                             state['error'] = result.error
                             state['status'] = 'failed'
                         except Exception as e:
@@ -479,7 +493,7 @@ class WorkflowCompiler:
                                     {'items': serialized_items, 'output_handle': result.output_handle}, 
                                     state
                                 ),
-                                timeout=20
+                                timeout=120
                             )
                             if isinstance(post_decision, AbortDecision):
                                 state['status'] = 'failed'
@@ -488,6 +502,13 @@ class WorkflowCompiler:
                                 state['status'] = 'paused'
                         except asyncio.TimeoutError:
                             logger.warning(f"Orchestrator 'after_node' timed out for {node_id}")
+                            # Notify user
+                            if hasattr(orchestrator, '_broadcast_activity'):
+                                asyncio.create_task(orchestrator._broadcast_activity({
+                                    "type": "error",
+                                    "content": f"Orchestrator LLM timed out while reasoning after {node_id}. Continuing.",
+                                    "node_id": node_id
+                                }))
                         except Exception as e:
                             logger.error(f"Orchestrator 'after_node' failed: {e}")
 

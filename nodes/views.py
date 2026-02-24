@@ -76,7 +76,8 @@ from credentials.models import Credential
 class AIModelListView(APIView):
     """
     List all available AI providers and their models.
-    Also returns whether the user has verified credentials for each provider.
+    Also returns whether the user has verified credentials for each provider
+    and computes dynamic availability for providers and models.
     """
     permission_classes = [IsAuthenticated]
     
@@ -108,7 +109,26 @@ class AIModelListView(APIView):
             elif provider_slug == 'perplexity':
                 has_creds = 'perplexity-api' in verified_type_slugs
             
+            # A provider is generally available if it has credentials (or is ollama)
+            provider_available = has_creds
+            
             models = provider.models.filter(is_active=True)
+            
+            model_data = []
+            for m in models:
+                # Model is available if its provider is fully available,
+                # OR if the model is free and the provider isn't local.
+                # All free cloud models are available by default via the platform routing
+                # Paid models require user's verified credentials
+                model_available = provider_available or (m.is_free and provider_slug != 'ollama')
+                
+                model_data.append({
+                    'name': m.name,
+                    'value': m.value,
+                    'is_free': m.is_free,
+                    'description': m.description,
+                    'available': model_available,
+                })
             
             data.append({
                 'name': provider.name,
@@ -116,14 +136,8 @@ class AIModelListView(APIView):
                 'description': provider.description,
                 'icon': provider.icon,
                 'has_credentials': has_creds,
-                'models': [
-                    {
-                        'name': m.name,
-                        'value': m.value,
-                        'is_free': m.is_free,
-                        'description': m.description,
-                    } for m in models
-                ]
+                'available': provider_available,
+                'models': model_data
             })
             
         return Response({

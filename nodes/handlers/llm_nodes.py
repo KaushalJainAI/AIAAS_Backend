@@ -105,7 +105,7 @@ class OpenAINode(BaseNodeHandler):
             name="model",
             label="Model",
             field_type=FieldType.SELECT,
-            options=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
+            options=[],  # Dynamic
             default="gpt-4o-mini"
         ),
         FieldConfig(
@@ -152,6 +152,22 @@ class OpenAINode(BaseNodeHandler):
         HandleDef(id="output-0", label="Output"),
     ]
     
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        """Fetch OpenAI models from database"""
+        try:
+            from nodes.models import AIModel
+            models = AIModel.objects.filter(provider__slug="openai", is_active=True).values_list('value', flat=True)
+            options = list(models)
+            return {
+                "model": {
+                    "options": options,
+                    "defaultValue": "gpt-4o-mini" if "gpt-4o-mini" in options else (options[0] if options else "gpt-4o-mini")
+                }
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch dynamic models for OpenAI: {e}")
+            return {}
+
     async def execute(
         self,
         input_data: dict[str, Any],
@@ -164,6 +180,16 @@ class OpenAINode(BaseNodeHandler):
         system_message = config.get("system_message", "You are a helpful assistant.")
         temperature = config.get("temperature", 0.7)
         max_tokens = config.get("max_tokens", 1024)
+        show_thinking = config.get("thinking", False)
+        
+        # Determine if we should force JSON for non-native reasoners
+        is_native_reasoner = any(m in model.lower() for m in ["o1", "o3", "reasoning", "thought", "pro"])
+        force_json = show_thinking and not is_native_reasoner
+        
+        effective_prompt = prompt
+        if force_json:
+            json_hint = "\n\nIMPORTANT: Respond ONLY in JSON format with fields 'thinking' (your reasoning) and 'content' (your actual answer)."
+            effective_prompt += json_hint
         
         if not prompt:
             return NodeExecutionResult(
@@ -201,7 +227,7 @@ class OpenAINode(BaseNodeHandler):
                     "model": model,
                     "messages": [
                         {"role": "system", "content": f"{system_message}{format_skills_as_context(all_skills)}"},
-                        {"role": "user", "content": prompt},
+                        {"role": "user", "content": effective_prompt},
                     ],
                     "temperature": temperature,
                     "max_tokens": max_tokens,
@@ -230,21 +256,51 @@ class OpenAINode(BaseNodeHandler):
                     )
                 
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
+                choice = data["choices"][0]
+                content = choice["message"]["content"]
                 usage = data.get("usage", {})
                 
+                captured_thinking = None
+                
+                # If we forced JSON, parse it
+                if force_json:
+                    try:
+                        import json
+                        # Basic parsing, might need more robust _parse_json_response later
+                        parsed = json.loads(content.strip().strip("```json").strip("```"))
+                        captured_thinking = parsed.get("thinking")
+                        content = parsed.get("content", content)
+                    except:
+                        pass # Fallback to raw content
+
+                if show_thinking and not captured_thinking:
+                    # Support OpenAI's specific reasoning field
+                    captured_thinking = choice["message"].get("reasoning_content")
+                    
+                    # Fallback to <think> tags for models that use them (e.g. fine-tuned)
+                    if not captured_thinking:
+                        import re
+                        match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                        if match:
+                            captured_thinking = match.group(1).strip()
+                
+                result_data = {
+                    "content": content,
+                    "model": model,
+                    "usage": {
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
+                    "input": input_data,
+                }
+                
+                if captured_thinking:
+                    result_data["thinking"] = captured_thinking
+
                 return NodeExecutionResult(
                     success=True,
-                    data={
-                        "content": content,
-                        "model": model,
-                        "usage": {
-                            "prompt_tokens": usage.get("prompt_tokens", 0),
-                            "completion_tokens": usage.get("completion_tokens", 0),
-                            "total_tokens": usage.get("total_tokens", 0),
-                        },
-                        "input": input_data,
-                    },
+                    data=result_data,
                     output_handle="output-0"
                 )
                 
@@ -270,6 +326,22 @@ class GeminiNode(BaseNodeHandler):
     """
     
     node_type = "gemini"
+    
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        """Fetch Gemini models from database"""
+        try:
+            from nodes.models import AIModel
+            models = AIModel.objects.filter(provider__slug="gemini", is_active=True).values_list('value', flat=True)
+            options = list(models)
+            return {
+                "model": {
+                    "options": options,
+                    "defaultValue": "gemini-2.0-flash" if "gemini-2.0-flash" in options else (options[0] if options else "gemini-2.0-flash")
+                }
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch dynamic models for Gemini: {e}")
+            return {}
     name = "Gemini"
     category = NodeCategory.AI.value
     description = "Generate text using Google Gemini models"
@@ -288,14 +360,7 @@ class GeminiNode(BaseNodeHandler):
             name="model",
             label="Model",
             field_type=FieldType.SELECT,
-            options=[
-                "gemini-2.5-pro",
-                "gemini-2.5-flash",
-                "gemini-2.0-flash", 
-                "gemini-2.0-flash-lite", 
-                "gemini-1.5-pro", 
-                "gemini-1.5-flash",
-            ],
+            options=[],  # Dynamic
             default="gemini-2.0-flash"
         ),
         FieldConfig(
@@ -335,6 +400,14 @@ class GeminiNode(BaseNodeHandler):
             required=False,
             description="Maximum tokens in response"
         ),
+        FieldConfig(
+            name="thinking",
+            label="Show Reasoning (Thinking)",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="If enabled, captures internal reasoning if supported by the model."
+        ),
     ]
     
     outputs = [
@@ -353,6 +426,7 @@ class GeminiNode(BaseNodeHandler):
         sys_message = config.get("system_message", "You are a helpful assistant.")
         temp = config.get("temperature", 0.7)
         tokens_limit = config.get("max_tokens", 1024)
+        show_thinking = config.get("thinking", False)
         
         if not user_prompt:
             return NodeExecutionResult(
@@ -407,10 +481,16 @@ class GeminiNode(BaseNodeHandler):
 
                 # Build compatible payload by merging system message into prompt
                 # (Avoids 'Unknown field system_instruction' on certain API versions/models)
-                full_prompt = f"{user_prompt}"
+                effective_prompt = user_prompt
+                if show_thinking:
+                    # Gemini currently requires force-prompting JSON for reasoning
+                    hint = "\n\nIMPORTANT: Respond ONLY in JSON format with fields 'thinking' (your reasoning) and 'content' (your actual answer)."
+                    effective_prompt += hint
+
+                full_prompt = f"{effective_prompt}"
                 if sys_message or skills_context:
                     header = f"[SYSTEM INSTRUCTION]\n{sys_message}\n{skills_context}\n\n[USER PROMPT]\n"
-                    full_prompt = f"{header}{user_prompt}"
+                    full_prompt = f"{header}{effective_prompt}"
 
                 payload = {
                     "contents": [{"parts": [{"text": full_prompt}]}],
@@ -440,18 +520,39 @@ class GeminiNode(BaseNodeHandler):
                 content = data["candidates"][0]["content"]["parts"][0]["text"]
                 usage = data.get("usageMetadata", {})
                 
+                # Gemini reasoning support (experimental/future-proofing)
+                captured_thinking = None
+                if show_thinking:
+                    # Try to parse forced JSON first
+                    try:
+                        import json
+                        parsed = json.loads(content.strip().strip("```json").strip("```"))
+                        captured_thinking = parsed.get("thinking")
+                        content = parsed.get("content", content)
+                    except:
+                        # Fallback to <think> tags for models that use them
+                        import re
+                        match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                        if match:
+                            captured_thinking = match.group(1).strip()
+                
+                result_data = {
+                    "content": content,
+                    "model": model_name,
+                    "usage": {
+                        "prompt_tokens": usage.get("promptTokenCount", 0),
+                        "completion_tokens": usage.get("candidatesTokenCount", 0),
+                        "total_tokens": usage.get("totalTokenCount", 0),
+                    },
+                    "input": input_data,
+                }
+                
+                if captured_thinking:
+                    result_data["thinking"] = captured_thinking
+
                 return NodeExecutionResult(
                     success=True,
-                    data={
-                        "content": content,
-                        "model": model_name,
-                        "usage": {
-                            "prompt_tokens": usage.get("promptTokenCount", 0),
-                            "completion_tokens": usage.get("candidatesTokenCount", 0),
-                            "total_tokens": usage.get("totalTokenCount", 0),
-                        },
-                        "input": input_data,
-                    },
+                    data=result_data,
                     output_handle="output-0"
                 )
                 
@@ -477,6 +578,22 @@ class OllamaNode(BaseNodeHandler):
     """
     
     node_type = "ollama"
+
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        """Fetch Ollama models from database"""
+        try:
+            from nodes.models import AIModel
+            models = AIModel.objects.filter(provider__slug="ollama", is_active=True).values_list('value', flat=True)
+            options = list(models)
+            return {
+                "model": {
+                    "options": options,
+                    "defaultValue": "llama3.2:latest" if "llama3.2:latest" in options else (options[0] if options else "llama3.2:latest")
+                }
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch dynamic models for Ollama: {e}")
+            return {}
     name = "Ollama (Local)"
     category = NodeCategory.AI.value
     description = "Generate text using local Ollama models"
@@ -488,8 +605,8 @@ class OllamaNode(BaseNodeHandler):
             name="model",
             label="Model",
             field_type=FieldType.SELECT,
-            options=["llama3.2", "llama3.1", "mistral", "codellama", "phi3", "gemma2"],
-            default="llama3.2"
+            options=[],  # Dynamic
+            default="llama3.2:latest"
         ),
         FieldConfig(
             name="prompt",
@@ -529,6 +646,14 @@ class OllamaNode(BaseNodeHandler):
             required=False,
             description="Creativity (0-2)"
         ),
+        FieldConfig(
+            name="thinking",
+            label="Show Reasoning (Thinking)",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="If enabled, captures internal reasoning (e.g. <think> tags) and shows it to the user."
+        ),
     ]
     
     outputs = [
@@ -546,6 +671,16 @@ class OllamaNode(BaseNodeHandler):
         system_message = config.get("system_message", "")
         base_url = config.get("base_url", "http://localhost:11434")
         temperature = config.get("temperature", 0.7)
+        show_thinking = config.get("thinking", False)
+        
+        # Heuristic for native reasoning models in Ollama (e.g. DeepSeek R1)
+        is_native_reasoner = any(m in model.lower() for m in ["r1", "reasoning", "thought"])
+        force_json = show_thinking and not is_native_reasoner
+
+        effective_prompt = prompt
+        if force_json:
+            json_hint = "\n\nIMPORTANT: Respond ONLY in JSON format with fields 'thinking' (your reasoning) and 'content' (your actual answer)."
+            effective_prompt += json_hint
         
         if not prompt:
             return NodeExecutionResult(
@@ -565,7 +700,7 @@ class OllamaNode(BaseNodeHandler):
                     messages.append({"role": "system", "content": f"{system_message}{format_skills_as_context(all_skills)}"})
                 elif all_skills:
                     messages.append({"role": "system", "content": format_skills_as_context(all_skills)})
-                messages.append({"role": "user", "content": prompt})
+                messages.append({"role": "user", "content": effective_prompt})
                 
                 response = await client.post(
                     f"{base_url.rstrip('/')}/api/chat",
@@ -589,15 +724,44 @@ class OllamaNode(BaseNodeHandler):
                 data = response.json()
                 content = data.get("message", {}).get("content", "")
                 
+                # Capture thinking if enabled
+                captured_thinking = None
+                
+                # If we forced JSON, parse it
+                if force_json:
+                    try:
+                        import json
+                        parsed = json.loads(content.strip().strip("```json").strip("```"))
+                        captured_thinking = parsed.get("thinking")
+                        content = parsed.get("content", content)
+                    except:
+                        pass # Fallback
+
+                if show_thinking and not captured_thinking:
+                    import re
+                    # Many local models (DeepSeek-R1, etc.) use <think> tags
+                    match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                    if match:
+                        captured_thinking = match.group(1).strip()
+                    
+                    # If model returns reasoning in a separate field (Ollama sometimes does)
+                    if not captured_thinking and data.get("message", {}).get("reasoning_content"):
+                         captured_thinking = data["message"]["reasoning_content"]
+
+                result_data = {
+                    "content": content,
+                    "model": model,
+                    "total_duration": data.get("total_duration", 0),
+                    "eval_count": data.get("eval_count", 0),
+                    "input": input_data,
+                }
+                
+                if captured_thinking:
+                    result_data["thinking"] = captured_thinking
+
                 return NodeExecutionResult(
                     success=True,
-                    data={
-                        "content": content,
-                        "model": model,
-                        "total_duration": data.get("total_duration", 0),
-                        "eval_count": data.get("eval_count", 0),
-                        "input": input_data,
-                    },
+                    data=result_data,
                     output_handle="output-0"
                 )
                 
@@ -628,6 +792,22 @@ class PerplexityNode(BaseNodeHandler):
     """
     
     node_type = "perplexity"
+
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        """Fetch Perplexity models from database"""
+        try:
+            from nodes.models import AIModel
+            models = AIModel.objects.filter(provider__slug="perplexity", is_active=True).values_list('value', flat=True)
+            options = list(models)
+            return {
+                "model": {
+                    "options": options,
+                    "defaultValue": "sonar" if "sonar" in options else (options[0] if options else "sonar")
+                }
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch dynamic models for Perplexity: {e}")
+            return {}
     name = "Perplexity"
     category = NodeCategory.AI.value
     description = "Generate web-grounded answers using Perplexity AI"
@@ -646,11 +826,7 @@ class PerplexityNode(BaseNodeHandler):
             name="model",
             label="Model",
             field_type=FieldType.SELECT,
-            options=[
-                "sonar",
-                "sonar-pro", 
-                "sonar-reasoning",
-            ],
+            options=[],  # Dynamic
             default="sonar"
         ),
         FieldConfig(
@@ -724,6 +900,14 @@ class PerplexityNode(BaseNodeHandler):
             required=False,
             description="Include related images if available"
         ),
+        FieldConfig(
+            name="thinking",
+            label="Show Reasoning (Thinking)",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="If enabled, captures internal reasoning if supported."
+        ),
     ]
     
     outputs = [
@@ -746,6 +930,16 @@ class PerplexityNode(BaseNodeHandler):
         recency_filter = config.get("search_recency_filter", "none")
         return_citations = config.get("return_citations", True)
         return_images = config.get("return_images", False)
+        show_thinking = config.get("thinking", False)
+
+        # Heuristic for native reasoning models (e.g., some fine-tunes)
+        is_native_reasoner = any(m in model.lower() for m in ["r1", "reasoning", "thought"])
+        force_json = show_thinking and not is_native_reasoner
+        
+        effective_prompt = prompt
+        if force_json:
+            json_hint = "\n\nIMPORTANT: Respond ONLY in JSON format with fields 'thinking' (your reasoning) and 'content' (your actual answer)."
+            effective_prompt += json_hint
         
         if not prompt:
             return NodeExecutionResult(
@@ -776,7 +970,7 @@ class PerplexityNode(BaseNodeHandler):
 
             messages = [
                 {"role": "system", "content": f"{system_message}{format_skills_as_context(all_skills)}"},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": effective_prompt},
             ]
             
             payload = {
@@ -841,6 +1035,26 @@ class PerplexityNode(BaseNodeHandler):
                 if return_images and images:
                     result_data["images"] = images
                 
+                # Perplexity reasoning support (future-proofing)
+                captured_thinking = None
+                if force_json:
+                    try:
+                        import json
+                        parsed = json.loads(content.strip().strip("```json").strip("```"))
+                        captured_thinking = parsed.get("thinking")
+                        content = parsed.get("content", content)
+                    except:
+                        pass # Fallback to raw content
+
+                if show_thinking and not captured_thinking:
+                    import re
+                    match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                    if match:
+                        captured_thinking = match.group(1).strip()
+                
+                if captured_thinking:
+                    result_data["thinking"] = captured_thinking
+
                 return NodeExecutionResult(
                     success=True,
                     data=result_data,
@@ -875,64 +1089,6 @@ class OpenRouterNode(BaseNodeHandler):
     icon = "🌐"
     color = "#6366f1"
 
-    # Only include currently-live models with :free suffix
-    # All of these are listed as free in Feb 2026 model trackers. [web:8][web:13][web:22]
-    MODEL_OPTIONS = [
-        # Routers
-        "openrouter/auto",              # Smart routing (may use paid models) [web:39]
-        "openrouter/free",              # Routes only across free models [web:18]
-
-        # Meta Llama (Free)
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "meta-llama/llama-3.1-405b-instruct:free",   # free tier variant [web:8][web:13]
-
-        # Google / Gemma / Gemini (Free)
-        "google/gemini-2.0-flash-exp:free",          # 1M ctx, free tier [web:8]
-        "google/gemma-3-27b-it:free",
-        "google/gemma-3-12b-it:free",
-        "google/gemma-3-4b-it:free",                 # all listed as free [web:13]
-
-        # DeepSeek (Free)
-        "deepseek/deepseek-r1-0528:free",            # May 2028 update, free tier [web:8][web:13]
-        "deepseek/deepseek-chat:free",
-
-        # Qwen (Free)
-        "qwen/qwen3-coder-480b:free",
-        "qwen/qwen2.5-vl-7b-instruct:free",          # VL free tier [web:8][web:13]
-
-        # Mistral (Free)
-        "mistralai/mistral-small-3.1:free",
-        "mistralai/mistral-7b-instruct:free",
-        "mistralai/devstral-2512:free",              # Devstral 2 free coding model [web:8][web:25]
-
-        # NVIDIA (Free)
-        "nvidia/nemotron-3-nano-30b:free",
-        "nvidia/nemotron-nano-vl-12b:free",          # VL free tier [web:8][web:13]
-
-        # Arcee AI (Free)
-        "arcee-ai/trinity-large:free",
-        "arcee-ai/trinity-mini:free",                # both listed free [web:8][web:13]
-
-        # Nous Research (Free)
-        "nousresearch/hermes-3-405b:free",           # on free list [web:8]
-
-        # StepFun (Free)
-        "stepfun/step-3.5-flash:free",               # Step 3.5 Flash free [web:8][web:13]
-
-        # Upstage (Free)
-        "upstage/solar-pro-3:free",                  # Solar Pro 3 free [web:8][web:13]
-
-        # Liquid AI (Free)
-        "liquid-ai/lfm-2.5-1.2b-thinking:free",
-        "liquid-ai/lfm-2.5-1.2b-instruct:free",      # both free [web:8]
-
-        # Xiaomi / MiMo (Free)
-        "xiaomi/mimo-v2-flash:free",                 # MiMo-V2-Flash free [web:8][web:25]
-
-        # Z.AI / GLM (Free)
-        "z-ai/glm-4.5-air:free",                     # GLM‑4.5 Air free [web:8]
-    ]
-
     # Safe fallback used when selected model returns 404
     # Pick something that is both strong and clearly free.
     FALLBACK_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
@@ -949,7 +1105,7 @@ class OpenRouterNode(BaseNodeHandler):
             name="model",
             label="Model",
             field_type=FieldType.SELECT,
-            options=MODEL_OPTIONS,
+            options=[],  # Dynamic
             # Default to robust, high‑quality free model
             default="meta-llama/llama-3.3-70b-instruct:free"
         ),
@@ -989,7 +1145,7 @@ class OpenRouterNode(BaseNodeHandler):
             field_type=FieldType.NUMBER,
             default=2048,
             required=False,
-            description="Maximum tokens in response"
+            description="Maximum number of tokens to generate."
         ),
         FieldConfig(
             name="top_p",
@@ -1008,11 +1164,37 @@ class OpenRouterNode(BaseNodeHandler):
             required=False,
             description="Output format: plain text or forced JSON object"
         ),
+        FieldConfig(
+            name="thinking",
+            label="Show Reasoning (Thinking)",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="If enabled, captures internal reasoning (o1/o3 reasoning_content)."
+        ),
     ]
 
     outputs = [
         HandleDef(id="output-0", label="Output"),
     ]
+
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        """Fetch OpenRouter models from database"""
+        try:
+            from nodes.models import AIModel
+            models = AIModel.objects.filter(provider__slug="openrouter", is_active=True).values_list('value', flat=True)
+            options = list(models)
+            return {
+                "model": {
+                    "options": options,
+                    "defaultValue": "meta-llama/llama-3.3-70b-instruct:free" 
+                                    if "meta-llama/llama-3.3-70b-instruct:free" in options 
+                                    else (options[0] if options else "openrouter/auto")
+                }
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch dynamic models for OpenRouter: {e}")
+            return {}
 
     async def execute(
         self,
@@ -1025,6 +1207,15 @@ class OpenRouterNode(BaseNodeHandler):
         model          = config.get("model", self.FALLBACK_MODEL)
         prompt         = config.get("prompt", "")
         system_message = config.get("system_message", "You are a helpful assistant.")
+        show_thinking  = config.get("thinking", False)
+
+        is_native_reasoner = any(m in model.lower() for m in ["r1", "o1", "o3", "reasoning", "thought", "pro"])
+        force_json = show_thinking and not is_native_reasoner
+        
+        effective_prompt = prompt
+        if force_json:
+            json_hint = "\n\nIMPORTANT: Respond ONLY in JSON format with fields 'thinking' (your reasoning) and 'content' (your actual answer)."
+            effective_prompt += json_hint
 
         # Defensive numeric parsing
         try:
@@ -1072,7 +1263,7 @@ class OpenRouterNode(BaseNodeHandler):
 
             messages = [
                 {"role": "system", "content": f"{system_message}{skill_context}"},
-                {"role": "user",   "content": prompt},
+                {"role": "user",   "content": effective_prompt},
             ]
 
             # ── Request Body ──────────────────────────────────────────────────
@@ -1161,29 +1352,52 @@ class OpenRouterNode(BaseNodeHandler):
             usage         = data.get("usage", {})
 
             # Extract reasoning/thinking if available (e.g. from DeepSeek R1)
-            reasoning = choice.get("message", {}).get("reasoning", "")
+            captured_thinking = None
             
-            # Some providers might put it in 'thinking' or other fields
-            if not reasoning:
-                reasoning = choice.get("message", {}).get("thinking", "")
+            if force_json:
+                try:
+                    import json
+                    parsed = json.loads(content.strip().strip("```json").strip("```"))
+                    captured_thinking = parsed.get("thinking")
+                    content = parsed.get("content", content)
+                except:
+                    pass
+
+            if show_thinking and not captured_thinking:
+                captured_thinking = choice.get("message", {}).get("reasoning", "")
+                
+                # Some providers might put it in 'thinking' or other fields
+                if not captured_thinking:
+                    captured_thinking = choice.get("message", {}).get("thinking", "")
+                
+                # Fallback to <think> tags
+                if not captured_thinking:
+                    import re
+                    match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                    if match:
+                        captured_thinking = match.group(1).strip()
+
+            result_data = {
+                "content":         content,
+                "model":           data.get("model", actual_model),
+                "requested_model": model,
+                "used_fallback":   used_fallback,
+                "generation_id":   generation_id,
+                "finish_reason":   finish_reason,
+                "usage": {
+                    "prompt_tokens":     usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "total_tokens":      usage.get("total_tokens", 0),
+                },
+                "input": input_data,
+            }
+            
+            if captured_thinking:
+                result_data["thinking"] = captured_thinking
 
             return NodeExecutionResult(
                 success=True,
-                data={
-                    "content":         content,
-                    "reasoning":       reasoning,
-                    "model":           data.get("model", actual_model),
-                    "requested_model": model,
-                    "used_fallback":   used_fallback,
-                    "generation_id":   generation_id,
-                    "finish_reason":   finish_reason,
-                    "usage": {
-                        "prompt_tokens":     usage.get("prompt_tokens", 0),
-                        "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens":      usage.get("total_tokens", 0),
-                    },
-                    "input": input_data,
-                },
+                data=result_data,
                 output_handle="output-0"
             )
 
@@ -1206,3 +1420,235 @@ class OpenRouterNode(BaseNodeHandler):
                 output_handle="output-0"
             )
 
+
+class HuggingFaceNode(BaseNodeHandler):
+    """
+    Call Hugging Face Inference API for text generation.
+    """
+    
+    node_type = "huggingface"
+
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        """Fetch Hugging Face models from database"""
+        try:
+            from nodes.models import AIModel
+            # Note: HuggingFaceNode usually uses model IDs, but we can still fetch registered models
+            models = AIModel.objects.filter(provider__slug="huggingface", is_active=True).values_list('value', flat=True)
+            options = list(models)
+            if not options:
+                 # Default if nothing in DB
+                 return {}
+            return {
+                "model": {
+                    "options": options,
+                    "defaultValue": "meta-llama/Meta-Llama-3-8B-Instruct" if "meta-llama/Meta-Llama-3-8B-Instruct" in options else options[0]
+                }
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch dynamic models for HuggingFace: {e}")
+            return {}
+    name = "Hugging Face"
+    category = NodeCategory.AI.value
+    description = "Generate text using Hugging Face models"
+    icon = "🤗"
+    color = "#FFD21E"  # Hugging Face yellow
+    
+    fields = [
+        FieldConfig(
+            name="credential",
+            label="Hugging Face API Key",
+            field_type=FieldType.CREDENTIAL,
+            credential_type="huggingface-api",
+            description="Select your Hugging Face credential"
+        ),
+        FieldConfig(
+            name="model",
+            label="Model",
+            field_type=FieldType.SELECT,
+            options=[],  # Dynamic
+            default="meta-llama/Meta-Llama-3-8B-Instruct",
+            description="Select a Hugging Face model from your registered list"
+        ),
+        FieldConfig(
+            name="prompt",
+            label="Prompt",
+            field_type=FieldType.STRING,
+            placeholder="Enter your prompt here...",
+            description="The prompt to send to the model"
+        ),
+        FieldConfig(
+            name="system_message",
+            label="System Message",
+            field_type=FieldType.STRING,
+            required=False,
+            default="",
+            description="Optional system message to set context (if supported by the model)"
+        ),
+        FieldConfig(
+            name="skills",
+            label="Skills",
+            field_type=FieldType.SKILLS,
+            required=False,
+            description="Select skills to inject as context into the prompt"
+        ),
+        FieldConfig(
+            name="temperature",
+            label="Temperature",
+            field_type=FieldType.NUMBER,
+            default=0.7,
+            required=False,
+            description="Creativity (0-2)"
+        ),
+        FieldConfig(
+            name="max_tokens",
+            label="Max Tokens",
+            field_type=FieldType.NUMBER,
+            default=512,
+            required=False,
+            description="Maximum tokens to generate"
+        ),
+        FieldConfig(
+            name="thinking",
+            label="Show Reasoning (Thinking)",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="If enabled, captures internal reasoning."
+        ),
+    ]
+    
+    outputs = [
+        HandleDef(id="output-0", label="Output"),
+    ]
+    
+    async def execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> NodeExecutionResult:
+        model = config.get("model", "meta-llama/Meta-Llama-3-8B-Instruct")
+        prompt = config.get("prompt", "")
+        system_message = config.get("system_message", "")
+        temperature = config.get("temperature", 0.7)
+        max_new_tokens = int(config.get("max_tokens", 512)) # Renamed from max_new_tokens to max_tokens
+        show_thinking = config.get("thinking", False)
+        credential_id = config.get("credential")
+        
+        # HuggingFace prompt engineering for reasoning
+        # (Most HF Inference models work better with clear JSON hints)
+        force_json = show_thinking
+        effective_prompt = prompt
+        if force_json:
+            json_hint = "\n\nIMPORTANT: Respond ONLY in JSON format with fields 'thinking' (your reasoning) and 'content' (your actual answer)."
+            effective_prompt = f"{effective_prompt}{json_hint}"
+
+        if not prompt:
+            return NodeExecutionResult(
+                success=False,
+                error="Prompt is required",
+                output_handle="error"
+            )
+            
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
+        
+        if not api_key:
+            return NodeExecutionResult(
+                success=False,
+                error="Hugging Face API key not configured",
+                output_handle="output-0"
+            )
+            
+        api_key = api_key.strip()
+        
+        try:
+            all_skills = await resolve_node_skills(config, context)
+            skills_context = format_skills_as_context(all_skills)
+            
+            # Combine system message and skills with prompt (basic formatting)
+            full_prompt = prompt
+            if system_message or skills_context:
+                full_prompt = f"System: {system_message}\n{skills_context}\nUser: {prompt}"
+                
+            payload = {
+                "inputs": full_prompt,
+                "parameters": {
+                    "temperature": temperature,
+                    "max_new_tokens": max_new_tokens,
+                    "return_full_text": False
+                }
+            }
+            
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    f"https://api-inference.huggingface.co/models/{model}",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=payload
+                )
+                
+                if response.status_code != 200:
+                    error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                    error_msg = error_data.get("error", response.text)
+                    return NodeExecutionResult(
+                        success=False,
+                        error=f"Hugging Face API error: {error_msg}",
+                        output_handle="output-0"
+                    )
+                
+                data = response.json()
+                content = ""
+                if isinstance(data, list) and len(data) > 0:
+                    content = data[0].get("generated_text", "")
+                elif isinstance(data, dict):
+                    content = data.get("generated_text", "")
+
+                # HF reasoning extraction
+                captured_thinking = None
+                
+                # If we forced JSON, parse it
+                if force_json:
+                    try:
+                        import json
+                        parsed = json.loads(content.strip().strip("```json").strip("```"))
+                        captured_thinking = parsed.get("thinking")
+                        content = parsed.get("content", content)
+                    except:
+                        pass # Fallback
+
+                if show_thinking and not captured_thinking:
+                    import re
+                    match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                    if match:
+                        captured_thinking = match.group(1).strip()
+
+                result_data = {
+                    "content": content,
+                    "model": model,
+                    "input": input_data,
+                }
+                
+                if captured_thinking:
+                    result_data["thinking"] = captured_thinking
+
+                return NodeExecutionResult(
+                    success=True,
+                    data=result_data,
+                    output_handle="output-0"
+                )
+                
+        except httpx.TimeoutException:
+            return NodeExecutionResult(
+                success=False,
+                error="Hugging Face API request timed out",
+                output_handle="output-0"
+            )
+        except Exception as e:
+            return NodeExecutionResult(
+                success=False,
+                error=f"Hugging Face error: {str(e)}",
+                output_handle="output-0"
+            )

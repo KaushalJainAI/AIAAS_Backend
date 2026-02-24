@@ -83,19 +83,20 @@ class ExecutionEngine:
             # Pass all user credential IDs so they are used for validation
             # We fetch IDs only to satisfy compile-time validation without pre-decrypting data
             from credentials.models import Credential
-            def get_user_cred_ids():
-                return set(map(str, Credential.objects.filter(user_id=user_id).values_list('id', flat=True)))
             
-            all_user_cred_ids = await sync_to_async(get_user_cred_ids)()
+            @sync_to_async
+            def compile_workflow():
+                cred_ids = set(map(str, Credential.objects.filter(user_id=user_id).values_list('id', flat=True)))
+                compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=cred_ids)
+                
+                # Direct compilation to StateGraph
+                # Pass orchestrator and supervision level for hook filtering
+                return compiler.compile(
+                    orchestrator=effective_orchestrator,
+                    supervision_level=supervision_level
+                )
             
-            compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=all_user_cred_ids)
-            
-            # Direct compilation to StateGraph
-            # Pass orchestrator and supervision level for hook filtering
-            graph = compiler.compile(
-                orchestrator=effective_orchestrator,
-                supervision_level=supervision_level
-            )
+            graph = await compile_workflow()
             
         except WorkflowCompilationError as e:
             error_msg = f"Compilation failed: {e}"

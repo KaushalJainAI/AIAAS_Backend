@@ -87,6 +87,9 @@ class SSEBroadcaster:
     EVENT_HITL_REQUEST = 'hitl_request'
     EVENT_PROGRESS = 'progress'
     EVENT_LOG = 'log'
+    EVENT_ORCHESTRATOR_THINKING = 'thinking'
+    EVENT_ORCHESTRATOR_THOUGHT = 'thought'
+    EVENT_WORKFLOW_CANCELLED = 'workflow_cancelled'
     
     # In-memory subscribers (for single instance)
     # Format: {execution_id: [asyncio.Queue, ...]}
@@ -238,7 +241,8 @@ class SSEBroadcaster:
                     # Check for terminal events
                     if event.event_type in (
                         self.EVENT_WORKFLOW_COMPLETE,
-                        self.EVENT_WORKFLOW_ERROR
+                        self.EVENT_WORKFLOW_ERROR,
+                        self.EVENT_WORKFLOW_CANCELLED
                     ):
                         break
                         
@@ -291,6 +295,21 @@ class SSEBroadcaster:
             }
         )
     
+    async def workflow_cancelled(
+        self,
+        execution_id: str,
+        duration_ms: int = 0
+    ):
+        """Send workflow cancelled event."""
+        await self.send_event(
+            execution_id,
+            self.EVENT_WORKFLOW_CANCELLED,
+            {
+                'status': 'cancelled',
+                'duration_ms': duration_ms,
+            }
+        )
+
     async def workflow_error(
         self,
         execution_id: str,
@@ -403,6 +422,46 @@ class SSEBroadcaster:
                 'total': total_nodes,
                 'percentage': int((current_node / total_nodes) * 100) if total_nodes > 0 else 0,
                 'message': message,
+            }
+        )
+
+    async def orchestrator_thinking(
+        self,
+        execution_id: str,
+        content: str,
+        node_id: str = 'orchestrator'
+    ):
+        """Send orchestrator thinking status event."""
+        await self.send_event(
+            execution_id,
+            self.EVENT_ORCHESTRATOR_THINKING,
+            {
+                'content': content,
+                'node_id': node_id,
+                'category': 'orchestrator_activity',
+                'type': 'thinking',
+                'timestamp': datetime.utcnow().isoformat()
+            }
+        )
+
+    async def orchestrator_thought(
+        self,
+        execution_id: str,
+        content: str,
+        reasoning: str = '',
+        node_id: str = 'orchestrator'
+    ):
+        """Send orchestrator final thought event."""
+        await self.send_event(
+            execution_id,
+            self.EVENT_ORCHESTRATOR_THOUGHT,
+            {
+                'content': content,
+                'reasoning': reasoning,
+                'node_id': node_id,
+                'category': 'orchestrator_activity',
+                'type': 'thought',
+                'timestamp': datetime.utcnow().isoformat()
             }
         )
 

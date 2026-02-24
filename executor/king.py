@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, Optional
 from uuid import UUID, uuid4
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import RLock
 
 from django.utils import timezone
 
@@ -128,6 +128,7 @@ class ExecutionHandle:
     runtime_variables: dict[str, Any] = field(default_factory=dict)
     execution_errors: list[dict] = field(default_factory=list)  # Runtime errors
     hitl_decisions: list[dict] = field(default_factory=list)  # Human decisions made
+    workflow_snapshot: dict = field(default_factory=dict) # Full workflow JSON for reference
     
     def record_node_input(self, node_id: str, input_data: Any) -> None:
         """Store a node's input for reasoning context."""
@@ -228,23 +229,33 @@ Generate ONLY valid JSON, no explanation:"""
 Your job is to provide high-level reasoning and oversight for each step.
 
 Current Execution Goal: {goal}
+Current Workflow Intent: {intent}
 Current Status: {status}
-Current Node: {node_id} ({node_type})
+Current Node: {node_name} ({node_id}) [{node_type}]
 
 Execution Context:
-- Workflow Intent: {intent}
 - Completed Steps: {completed_steps}
-- Recent Node Data: {data_context}
-- Runtime Variables: {variables}
+- Recent Node Results (Context): {data_context}
+- Runtime Variables (State): {variables}
 
 {extra_info}
 
 Relevant Skills:
 {skills}
 
-Based on this, what are your thoughts or reasoning for this specific step or situation? 
-Provide a concise, insightful "thought" (1-2 sentences). 
-Focus on HOW this step serves the goal or how you plan to handle the current state."""
+# Task:
+Analyze the data context above and determine if the workflow is on track to meet the "Execution Goal". 
+- If the node output indicates a problem, explain it. 
+- If the node output moved the project forward, explain what was achieved.
+- Avoid generic phrases like "Proceeding to next step" or "Execution successful".
+
+Provide your response in VALID JSON format with the following fields:
+{{
+    "thinking": "Your internal, step-by-step technical analysis of the node's output and its impact on the goal.",
+    "thought": "A highly useful, insightful summary for the user. Explain the SIGNIFICANCE of this step. Do not artificially limit yourself to 1-2 sentences if the complexity warrants more detail, but stay concise and value-dense."
+}}
+
+Output ONLY the JSON object, no other text."""
     
     def __init__(self, user_id: int | None = None, llm_type: str = "openrouter", llm_model: str = "google/gemini-2.0-flash-exp:free", credential_id: str | None = None):
         # Identity
@@ -258,7 +269,7 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         self.settings_loaded = False
 
         # State tracking (thread-safe access)
-        self._lock = Lock()
+        self._lock = RLock()
         self._executions: dict[UUID, ExecutionHandle] = {}
         self._tasks: dict[UUID, asyncio.Task] = {}
         self._pause_events: dict[UUID, asyncio.Event] = {}
@@ -282,6 +293,8 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         
         # Callbacks
         self._on_state_change: Callable[[ExecutionHandle], None] | None = None
+        self._on_progress: Callable[[UUID, str, float], None] | None = None
+        self._on_hitl_request: Callable[[HITLRequest], None] | None = None
     
     def _schedule_cleanup(self):
         """Start background TTL cleanup."""
@@ -436,10 +449,21 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         
         return "\n".join(descriptions)
     
-    async def _broadcast_activity(self, data: dict):
-        """Broadcast orchestrator activity via WebSockets."""
-        # Using user-specific group for notifications
-        if self.user_id:
+    async def _broadcast_activity(self, data: dict, execution_id: UUID | None = None):
+        """
+        Broadcasts an activity notification to the user's channel.
+        DEPRECATED: Use get_execution_logger().log_orchestrator_thought instead.
+        """
+        from logs.logger import get_execution_logger
+        if execution_id:
+            await get_execution_logger().log_orchestrator_thought(
+                execution_id=execution_id,
+                content=data.get('thought') or data.get('thinking_message') or 'Updating...',
+                reasoning=data.get('thinking', ''),
+                thought_type=data.get('type', 'thought'),
+                node_id=data.get('node_id') or 'orchestrator'
+            )
+        elif self.user_id: # Fallback for non-execution specific broadcasts
             from channels.layers import get_channel_layer
             channel_layer = get_channel_layer()
             if channel_layer:
@@ -461,16 +485,29 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         context: Dict[str, Any], 
         node_type: str = "unknown",
         extra_info: str = ""
-    ) -> str:
-        """Generate a reasoning thought for the current execution state."""
+    ) -> tuple[str, str | None]:
+        """
+        Generate a reasoning thought for the current execution state.
+        
+        Returns:
+            (thought_text, error_message)
+        """
         handle = self._executions.get(execution_id)
         if not handle:
-            return ""
+            return "", "Execution handle not found"
 
         # Gather context for the prompt
         completed_steps = list(handle.node_outputs.keys())
         variables = handle.runtime_variables
         
+        # Look up node name from snapshot
+        node_name = node_id
+        if handle.workflow_snapshot:
+            nodes = handle.workflow_snapshot.get('nodes', [])
+            node_data = next((n for n in nodes if n.get('id') == node_id), None)
+            if node_data:
+                node_name = node_data.get('data', {}).get('label') or node_data.get('data', {}).get('config', {}).get('label') or node_id
+
         # Gather data context (inputs for current, outputs for others)
         data_ctx = {
             "current_node_input": self._sanitize_data(handle.node_inputs.get(node_id)),
@@ -479,15 +516,8 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         
         # Prepare skills context
         skills_text = "None"
-        if handle.execution_id in self._executions: # Should be handle but let's be safe
-             # Wait, handle is already available in self._executions[execution_id]
-             # But it doesn't have the skills yet because I haven't added them to handle.
-             # Alternatively, I can get them from the context if I pass it.
-             pass
-
-        # Helper to format skills for the prompt
-        skills_list = []
         if hasattr(handle, 'skills_data') and handle.skills_data:
+            skills_list = []
             for s in handle.skills_data:
                 skills_list.append(f"### {s['title']}\n{s['content']}")
             skills_text = "\n\n".join(skills_list)
@@ -498,6 +528,7 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
             user_context=handle.execution_context or "None provided",
             status=handle.state,
             node_id=node_id,
+            node_name=node_name,
             node_type=node_type, 
             completed_steps=", ".join(completed_steps) if completed_steps else "None",
             data_context=json.dumps(data_ctx, indent=2),
@@ -507,35 +538,84 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         )
 
         try:
-            # Call LLM and let it record/broadcast the thought
-            # We use a placeholder thought for 'pre-generation status'
-            thought_text = await self._call_llm(
+            # [NEW] Use more descriptive status messages
+            status_desc = f"Analyzing {node_type} logic for '{node_name}'..."
+            
+            # [NEW] Get model info for logging
+            model_id, model_name_str = await self._get_model_info(self.llm_model)
+
+            llm_response = await self._call_llm(
                 prompt, 
                 user_id=handle.user_id,
-                thought=f"Analyzing step '{node_id}'...",
-                execution_id=execution_id
+                thought=status_desc,
+                execution_id=execution_id,
+                node_id=node_id
             )
             
-            # The thought is already broadcast by _call_llm if we pass 'thought'.
-            # But that's the "I am thinking" thought.
-            # We want the ACTUAL reasoning to be broadcat too.
-            await self._broadcast_activity({
-                "type": "thought",
-                "content": thought_text,
-                "node_id": node_id,
-                "node_type": node_type,
-                "timestamp": datetime.utcnow().isoformat()
-            })
+            # Parse forced JSON reasoning
+            try:
+                data = self._parse_json_response(llm_response)
+                thinking_text = data.get("thinking", "").strip()
+                thought_text = data.get("thought", "").strip()
+                
+                # [NEW] Robust fallback: if summary is missing or empty, use technical thinking
+                if not thought_text and thinking_text:
+                    thought_text = thinking_text
+                elif not thought_text:
+                    thought_text = "Analysis complete."
+            except:
+                # Fallback if model fails to output valid JSON
+                thinking_text = ""
+                thought_text = llm_response.strip() or "No response generated."
+
+            # Broadcast ACTUAL reasoning
+            from logs.logger import get_execution_logger
+            if thinking_text:
+                await get_execution_logger().log_orchestrator_thought(
+                    execution_id=execution_id,
+                    content=thinking_text,
+                    reasoning=thinking_text,
+                    thought_type='thinking',
+                    node_id=node_id,
+                    node_name=node_name,
+                    model_id=model_id,
+                    model_name=model_name_str
+                )
+            
+            # Broadcast summary thought
+            await get_execution_logger().log_orchestrator_thought(
+                execution_id=execution_id,
+                content=thought_text,
+                reasoning=thinking_text,
+                thought_type='thought',
+                node_id=node_id,
+                node_name=node_name,
+                model_id=model_id,
+                model_name=model_name_str
+            )
             
             # Record it in history formally
             from orchestrator.chat_context import get_thought_history
             history = get_thought_history(str(execution_id))
             history.add_thought(node_id=node_id, thought=thought_text)
             
-            return thought_text
+            return thought_text, None
         except Exception as e:
-            logger.error(f"Failed to generate thought: {e}")
-            return ""
+            error_msg = str(e)
+            logger.error(f"Failed to generate thought: {error_msg}")
+            
+            # Dismiss the "thinking..." state on the frontend if LLM fails
+            error_thought = f"Could not generate reasoning due to LLM error: {error_msg}"
+            from logs.logger import get_execution_logger
+            await get_execution_logger().log_orchestrator_thought(
+                execution_id=execution_id,
+                content=error_thought,
+                reasoning=error_thought,
+                thought_type='error',
+                node_id=node_id,
+                node_name=node_name
+            )
+            return "", error_msg
 
     async def ensure_settings_loaded(self):
         """Ensure settings are loaded from user profile (async safe)."""
@@ -556,6 +636,60 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         except Exception as e:
             logger.warning(f"Failed to load user settings for {self.user_id}: {e}")
             self.settings_loaded = True # Don't keep retrying if it fails
+
+    async def check_health(self, user_id: int | None = None) -> tuple[bool, str]:
+        """
+        Verify that the orchestrator LLM is reachable and credentials are valid.
+        
+        Returns:
+            (is_healthy, error_message)
+        """
+        effective_user_id = user_id or self.user_id
+        await self.ensure_settings_loaded()
+        
+        test_prompt = "Respond with 'ok' and nothing else."
+        try:
+            # Use a very low token limit for the health check
+            registry = self._get_registry()
+            if not registry.has_handler(self.llm_type):
+                return False, f"LLM provider '{self.llm_type}' not available"
+            
+            # We don't use _call_llm directly to avoid adding to thought history
+            handler = registry.get_handler(self.llm_type)
+            
+            # Resolve credential (mostly duplicated from _call_llm for health check safety)
+            effective_credential_id = self.credential_id
+            if not effective_credential_id and effective_user_id and self.llm_type != "ollama":
+                from credentials.models import Credential
+                from asgiref.sync import sync_to_async
+                def find_cred():
+                    return Credential.objects.filter(
+                        user_id=effective_user_id,
+                        credential_type__service_identifier=self.llm_type,
+                        is_active=True
+                    ).order_by('-last_used_at').first()
+                found_cred = await sync_to_async(find_cred)()
+                if found_cred:
+                    effective_credential_id = str(found_cred.id)
+
+            from compiler.schemas import ExecutionContext
+            context = ExecutionContext(execution_id=uuid4(), user_id=effective_user_id, workflow_id=0)
+            config = {
+                "prompt": test_prompt,
+                "credential": effective_credential_id,
+                "model": self.llm_model,
+                "max_tokens": 10,
+                "temperature": 0.0
+            }
+            
+            result = await handler.execute({}, config, context)
+            if result.success:
+                return True, "Healthy"
+            else:
+                return False, result.error or "LLM check failed"
+        except Exception as e:
+            logger.error(f"Orchestrator health check failed: {e}")
+            return False, str(e)
 
     async def _load_user_settings(self):
         """Alias for ensure_settings_loaded."""
@@ -601,11 +735,13 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         user_id: int | None = None,
         credential_id: str | None = None,
         thought: str | None = None,
-        execution_id: UUID | None = None
+        execution_id: UUID | None = None,
+        node_id: str | None = None
     ) -> str:
         """Call LLM to generate response. Uses configured llm_type and llm_model."""
         from compiler.schemas import ExecutionContext
         from orchestrator.chat_context import get_thought_history
+        from logs.logger import get_execution_logger
         
         registry = self._get_registry()
         
@@ -659,29 +795,63 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         # Record thought if provided
         if thought:
             history = get_thought_history(str(context.execution_id))
-            # Try to infer node_id from prompt context if possible, or use 'orchestrator'
-            target_node = "orchestrator"
-            if "node_id=" in prompt:
-                import re
-                match = re.search(r"node_id=([\w-]+)", prompt)
-                if match:
-                    target_node = match.group(1)
+            target_node = node_id or "orchestrator"
             
             history.add_thought(node_id=target_node, thought=thought)
             # Broadcast activity as 'thinking' status, not a final thought
-            asyncio.create_task(self._broadcast_activity({
-                "type": "thinking",
-                "content": thought,
-                "node_id": target_node,
-                "timestamp": datetime.utcnow().isoformat()
-            }))
+            # [NEW] Use 'status' type for transient thinking messages to distinguish from final insights
+            asyncio.create_task(get_execution_logger().log_orchestrator_thought(
+                execution_id=execution_id,
+                content=thought,
+                thought_type='status',
+                node_id=target_node
+            ))
         
         result = await handler.execute({}, config, context)
         
         if result.success:
-            return result.data.get("content", "")
+            # [FIX] Safety check for result.data being None
+            data = result.data or {}
+            content = data.get("content", "")
+            
+            # [NEW] Capture model-generated thinking/reasoning if present
+            # Handlers will be updated to put this in 'thinking' or search for <think> tags
+            captured_thinking = data.get("thinking") or data.get("reasoning")
+            if not captured_thinking and "<think>" in content:
+                import re
+                match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                if match:
+                    captured_thinking = match.group(1).strip()
+                    # Optionally strip from content if the user wants clean output
+                    # content = content.replace(match.group(0), "").strip()
+
+            if captured_thinking:
+                asyncio.create_task(get_execution_logger().log_orchestrator_thought(
+                    execution_id=execution_id,
+                    content=captured_thinking,
+                    reasoning=captured_thinking,
+                    thought_type='thought',
+                    node_id=node_id or "orchestrator"
+                ))
+
+            return content
         else:
-            raise Exception(result.error)
+            # Check for connection-related errors (especially for Ollama)
+            error_msg = result.error or "Unknown LLM error"
+            is_connection_error = any(phrase in error_msg.lower() for phrase in [
+                "connection", "unreachable", "refused", "failed to connect", "not found"
+            ])
+            
+            if is_connection_error:
+                asyncio.create_task(get_execution_logger().log_orchestrator_thought(
+                    execution_id=execution_id,
+                    content=f"CRITICAL: Failed to connect to {self.llm_type} ({self.llm_model}). Please ensure the service is running locally.",
+                    reasoning=error_msg,
+                    thought_type='error',
+                    node_id=node_id or "orchestrator"
+                ))
+            
+            raise Exception(error_msg)
     
     def _parse_json_response(self, response: str) -> dict:
         """Parse JSON from LLM response."""
@@ -741,6 +911,7 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         Runtime execution does NOT use this - it uses goal-based control.
         """
         logger.info(f"King Agent generating workflow for user {user_id}: {prompt}")
+        # This broadcast is not tied to an execution_id, so it uses the old method.
         await self._broadcast_activity({"type": "status", "content": f"Processing intent: {prompt[:50]}..."})
         
         try:
@@ -858,6 +1029,7 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         )
         
         effective_user_id = user_id or self.user_id
+        # This broadcast is not tied to an execution_id, so it uses the old method.
         await self._broadcast_activity({"type": "status", "content": f"Modifying workflow: {modification[:50]}..."})
         # Record thought for modification
         response = await self._call_llm(
@@ -1067,6 +1239,7 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
             goal_conditions=goal_conditions or {},
             workflow_description=workflow_json.get('description', ''),
             execution_context=context,
+            workflow_snapshot=workflow_json
         )
         # Store for supervision reasoning
         handle.skills_data = skills_data
@@ -1074,12 +1247,8 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         with self._lock:
             self._executions[execution_id] = handle
         
-        # Setup pause event (set = running, cleared = paused)
-        pause_event = asyncio.Event()
-        pause_event.set()
-        self._pause_events[execution_id] = pause_event
-        
-        # --- FIX: Create ExecutionLog synchronously to prevent race condition ---
+        # --- FIX: Create ExecutionLog EARLY to capture startup failures ---
+        exec_logger = None
         try:
             from logs.logger import ExecutionLogger
             exec_logger = ExecutionLogger()
@@ -1091,13 +1260,35 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
                 input_data=input_data,
                 nesting_depth=nesting_depth,
                 timeout_budget_ms=timeout_budget_ms,
-                workflow_snapshot=workflow_json
+                workflow_snapshot=workflow_json,
+                supervision_level=supervision_level
             )
         except Exception as e:
             logger.error(f"Failed to create execution log for {execution_id}: {e}")
-            # We continue, but engine might fail if it relies on log existence.
-            # Actually, engine will also try to log, so this is critical.
-            # But let's let the engine fail gracefully if needed.
+
+        # --- NEW: Orchestrator Health Check ---
+        if supervision_level != SupervisionLevel.NONE:
+            is_healthy, health_error = await self.check_health(user_id=effective_user_id)
+            if not is_healthy:
+                error_msg = f"Orchestrator LLM failure: {health_error}. Please check your credentials and connection."
+                logger.error(f"Cannot start workflow {workflow_id} for user {effective_user_id}: {error_msg}")
+                
+                # Log failure to DB if logger is available
+                if exec_logger:
+                    await exec_logger.complete_execution(
+                        execution_id=execution_id,
+                        status='failed',
+                        error_message=f"Orchestrator Failure: {health_error}",
+                        error_node_id="orchestrator"
+                    )
+                
+                # We raise an exception here so the view can return 400/500
+                raise Exception(error_msg)
+
+        # Setup pause event (set = running, cleared = paused)
+        pause_event = asyncio.Event()
+        pause_event.set()
+        self._pause_events[execution_id] = pause_event
         
         from django.conf import settings
         if getattr(settings, 'RUN_WORKFLOWS_ASYNC', False):
@@ -1184,6 +1375,19 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
             self._pause_events.pop(execution_id, None)
             # Note: We keep _executions for status queries but could add TTL-based eviction
 
+    async def _get_model_info(self, model_id: str) -> tuple[str, str]:
+        """Lookup human-readable model name from technical ID."""
+        if not model_id:
+            return '', ''
+        
+        try:
+            from nodes.models import AIModel
+            model = await AIModel.objects.aget(value=model_id)
+            return model_id, model.name
+        except Exception:
+            # Fallback to model ID if name not found
+            return model_id, model_id
+
     # --- OrchestratorInterface Hooks (Supervision) ---
     def _sanitize_data(self, data: Any) -> Any:
         """Recursively scrub sensitive keys from data before sending to LLM."""
@@ -1237,19 +1441,14 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         # BROADCAST STATUS (Ensure frontend sees it on timeline)
         await self._broadcast_activity({
             "type": "status",
-            "content": f"Analyzing node: {node_id}",
+            "content": f"Executing node: {node_id}",
             "node_id": node_id,
             "node_type": node_type,
             "timestamp": datetime.utcnow().isoformat()
         })
         
-        # GENERATE THOUGHT (for FULL supervision)
-        if handle.supervision_level == SupervisionLevel.FULL:
-            # We don't await this to keep execution moving, OR we await for serial "Thought -> Action" feel
-            # User says "thought should be an attribute in each node" which implies it belongs to the step.
-            # Let's await to ensure the thought is visible BEFORE the node output.
-            await self._generate_thought(execution_id, node_id, context, node_type=node_type)
-
+        # We NO LONGER check full supervision here. User wants thought AFTER execution completes on the node!
+        
         return ContinueDecision()
 
     async def after_node(
@@ -1261,11 +1460,6 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
     ) -> OrchestratorDecision:
         """
         After each node, use RUNTIME context for goal-based decisions.
-        
-        This does NOT use the knowledge base - only runtime state:
-        - Node outputs
-        - Goal conditions  
-        - Error thresholds
         """
         handle = self._executions.get(execution_id)
         if not handle: 
@@ -1295,12 +1489,54 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
                     "reason": reason,
                     "timestamp": datetime.utcnow().isoformat()
                 })
+                
+                # GENERATE THOUGHT to explain why it stopped
+                if handle.supervision_level in (SupervisionLevel.FULL, SupervisionLevel.FAILSAFE):
+                    await self._generate_thought(
+                        execution_id, 
+                        node_id, 
+                        context, 
+                        node_type="unknown", 
+                        extra_info=f"Node output: {self._sanitize_data(result)}\nDecision: Stopping because goal condition not met ({reason})."
+                    )
+
                 # Could ask human here if supervision level allows
-                if handle.supervision_level == SupervisionLevel.FULL:
-                    # Optionally ask user before stopping
-                    pass  # For now, just stop
                 return AbortDecision(f"Goal condition: {reason}")
         
+        # GENERATE THOUGHT to explain why it continues
+        if handle.supervision_level in (SupervisionLevel.FULL, SupervisionLevel.FAILSAFE):
+            thought, error = await self._generate_thought(
+                execution_id, 
+                node_id, 
+                context, 
+                node_type="unknown", 
+                extra_info=f"Node output: {self._sanitize_data(result)}\nDecision: Continuing execution."
+            )
+            
+            # [CRITICAL] If thought generation failed (e.g. 429/404), handle based on level
+            if error:
+                # [NEW] If level is FAILSAFE, we just log a warning and CONTINUE
+                if handle.supervision_level == SupervisionLevel.FAILSAFE:
+                    logger.warning(f"Supervision failure (Failsafe mode): {error}. Continuing execution.")
+                    # Thought generation already logged the error to the frontend via _generate_thought
+                    return ContinueDecision()
+                
+                # Otherwise, ABORT with the specific error
+                error_msg = f"Supervision failure: {error}. Aborting for safety. (Use 'failsafe' mode to ignore)"
+                logger.error(f"Execution {execution_id} aborted: {error_msg}")
+                
+                # Try to log the failure reason
+                try:
+                    from logs.logger import get_execution_logger
+                    await get_execution_logger().log_error(
+                        execution_id=execution_id,
+                        node_id="orchestrator",
+                        error_message=f"Orchestrator Failure mid-workflow during '{node_id}' analysis: {error}"
+                    )
+                except: pass
+                
+                return AbortDecision(error_msg)
+
         return ContinueDecision()
 
     async def on_error(
@@ -1340,13 +1576,14 @@ Focus on HOW this step serves the goal or how you plan to handle the current sta
         # Future: Could ask human for error recovery based on supervision level
         
         # GENERATE THOUGHT (for FULL and ERROR_ONLY supervision)
-        if handle.supervision_level in (SupervisionLevel.FULL, SupervisionLevel.ERROR_ONLY):
+        if handle.supervision_level in (SupervisionLevel.FULL, SupervisionLevel.ERROR_ONLY, SupervisionLevel.FAILSAFE):
+            # Record the error first anyway
             await self._generate_thought(
                 execution_id, 
                 node_id, 
                 context, 
                 node_type=node_type,
-                extra_info=f"CRITICAL ERROR: {error}"
+                extra_info=f"CRITICAL ERROR: {error}\nDecision: Aborting execution."
             )
 
         return AbortDecision(error)

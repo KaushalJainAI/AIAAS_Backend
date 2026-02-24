@@ -232,6 +232,13 @@ class BaseNodeHandler(ABC):
         """
         return [], state
     
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        """
+        Hook for subclasses to provide dynamic configuration for fields.
+        Returns a dict mapping field name -> override dict (e.g., {'options': [...], 'default': '...'}).
+        """
+        return {}
+
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         """
         Validate node configuration.
@@ -239,6 +246,7 @@ class BaseNodeHandler(ABC):
         Returns list of error messages, empty if valid.
         """
         errors = []
+        dynamic_overrides = self.get_dynamic_fields()
         
         for field in self.fields:
             value = config.get(field.name)
@@ -246,14 +254,33 @@ class BaseNodeHandler(ABC):
             if field.required and value is None:
                 errors.append(f"Field '{field.label}' is required")
             
+            # Resolve options: static + dynamic overrides
+            options = field.options or []
+            if field.name in dynamic_overrides and 'options' in dynamic_overrides[field.name]:
+                options = dynamic_overrides[field.name]['options']
+
             if field.field_type == FieldType.SELECT and value:
-                if field.options and value not in field.options:
+                if options and value not in options:
                     errors.append(f"Invalid option '{value}' for field '{field.label}'")
         
         return errors
-    
+
     def get_schema(self) -> NodeSchema:
-        """Generate schema for frontend"""
+        """Generate schema for frontend with dynamic field resolution."""
+        dynamic_overrides = self.get_dynamic_fields()
+        
+        processed_fields = []
+        for field in self.fields:
+            if field.name in dynamic_overrides:
+                # Merge dynamic data into a new FieldConfig instance
+                field_data = field.model_dump()
+                field_data.update(dynamic_overrides[field.name])
+                # Note: name -> id and field_type -> type in serialization, 
+                # but pydantic will handle it if we use field.name
+                processed_fields.append(FieldConfig(**field_data))
+            else:
+                processed_fields.append(field)
+
         return NodeSchema(
             node_type=self.node_type,
             name=self.name,
@@ -261,7 +288,7 @@ class BaseNodeHandler(ABC):
             description=self.description,
             icon=self.icon,
             color=self.color,
-            fields=self.fields,
+            fields=processed_fields,
             inputs=self.inputs,
             outputs=self.outputs,
         )

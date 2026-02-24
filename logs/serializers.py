@@ -1,4 +1,17 @@
 from rest_framework import serializers
+from .models import ExecutionLog, NodeExecutionLog, AuditEntry, OrchestratorThought
+
+class OrchestratorThoughtSerializer(serializers.ModelSerializer):
+    """Serializer for orchestrator thoughts."""
+    class Meta:
+        model = OrchestratorThought
+        fields = [
+            'id', 'execution', 'node_id', 'node_name', 'category', 
+            'thought_type', 'content', 'reasoning', 
+            'model_id', 'model_name',
+            'metadata', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_at']
 
 class AnalyticsFilterSerializer(serializers.Serializer):
     """Serializer for basic analytics filtering."""

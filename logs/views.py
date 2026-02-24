@@ -15,12 +15,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from asgiref.sync import sync_to_async
 
-from .models import ExecutionLog, NodeExecutionLog, AuditEntry
+from .models import ExecutionLog, NodeExecutionLog, AuditEntry, OrchestratorThought
 from .serializers import (
     AnalyticsFilterSerializer, 
     AuditFilterSerializer, 
     ExecutionListFilterSerializer,
-    AuditExportSerializer
+    AuditExportSerializer,
+    OrchestratorThoughtSerializer
 )
 
 
@@ -460,6 +461,7 @@ async def execution_detail(request, execution_id: str):
             "nodes_executed": execution.nodes_executed,
             "tokens_used": execution.tokens_used,
             "credits_used": execution.credits_used,
+            "supervision_level": execution.supervision_level,
             "input_data": execution.input_data,
             "output_data": execution.output_data,
             "error_message": execution.error_message,
@@ -473,3 +475,80 @@ async def execution_detail(request, execution_id: str):
     if detail is None:
         return Response({"error": "Execution not found"}, status=404)
     return Response(detail)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def execution_activity_logs(request, execution_id: str):
+    """
+    Get all orchestrator activity logs (thoughts, thinking, status) for an execution.
+    """
+    def get_activities():
+        thoughts = OrchestratorThought.objects.filter(
+            execution__execution_id=execution_id,
+            user=request.user
+        ).order_by('created_at')
+        
+        serializer = OrchestratorThoughtSerializer(thoughts, many=True)
+        return serializer.data
+
+    activities = await sync_to_async(get_activities)()
+    return Response(activities)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def execution_narrative(request, execution_id: str):
+    """
+    Get or generate a synthesized narrative summary of the execution's thoughts.
+    """
+    def get_narrative():
+        # Check if we already have a narrative entry
+        narrative = OrchestratorThought.objects.filter(
+            execution__execution_id=execution_id,
+            thought_type='narrative',
+            user=request.user
+        ).first()
+        
+        if narrative:
+            return OrchestratorThoughtSerializer(narrative).data
+            
+        # If not, find all thoughts to synthesize
+        # [NEW] Exclude 'status' and 'thinking' types to focus on final 'thought' entries
+        thoughts = OrchestratorThought.objects.filter(
+            execution__execution_id=execution_id,
+            user=request.user
+        ).filter(thought_type__in=['thought', 'error']).order_by('created_at')
+        
+        if not thoughts.exists():
+            return None
+            
+        # [NEW] Improved synthesis logic
+        lines = []
+        for t in thoughts:
+            node_display = t.node_name if t.node_name else (f"@{t.node_id}" if t.node_id and t.node_id != 'orchestrator' else "System")
+            prefix = node_display
+            # Use reasoning if content is tiny or placeholder-like
+            body = t.content
+            if (not body or len(body) < 30) and t.reasoning:
+                body = t.reasoning
+            lines.append(f"[{t.created_at.strftime('%H:%M:%S')}] {prefix}: {body}")
+        
+        combined_thoughts = "\n".join(lines)
+        
+        summary = f"Synthesized Narrative for Execution {execution_id[:8]}...\n\n"
+        summary += "Key Decisions & Insights:\n"
+        summary += combined_thoughts
+        
+        return {
+            "execution_id": execution_id,
+            "thought_type": "narrative",
+            "content": f"AI Narrative Review - {len(thoughts)} insights captured.",
+            "reasoning": summary,
+            "created_at": timezone.now()
+        }
+
+    narrative_data = await sync_to_async(get_narrative)()
+    if narrative_data is None:
+        return Response({"error": "No activities found to synthesize."}, status=404)
+    return Response(narrative_data)

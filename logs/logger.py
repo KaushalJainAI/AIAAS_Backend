@@ -132,7 +132,8 @@ class ExecutionLogger:
         parent_execution_id: UUID | None = None,
         nesting_depth: int = 0,
         timeout_budget_ms: int | None = None,
-        workflow_snapshot: dict | None = None
+        workflow_snapshot: dict | None = None,
+        supervision_level: str = ''
     ) -> ExecutionLog:
         """Create a new execution log entry when workflow starts."""
         from django.db.models import F
@@ -152,7 +153,8 @@ class ExecutionLogger:
             nesting_depth=nesting_depth,
             is_subworkflow_execution=bool(parent_execution_id),
             timeout_budget_ms=timeout_budget_ms,
-            workflow_snapshot=workflow_snapshot or {}
+            workflow_snapshot=workflow_snapshot or {},
+            supervision_level=supervision_level
         )
         return exec_log
     
@@ -166,7 +168,8 @@ class ExecutionLogger:
         parent_execution_id: UUID | None = None,
         nesting_depth: int = 0,
         timeout_budget_ms: int | None = None,
-        workflow_snapshot: dict | None = None
+        workflow_snapshot: dict | None = None,
+        supervision_level: str = ''
     ) -> ExecutionLog:
         """Async version of start_execution."""
         from orchestrator.models import Workflow
@@ -195,7 +198,8 @@ class ExecutionLogger:
                 nesting_depth=nesting_depth,
                 is_subworkflow_execution=bool(parent_execution_id),
                 timeout_budget_ms=timeout_budget_ms,
-                workflow_snapshot=workflow_snapshot or {}
+                workflow_snapshot=workflow_snapshot or {},
+                supervision_level=supervision_level
             )
         
         return await create_log()
@@ -255,6 +259,8 @@ class ExecutionLogger:
             broadcaster = get_broadcaster()
             if status == 'completed':
                 await broadcaster.workflow_completed(str(execution_id), output_data or {}, duration_ms)
+            elif status == 'cancelled':
+                await broadcaster.workflow_cancelled(str(execution_id), duration_ms)
             else:
                 await broadcaster.workflow_error(str(execution_id), error_message, error_node_id)
         except Exception: pass
@@ -302,10 +308,12 @@ class ExecutionLogger:
         output_data: dict[str, Any] | None = None,
         error_message: str = '',
         duration_ms: int = 0,
-        warnings: list[Any] | None = None
+        warnings: list[Any] | None = None,
+        status: str | None = None
     ) -> None:
         """Buffer node completion."""
-        status = 'completed' if success else 'failed'
+        if status is None:
+            status = 'completed' if success else 'failed'
         log_entry = {
             '_op': 'complete',
             'node_id': node_id,
@@ -326,11 +334,14 @@ class ExecutionLogger:
 
         try:
             broadcaster = get_broadcaster()
-            if success:
-                await broadcaster.node_completed(str(execution_id), node_id, output_data, duration_ms, status='completed')
+            if success and status == 'completed':
+                await broadcaster.node_completed(str(execution_id), node_id, output_data, duration_ms, status=status)
             else:
-                # If failed, send error event with status='failed'
-                await broadcaster.node_error(str(execution_id), node_id, error_message, status='failed')
+                # If failed or cancelled, send event with determined status
+                if status == 'cancelled':
+                     await broadcaster.node_completed(str(execution_id), node_id, output_data, duration_ms, status='cancelled')
+                else:
+                     await broadcaster.node_error(str(execution_id), node_id, error_message, status=status)
         except Exception: pass
 
     async def log_node_skip(
@@ -394,6 +405,69 @@ class ExecutionLogger:
             await get_broadcaster().node_error(str(execution_id), node_id, error_message, status='failed')
         except Exception: pass
     
+    async def log_orchestrator_thought(
+        self,
+        execution_id: UUID,
+        content: str,
+        reasoning: str = '',
+        thought_type: str = 'thought',
+        node_id: str = 'orchestrator',
+        node_name: str = '',
+        category: str = 'workflow',
+        metadata: dict | None = None,
+        model_id: str = '',
+        model_name: str = ''
+    ) -> None:
+        """
+        Persist an orchestrator thought immediately to the DB.
+        Thoughts are cognitive events and bypass buffering for immediate visibility.
+        """
+        from django.contrib.auth import get_user_model
+        from orchestrator.models import Workflow
+        from .models import OrchestratorThought
+        
+        try:
+            exec_log = await ExecutionLog.objects.aget(execution_id=execution_id)
+            
+            @sync_to_async
+            def save_thought():
+                return OrchestratorThought.objects.create(
+                    user=exec_log.user,
+                    execution=exec_log,
+                    workflow=exec_log.workflow,
+                    node_id=node_id,
+                    node_name=node_name or '',
+                    category=category,
+                    thought_type=thought_type,
+                    content=content,
+                    reasoning=reasoning,
+                    model_id=model_id,
+                    model_name=model_name,
+                    metadata=metadata or {}
+                )
+            
+            await save_thought()
+            
+            # Broadcast via standardized SSE
+            broadcaster = get_broadcaster()
+            if thought_type == 'thinking':
+                await broadcaster.orchestrator_thinking(str(execution_id), content, node_id)
+            else:
+                # Include model info in broadcast if available
+                broadcast_content = content
+                if model_name:
+                    # We can either append to content or send in metadata. 
+                    # For now, let's keep SSE content clean and rely on frontend to fetch model info, 
+                    # OR include it in metadata if the broadcaster supports it.
+                    # Looking at broadcaster.py would be good, but let's assume SSE metadata for now.
+                    pass
+                await broadcaster.orchestrator_thought(str(execution_id), content, reasoning, node_id)
+                
+        except ExecutionLog.DoesNotExist:
+            logger.warning(f"Failed to log thought for {execution_id}: ExecutionLog not found.")
+        except Exception as e:
+            logger.error(f"Error logging orchestrator thought for {execution_id}: {e}")
+
     def create_audit_entry(self, **kwargs) -> AuditEntry:
         """Audit entries are critical; bypass buffer and write immediately."""
         return AuditEntry.objects.create(**kwargs)

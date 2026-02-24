@@ -17,6 +17,7 @@ class ExecutionState(str, Enum):
 class SupervisionLevel(str, Enum):
     """Level of orchestrator supervision during execution."""
     FULL = "full"           # All hooks: before_node, after_node, on_error
+    FAILSAFE = "failsafe"   # All hooks, but continues on supervisor failure
     ERROR_ONLY = "error_only"  # Only on_error hook (lightweight mode)
     NONE = "none"           # No hooks (pure engine execution)
 

@@ -390,14 +390,21 @@ async def execute_workflow(request, workflow_id: int):
     active_creds = await sync_to_async(get_workflow_credentials)(request.user.id, workflow_json)
     
     # Start Execution via Orchestrator
-    handle = await orchestrator.start(
-        workflow_json=workflow_json,
-        user_id=request.user.id,
-        input_data=input_data,
-        credentials=active_creds, # Pass injected creds
-        supervision=workflow.supervision_level, 
-        context=workflow.context,
-    )
+    try:
+        handle = await orchestrator.start(
+            workflow_json=workflow_json,
+            user_id=request.user.id,
+            input_data=input_data,
+            credentials=active_creds, # Pass injected creds
+            supervision=workflow.supervision_level, 
+            context=workflow.context,
+        )
+    except Exception as e:
+        logger.error(f"Failed to start workflow: {e}")
+        return Response({
+            'error': 'Orchestrator Failure',
+            'message': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
     
     return Response({
         'execution_id': str(handle.execution_id),

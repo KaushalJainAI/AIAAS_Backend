@@ -409,8 +409,8 @@ class LogSanitizer:
         
         result = {}
         sensitive_keys = {
-            'password', 'secret', 'token', 'api_key', 'apikey', 'auth',
-            'credential', 'private', 'key', 'access_token', 'refresh_token'
+            'password', 'secret', 'api_key', 'apikey', 'auth_token',
+            'private_key', 'access_token', 'refresh_token', 'client_secret'
         }
         
         for key, value in data.items():

@@ -140,6 +140,13 @@ class ExecutionLog(models.Model):
         validators=[MinValueValidator(0)]
     )
     
+    # Supervision
+    supervision_level = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text='Level of orchestrator supervision used for this execution'
+    )
+    
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -380,3 +387,78 @@ class AuditEntry(models.Model):
 
     def __str__(self):
         return f"{self.action_type} by {self.user} at {self.created_at}"
+
+
+class OrchestratorThought(models.Model):
+    """
+    Records the Orchestrator's thoughts, reasoning, and synthesis narrative.
+    Links cognitive activity to execution history.
+    """
+    CATEGORY_CHOICES = [
+        ('workflow', 'Workflow Execution'),
+        ('idle', 'Idle Reflection'),
+        ('system', 'System Context'),
+    ]
+    
+    THOUGHT_TYPE_CHOICES = [
+        ('thinking', 'Internal Technical Reasoning'),
+        ('thought', 'Concise Decision/Observation'),
+        ('narrative', 'Synthesized Run Narrative'),
+        ('status', 'Operational Status'),
+    ]
+    
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='orchestrator_thoughts'
+    )
+    
+    # Optional links for context
+    workflow = models.ForeignKey(
+        'orchestrator.Workflow',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orchestrator_thoughts'
+    )
+    execution = models.ForeignKey(
+        ExecutionLog,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orchestrator_thoughts'
+    )
+    
+    # Contextual identifiers
+    node_id = models.CharField(max_length=100, blank=True)
+    node_name = models.CharField(max_length=255, blank=True)
+    
+    # Content
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='workflow')
+    thought_type = models.CharField(max_length=20, choices=THOUGHT_TYPE_CHOICES, default='thought')
+    
+    # Model tracking
+    model_id = models.CharField(max_length=255, blank=True, help_text='Technical ID of the model used')
+    model_name = models.CharField(max_length=255, blank=True, help_text='Human-readable name of the model')
+    
+    content = models.TextField(help_text="The core thought or concisely stated observation.")
+    reasoning = models.TextField(blank=True, help_text="Detailed internal technical reasoning or 'thinking' block.")
+    
+    # Metadata
+    metadata = models.JSONField(default=dict, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Orchestrator Thought'
+        verbose_name_plural = 'Orchestrator Thoughts'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['execution', 'thought_type']),
+            models.Index(fields=['category', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.get_thought_type_display()} - {self.content[:50]}..."

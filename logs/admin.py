@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import ExecutionLog, NodeExecutionLog, AuditEntry
+from .models import ExecutionLog, NodeExecutionLog, AuditEntry, OrchestratorThought
 
 
 class NodeExecutionLogInline(admin.TabularInline):
@@ -104,6 +104,29 @@ class AuditEntryAdmin(admin.ModelAdmin):
         }),
         ('Metadata', {
             'fields': ('ip_address', 'user_agent'),
+            'classes': ('collapse',)
+        }),
+        ('Timestamp', {
+            'fields': ('created_at',)
+        }),
+    )
+@admin.register(OrchestratorThought)
+class OrchestratorThoughtAdmin(admin.ModelAdmin):
+    list_display = ['id', 'execution', 'node_id', 'node_name', 'thought_type', 'created_at']
+    list_filter = ['thought_type', 'category', 'created_at']
+    search_fields = ['node_id', 'node_name', 'content', 'reasoning', 'execution__execution_id']
+    readonly_fields = ['created_at']
+    ordering = ['-created_at']
+    
+    fieldsets = (
+        ('Context', {
+            'fields': ('user', 'workflow', 'execution', 'node_id', 'node_name', 'category')
+        }),
+        ('Content', {
+            'fields': ('thought_type', 'content', 'reasoning')
+        }),
+        ('Metadata', {
+            'fields': ('metadata',),
             'classes': ('collapse',)
         }),
         ('Timestamp', {
