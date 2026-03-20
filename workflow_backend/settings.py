@@ -29,7 +29,14 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-default-key-change-in
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+    '.ngrok-free.app',
+    '.ngrok-free.dev',
+    os.environ.get('PUBLIC_URL', '').replace('https://', '').replace('http://', '').split('/')[0]
+]
+ALLOWED_HOSTS = [h for h in ALLOWED_HOSTS if h]  # Remove empties
 
 
 # Application definition
@@ -215,6 +222,18 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
+
+# ============================================
+# Upload Configuration
+# ============================================
+try:
+    from workflow_backend.thresholds import (
+        DATA_UPLOAD_MAX_MEMORY_SIZE, 
+        FILE_UPLOAD_MAX_MEMORY_SIZE, 
+        DATA_UPLOAD_MAX_NUMBER_FIELDS
+    )
+except ImportError:
+    pass
 
 # ============================================
 # CORS Configuration

@@ -2,6 +2,11 @@ import os
 import django
 import sys
 
+# Set up Django environment BEFORE importing models
+# Fix: Correct settings path to workflow_backend.settings
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'workflow_backend.settings')
+django.setup()
+
 from credentials.models import CredentialType
 
 def populate_types():
@@ -252,6 +257,22 @@ def populate_types():
             'icon': '⚡',
             'auth_method': 'api_key',
             'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'Tavily API',
+            'slug': 'tavily',
+            'description': 'API Key for Tavily Search',
+            'icon': 'Search',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'Firecrawl API',
+            'slug': 'firecrawl',
+            'description': 'API Key for Firecrawl Scraping',
+            'icon': 'Globe',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
         }
     ]
 
@@ -265,14 +286,7 @@ def populate_types():
             'fields_schema': cred_data.get('fields_schema', []),
             'is_active': True
         }
-        # Only set service_identifier if it would not cause a collision 
-        # or if it's already set on the existing object.
-        # To be safe, for new records we'll just set it to the slug if it's uniquely identifying.
-        # But actually, the DB has unique=True on service_identifier.
-        # So we'll only set it if explicitly provided in the dict.
-        if 'service_identifier' in cred_data:
-            defaults['service_identifier'] = cred_data['service_identifier']
-
+        
         obj, created = CredentialType.objects.update_or_create(
             slug=slug,
             defaults=defaults

@@ -87,6 +87,7 @@ class NodeSchema(BaseModel):
     fields: list[FieldConfig]
     inputs: list[HandleDef]
     outputs: list[HandleDef]
+    output_fields: list[str] = Field(default_factory=list, serialization_alias="outputFields")
     
     model_config = {"use_enum_values": True, "populate_by_name": True}
 
@@ -164,6 +165,56 @@ class NodeExecutionResult(BaseModel):
         return [item.json for item in self.items]
 
 
+# ==================== Schema Helpers ====================
+
+def build_json_schema_from_fields(fields: list[dict]) -> dict | None:
+    """
+    Convert user-defined custom field defs into a JSON Schema.
+    
+    Args:
+        fields: List of dicts with 'id', 'type', 'label' keys.
+               id is prefixed with 'custom_' (will be stripped).
+    
+    Returns:
+        JSON Schema dict or None if no fields.
+    """
+    if not fields:
+        return None
+    type_map = {"text": "string", "number": "number", "boolean": "boolean", "json": "object"}
+    props = {}
+    for f in fields:
+        field_name = f.get("id", "").replace("custom_", "")
+        if not field_name:
+            continue
+        json_type = type_map.get(f.get("type", "text"), "string")
+        props[field_name] = {"type": json_type}
+    if not props:
+        return None
+    return {
+        "type": "object",
+        "properties": props,
+        "required": list(props.keys()),
+        "additionalProperties": False,
+    }
+
+
+def format_schema_for_prompt(schema: dict) -> str:
+    """Format a JSON schema as a prompt instruction for models without native JSON mode."""
+    if not schema:
+        return ""
+    import json
+    fields_desc = []
+    for name, prop in schema.get("properties", {}).items():
+        fields_desc.append(f'  "{name}": <{prop["type"]}>')
+    fields_str = ",\n".join(fields_desc)
+    return (
+        "\n\nIMPORTANT: You MUST respond with ONLY a valid JSON object matching this exact schema, "
+        "with no extra text before or after:\n"
+        "{\n" + fields_str + "\n}\n"
+        "Do NOT include markdown code fences or any text outside the JSON."
+    )
+
+
 # ==================== Base Handler ====================
 
 class BaseNodeHandler(ABC):
@@ -190,6 +241,7 @@ class BaseNodeHandler(ABC):
     fields: list[FieldConfig] = []
     inputs: list[HandleDef] = [HandleDef(id="input")]
     outputs: list[HandleDef] = [HandleDef(id="output")]
+    static_output_fields: list[str] = [] # Metadata for static field discovery
     
     @abstractmethod
     async def execute(
@@ -210,6 +262,26 @@ class BaseNodeHandler(ABC):
             NodeExecutionResult with success status and output data
         """
         pass
+
+    async def stream_execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ):
+        """
+        Stream response tokens if supported. 
+        Falling back to standard execute if not implemented.
+        """
+        result = await self.execute(input_data, config, context)
+        if result.success:
+            data = result.get_data()
+            yield {"type": "content", "content": data.get("content", "")}
+            # Yield usage and other metadata in a final chunk
+            final_meta = {k: v for k, v in data.items() if k != "content"}
+            yield {"type": "metadata", **final_meta}
+        else:
+            yield {"type": "error", "message": result.error}
     
     async def poll(
         self,
@@ -291,6 +363,7 @@ class BaseNodeHandler(ABC):
             fields=processed_fields,
             inputs=self.inputs,
             outputs=self.outputs,
+            output_fields=self.static_output_fields,
         )
     
     def __repr__(self) -> str:

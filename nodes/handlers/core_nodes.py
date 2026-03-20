@@ -38,8 +38,8 @@ class CodeNode(BaseNodeHandler):
             name="code",
             label="Python Code",
             field_type=FieldType.CODE,
-            description="Pure Python function body. Use 'item' to access data.",
-            placeholder='return {"sum": item["a"] + item["b"]}'
+            description="Write a function 'main(item, context)' or just use 'return' for simple logic.",
+            default="def main(item, context):\n    # Access input via item['field']\n    # Return a dictionary\n    return {\"result\": \"success\"}"
         ),
     ]
     
@@ -47,16 +47,32 @@ class CodeNode(BaseNodeHandler):
         HandleDef(id="output-0", label="Success", handle_type="success"),
     ]
 
+    def _extract_code(self, text: str) -> str:
+        """Utility to extract code from markdown for the user."""
+        if not isinstance(text, str): return text
+        import re
+        # 1. ```python\ncode\n```
+        match = re.search(r"```(?:python|py)?\n(.*?)\n```", text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        # 2. ```code```
+        match = re.search(r"```(.*?)```", text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return text.strip()
+
     def _get_sandbox_globals(self):
         """Define a strict whitelist for in-process safety."""
         import math, json, datetime
         return {
+            "extract_code": self._extract_code,
             "__builtins__": {
                 "len": len, "range": range, "min": min, "max": max,
                 "sum": sum, "abs": abs, "str": str, "int": int,
                 "float": float, "list": list, "dict": dict, "set": set,
                 "bool": bool, "enumerate": enumerate, "zip": zip,
                 "round": round, "any": any, "all": all, "sorted": sorted,
+                "getattr": getattr, "hasattr": hasattr,
                 "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError,
             },
             "math": math,
@@ -71,26 +87,43 @@ class CodeNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        user_code = config.get("code", "")
+        user_code = config.get("code", "").strip()
         if not user_code:
             return NodeExecutionResult(success=False, error="No code provided")
 
-        # 1. Pre-Compile (Performance: ONCE per node execution)
-        wrapped_code = "def __user_fn__(item, context, config):\n"
-        wrapped_code += "\n".join(f"    {line}" for line in user_code.splitlines())
-        
-        try:
-            code_obj = compile(wrapped_code, "<user_code>", "exec")
-        except SyntaxError as e:
-            return NodeExecutionResult(success=False, error=f"Syntax Error: {str(e)}")
+        # Auto-extract if it looks like markdown (piped from LLM)
+        user_code = self._extract_code(user_code)
 
-        # 2. Setup Sandbox & Extract Function
+        # 1. Prepare Sandbox
         sandbox_globals = self._get_sandbox_globals()
-        exec(code_obj, sandbox_globals)
-        user_fn = sandbox_globals.get("__user_fn__")
+        
+        # 2. Detection Logic: Full Function vs Body Only
+        # If the user defines 'main(item, context)', we'll call that.
+        # Otherwise, we wrap it in a function like before.
+        
+        is_full_function = "def main(" in user_code
+        
+        if is_full_function:
+            try:
+                # Execute the code to define functions
+                code_obj = compile(user_code, "<user_code>", "exec")
+                exec(code_obj, sandbox_globals)
+                user_fn = sandbox_globals.get("main")
+            except Exception as e:
+                return NodeExecutionResult(success=False, error=f"Compilation/Execution Error: {str(e)}")
+        else:
+            # Body-only mode (legacy/simple)
+            wrapped_code = "def __user_fn__(item, context, config):\n"
+            wrapped_code += "\n".join(f"    {line}" for line in user_code.splitlines())
+            try:
+                code_obj = compile(wrapped_code, "<user_code>", "exec")
+                exec(code_obj, sandbox_globals)
+                user_fn = sandbox_globals.get("__user_fn__")
+            except Exception as e:
+                return NodeExecutionResult(success=False, error=f"Syntax Error: {str(e)}")
 
         if not user_fn:
-            return NodeExecutionResult(success=False, error="Failed to initialize user function")
+            return NodeExecutionResult(success=False, error="Failed to find entry point 'main' or valid logic.")
 
         # 3. Execution Context Data
         context_data = {
@@ -98,15 +131,19 @@ class CodeNode(BaseNodeHandler):
             "workflow_id": context.workflow_id,
         }
 
-        # 4. Item Processing (Centralized in BaseNodeHandler)
+        # 4. Item Processing
         def run_in_sandbox(item_json):
-            # Strict per-item isolation: No global mutation allowed
-            result = user_fn(item_json, context_data, config)
+            # If calling 'main', it's (item, context). If '__user_fn__', it's (item, context, config).
+            if is_full_function:
+                result = user_fn(item_json, context_data)
+            else:
+                result = user_fn(item_json, context_data, config)
+                
             if not isinstance(result, dict):
                  raise ValueError(
                      f"Code Node Error: Expected a dictionary output (e.g. {{'key': 'value'}}), "
-                     f"but got {type(result).__name__} ({result}).\n"
-                     f"Please update your code to return a dictionary."
+                     f"but got {type(result).__name__}.\n"
+                     f"Please return a dictionary from your function."
                  )
             return result
 

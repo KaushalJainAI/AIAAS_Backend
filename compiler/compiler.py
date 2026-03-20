@@ -227,8 +227,14 @@ class WorkflowCompiler:
         # If 'data' has 'config', use that. Else use 'data'.
         node_config = config.get('config', config)
         
+        # Merge customFieldDefs from node.data into config for structured output support
+        # (customFieldDefs lives at node.data level, not inside node.data.config)
+        if 'customFieldDefs' in config and 'customFieldDefs' not in node_config:
+            node_config = {**node_config, 'customFieldDefs': config['customFieldDefs']}
+        
         # Basic timeout handling
-        timeout = node_config.get('timeout', self.settings.get('node_timeout', 60))
+        # Increase default to 300s (5 mins) as LLM calls and complex nodes often exceed 60s
+        timeout = node_config.get('timeout', self.settings.get('node_timeout', 300))
         
         registry = self.registry
 
@@ -310,7 +316,7 @@ class WorkflowCompiler:
                 try:
                     decision = await asyncio.wait_for(
                         orchestrator.before_node(execution_id, node_id, node_type, state, input_data=input_data),
-                        timeout=120
+                        timeout=300
                     )
                     if isinstance(decision, AbortDecision):
                         state['status'] = 'failed'
@@ -441,7 +447,7 @@ class WorkflowCompiler:
                         try:
                             err_decision = await asyncio.wait_for(
                                 orchestrator.on_error(execution_id, node_id, node_type, result.error, state),
-                                timeout=120
+                                timeout=300
                             )
                             if isinstance(err_decision, AbortDecision):
                                 state['error'] = result.error
@@ -493,7 +499,7 @@ class WorkflowCompiler:
                                     {'items': serialized_items, 'output_handle': result.output_handle}, 
                                     state
                                 ),
-                                timeout=120
+                                timeout=300
                             )
                             if isinstance(post_decision, AbortDecision):
                                 state['status'] = 'failed'

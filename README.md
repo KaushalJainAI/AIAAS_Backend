@@ -33,6 +33,11 @@ To understand how this system truly operates, we have prepared detailed, step-by
 *   **[WORKFLOW_DEPLOYMENT.md](./docs/WORKFLOW_DEPLOYMENT.md)**
     *   Details the strict criteria (Static Validation + Proof of Success) required before a workflow can be activated for automated running.
 
+### 5. Advanced RAG Strategy
+*   **[RAG_STRATEGY.md](./docs/RAG_STRATEGY.md)**
+    *   Explains the Hierarchical RAG (File, User, Platform level) used in the chat system.
+    *   Details the automatic indexing of documents and the multi-tier retrieval logic.
+
 ---
 
 ## Local Development Setup

@@ -137,10 +137,29 @@ class ExecutionContext(BaseModel):
         """
         return self.node_outputs.get(node_id)
 
-    def resolve_expressions(self, config: dict, expression_paths: list[list]) -> dict:
-        """Resolve all pre-analyzed expressions in the config."""
-        if not expression_paths:
+    def resolve_all_expressions(self, config: Any) -> Any:
+        """
+        Recursively resolve all expressions in a config object (dict, list, or str).
+        Does not require pre-analyzed paths.
+        """
+        if isinstance(config, str):
+            if "{{" in config and "}}" in config:
+                return self._resolve_string_expression(config)
             return config
+        
+        elif isinstance(config, dict):
+            # Create a copy to avoid mutating the original
+            resolved = {}
+            for k, v in config.items():
+                resolved[k] = self.resolve_all_expressions(v)
+            return resolved
+            
+        elif isinstance(config, list):
+            return [self.resolve_all_expressions(item) for item in config]
+            
+        return config
+
+    def resolve_expressions(self, config: dict, expression_paths: list[list]) -> dict:
             
         # Create a shallow copy to avoid mutating the original template if it's reused
         # Actually, deepcopy might be safer here since we are modifying nested values
@@ -309,9 +328,13 @@ class ExecutionContext(BaseModel):
             
             if current is None: return None
             
+            # Robust AIAAS handling: if we have a dict with 'items' but no 'json' at top level,
+            # and we are looking for 'json' or diving further, unwrap it.
+            if isinstance(current, dict) and "items" in current and "json" not in current:
+                current = current["items"]
+
             # If we are at a list, and trying to access a field, it might be an items list
             # n8n automatically handles $node["name"].json.field even if .json is a list field?
-            # Actually, if current is a list of items, we should look into the first item's json if the token isn't an index.
             if isinstance(current, list) and index is None:
                 if len(current) > 0:
                     first = current[0]

@@ -24,6 +24,8 @@ class Document(models.Model):
         ('csv', 'CSV'),
         ('json', 'JSON'),
         ('html', 'HTML'),
+        ('image', 'Image'),
+        ('video', 'Video'),
     ]
     
     document_id = models.UUIDField(

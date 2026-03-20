@@ -31,7 +31,6 @@ BLOCKED_IMPORTS = {
     'open',
     'file',
     'input',
-    'raw_input',
 }
 
 # Required attributes for a valid node handler
@@ -236,7 +235,7 @@ def load_custom_node_from_db(custom_node_id: int) -> Type[BaseNodeHandler] | Non
     from nodes.models import CustomNode
     
     try:
-        custom_node = CustomNode.objects.get(id=custom_node_id, is_active=True)
+        custom_node = CustomNode.objects.get(id=custom_node_id)
     except CustomNode.DoesNotExist:
         logger.error(f"Custom node {custom_node_id} not found")
         return None

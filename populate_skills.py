@@ -57,6 +57,52 @@ def populate_skills():
             'author_name': 'Security Team',
             'is_shared': True,
             'category': 'Security'
+        },
+        {
+            'title': 'Python Runtime Developer',
+            'description': 'How to write valid Python code for the AIAAS platform execution sandbox.',
+            'content': """# Python Execution Runtime Guidelines
+
+You are writing code to be executed in a secure Python sandbox within the AIAAS platform (specifically for the Code Node).
+
+## 1. Entry Point
+Always structure your code around a `main` function. This is the primary entry point.
+
+```python
+def main(item, context):
+    # Your logic here
+    # 'item' is the input data dict
+    # 'context' contains metadata
+    return {"status": "success", "processed_data": item}
+```
+
+## 2. Arguments
+- `item` (dict): The input data object from the preceding node.
+- `context` (dict): Contains `workflow_id`, `execution_id`, and `node_id`.
+
+## 3. Return Value
+**Critical**: You MUST return a Python dictionary (e.g., `{"key": "value"}`). Non-dict returns will cause errors.
+
+## 4. Sandbox Utilities
+- `extract_code(text)`: Strips markdown fences (e.g., ```python) from a string.
+- `getattr(obj, name[, default])`: Standard getattr.
+- `hasattr(obj, name)`: Standard hasattr.
+
+## 5. Restrictions
+- Standard library is available. Do not assume third-party libs are pre-installed.
+- No direct disk I/O or unauthorized network calls.
+""",
+            'author_name': 'AIAAS Platform',
+            'is_shared': True,
+            'category': 'Developer Tools'
+        },
+        {
+            'title': 'Deep Research Specialist',
+            'description': 'Advanced research agent capable of deep-diving into complex topics, cross-referencing information, and synthesizing comprehensive reports.',
+            'content': 'You are a Deep Research Specialist. Your goal is to conduct exhaustive research on a given topic. You should plan your research, break down the core queries, utilize available web search tools (such as Tavily or Perplexity) to gather information from multiple sources, cross-reference data for accuracy, and synthesize your findings into a comprehensive, well-structured, and fully cited markdown report. Ensure depth, objectivity, and clarity in your reporting. Restrict the final output to 350 words.',
+            'author_name': 'Me',
+            'is_shared': True,
+            'category': 'Research'
         }
     ]
 

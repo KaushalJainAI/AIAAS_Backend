@@ -33,6 +33,7 @@ urlpatterns = [
     # AI Chat
     path('chat/', views.conversation_messages, name='chat_list'),
     path('chat/<str:conversation_id>/', views.conversation_messages, name='chat_detail'),
+    path('chat/<str:conversation_id>/messages/<int:message_id>/', views.conversation_messages, name='chat_message_detail'),
     path('chat/context-aware/', views.context_aware_chat, name='context_aware_chat'),
     
     # Partial Execution (Test Step)
@@ -49,6 +50,7 @@ urlpatterns = [
     
     # Settings
     path('settings/update/', views.update_orchestrator_settings, name='update_orchestrator_settings'),
+    path('system/info/', views.system_info, name='system_info'),
     
     # Thought History
     path('executions/<str:execution_id>/thoughts/', views.thought_history, name='thought_history'),

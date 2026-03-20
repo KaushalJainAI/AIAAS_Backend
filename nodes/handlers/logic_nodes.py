@@ -103,12 +103,12 @@ class LoopNode(BaseNodeHandler):
                 
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "item": current_item,
                         "index": cursor,
                         "total": len(items),
                         **input_data
-                    },
+                    })],
                     output_handle="loop"
                 )
             else:
@@ -116,11 +116,11 @@ class LoopNode(BaseNodeHandler):
                 accumulated = context.get_accumulated_results(node_id)
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "results": accumulated if accumulated else [],
                         "iterations": current_count,
                         **input_data
-                    },
+                    })],
                     output_handle="done"
                 )
         else:
@@ -128,22 +128,22 @@ class LoopNode(BaseNodeHandler):
             if current_count < max_loop:
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "index": current_count,
                         "iteration": current_count + 1,
                         **input_data
-                    },
+                    })],
                     output_handle="loop"
                 )
             else:
                 accumulated = context.get_accumulated_results(node_id)
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "results": accumulated if accumulated else [],
                         "iterations": current_count,
                         **input_data
-                    },
+                    })],
                     output_handle="done"
                 )
 
@@ -246,7 +246,7 @@ class SplitInBatchesNode(BaseNodeHandler):
             
             return NodeExecutionResult(
                 success=True,
-                data={
+                items=[NodeItem(json={
                     "batch": current_batch,
                     "batch_index": current_count,
                     "batch_size": len(current_batch),
@@ -254,7 +254,7 @@ class SplitInBatchesNode(BaseNodeHandler):
                     "total_batches": total_batches,
                     "is_last_batch": batch_end >= total_items,
                     **input_data
-                },
+                })],
                 output_handle="loop"
             )
         else:
@@ -262,12 +262,12 @@ class SplitInBatchesNode(BaseNodeHandler):
             accumulated = context.get_accumulated_results(node_id)
             return NodeExecutionResult(
                 success=True,
-                data={
+                items=[NodeItem(json={
                     "results": accumulated if accumulated else [],
                     "batches_processed": current_count,
                     "total_items": total_items,
                     **input_data
-                },
+                })],
                 output_handle="done"
             )
 
@@ -337,38 +337,6 @@ class IfNode(BaseNodeHandler):
         for idx, item in enumerate(items):
             item_data = item.get("json", item) if isinstance(item, dict) else {}
             
-            # Get field value using dot notation
-            field_value = item_data
-            try:
-                for key in field_path.split("."):
-                    field_value = field_value[key]
-            except (KeyError, TypeError):
-                field_value = None
-            
-            # Evaluate condition
-            result = False
-            
-            if operator == "equals":
-                result = str(field_value) == str(compare_value)
-            elif operator == "not_equals":
-                result = str(field_value) != str(compare_value)
-            elif operator == "contains":
-                result = str(compare_value) in str(field_value)
-            elif operator == "greater_than":
-                try:
-                    result = float(field_value) > float(compare_value)
-                except (ValueError, TypeError):
-                    result = False
-            elif operator == "less_than":
-                try:
-                    result = float(field_value) < float(compare_value)
-                except (ValueError, TypeError):
-                    result = False
-            elif operator == "is_empty":
-                result = field_value is None or field_value == "" or field_value == []
-            elif operator == "is_not_empty":
-                result = field_value is not None and field_value != "" and field_value != []
-            
             from .base import NodeItem
             output_items.append(NodeItem(
                 json=item_data,
@@ -417,7 +385,7 @@ class IfNode(BaseNodeHandler):
         )
 
 
-class EndNode(BaseNodeHandler):
+class StopNode(BaseNodeHandler):
     """
     Explicitly end a workflow path.
     
@@ -454,6 +422,6 @@ class EndNode(BaseNodeHandler):
         
         return NodeExecutionResult(
             success=True,
-            data={"status": "stopped", "message": message},
+            items=[NodeItem(json={"status": "stopped", "message": message})],
             output_handle=None  # Signaling no further routing
         )

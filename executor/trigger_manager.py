@@ -39,8 +39,13 @@ class TriggerManager:
             node_type = data.get('nodeType')
             config = data.get('config', {})
             
-            if node_type == "webhook_trigger" or node_type == "github_trigger":
+            if node_type in ["webhook_trigger", "github_trigger", "telegram_trigger"]:
                 path = config.get("path", "").strip("/")
+                
+                # For Telegram, we might use a default path if not specified
+                if not path and node_type == "telegram_trigger":
+                    path = "telegram"
+                
                 if not path:
                     # For GitHub, we might fall back to repo name if path is missing
                     if node_type == "github_trigger" and config.get("repository"):
@@ -55,6 +60,7 @@ class TriggerManager:
                     "method": config.get("method", "POST"),
                     "authentication": config.get("authentication", "none"),
                     "auth_key": config.get("auth_key", ""),
+                    "secret_token": config.get("secret_token", ""), # Added for security
                     "node_type": node_type,
                     "node_id": node.get("id"),
                 }

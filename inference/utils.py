@@ -1,9 +1,10 @@
 import magic
 import bleach
+import logging
 from django.core.exceptions import ValidationError
+from workflow_backend.thresholds import MAX_DOCUMENT_SIZE
 
-# 50MB limit
-MAX_DOCUMENT_SIZE = 50 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 ALLOWED_MIME_TYPES = [
     'application/pdf',
@@ -13,6 +14,11 @@ ALLOWED_MIME_TYPES = [
     'text/csv',
     'application/json',
     'text/html',
+    'image/png',
+    'image/jpeg',
+    'image/webp',
+    'video/mp4',
+    'video/quicktime',
 ]
 
 def validate_file_upload(file_obj):
@@ -60,6 +66,10 @@ def extract_text_from_file(file_path, file_type):
     file_type = file_type.lower()
     
     try:
+        if file_type in ('image', 'video'):
+            # No text extraction for media yet
+            return ""
+            
         if file_type == 'pdf':
             reader = PdfReader(file_path)
             for page in reader.pages:
@@ -82,7 +92,7 @@ def extract_text_from_file(file_path, file_type):
                 text = f.read()
                 
     except Exception as e:
-        print(f"Error extracting text from {file_path}: {e}")
+        logger.error(f"Error extracting text from {file_path}: {e}")
         return ""
         
     return sanitize_document_content(text)

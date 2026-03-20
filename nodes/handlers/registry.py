@@ -137,12 +137,13 @@ def get_registry() -> NodeRegistry:
     
     # Use absolute imports to avoid circular/ambiguous import issues in Django
     from nodes.handlers.core_nodes import CodeNode, SetNode
-    from nodes.handlers.logic_nodes import LoopNode, SplitInBatchesNode, IfNode, EndNode
-    from nodes.handlers.utility_nodes import NotificationNode
+    from nodes.handlers.logic_nodes import LoopNode, SplitInBatchesNode, IfNode, StopNode
+    from nodes.handlers.utility_nodes import NotificationNode, SendNotificationNode
     from nodes.handlers.subworkflow_node import SubworkflowNodeHandler
     from nodes.handlers.integration_nodes import (
         GmailNode, SlackNode, GoogleSheetsNode, DiscordNode, NotionNode,
-        AirtableNode, TelegramNode, TrelloNode, GitHubNode, HTTPRequestNode
+        AirtableNode, TelegramNode, TrelloNode, GitHubNode, HTTPRequestNode,
+        FirecrawlScrapeNode
     )
     from nodes.handlers.triggers import (
         ManualTriggerNode, WebhookTriggerNode, ScheduleTriggerNode, EmailTriggerNode,
@@ -164,8 +165,9 @@ def get_registry() -> NodeRegistry:
         registry.register(SubworkflowNodeHandler)
         
         # Register Utility
-        registry.register(EndNode)
+        registry.register(StopNode)
         registry.register(NotificationNode)
+        registry.register(SendNotificationNode)
         
         # Register MCP (Optional)
         try:
@@ -174,12 +176,23 @@ def get_registry() -> NodeRegistry:
         except (ImportError, ModuleNotFoundError) as e:
             logger.warning(f"Could not register MCPToolNode: {e}")
 
-        # Register LangChain (Optional)
+        # Register Native Tool Nodes (Search, Lookup, Weather, etc.)
         try:
-            from nodes.handlers.langchain_nodes import LangChainToolNode
-            registry.register(LangChainToolNode)
+            from nodes.handlers.langchain_nodes import (
+                WikipediaNode, DuckDuckGoNode, ArxivNode,
+                SerpApiNode, OpenWeatherMapNode, WolframAlphaNode, BingSearchNode,
+                TavilySearchNode
+            )
+            registry.register(WikipediaNode)
+            registry.register(DuckDuckGoNode)
+            registry.register(ArxivNode)
+            registry.register(SerpApiNode)
+            registry.register(OpenWeatherMapNode)
+            registry.register(WolframAlphaNode)
+            registry.register(BingSearchNode)
+            registry.register(TavilySearchNode)
         except (ImportError, ModuleNotFoundError) as e:
-            logger.warning(f"Could not register LangChainToolNode: {e}")
+            logger.warning(f"Could not register LangChain nodes: {e}")
         
         # Register Integrations
         registry.register(GmailNode)
@@ -192,14 +205,17 @@ def get_registry() -> NodeRegistry:
         registry.register(TrelloNode)
         registry.register(GitHubNode)
         registry.register(HTTPRequestNode)
+        registry.register(FirecrawlScrapeNode)
         
         # Register AI / LLM Nodes
-        from nodes.handlers.llm_nodes import OpenAINode, GeminiNode, OllamaNode, PerplexityNode, OpenRouterNode
+        from nodes.handlers.llm_nodes import OpenAINode, GeminiNode, OllamaNode, PerplexityNode, OpenRouterNode, HuggingFaceNode, XAINode
         registry.register(OpenAINode)
         registry.register(GeminiNode)
         registry.register(OllamaNode)
         registry.register(PerplexityNode)
         registry.register(OpenRouterNode)
+        registry.register(HuggingFaceNode)
+        registry.register(XAINode)
         
         # Register Triggers
         registry.register(ManualTriggerNode)

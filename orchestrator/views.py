@@ -627,11 +627,11 @@ async def respond_to_hitl(request, request_id: str):
 
 @api_view(['GET', 'POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
-def conversation_messages(request, conversation_id: str = None):
+def conversation_messages(request, conversation_id: str = None, message_id: int = None):
     """
     GET: Get conversation history
     POST: Add a message (and get AI response)
-    DELETE: Delete a conversation
+    DELETE: Delete a conversation (or a message if message_id provided)
     """
     from uuid import uuid4
     
@@ -686,18 +686,41 @@ def conversation_messages(request, conversation_id: str = None):
         
         return Response({
             'conversation_id': conv_id,
-            'user_message': {'content': content, 'created_at': user_msg.created_at},
-            'ai_response': {'content': ai_response, 'created_at': ai_msg.created_at},
+            'user_message': {'id': user_msg.id, 'content': content, 'created_at': user_msg.created_at},
+            'ai_response': {'id': ai_msg.id, 'content': ai_response, 'created_at': ai_msg.created_at},
         })
     
     elif request.method == 'DELETE':
         if not conversation_id:
             return Response({'error': 'Conversation ID required'}, status=400)
             
-        deleted_count, _ = ConversationMessage.objects.filter(
-            user=request.user,
-            conversation_id=conversation_id
-        ).delete()
+        if message_id is not None:
+            is_rewind = request.query_params.get('rewind', '').lower() == 'true'
+            is_rewind_after = request.query_params.get('rewind_after', '').lower() == 'true'
+            
+            if is_rewind_after:
+                deleted_count, _ = ConversationMessage.objects.filter(
+                    user=request.user,
+                    conversation_id=conversation_id,
+                    id__gt=message_id
+                ).delete()
+            elif is_rewind:
+                deleted_count, _ = ConversationMessage.objects.filter(
+                    user=request.user,
+                    conversation_id=conversation_id,
+                    id__gte=message_id
+                ).delete()
+            else:
+                deleted_count, _ = ConversationMessage.objects.filter(
+                    user=request.user,
+                    conversation_id=conversation_id,
+                    id=message_id
+                ).delete()
+        else:
+            deleted_count, _ = ConversationMessage.objects.filter(
+                user=request.user,
+                conversation_id=conversation_id
+            ).delete()
         
         return Response({'deleted': True, 'count': deleted_count})
 
@@ -1059,6 +1082,72 @@ async def execute_partial(request, workflow_id: int = None):
         input_data = request.data.get('input_data', {})
         config = request.data.get('config', {})
         
+        # --- UI Helper: Smart context and input data fetching ---
+        node_outputs = {}
+        node_label_to_id = {}
+        
+        target_workflow_id = workflow_id or request.data.get('workflow_id')
+        if target_workflow_id:
+            try:
+                from logs.models import ExecutionLog, NodeExecutionLog
+                from orchestrator.models import Workflow
+                
+                workflow = await Workflow.objects.filter(id=target_workflow_id).afirst()
+                if workflow:
+                    # 1. Build label to ID map for expression resolution
+                    for node in workflow.nodes:
+                        label = node.get('data', {}).get('label')
+                        if label:
+                            node_label_to_id[label] = node.get('id')
+                    
+                    # 2. Try to fetch data from the last successful run to populate context
+                    last_exec = await ExecutionLog.objects.filter(
+                        workflow_id=target_workflow_id,
+                        status='completed'
+                    ).order_by('-created_at').afirst()
+                    
+                    if last_exec:
+                        # Load all node outputs from that execution into context
+                        # This allows expressions like {{ $node["Name"] }} to resolve
+                        async for n_log in NodeExecutionLog.objects.filter(execution=last_exec):
+                            node_outputs[n_log.node_id] = n_log.output_data
+                        
+                        logger.info(f"Populated {len(node_outputs)} node outputs from execution {last_exec.execution_id} for partial test")
+
+                        # 3. Auto-fill input_data if empty by looking at predecessors
+                        if not input_data:
+                            edges = workflow.edges
+                            preceding_node_ids = [
+                                edge['source'] for edge in edges 
+                                if edge.get('target') == node_id
+                            ]
+                            
+                            if preceding_node_ids:
+                                # Find the output of the most recent preceding node in that execution
+                                node_log = await NodeExecutionLog.objects.filter(
+                                    execution=last_exec,
+                                    node_id__in=preceding_node_ids
+                                ).order_by('-execution_order').afirst()
+                                
+                                if node_log and node_log.output_data:
+                                    # AIAAS nodes usually return {'items': [{'json': {...}}]}
+                                    raw_output = node_log.output_data
+                                    if isinstance(raw_output, dict) and 'items' in raw_output and raw_output['items']:
+                                        input_data = raw_output['items'][0].get('json', {})
+                                    else:
+                                        input_data = raw_output
+                                    logger.info(f"Auto-filled input_data for node {node_id} from predecessor {node_log.node_id}")
+            except Exception as fe:
+                logger.warning(f"Failed to populate partial execution context: {fe}")
+        
+        # 4. Manual test data from node config (overrides auto-fill if present)
+        manual_test_data = config.get('test_data')
+        if manual_test_data and isinstance(manual_test_data, dict):
+             # Only override if input_data wasn't explicitly provided in the request body
+             # (but keep it if we just auto-filled it and manual test data is a specific "mock")
+             input_data = manual_test_data
+             logger.info(f"Using manual test_data for node {node_id}")
+        
         # Also try to get workflow_id from request data if not in URL
         if not workflow_id:
             raw_workflow_id = request.data.get('workflow_id')
@@ -1102,16 +1191,21 @@ async def execute_partial(request, workflow_id: int = None):
             except Exception as e:
                 logger.error(f"Failed to fetch credential {credential_id}: {e}")
         
-        # Create context with credentials
+        # Create context with credentials and previous outputs for expression resolution
         context = ExecutionContext(
             execution_id=uuid4(),
             user_id=request.user.id,
             workflow_id=workflow_id or 0,
             node_id=node_id,
             credentials=credentials,
+            node_outputs=node_outputs,
+            node_label_to_id=node_label_to_id,
         )
         
-        result = await handler.execute(input_data, config, context)
+        # Resolve expressions in config using the populated context
+        resolved_config = context.resolve_all_expressions(config)
+        
+        result = await handler.execute(input_data, resolved_config, context)
         
         if result.success:
             # Return items array in n8n-compatible format
@@ -1309,8 +1403,20 @@ def receive_webhook(request, user_id, webhook_path):
     if request.method != allowed_method:
         return JsonResponse({"error": f"Method {request.method} not allowed. Use {allowed_method}"}, status=405)
 
-    # 2. Validate Authentication (Simple)
+    # 2. Validate Authentication
     auth_type = config.get("authentication", "none")
+    node_type = config.get("node_type", "webhook_trigger")
+    
+    # Telegram Security Check
+    if node_type == "telegram_trigger":
+        secret_token = config.get("secret_token")
+        if secret_token:
+            incoming_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+            if incoming_token != secret_token:
+                _webhook_logger.warning(f"Telegram webhook rejected: Invalid secret token for {user_id}/{webhook_path}")
+                return JsonResponse({"error": "Unauthorized - Invalid Secret Token"}, status=401)
+
+    # Generic Webhook Auth Check
     if auth_type != "none":
         auth_key = config.get("auth_key", "")
         if auth_type == "header":
@@ -1335,7 +1441,9 @@ def receive_webhook(request, user_id, webhook_path):
 
     # 4. Build input_data for execution
     github_event = request.headers.get('X-GitHub-Event')
-    is_github = github_event or config.get("node_type") == "github_trigger"
+    node_type = config.get("node_type")
+    is_github = github_event or node_type == "github_trigger"
+    is_telegram = node_type == "telegram_trigger"
     
     input_data = {
         "headers": dict(request.headers),
@@ -1348,11 +1456,16 @@ def receive_webhook(request, user_id, webhook_path):
     if is_github:
         input_data.update({
             "trigger_type": "github",
-            "event": github_event or "push", # Default to push if node_type matched but header missing
+            "event": github_event or "push",
             "action": body_data.get("action", ""),
             "payload": body_data,
             "sender": body_data.get("sender", {}),
             "ref": body_data.get("ref", ""),
+        })
+    elif is_telegram:
+        input_data.update({
+            "trigger_type": "telegram",
+            "payload": body_data,
         })
     else:
         input_data["trigger_type"] = "webhook"
@@ -1479,4 +1592,14 @@ async def thought_history(request, execution_id):
         'execution_id': str(execution_id),
         'thoughts': thoughts,
         'summary': history.to_summary()
+    })
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def system_info(request):
+    """Get system-wide configuration and metadata."""
+    from django.conf import settings
+    return Response({
+        'public_url': getattr(settings, 'PUBLIC_URL', 'http://localhost:8000'),
+        'debug': settings.DEBUG,
+        'version': '1.0.0',
     })

@@ -16,6 +16,7 @@ from .base import (
     FieldType,
     HandleDef,
     NodeExecutionResult,
+    NodeItem,
 )
 
 
@@ -54,11 +55,11 @@ class ManualTriggerNode(BaseNodeHandler):
         
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
                 "execution_id": str(context.execution_id),
                 "trigger_type": "manual"
-            },
+            })],
             output_handle="output-0"
         )
 
@@ -111,7 +112,16 @@ class WebhookTriggerNode(BaseNodeHandler):
             placeholder="X-API-Key",
             description="Authentication key or header name"
         ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"body": {"test": "data"}, "headers": {}, "query": {}},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
+    static_output_fields = ["headers", "body", "query", "url", "method", "received_at"]
     inputs = []
     outputs = [
         HandleDef(id="output-0", label="On webhook")
@@ -123,18 +133,23 @@ class WebhookTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        # Webhook data comes from input_data (set by webhook handler)
+        # Fallback to test_data if input_data is empty (manual full workflow test)
+        source_data = input_data
+        if not input_data and "test_data" in config:
+            source_data = config["test_data"]
+            
+        # Webhook data comes from source_data (set by webhook handler or mock)
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "received_at": datetime.now().isoformat(),
                 "method": config.get("method", "POST"),
                 "path": config.get("path", ""),
-                "headers": input_data.get("headers", {}),
-                "body": input_data.get("body", {}),
-                "query": input_data.get("query", {}),
-                "url": input_data.get("url", ""),
-            },
+                "headers": source_data.get("headers", {}),
+                "body": source_data.get("body", {}),
+                "query": source_data.get("query", {}),
+                "url": source_data.get("url", ""),
+            })],
             output_handle="output-0"
         )
 
@@ -213,7 +228,7 @@ class ScheduleTriggerNode(BaseNodeHandler):
         
         return NodeExecutionResult(
             success=True,
-            data=data,
+            items=[NodeItem(json=data)],
             output_handle="output-0"
         )
 
@@ -273,7 +288,16 @@ class EmailTriggerNode(BaseNodeHandler):
             required=False,
             description="Mark processed emails as read"
         ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"from": "tester@example.com", "subject": "Test Email", "body": "Hello world"},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
+    static_output_fields = ["from", "to", "subject", "body", "html_body", "attachments", "date", "message_id", "triggered_at"]
     inputs = []
     outputs = [HandleDef(id="output-0", label="On email")]
     
@@ -286,7 +310,7 @@ class EmailTriggerNode(BaseNodeHandler):
         # Email data comes from input_data (set by email poller)
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
                 "from": input_data.get("from", ""),
                 "to": input_data.get("to", ""),
@@ -296,7 +320,7 @@ class EmailTriggerNode(BaseNodeHandler):
                 "attachments": input_data.get("attachments", []),
                 "date": input_data.get("date", ""),
                 "message_id": input_data.get("message_id", ""),
-            },
+            })],
             output_handle="output-0"
         )
 
@@ -447,7 +471,16 @@ class FormTriggerNode(BaseNodeHandler):
             required=False,
             description="Message shown after successful submission"
         ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"form_data": {"name": "Test User", "email": "test@example.com"}},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
+    static_output_fields = ["form_data", "submitted_at", "submitter_ip", "user_agent"]
     inputs = []
     outputs = [HandleDef(id="output-0", label="On submit")]
     
@@ -460,12 +493,12 @@ class FormTriggerNode(BaseNodeHandler):
         # Form submission data comes from input_data
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "submitted_at": datetime.now().isoformat(),
                 "form_data": input_data.get("form_data", {}),
                 "submitter_ip": input_data.get("ip_address", ""),
                 "user_agent": input_data.get("user_agent", ""),
-            },
+            })],
             output_handle="output-0"
         )
 
@@ -517,7 +550,16 @@ class SlackTriggerNode(BaseNodeHandler):
             placeholder="urgent",
             description="Only trigger if message contains this keyword"
         ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"text": "Hello Slack", "user": "U12345", "channel": "C12345"},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
+    static_output_fields = ["channel", "user", "text", "timestamp", "thread_ts", "event_type", "triggered_at"]
     inputs = []
     outputs = [HandleDef(id="output-0", label="On event")]
     
@@ -530,7 +572,7 @@ class SlackTriggerNode(BaseNodeHandler):
         # Slack event data comes from input_data (set by Slack event handler)
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
                 "event_type": config.get("event_type", "message"),
                 "channel": input_data.get("channel", ""),
@@ -539,7 +581,7 @@ class SlackTriggerNode(BaseNodeHandler):
                 "timestamp": input_data.get("ts", ""),
                 "thread_ts": input_data.get("thread_ts", ""),
                 "event_data": input_data,
-            },
+            })],
             output_handle="output-0"
         )
 
@@ -610,14 +652,14 @@ class GoogleSheetsTriggerNode(BaseNodeHandler):
         # Sheet change data comes from input_data (set by polling service)
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
                 "spreadsheet_id": config.get("spreadsheet_id", ""),
                 "sheet_name": config.get("sheet_name", "Sheet1"),
                 "trigger_type": config.get("trigger_on", "new_row"),
                 "row_data": input_data.get("row_data", {}),
                 "change_type": input_data.get("change_type", ""),
-            },
+            })],
             output_handle="output-0"
         )
 
@@ -704,21 +746,6 @@ class GitHubTriggerNode(BaseNodeHandler):
             description="Array of GitHub events to listen for"
         ),
         FieldConfig(
-            name="credential",
-            label="GitHub Token",
-            field_type=FieldType.CREDENTIAL,
-            credential_type="github",
-            required=False,
-            description="Select a GitHub credential for private repos or to fetch detailed diffs"
-        ),
-        FieldConfig(
-            name="repository",
-            label="Repository Name",
-            field_type=FieldType.STRING,
-            placeholder="owner/repo",
-            description="Repository to watch (e.g. 'octocat/hello-world')"
-        ),
-        FieldConfig(
             name="branch_filter",
             label="Branch Filter",
             field_type=FieldType.STRING,
@@ -734,7 +761,16 @@ class GitHubTriggerNode(BaseNodeHandler):
             required=False,
             description="Include the full raw GitHub payload in the output"
         ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"repository": "owner/repo", "sender": "octocat"},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
+    static_output_fields = ["project_context", "change_summary", "code_changes", "repository", "event", "sender", "triggered_at"]
 
     inputs = []
     outputs = [HandleDef(id="output-0", label="On event")]
@@ -745,9 +781,14 @@ class GitHubTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
+        # Fallback to test_data if input_data is empty
+        source_data = input_data
+        if not input_data and "test_data" in config:
+            source_data = config["test_data"]
+
         # Extract raw data from the webhook input
-        payload = input_data.get("payload", {})
-        event_type = input_data.get("event", "unknown")
+        payload = source_data.get("payload", {})
+        event_type = source_data.get("event", "unknown")
         
         # Normalize repo and branch info
         repo_full_name = payload.get('repository', {}).get('full_name', config.get("repository", ""))
@@ -853,7 +894,7 @@ class GitHubTriggerNode(BaseNodeHandler):
 
         return NodeExecutionResult(
             success=True,
-            data=normalized_data,
+            items=[NodeItem(json=normalized_data)],
             output_handle="output-0"
         )
 
@@ -906,6 +947,14 @@ class DiscordTriggerNode(BaseNodeHandler):
             placeholder="!",
             description="Only trigger on messages starting with this prefix"
         ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"content": "Hello Discord", "author": {"username": "tester"}},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
     inputs = []
     outputs = [HandleDef(id="output-0", label="On event")]
@@ -916,19 +965,24 @@ class DiscordTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        # Discord event data comes from input_data
+        # Fallback to test_data if input_data is empty
+        actual_input = input_data
+        if not input_data and "test_data" in config:
+            actual_input = config["test_data"]
+
+        # Discord event data comes from actual_input
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
                 "event_type": config.get("event_type", "message"),
-                "channel_id": input_data.get("channel_id", ""),
-                "guild_id": input_data.get("guild_id", ""),
-                "author": input_data.get("author", {}),
-                "content": input_data.get("content", ""),
-                "timestamp": input_data.get("timestamp", ""),
-                "event_data": input_data,
-            },
+                "channel_id": actual_input.get("channel_id", ""),
+                "guild_id": actual_input.get("guild_id", ""),
+                "author": actual_input.get("author", {}),
+                "content": actual_input.get("content", ""),
+                "timestamp": actual_input.get("timestamp", ""),
+                "event_data": actual_input,
+            })],
             output_handle="output-0"
         )
 
@@ -981,7 +1035,24 @@ class TelegramTriggerNode(BaseNodeHandler):
             required=False,
             description="Filter by chat type"
         ),
+        FieldConfig(
+            name="secret_token",
+            label="Secret Token",
+            field_type=FieldType.STRING,
+            required=False,
+            placeholder="my-secret-token",
+            description="Optional secret token for webhook verification (stored in X-Telegram-Bot-Api-Secret-Token)"
+        ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"text": "Hello Telegram", "from": {"id": 1234, "username": "tester"}},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
+    static_output_fields = ["chat_id", "text", "command", "args", "user", "chat", "message", "trigger_type", "triggered_at"]
     inputs = []
     outputs = [HandleDef(id="output-0", label="On update")]
     
@@ -991,21 +1062,31 @@ class TelegramTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        # Telegram update data comes from input_data
-        # Standardize extraction based on update type
-        message = input_data.get("message", {})
+        # Fallback to test_data if input_data is empty
+        actual_input = input_data
+        if not input_data and "test_data" in config:
+            actual_input = config["test_data"]
+
+        # Extract data from payload (webhooks) or direct actual_input (polling)
+        payload = actual_input.get("payload", actual_input)
+        
+        message = payload.get("message", {})
         # Handle callback queries or edited messages if present
         if not message:
-            message = input_data.get("edited_message", {})
-        if not message and "callback_query" in input_data:
-            message = input_data["callback_query"].get("message", {})
+            message = payload.get("edited_message", {})
+        if not message and "callback_query" in payload:
+            message = payload["callback_query"].get("message", {})
+            
+        # Fallback for flat manual test_data
+        if not message and "text" in payload:
+            message = payload
             
         chat = message.get("chat", {})
         user = message.get("from", {})
         # For direct message updates, 'from' is at top level of message
         # For callbacks, user is 'from' in callback_query
-        if "callback_query" in input_data:
-            user = input_data["callback_query"].get("from", {})
+        if "callback_query" in payload:
+            user = payload["callback_query"].get("from", {})
             
         text = message.get("text", "")
         # If no text (e.g. photo), check caption
@@ -1026,9 +1107,9 @@ class TelegramTriggerNode(BaseNodeHandler):
             
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
-                "update_id": input_data.get("update_id", ""),
+                "update_id": payload.get("update_id", ""),
                 "chat_id": chat.get("id"),
                 "text": text,
                 "command": command,
@@ -1043,9 +1124,9 @@ class TelegramTriggerNode(BaseNodeHandler):
                 "chat": chat,
                 # Include full raw objects for advanced use
                 "message": message,
-                "raw_update": input_data,
+                "raw_update": payload,
                 "trigger_type": config.get("trigger_on", "message"),
-            },
+            })],
             output_handle="output-0"
         )
 
@@ -1107,7 +1188,8 @@ class TelegramTriggerNode(BaseNodeHandler):
             return new_items, {"offset": new_offset}
             
         except Exception as e:
-            print(f"Telegram Poll error: {e}")
+            import logging
+            logging.getLogger(__name__).error(f"Telegram Poll error: {e}")
             return [], state
 
 
@@ -1161,7 +1243,7 @@ class RssFeedTriggerNode(BaseNodeHandler):
         # RSS item data comes from input_data (set by RSS poller)
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
                 "feed_url": config.get("feed_url", ""),
                 "title": input_data.get("title", ""),
@@ -1170,7 +1252,7 @@ class RssFeedTriggerNode(BaseNodeHandler):
                 "published": input_data.get("published", ""),
                 "author": input_data.get("author", ""),
                 "content": input_data.get("content", ""),
-            },
+            })],
             output_handle="output-0"
         )
 
@@ -1245,7 +1327,8 @@ class RssFeedTriggerNode(BaseNodeHandler):
             
         except Exception as e:
             # We don't want a single feed error to crash the poller
-            print(f"RSS Poll error for {feed_url}: {e}")
+            import logging
+            logging.getLogger(__name__).error(f"RSS Poll error for {feed_url}: {e}")
             return [], state
 
 
@@ -1291,15 +1374,22 @@ class FileTriggerNode(BaseNodeHandler):
         FieldConfig(
             name="recursive",
             label="Recursive",
-            field_type=FieldType.SELECT,
-            options=["true", "false"],
-            default="false",
+            field_type=FieldType.BOOLEAN,
+            default=False,
             required=False,
             description="Watch subdirectories recursively"
         ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"file_name": "test.txt", "file_path": "/tmp/test.txt", "event_type": "created"},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On file change")]
+    outputs = [HandleDef(id="output-0", label="On file change")]
     
     async def execute(
         self,
@@ -1307,19 +1397,24 @@ class FileTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        # File event data comes from input_data (set by file watcher)
+        # Fallback to test_data if input_data is empty
+        actual_input = input_data
+        if not input_data and "test_data" in config:
+            actual_input = config["test_data"]
+
+        # File event data comes from actual_input (set by file watcher or mock)
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
-                "event_type": input_data.get("event_type", ""),
-                "file_path": input_data.get("file_path", ""),
-                "file_name": input_data.get("file_name", ""),
-                "file_size": input_data.get("file_size", 0),
-                "modified_time": input_data.get("modified_time", ""),
-                "file_extension": input_data.get("file_extension", ""),
-            },
-            output_handle="output"
+                "event_type": actual_input.get("event_type", ""),
+                "file_path": actual_input.get("file_path", ""),
+                "file_name": actual_input.get("file_name", ""),
+                "file_size": actual_input.get("file_size", 0),
+                "modified_time": actual_input.get("modified_time", ""),
+                "file_extension": actual_input.get("file_extension", ""),
+            })],
+            output_handle="output-0"
         )
 
 
@@ -1343,6 +1438,7 @@ class SQSTriggerNode(BaseNodeHandler):
             name="credential",
             label="AWS Credential",
             field_type=FieldType.CREDENTIAL,
+            credential_type="aws",
             description="AWS access credentials"
         ),
         FieldConfig(
@@ -1371,15 +1467,22 @@ class SQSTriggerNode(BaseNodeHandler):
         FieldConfig(
             name="delete_after_process",
             label="Delete After Processing",
-            field_type=FieldType.SELECT,
-            options=["true", "false"],
-            default="true",
+            field_type=FieldType.BOOLEAN,
+            default=True,
             required=False,
             description="Automatically delete message after successful processing"
         ),
+        FieldConfig(
+            name="test_data",
+            label="Test Data (Mock JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            default={"body": "Hello SQS", "message_id": "test-msg-123"},
+            description="Mock data to use when testing this node manually."
+        ),
     ]
     inputs = []
-    outputs = [HandleDef(id="output", label="On message")]
+    outputs = [HandleDef(id="output-0", label="On message")]
     
     async def execute(
         self,
@@ -1387,17 +1490,22 @@ class SQSTriggerNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        # SQS message data comes from input_data (set by SQS poller)
+        # Fallback to test_data if input_data is empty
+        actual_input = input_data
+        if not input_data and "test_data" in config:
+            actual_input = config["test_data"]
+
+        # SQS message data comes from actual_input (set by SQS poller or mock)
         return NodeExecutionResult(
             success=True,
-            data={
+            items=[NodeItem(json={
                 "triggered_at": datetime.now().isoformat(),
-                "message_id": input_data.get("message_id", ""),
-                "receipt_handle": input_data.get("receipt_handle", ""),
-                "body": input_data.get("body", ""),
-                "attributes": input_data.get("attributes", {}),
-                "message_attributes": input_data.get("message_attributes", {}),
-                "sent_timestamp": input_data.get("sent_timestamp", ""),
-            },
-            output_handle="output"
+                "message_id": actual_input.get("message_id", ""),
+                "receipt_handle": actual_input.get("receipt_handle", ""),
+                "body": actual_input.get("body", ""),
+                "attributes": actual_input.get("attributes", {}),
+                "message_attributes": actual_input.get("message_attributes", {}),
+                "sent_timestamp": actual_input.get("sent_timestamp", ""),
+            })],
+            output_handle="output-0"
         )

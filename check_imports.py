@@ -25,8 +25,8 @@ SKIP_FILES = {
     'manage.py', 'conftest.py',
 }
 
-# Per-subprocess timeout in seconds
-TIMEOUT_SECONDS = 15
+# --- Default Configuration ---
+from workflow_backend.thresholds import IMPORT_CHECK_TIMEOUT_SECONDS as TIMEOUT_SECONDS
 
 
 def get_python_modules(start_dir, prefix_filter=None):

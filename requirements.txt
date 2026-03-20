@@ -56,7 +56,14 @@ adrf
 bleach>=6.1
 python-magic-bin>=0.4.14
 pypdf>=3.17.0
+PyPDF2>=3.0.1
+python-pptx>=1.0.2
 
 # Browser Automation
 selenium>=4.0.0
 webdriver-manager>=4.0.0
+
+# SDKs
+tavily-python>=0.3.0
+firecrawl-py>=0.0.16
+ddgs>=9.10.0

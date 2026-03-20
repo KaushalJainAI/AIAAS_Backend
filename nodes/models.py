@@ -162,6 +162,28 @@ class AIModel(models.Model):
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
     is_free = models.BooleanField(default=False)
+    
+    # Capability Flags
+    supports_text_input = models.BooleanField(default=True)
+    supports_text_generation = models.BooleanField(default=True)
+    supports_image_input = models.BooleanField(default=False)
+    supports_image_generation = models.BooleanField(default=False)
+    supports_audio_input = models.BooleanField(default=False)
+    supports_audio_generation = models.BooleanField(default=False)
+    supports_video_input = models.BooleanField(default=False)
+    supports_video_generation = models.BooleanField(default=False)
+    supports_numeric_input = models.BooleanField(default=False)
+    supports_numeric_generation = models.BooleanField(default=False)
+    supports_time_series_input = models.BooleanField(default=False)
+    supports_time_series_generation = models.BooleanField(default=False)
+    supports_document_input = models.BooleanField(default=False)
+    supports_document_generation = models.BooleanField(default=False)
+    supports_tabular_input = models.BooleanField(default=False)
+    supports_tabular_generation = models.BooleanField(default=False)
+    supports_structured_output = models.BooleanField(default=False)
+    supports_tool_calling = models.BooleanField(default=False)
+    supports_embedding_generation = models.BooleanField(default=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

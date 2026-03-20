@@ -142,10 +142,11 @@ async def document_share(request, document_id: int):
         threading.Thread(target=share_document, args=(doc.id, request.user.id)).start()
         
     else:
-        doc.sharing_mode = 'private'
-        doc.is_shared = False
-        doc.shared_at = None
-        # TODO: Remove from platform KB when such method is available
+        # Once shared, un-sharing is not allowed to prevent global KB fragmentation.
+        return Response({
+            **DocumentSerializer(doc).data,
+            'error': 'Un-sharing documents is not allowed once they are part of the platform knowledge base.'
+        }, status=status.HTTP_403_FORBIDDEN)
     
     await sync_to_async(doc.save)()
     

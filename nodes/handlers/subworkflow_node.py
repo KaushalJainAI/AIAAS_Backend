@@ -105,11 +105,12 @@ class SubworkflowNodeHandler(BaseNodeHandler):
                 
             # 5. Output Mapping
             output_mapping = config.get("output_mapping", {})
-            final_output = self._transform_state(result.data, output_mapping)
+            final_output = self._transform_state(result.get_data(), output_mapping)
             
+            from .base import NodeItem
             return NodeExecutionResult(
                 success=True,
-                data=final_output,
+                items=[NodeItem(json=final_output)],
                 output_handle="success"
             )
             

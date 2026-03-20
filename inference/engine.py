@@ -12,8 +12,53 @@ import numpy as np
 from typing import Any, List, Dict, Optional
 from dataclasses import dataclass
 from asgiref.sync import sync_to_async
+from workflow_backend.thresholds import CHUNK_SIZE, CHUNK_OVERLAP, SEARCH_TOP_K, SEARCH_MIN_SCORE
 
 logger = logging.getLogger(__name__)
+
+# Global embedder variables for singleton pattern
+_global_embedder = None
+_embedder_lock = asyncio.Lock()
+
+
+def _preload_embedder():
+    """Pre-load the SentenceTransformer model in a background thread on server start.
+    This eliminates cold-start latency on the first RAG search."""
+    global _global_embedder
+    if _global_embedder is not None:
+        return
+    try:
+        from sentence_transformers import SentenceTransformer
+        logger.info("[Background] Pre-loading SentenceTransformer model: all-MiniLM-L6-v2 on CPU...")
+        _global_embedder = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+        logger.info("[Background] SentenceTransformer model loaded and ready.")
+    except Exception as e:
+        logger.warning(f"[Background] Embedder preload failed (will retry on first use): {e}")
+
+
+# Fire-and-forget: start warming up the embedder as soon as this module loads
+import threading
+threading.Thread(target=_preload_embedder, daemon=True).start()
+
+
+async def get_global_embedder():
+    """Get the global embedder. If already pre-loaded, returns instantly."""
+    global _global_embedder
+    
+    if _global_embedder is not None:
+        return _global_embedder
+        
+    async with _embedder_lock:
+        if _global_embedder is not None:
+            return _global_embedder
+            
+        def load_model():
+            logger.info("Loading SentenceTransformer model: all-MiniLM-L6-v2 on CPU (fallback)")
+            from sentence_transformers import SentenceTransformer
+            return SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+            
+        _global_embedder = await asyncio.to_thread(load_model)
+        return _global_embedder
 
 
 @dataclass
@@ -57,14 +102,9 @@ class KnowledgeBase:
             
             try:
                 import faiss
-                from sentence_transformers import SentenceTransformer
                 
-                # Load embedding model in a thread
-                def load_model():
-                    logger.info("Loading SentenceTransformer model: all-MiniLM-L6-v2")
-                    return SentenceTransformer('all-MiniLM-L6-v2')
-                
-                self._embedder = await asyncio.to_thread(load_model)
+                # Fetch the global embedder instance instead of creating a new one
+                self._embedder = await get_global_embedder()
                 
                 # Create FAISS index (384 dimensions for MiniLM)
                 self._index = faiss.IndexFlatIP(384)  # Inner product for cosine similarity
@@ -89,8 +129,8 @@ class KnowledgeBase:
         doc_id: int,
         content: str,
         metadata: dict | None = None,
-        chunk_size: int = 500,
-        chunk_overlap: int = 50
+        chunk_size: int = CHUNK_SIZE,
+        chunk_overlap: int = CHUNK_OVERLAP
     ) -> List[str]:
         """
         Add a document to the knowledge base.
@@ -125,8 +165,9 @@ class KnowledgeBase:
     async def search(
         self,
         query: str,
-        top_k: int = 5,
-        min_score: float = 0.3
+        top_k: int = SEARCH_TOP_K,
+        min_score: float = SEARCH_MIN_SCORE,
+        doc_id: int | None = None
     ) -> List[SearchResult]:
         """
         Search the knowledge base.
@@ -153,10 +194,15 @@ class KnowledgeBase:
             if idx < 0 or score < min_score:
                 continue
             
-            doc_id, content, metadata = self._documents.get(idx, (None, "", {}))
-            if doc_id is not None:
+            existing_doc_id, content, metadata = self._documents.get(idx, (None, "", {}))
+            
+            # Apply doc_id filter if provided
+            if doc_id is not None and existing_doc_id != doc_id:
+                continue
+
+            if existing_doc_id is not None:
                 results.append(SearchResult(
-                    document_id=doc_id,
+                    document_id=existing_doc_id,
                     chunk_id=f"chunk_{idx}",
                     content=content,
                     score=float(score),
@@ -207,10 +253,49 @@ class KnowledgeBase:
         return [c for c in chunks if c]
     
     async def delete_document(self, doc_id: int) -> bool:
-        """Remove a document from the knowledge base."""
-        logger.warning("Document deletion not implemented for FAISS")
-        return False
-    
+        """
+        Remove a document from the knowledge base.
+        Since FAISS IndexFlatIP doesn't support easy deletion by ID,
+        we rebuild the index from the remaining chunks.
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        async with self._lock:
+            # 1. Identify chunks to keep
+            remaining_docs = {}
+            temp_chunks = []
+            
+            found = False
+            for idx, (existing_id, content, metadata) in self._documents.items():
+                if existing_id == doc_id:
+                    found = True
+                    continue
+                remaining_docs[len(temp_chunks)] = (existing_id, content, metadata)
+                temp_chunks.append(content)
+            
+            if not found:
+                return False
+                
+            # 2. Re-embed and rebuild index if there are chunks left
+            self._index.reset()
+            self._documents = remaining_docs
+            
+            if temp_chunks:
+                # Re-embedding is expensive, but necessary if we don't store 
+                # the original embeddings. For now, we re-embed.
+                embeddings = await asyncio.to_thread(self._embedder.encode, temp_chunks)
+                
+                # Normalize and add to index
+                normalized_embeddings = []
+                for emb in embeddings:
+                    normalized_embeddings.append(emb / np.linalg.norm(emb))
+                
+                self._index.add(np.array(normalized_embeddings, dtype='float32'))
+            
+            logger.info(f"Deleted document {doc_id} and rebuilt index with {len(temp_chunks)} chunks")
+            return True
+
     def clear(self):
         """Clear all documents from the knowledge base."""
         if self._index:
@@ -232,16 +317,33 @@ class RAGPipeline:
         question: str,
         user_id: int,
         llm_type: str = "openai",
-        top_k: int = 5,
+        top_k: int = SEARCH_TOP_K,
         credential_id: str | None = None,
         context: Any = None
     ) -> Dict:
         """
         Run a RAG query.
         """
-        # Search knowledge base
+        # Search knowledge base(s)
         results = await self.kb.search(question, top_k=top_k)
         
+        # In Hybrid RAG, we also check the session KB if a session_id is given
+        session_id = None
+        if isinstance(context, dict):
+            session_id = context.get('session_id')
+        elif hasattr(context, 'session_id'):
+            session_id = context.session_id
+            
+        if session_id:
+            session_kb = get_session_knowledge_base(str(session_id))
+            if session_kb._initialized and session_kb._index and session_kb._index.ntotal > 0:
+                session_results = await session_kb.search(question, top_k=top_k)
+                # Merge and sort by score
+                results.extend(session_results)
+                results.sort(key=lambda x: x.score, reverse=True)
+                # Take top_k overall
+                results = results[:top_k]
+                
         if not results:
             return {
                 "answer": "I couldn't find relevant information in the knowledge base.",
@@ -336,13 +438,13 @@ class UserKnowledgeBaseManager:
     
     def get_user_kb(self, user_id: int) -> KnowledgeBase:
         if user_id not in self._user_kbs:
-            logger.info(f"Creating new knowledge base for user {user_id}")
+            logger.info(f"Creating new knowledge base for user {user_id} (lazy-loaded)")
             self._user_kbs[user_id] = KnowledgeBase()
         return self._user_kbs[user_id]
     
     def get_platform_kb(self) -> KnowledgeBase:
         if self._platform_kb is None:
-            logger.info("Creating platform knowledge base")
+            logger.info("Creating platform knowledge base (lazy-loaded)")
             self._platform_kb = KnowledgeBase()
         return self._platform_kb
     
@@ -361,20 +463,51 @@ class UserKnowledgeBaseManager:
             'platform_kb_exists': self._platform_kb is not None,
         }
 
+class SessionKnowledgeBaseManager:
+    """
+    Manages ephemeral per-session knowledge bases for the Hybrid RAG architecture.
+    """
+    
+    def __init__(self):
+        self._session_kbs: Dict[str, KnowledgeBase] = {}
+        
+    def get_session_kb(self, session_id: str) -> KnowledgeBase:
+        if session_id not in self._session_kbs:
+            logger.info(f"Creating new ephemeral knowledge base for session {session_id} (lazy-loaded)")
+            self._session_kbs[session_id] = KnowledgeBase()
+        return self._session_kbs[session_id]
+        
+    def clear_session_kb(self, session_id: str) -> bool:
+        if session_id in self._session_kbs:
+            self._session_kbs[session_id].clear()
+            del self._session_kbs[session_id]
+            logger.info(f"Cleared ephemeral knowledge base for session {session_id}")
+            return True
+        return False
 
-# Global manager instance
-_kb_manager: UserKnowledgeBaseManager | None = None
+# Global manager instances
+_user_kb_manager: UserKnowledgeBaseManager | None = None
+_session_kb_manager: SessionKnowledgeBaseManager | None = None
 
 
 def get_kb_manager() -> UserKnowledgeBaseManager:
-    global _kb_manager
-    if _kb_manager is None:
-        _kb_manager = UserKnowledgeBaseManager()
-    return _kb_manager
+    global _user_kb_manager
+    if _user_kb_manager is None:
+        _user_kb_manager = UserKnowledgeBaseManager()
+    return _user_kb_manager
+
+def get_session_kb_manager() -> SessionKnowledgeBaseManager:
+    global _session_kb_manager
+    if _session_kb_manager is None:
+        _session_kb_manager = SessionKnowledgeBaseManager()
+    return _session_kb_manager
 
 
 def get_user_knowledge_base(user_id: int) -> KnowledgeBase:
     return get_kb_manager().get_user_kb(user_id)
+
+def get_session_knowledge_base(session_id: str) -> KnowledgeBase:
+    return get_session_kb_manager().get_session_kb(session_id)
 
 
 def get_platform_knowledge_base() -> KnowledgeBase:

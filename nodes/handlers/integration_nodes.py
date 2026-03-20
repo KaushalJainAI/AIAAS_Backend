@@ -17,6 +17,7 @@ from .base import (
     FieldType,
     HandleDef,
     NodeExecutionResult,
+    NodeItem,
 )
 
 
@@ -173,13 +174,13 @@ class GmailNode(BaseNodeHandler):
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "message_id": data.get("id"),
                         "thread_id": data.get("threadId"),
                         "operation": operation,
                         "to": to,
                         "subject": subject,
-                    },
+                    })],
                     output_handle="output-0"
                 )
                 
@@ -340,11 +341,11 @@ class SlackNode(BaseNodeHandler):
                 
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "message_ts": data.get("ts"),
                         "channel": data.get("channel"),
                         "thread_ts": data.get("message", {}).get("thread_ts"),
-                    },
+                    })],
                     output_handle="output-0"
                 )
                 
@@ -488,11 +489,11 @@ class GoogleSheetsNode(BaseNodeHandler):
                     data = response.json()
                     return NodeExecutionResult(
                         success=True,
-                        data={
+                        items=[NodeItem(json={
                             "values": data.get("values", []),
                             "range": data.get("range"),
                             "row_count": len(data.get("values", [])),
-                        },
+                        })],
                         output_handle="output-0"
                     )
                 
@@ -526,11 +527,11 @@ class GoogleSheetsNode(BaseNodeHandler):
                     data = response.json()
                     return NodeExecutionResult(
                         success=True,
-                        data={
+                        items=[NodeItem(json={
                             "updated_range": data.get("updatedRange"),
                             "updated_rows": data.get("updatedRows"),
                             "updated_cells": data.get("updatedCells"),
-                        },
+                        })],
                         output_handle="output-0"
                     )
                 
@@ -568,10 +569,10 @@ class GoogleSheetsNode(BaseNodeHandler):
                     updates = data.get("updates", {})
                     return NodeExecutionResult(
                         success=True,
-                        data={
+                        items=[NodeItem(json={
                             "updated_range": updates.get("updatedRange"),
                             "updated_rows": updates.get("updatedRows"),
-                        },
+                        })],
                         output_handle="output-0"
                     )
                 
@@ -596,9 +597,9 @@ class GoogleSheetsNode(BaseNodeHandler):
                     data = response.json()
                     return NodeExecutionResult(
                         success=True,
-                        data={
+                        items=[NodeItem(json={
                             "cleared_range": data.get("clearedRange"),
-                        },
+                        })],
                         output_handle="output-0"
                     )
                 
@@ -748,11 +749,11 @@ class DiscordNode(BaseNodeHandler):
                 
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "status": "sent",
                         "has_embeds": len(embeds) > 0,
                         "tts_enabled": tts,
-                    },
+                    })],
                     output_handle="success"
                 )
                 
@@ -971,7 +972,7 @@ class NotionNode(BaseNodeHandler):
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
-                    data=data,
+                    items=[NodeItem(json=data)],
                     output_handle="output-0"
                 )
                 
@@ -1178,7 +1179,7 @@ class AirtableNode(BaseNodeHandler):
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
-                    data=data,
+                    items=[NodeItem(json=data)],
                     output_handle="output-0"
                 )
                 
@@ -1430,11 +1431,11 @@ class TelegramNode(BaseNodeHandler):
                 result = data.get("result", {})
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "message_id": result.get("message_id"),
                         "chat_id": result.get("chat", {}).get("id"),
                         "date": result.get("date"),
-                    },
+                    })],
                     output_handle="output-0"
                 )
                 
@@ -1659,7 +1660,7 @@ class TrelloNode(BaseNodeHandler):
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
-                    data=data,
+                    items=[NodeItem(json=data)],
                     output_handle="output-0"
                 )
                 
@@ -1878,7 +1879,7 @@ class GitHubNode(BaseNodeHandler):
                 data = response.json()
                 return NodeExecutionResult(
                     success=True,
-                    data=data,
+                    items=[NodeItem(json=data)],
                     output_handle="output-0"
                 )
                 
@@ -2015,11 +2016,11 @@ class HTTPRequestNode(BaseNodeHandler):
                 
                 return NodeExecutionResult(
                     success=True,
-                    data={
+                    items=[NodeItem(json={
                         "status_code": response.status_code,
                         "headers": dict(response.headers),
                         "body": response_data,
-                    },
+                    })],
                     output_handle="output-0"
                 )
                 
@@ -2033,5 +2034,184 @@ class HTTPRequestNode(BaseNodeHandler):
             return NodeExecutionResult(
                 success=False,
                 error=f"HTTP request error: {str(e)}",
+                output_handle="output-0"
+            )
+
+class FirecrawlScrapeNode(BaseNodeHandler):
+    """
+    Scrape and crawl websites using Firecrawl API.
+    """
+    
+    node_type = "firecrawl_scrape"
+    name = "Firecrawl Scrape"
+    category = NodeCategory.INTEGRATION.value
+    description = "Scrape websites and convert to LLM-ready formats using Firecrawl"
+    icon = "Globe"
+    color = "#f59e0b"
+    
+    fields = [
+        FieldConfig(
+            name="credential",
+            label="Firecrawl API Key",
+            field_type=FieldType.CREDENTIAL,
+            credential_type="firecrawl",
+            description="Select your Firecrawl API credential"
+        ),
+        FieldConfig(
+            name="operation",
+            label="Operation",
+            field_type=FieldType.SELECT,
+            options=["scrape", "crawl", "map", "check_crawl"],
+            default="scrape"
+        ),
+        FieldConfig(
+            name="url",
+            label="URL",
+            field_type=FieldType.STRING,
+            placeholder="https://example.com",
+            description="The URL to scrape or crawl"
+        ),
+        FieldConfig(
+            name="formats",
+            label="Formats",
+            field_type=FieldType.STRING,
+            default="markdown",
+            description="Comma-separated list of formats (markdown, html, raw-html, screenshot, links)"
+        ),
+        FieldConfig(
+            name="only_main_content",
+            label="Only Main Content",
+            field_type=FieldType.BOOLEAN,
+            default=True,
+            description="Only return the main content of the page"
+        ),
+        FieldConfig(
+            name="wait_for",
+            label="Wait For (ms)",
+            field_type=FieldType.NUMBER,
+            default=0,
+            required=False,
+            description="Time to wait for the page to load in milliseconds"
+        ),
+        FieldConfig(
+            name="extraction_schema",
+            label="Extraction Schema (JSON)",
+            field_type=FieldType.JSON,
+            required=False,
+            description="JSON schema for structured data extraction"
+        ),
+        FieldConfig(
+            name="system_prompt",
+            label="System Prompt",
+            field_type=FieldType.STRING,
+            required=False,
+            description="System prompt for extraction"
+        ),
+        FieldConfig(
+            name="prompt",
+            label="Prompt",
+            field_type=FieldType.STRING,
+            required=False,
+            description="User prompt for extraction"
+        ),
+        FieldConfig(
+            name="crawl_id",
+            label="Crawl ID",
+            field_type=FieldType.STRING,
+            required=False,
+            description="ID of the crawl job (required for check_crawl operation)"
+        ),
+    ]
+    
+    outputs = [
+        HandleDef(id="output-0", label="Output"),
+    ]
+    
+    async def execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> NodeExecutionResult:
+        from firecrawl import FirecrawlApp
+        
+        credential_id = config.get("credential")
+        operation = config.get("operation", "scrape")
+        url = config.get("url", "")
+        
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = creds.get("apiKey") if creds else None
+        
+        if not api_key:
+             return NodeExecutionResult(
+                success=False,
+                error="Firecrawl API key not configured",
+                output_handle="output-0"
+            )
+            
+        try:
+            app = FirecrawlApp(api_key=api_key)
+            
+            if operation == "scrape":
+                if not url:
+                     return NodeExecutionResult(success=False, error="URL is required for scrape", output_handle="output-0")
+                
+                params = {
+                    "formats": [f.strip() for f in config.get("formats", "markdown").split(",")],
+                    "onlyMainContent": config.get("only_main_content", True),
+                }
+                
+                wait_for = config.get("wait_for")
+                if wait_for:
+                    params["waitFor"] = int(wait_for)
+                    
+                extraction_schema = config.get("extraction_schema")
+                if extraction_schema:
+                    params["extract"] = {
+                        "schema": extraction_schema,
+                        "systemPrompt": config.get("system_prompt"),
+                        "prompt": config.get("prompt")
+                    }
+                    
+                data = app.scrape_url(url, params=params)
+                
+            elif operation == "crawl":
+                if not url:
+                     return NodeExecutionResult(success=False, error="URL is required for crawl", output_handle="output-0")
+                
+                params = {
+                    "formats": [f.strip() for f in config.get("formats", "markdown").split(",")],
+                    "onlyMainContent": config.get("only_main_content", True),
+                }
+                
+                data = app.crawl_url(url, params=params)
+                
+            elif operation == "map":
+                if not url:
+                     return NodeExecutionResult(success=False, error="URL is required for map", output_handle="output-0")
+                data = app.map_url(url)
+                
+            elif operation == "check_crawl":
+                crawl_id = config.get("crawl_id")
+                if not crawl_id:
+                     return NodeExecutionResult(success=False, error="Crawl ID is required for check_crawl", output_handle="output-0")
+                data = app.check_crawl_status(crawl_id)
+            else:
+                 return NodeExecutionResult(
+                    success=False,
+                    error=f"Unsupported operation: {operation}",
+                    output_handle="output-0"
+                )
+                
+            return NodeExecutionResult(
+                success=True,
+                items=[NodeItem(json=data)],
+                output_handle="output-0"
+            )
+            
+        except Exception as e:
+            return NodeExecutionResult(
+                success=False,
+                error=f"Firecrawl error: {str(e)}",
                 output_handle="output-0"
             )

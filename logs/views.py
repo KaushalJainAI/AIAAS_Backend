@@ -550,5 +550,14 @@ async def execution_narrative(request, execution_id: str):
 
     narrative_data = await sync_to_async(get_narrative)()
     if narrative_data is None:
-        return Response({"error": "No activities found to synthesize."}, status=404)
+        # Return a 200 with a placeholder if the execution exists but has no thoughts yet
+        # This prevents 404 errors during early execution polling.
+        return Response({
+            "execution_id": execution_id,
+            "thought_type": "narrative",
+            "content": "AI Narrative Review - Still generating...",
+            "reasoning": "The execution has not yet generated enough activity to synthesize a narrative. Please check back when more steps are completed.",
+            "created_at": timezone.now()
+        }, status=200)
+        
     return Response(narrative_data)

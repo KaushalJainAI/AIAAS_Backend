@@ -8,6 +8,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from .handlers.registry import get_registry
+from .models import AIProvider, AIModel
+from credentials.models import Credential
+from django.views.decorators.cache import never_cache
+from django.utils.decorators import method_decorator
 
 
 class NodeSchemaListView(APIView):
@@ -69,10 +73,9 @@ class NodeSchemaDetailView(APIView):
         schema = handler.get_schema()
         
         return Response(schema.model_dump(by_alias=True))
-from .models import AIProvider, AIModel
-from credentials.models import Credential
 
 
+@method_decorator(never_cache, name='get')
 class AIModelListView(APIView):
     """
     List all available AI providers and their models.
@@ -128,6 +131,25 @@ class AIModelListView(APIView):
                     'is_free': m.is_free,
                     'description': m.description,
                     'available': model_available,
+                    'supports_text_input': m.supports_text_input,
+                    'supports_text_generation': m.supports_text_generation,
+                    'supports_image_input': m.supports_image_input,
+                    'supports_image_generation': m.supports_image_generation,
+                    'supports_audio_input': m.supports_audio_input,
+                    'supports_audio_generation': m.supports_audio_generation,
+                    'supports_video_input': m.supports_video_input,
+                    'supports_video_generation': m.supports_video_generation,
+                    'supports_numeric_input': m.supports_numeric_input,
+                    'supports_numeric_generation': m.supports_numeric_generation,
+                    'supports_time_series_input': m.supports_time_series_input,
+                    'supports_time_series_generation': m.supports_time_series_generation,
+                    'supports_document_input': m.supports_document_input,
+                    'supports_document_generation': m.supports_document_generation,
+                    'supports_tabular_input': m.supports_tabular_input,
+                    'supports_tabular_generation': m.supports_tabular_generation,
+                    'supports_structured_output': m.supports_structured_output,
+                    'supports_tool_calling': m.supports_tool_calling,
+                    'supports_embedding_generation': m.supports_embedding_generation,
                 })
             
             data.append({

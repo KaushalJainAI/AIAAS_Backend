@@ -22,6 +22,7 @@ def share_document_task(self, document_id, user_id):
     return share_document(document_id, user_id)
 
 
+
 from .utils import extract_text_from_file
 
 def process_document(document_id):

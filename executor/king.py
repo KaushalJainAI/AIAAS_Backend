@@ -40,13 +40,9 @@ from orchestrator.interface import (
 from executor.engine import ExecutionEngine
 from logs.models import ExecutionLog
 from skills.models import Skill
+from workflow_backend.thresholds import DEFAULT_HITL_TIMEOUT_SECONDS, MAX_LOOP_COUNT, EXECUTION_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
-
-# Constants
-DEFAULT_HITL_TIMEOUT_SECONDS = 300
-MAX_LOOP_COUNT = 1000
-EXECUTION_TTL_SECONDS = 3600  # 1 hour
 
 
 class HITLRequestType(str, Enum):
