@@ -1,6 +1,7 @@
 import re
 import json
 import logging
+import ast
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,9 @@ PATTERNS = {
     'function_call': r'<FunctionCall>\s*(.*?)\s*(?:</FunctionCall>|$)',
     'thought_block': r'<(?:thought|think)>\s*(.*?)\s*</(?:thought|think)>',
     'generic_json_tool': r'\{\s*["\'](?:tool|action)["\']\s*:\s*["\'](.*?)["\']\s*,\s*["\'](?:args|parameters|arguments)["\']\s*:\s*(.*)\s*\}',
-    'xml_tool_block': r'<(?:tool_call|invoke|tool|FunctionCall|call:[a-z0-9_]+)[\s>].*?</(?:tool_call|invoke|tool|FunctionCall|call:[a-z0-9_]+)>'
+    'xml_tool_block': r'<(?:tool_call|invoke|tool|FunctionCall|call:[a-z0-9_]+)[\s>].*?</(?:tool_call|invoke|tool|FunctionCall|call:[a-z0-9_]+)>',
+    # Arrow hash: {tool => "name", args => ...} - keys may be quoted or bare
+    'arrow_hash': r"\{\s*['\"]?tool['\"]?\s*=>\s*['\"]([a-z0-9_]+)['\"]\s*,\s*['\"]?args['\"]?\s*=>\s*((?:\{[^}]*\}|[^,}]+))",
 }
 
 def clean_json_string(s: str) -> str:
@@ -62,6 +65,22 @@ def fuzzy_json_loads(s: str) -> any:
         return json.loads(fixed)
     except:
         pass
+
+    # Try normalizing arrow operator => to JSON colon (handles quoted AND unquoted keys)
+    try:
+        # Step 1: quote any bare (unquoted) word keys before =>
+        arrow_fixed = re.sub(r'(?<!["\w])(\b[a-z_][a-z0-9_]*)\b\s*=>', r'"\1":', s)
+        # Step 2: also handle already-quoted keys:  'key' =>  or  "key" =>
+        arrow_fixed = re.sub(r"([\"'])\s*=>\s*", r'\1:', arrow_fixed)
+        # Step 3: normalize single quotes to double quotes
+        arrow_fixed = re.sub(r"(?<![\\])'", '"', arrow_fixed)
+        # Step 4: strip any --flag style keys inside nested braces into quoted strings
+        arrow_fixed = re.sub(r'\{\s*--([a-z_][a-z0-9_]*)\s+"([^"]*)"\s*\}', r'{"\1": "\2"}', arrow_fixed)
+        arrow_fixed = re.sub(r"\{\s*--([a-z_][a-z0-9_]*)\s+'([^']*)'\s*\}", r'{"\1": "\2"}', arrow_fixed)
+        arrow_fixed = re.sub(r'\{\s*--([a-z_][a-z0-9_]*)\s+([^}"\s][^}\s]*)\s*\}', r'{"\1": "\2"}', arrow_fixed)
+        return json.loads(arrow_fixed)
+    except:
+        pass
         
     return None
 
@@ -89,6 +108,18 @@ def parse_tool_arguments(raw_args):
         return {"items": parsed}
     if parsed is not None:
         return {"query": str(parsed)}
+
+    # Try CLI-flag style args: --key "value" or --key value
+    try:
+        cli_args = {}
+        for flag_match in re.finditer(r'--([a-z][a-z0-9_]*)(?:\s+|=)(?:"([^"]*?)"|\'([^\']*?)\'|([^\s\-][^\s]*))', s):
+            key = flag_match.group(1)
+            val = flag_match.group(2) or flag_match.group(3) or flag_match.group(4) or ''
+            cli_args[key] = val.strip()
+        if cli_args:
+            return cli_args
+    except Exception:
+        pass
 
     # Last fallback: keep raw text as query for search-like tools.
     return {"query": s}
@@ -297,6 +328,21 @@ def extract_tool_calls(content: str):
                     'raw': raw
                 })
 
+    # 15. Arrow-hash style: {'tool' => 'name', 'args' => '...'}
+    # Emitted by some LLMs (e.g. Kimi) inside or outside <FunctionCall> wrappers.
+    for match in re.finditer(PATTERNS['arrow_hash'], content, re.DOTALL):
+        raw = match.group(0)
+        if any(raw in tc['raw'] or tc['raw'] in raw for tc in tool_calls):
+            continue
+        name = match.group(1).strip()
+        args_raw = match.group(2).strip()
+        # Strip leading/trailing quotes from the args string if it's a bare quoted string
+        if (args_raw.startswith("'") and args_raw.endswith("'")) or \
+           (args_raw.startswith('"') and args_raw.endswith('"')):
+            args_raw = args_raw[1:-1]
+        args = parse_tool_arguments(args_raw)
+        tool_calls.append({'tool': name, 'args': args, 'raw': raw})
+
     return tool_calls
 
 def strip_tool_calls(content: str) -> str:
@@ -362,6 +408,9 @@ def get_block_signatures():
         r'<(?:thought|think)>',
         r'</(?:thought|think)>',
         r'<tool_code>',
-        r'</tool_code>'
+        r'</tool_code>',
+        # Arrow-hash syntax markers
+        r"'tool'\s*=>",
+        r"'args'\s*=>",
     ]
 

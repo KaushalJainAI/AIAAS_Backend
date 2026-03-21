@@ -1,3 +1,91 @@
+import asyncio
+from typing import Any
+
+# Timeout constants for agentic loop (in seconds)
+LLM_STREAM_TIMEOUT = 180  # Max time to wait for LLM stream (in seconds)
+TOOL_EXECUTION_TIMEOUT = 120  # Max time to wait for tool execution
+MAX_THINKING_CHUNKS = 100000  # Max thinking chunks before forcing exit
+
+
+def normalize_llm_payload(raw: Any, provider: str, model: str, tool_context_text: str | None, metadata: dict | None = None, llm_result: dict | None = None, max_followups: int = 3) -> dict:
+    """
+    Normalize LLM output into canonical payload dict.
+
+    Returns keys: response, follow_ups, thinking, summary, sources, images, videos, tool_trace, metadata
+    """
+    if metadata is None:
+        metadata = {}
+
+    # First, try to parse structured fields from raw using existing parser
+    try:
+        content, follow_ups, thinking, summary = parse_llm_json_response(raw)
+    except Exception:
+        # Fallback: treat raw as plain text
+        content, follow_ups, thinking, summary = (str(raw) if raw is not None else ""), [], "", ""
+
+    # Ensure types
+    content = content or ""
+    follow_ups = follow_ups or []
+    
+    # If JSON didn't have thinking, check if we already have it from the stream in metadata
+    if not thinking and metadata:
+        thinking = metadata.get('thinking', '')
+    
+    thinking = thinking or ""
+    summary = summary or ""
+
+    # Cap follow-ups
+    follow_ups = [str(f) for f in follow_ups][:max_followups]
+
+    # Sources / images / videos may already be in metadata from tool runs
+    sources = metadata.get('sources', []) if isinstance(metadata.get('sources', []), list) else []
+    images = metadata.get('images', []) if isinstance(metadata.get('images', []), list) else []
+    videos = metadata.get('videos', []) if isinstance(metadata.get('videos', []), list) else []
+
+    # Summarize tool trace if present
+    raw_tool_trace = metadata.get('tool_trace') or []
+    summarized_trace = []
+    if isinstance(raw_tool_trace, list):
+        for t in raw_tool_trace[-20:]:
+            try:
+                trace_summary = t.get('summary') if isinstance(t, dict) and t.get('summary') else None
+                if not trace_summary:
+                    # create short summary from args/results
+                    args = t.get('args') if isinstance(t, dict) else None
+                    trace_summary = (str(args)[:200]) if args else ''
+                summarized_trace.append({
+                    'tool': t.get('tool') if isinstance(t, dict) else str(t),
+                    'iteration': t.get('iteration') if isinstance(t, dict) else None,
+                    'summary': trace_summary,
+                })
+            except Exception:
+                continue
+
+    # If tool_context_text exists but no structured sources, inject a preview
+    raw_preview = (str(raw) or '')[:2000]
+
+    out_meta = {
+        'provider': provider,
+        'model': model,
+        'tokens': metadata.get('tokens') if isinstance(metadata.get('tokens'), int) else None,
+        'raw_llm_output_preview': raw_preview,
+        'summary': summary,
+    }
+
+    payload = {
+        'response': content,
+        'follow_ups': follow_ups,
+        'thinking': thinking,
+        'summary': summary,
+        'sources': sources,
+        'images': images,
+        'videos': videos,
+        'tool_trace': summarized_trace,
+        'metadata': out_meta,
+    }
+
+    return payload
+
 """
 Standalone AI Chat Views — Perplexity-Style
 
@@ -10,7 +98,6 @@ Features:
 - File upload endpoint
 - /image and /video slash commands
 """
-from typing import Any
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from adrf.decorators import api_view
@@ -22,7 +109,7 @@ from uuid import UUID, uuid4
 
 from .models import ChatSession, ChatMessage, ChatAttachment
 from .serializers import ChatSessionSerializer, ChatMessageSerializer, ChatAttachmentSerializer
-from .extraction import extract_tool_calls, strip_tool_calls, get_block_signatures, parse_tool_arguments
+from .extraction import extract_tool_calls, strip_tool_calls, get_block_signatures, parse_tool_arguments, fuzzy_json_loads
 import logging
 import asyncio
 import json
@@ -122,13 +209,18 @@ def has_structured_final_response(text: str) -> bool:
 
     try:
         data = json.loads(raw, strict=False)
+        if isinstance(data, dict):
+            resp = data.get("response")
+            if isinstance(resp, str) and bool(resp.strip()):
+                return True
     except Exception:
-        return False
+        pass
 
-    if not isinstance(data, dict):
-        return False
-    resp = data.get("response")
-    return isinstance(resp, str) and bool(resp.strip())
+    # Fallback to prevent overthinking loops if it's text
+    if len(text.strip()) > 10 and not looks_like_intermediate_action_text(text):
+        return True
+
+    return False
 
 
 def looks_like_intermediate_action_text(text: str) -> bool:
@@ -143,7 +235,7 @@ def looks_like_intermediate_action_text(text: str) -> bool:
         return False
     return bool(
         _re_module.search(
-            r"\b(i(?:'| )?ll|i will|let me)\s+(search|look up|use|fetch|check|call|find|try)\b",
+            r"\b(i(?:'| )?ll|i will|let me)\s+(search|look up|use|fetch|check|call|find|try|review|think|double check|verify)\b",
             lowered,
             _re_module.IGNORECASE,
         )
@@ -305,7 +397,7 @@ def resolve_agent_iteration_limit(intent: str) -> int:
     if intent in ('research', 'search'):
         # Allow deeper exploration for search-heavy flows while staying bounded.
         return min(40, max(base_limit * 3, 24))
-    return min(30, max(base_limit * 2, 16))
+    return min(30, max(base_limit * 2, 12))
 
 
 @sync_to_async
@@ -512,9 +604,6 @@ async def run_eager_search_intent(clean_content: str, user_id: int, shared_tools
     if parsed_res and parsed_res.get("type") == "search_results":
         result["sources"] = parsed_res.get("sources", [])[:50]
         result["eager_text"] = parsed_res.get("text", "")
-        img_res = await perform_image_search(clean_content)
-        if img_res.get("images"):
-            result["images"] = img_res["images"]
     return result
 
 
@@ -631,13 +720,14 @@ async def perform_image_search(query: str, max_results: int = IMAGE_SEARCH_MAX_R
             for attempt in range(2):
                 try:
                     with DDGS(timeout=10) as ddgs:
-                        results = ddgs.images(query, region='us-en', max_results=max_results)
+                        results = ddgs.images(query, max_results=max_results)
                         return list(results) if results else []
                 except Exception as e:
                     logger.warning(f"Image search failed: {e}")
             return []
 
         raw_results = await asyncio.to_thread(_search)
+        logger.info(f"Image search for '{query}' returned {len(raw_results) if raw_results else 0} results")
         if not raw_results:
             return {"images": []}
 
@@ -666,13 +756,14 @@ async def perform_video_search(query: str, max_results: int = VIDEO_SEARCH_MAX_R
             for attempt in range(2):
                 try:
                     with DDGS(timeout=10) as ddgs:
-                        results = ddgs.videos(query, region='us-en', max_results=max_results)
+                        results = ddgs.videos(query, max_results=max_results)
                         return list(results) if results else []
                 except Exception:
                     pass
             return []
 
         raw_results = await asyncio.to_thread(_search)
+        logger.info(f"Video search for '{query}' returned {len(raw_results) if raw_results else 0} results")
         if not raw_results:
             return {"videos": []}
 
@@ -699,7 +790,7 @@ async def scrape_sources(
     sources: list[dict],
     per_source_char_limit: int = 4000,
     min_content_chars: int = 100,
-) -> tuple[list[str], list[dict]]:
+    ) -> tuple[list[str], list[dict]]:
     """
     Fetch and extract text for source URLs, returning extracted blocks and valid source metadata.
     """
@@ -752,13 +843,15 @@ def get_format_instructions(provider: str, model: str) -> str:
             "<json_response>\n"
             "{\n"
             '  "response": "Your markdown answer here...",\n'
+            '  "summary": "A 1-2 sentence quick summary...",\n'
             '  "follow_ups": ["Q1", "Q2", "Q3"]\n'
             "}\n"
             "</json_response>\n\n"
             "Directives:\n"
             "1. The 'response' field MUST use clean Markdown (headers, bold, lists).\n"
             "2. ALWAYS use language-specific code blocks (e.g. ```python) for code.\n"
-            "3. Provide exactly 3 engaging follow-up questions."
+            "3. Provide exactly 3 engaging follow-up questions.\n"
+            "4. You MUST escape all newlines as \\n inside JSON string values. Do not use literal newlines."
         )
     
     # Standard instruction for frontier models (GPT-4, Claude 3.5+, Gemini 1.5+)
@@ -769,19 +862,74 @@ def get_format_instructions(provider: str, model: str) -> str:
         "STRUCTURE:\n"
         "{\n"
         '  "response": "Your full detailed answer with markdown formatting here.",\n'
+        '  "summary": "A concise 1-2 sentence overview of the answer for quick reading.",\n'
         '  "follow_ups": ["Question 1?", "Question 2?", "Question 3?"]\n'
         "}\n\n"
         "GUIDELINES:\n"
         "- Use clean Markdown (lists, bold, headers) in the 'response' field.\n"
         "- Use language-specific code blocks (e.g., ```python) for all code.\n"
         "- Provide exactly 3 concise and engaging follow-up questions.\n"
-        "- DO NOT wrap the JSON block in markdown code fences (```json). Just output the raw object."
+        "- DO NOT wrap the JSON block in markdown code fences (```json). Just output the raw object.\n"
+        "- You MUST escape all newlines as \\n inside JSON string values. Do not use literal newlines."
     )
 
 
-def build_augmented_system_message(session, current_time: str, intent: str, provider: str, model: str) -> str:
+async def get_interruption_context(session) -> dict:
+    """
+    Check session message history for previous interruptions and return context.
+    
+    Returns a dict with:
+        - count: number of previous interruptions
+        - reason: most recent interruption reason
+        - iterations_used: iterations used in most recent interruption
+    """
+    if not session:
+        return {'count': 0}
+    
+    # Check recent assistant messages for interruption metadata
+    from asgiref.sync import sync_to_async
+    
+    @sync_to_async
+    def _get_interruption_count():
+        # Get last 10 assistant messages to check for interruptions
+        recent_messages = list(
+            ChatMessage.objects.filter(session=session, role='assistant')
+            .order_by('-created_at')[:10]
+        )
+        
+        interruption_count = 0
+        last_reason = None
+        last_iterations = None
+        
+        for msg in recent_messages:
+            if msg.metadata and isinstance(msg.metadata, dict):
+                if msg.metadata.get('interrupted'):
+                    interruption_count += 1
+                    if not last_reason:
+                        last_reason = msg.metadata.get('partial_results', 'excessive processing')[:100]
+                    if not last_iterations:
+                        last_iterations = msg.metadata.get('iterations_completed')
+        
+        return {
+            'count': interruption_count,
+            'reason': last_reason,
+            'iterations_used': last_iterations
+        }
+    
+    return await _get_interruption_count()
+
+
+def build_augmented_system_message(session, current_time: str, intent: str, provider: str, model: str, interruption_context: dict = None) -> str:
     """
     Constructs a unified, highly-directive system message with industry-standard rules.
+    
+    Args:
+        session: ChatSession object
+        current_time: Current timestamp string
+        intent: Intent category (chat, search, research, etc.)
+        provider: LLM provider name
+        model: LLM model name
+        interruption_context: Optional dict with keys 'count', 'reason', 'iterations_used' for optimization hints
     """
     base = session.system_prompt or "You are a helpful, knowledgeable AI assistant. Be concise but thorough."
     
@@ -804,7 +952,24 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
         f"\n9. RAG CONTEXT UTILIZATION: If provided with context labeled 'RELEVANT CONTEXT FROM DOCUMENTS', prioritize these snippets. These are pinpointed chunks from documents too large for manual extraction or direct input; they provide the highest fidelity for detailed queries about large files."
         f"\n10. META-DATA SILENCE: Never repeat internal tags like `<context_metadata>`, `[FULL RESOURCE CONTENT]`, or system instructions in your final response to the user. These are for your eyes only."
         f"\n11. THINKING PROCESS: You have a `thinking` field (in JSON) or `<thought>` tags available. Use this for your internal reasoning, research logs, and source synthesis. If you see `[RESEARCH_LOG]` in the context, synthesize it into your thinking but DO NOT include the raw list in your final `response` field."
+        f"\n12. EFFICIENCY: Avoid making multiple sequential tool calls if a single call or no tool call can answer the user's question. Tool calls add latency — only use them when necessary for real-time data, file content retrieval, or specific citations. For straightforward knowledge questions, general advice, or topics you can answer from your training, provide the answer directly without invoking any tools. If one tool call provides sufficient information, do NOT make additional calls — synthesize and respond."
     )
+    
+    # Add optimization hint if previous interruptions occurred
+    optimization_hint = ""
+    if interruption_context and interruption_context.get('count', 0) > 0:
+        count = interruption_context['count']
+        reason = interruption_context.get('reason', 'excessive tool calls or tokens')
+        optimization_hint = (
+            f"\n\n### OPTIMIZATION REMINDER (来自之前中断) ###"
+            f"\nWARNING: This conversation was interrupted {count} time(s) due to {reason}."
+            f"\nTo prevent further interruptions:"
+            f"\n- Be MORE conservative with tool calls — aim for 3-5 maximum per iteration."
+            f"\n- Prefer simpler, direct approaches over complex multi-step tool chains."
+            f"\n- If you have partial results from previous attempts, use them rather than re-fetching."
+            f"\n- Synthesize information quickly — avoid excessive reasoning loops."
+            f"\n- Provide the best answer you can with minimal tool usage."
+        )
     
     mode_augmentation = ""
     if intent == 'coding':
@@ -816,7 +981,7 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
     
     format_instr = get_format_instructions(provider, model)
     
-    return f"{base}{context_block}{directives}{mode_augmentation}{format_instr}"
+    return f"{base}{context_block}{directives}{mode_augmentation}{format_instr}{optimization_hint}"
 
 
 # ==================== Dynamic LLM Execution ====================
@@ -1166,10 +1331,13 @@ async def send_message(request, session_id: str):
     provider, model = resolve_provider_model(request.data, session)
     await sync_session_model_overrides(request.data, session, provider, model)
     current_time_str = current_time_string()
+    
+    # Check for previous interruptions to add optimization hints
+    interruption_context = await get_interruption_context(session)
 
-    system_message = build_augmented_system_message(session, current_time_str, intent, provider, model)
+    system_message = build_augmented_system_message(session, current_time_str, intent, provider, model, interruption_context)
 
-    _, _, history_prompt = await prepare_history_context(
+    _, history_list, history_prompt = await prepare_history_context(
         session=session,
         excluded_message_id=user_msg.id,
         supports_docs=False,
@@ -1199,12 +1367,20 @@ async def send_message(request, session_id: str):
             metadata['search_query'] = search_data["search_query"]
             if search_data["sources"]:
                 metadata['sources'] = search_data["sources"]
-            if search_data["images"]:
-                metadata['images'] = search_data["images"]
             if search_data["eager_text"]:
                 eager_results.append(f"[Eager Tool: web_search executed]\nResult: {search_data['eager_text']}")
             else:
                 eager_results.append(f"[Eager Tool: web_search executed]\nResult: {search_data['raw_result']}")
+            
+            # --- Proactive Media Search ---
+            img_task = perform_image_search(clean_content)
+            vid_task = perform_video_search(clean_content)
+            img_res, vid_res = await asyncio.gather(img_task, vid_task)
+            
+            if img_res.get("images"):
+                metadata['images'] = img_res["images"]
+            if vid_res.get("videos"):
+                metadata['videos'] = vid_res["videos"]
         elif intent == 'research':
             # Deep Research Loop
             
@@ -1213,6 +1389,8 @@ async def send_message(request, session_id: str):
             plan_sys = "You are an expert research planner. Output only valid JSON."
             plan_res = await execute_llm(provider, model, plan_prompt, plan_sys, request.user.id)
             total_tokens += plan_res.get("usage", {}).get("total_tokens", 0)
+            if plan_res.get('thinking'):
+                thinking += plan_res['thinking'] + "\n\n"
             
             plan_json = parse_first_json_object(plan_res.get('content', ''))
             queries = normalize_research_queries(plan_json, clean_content)
@@ -1241,12 +1419,17 @@ async def send_message(request, session_id: str):
             # Hard limit to prevent blowing up the LLM token budget (~60,000 characters)
             combined = combined[:60000] 
             
-            # --- Integrated Image Search ---
-            img_res = await perform_image_search(clean_content)
+            # --- Integrated Image/Video Search ---
+            img_task = perform_image_search(clean_content)
+            vid_task = perform_video_search(clean_content)
+            img_res, vid_res = await asyncio.gather(img_task, vid_task)
+            
             if img_res.get("images"):
                 metadata['images'] = img_res["images"]
+            if vid_res.get("videos"):
+                metadata['videos'] = vid_res["videos"]
                 
-            eager_results.append(f"[Deep Research Performed]\nQueries Decided: {queries}\nTotal Links Analyzed: {len(valid_sources)}\n\nExtracted Content for Synthesis:\n{combined}\n\nReview this deeply researched data, understanding you must analyze the dates/times and provide an exceptionally robust response.")
+            eager_results.append(f"[Deep Research Performed]\nQueries Decided: {queries}\nTotal Links Analyzed: {len(valid_sources)}\nImages: {len(metadata.get('images', []))}\nVideos: {len(metadata.get('videos', []))}\n\nExtracted Content for Synthesis:\n{combined}\n\nReview this deeply researched data, understanding you must analyze the dates/times and provide an exceptionally robust response.")
             
         elif intent == 'workflow':
             workflow_data = await run_workflow_suggestion_intent(clean_content, request.user.id, shared_tools)
@@ -1279,6 +1462,7 @@ async def send_message(request, session_id: str):
             full_prompt += f"\n\n[SYSTEM INSTRUCTION: The user's query specifically refers to a portion of Message ID {ref_msg_id}. Please prioritize this context when answering.]"
 
     # If we have eager results, we inject them and treat this as the 'final' call
+    interrupted = False  # Track if loop was interrupted due to timeout/limits
     if eager_results:
         combined_eager = "\n\n".join(eager_results)
         prompt_with_context = f"{full_prompt}\n\nAdditional context from tools:\n{combined_eager}\n\nPlease provide your final answer based on these results in the requested JSON format."
@@ -1289,6 +1473,7 @@ async def send_message(request, session_id: str):
             prompt=prompt_with_context,
             system_message=system_message,
             user_id=request.user.id,
+            history=history_list,
             response_format=response_format,
         )
         raw_content = llm_result.get("content") or ""
@@ -1308,17 +1493,30 @@ async def send_message(request, session_id: str):
         
         actual_max_iterations = resolve_agent_iteration_limit(intent)
         final_answer_received = False
+        interrupted = False  # Track if loop was interrupted due to timeout/limits
 
         for iteration in range(actual_max_iterations):
-            llm_result = await execute_llm(
-                provider=provider,
-                model=model,
-                prompt=current_prompt,
-                system_message=system_message,
-                user_id=request.user.id,
-                tools=tools_payload,
-                response_format=response_format,
-            )
+            try:
+                llm_result = await asyncio.wait_for(
+                    execute_llm(
+                        provider=provider,
+                        model=model,
+                        prompt=current_prompt,
+                        system_message=system_message,
+                        user_id=request.user.id,
+                        tools=tools_payload,
+                        history=history_list,
+                        response_format=response_format,
+                    ),
+                    timeout=LLM_STREAM_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Non-streaming LLM call timed out after {LLM_STREAM_TIMEOUT}s at iteration {iteration + 1}")
+                interrupted = True
+                break
+
+            if llm_result.get("thinking"):
+                thinking += llm_result["thinking"] + "\n\n"
 
             total_tokens += llm_result.get("usage", {}).get("total_tokens", 0)
             raw_content = llm_result.get("content") or ""
@@ -1394,7 +1592,15 @@ async def send_message(request, session_id: str):
                 logger.info(f"[Agentic Loop iter={iteration+1}] Calling tool: {func_name} with args: {args}")
 
                 context = {"user_id": request.user.id}
-                res = await shared_tools.execute_tool(func_name, args, context)
+                try:
+                    res = await asyncio.wait_for(
+                        shared_tools.execute_tool(func_name, args, context),
+                        timeout=TOOL_EXECUTION_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Tool {func_name} timed out after {TOOL_EXECUTION_TIMEOUT}s")
+                    tool_results_text.append(f"[Tool: {func_name}] Timeout error - tool execution exceeded {TOOL_EXECUTION_TIMEOUT}s limit")
+                    continue
 
                 if func_name == "web_search":
                     metadata['search_query'] = args.get("query", clean_content)
@@ -1449,22 +1655,44 @@ async def send_message(request, session_id: str):
 
         if not final_answer_received:
             combined_results = "\n\n".join(accumulated_tool_context)
-            forced_final_prompt = (
-                f"{full_prompt}\n\n"
-                f"Tool results gathered across {actual_max_iterations} iterations:\n{combined_results}\n\n"
-                "You have reached the tool-iteration limit. You MUST now provide the best possible final answer "
-                "in the required JSON format using available evidence. Do NOT call tools again."
-            )
-            llm_result = await execute_llm(
-                provider=provider,
-                model=model,
-                prompt=forced_final_prompt,
-                system_message=system_message,
-                user_id=request.user.id,
-                response_format=response_format,
-            )
-            total_tokens += llm_result.get("usage", {}).get("total_tokens", 0)
-            raw_content = llm_result.get("content") or raw_content
+            
+            if interrupted:
+                # User interruption case - preserve thinking and search results
+                interruption_summary = (
+                    f"I was interrupted while processing your request. "
+                    f"Here's what I had gathered so far:\n\n"
+                    f"**Completed Tool Executions:**\n{combined_results if combined_results else 'None'}\n\n"
+                    f"**Iterations Completed:** {iteration + 1} of {actual_max_iterations}\n\n"
+                    f"You can continue this conversation and I'll pick up where we left off, or rephrase your question."
+                )
+                
+                # Use interruption summary only if we don't have substantial content
+                if not raw_content or len(str(raw_content)) < 100:
+                    raw_content = json.dumps({
+                        "response": interruption_summary,
+                        "interrupted": True,
+                        "partial_results": combined_results[:3000] if combined_results else "",
+                        "iterations_completed": iteration + 1,
+                        "max_iterations": actual_max_iterations
+                    })
+            else:
+                # Normal case - max iterations reached
+                forced_final_prompt = (
+                    f"{full_prompt}\n\n"
+                    f"Tool results gathered across {actual_max_iterations} iterations:\n{combined_results}\n\n"
+                    "You have reached the tool-iteration limit. You MUST now provide the best possible final answer "
+                    "in the required JSON format using available evidence. Do NOT call tools again."
+                )
+                llm_result = await execute_llm(
+                    provider=provider,
+                    model=model,
+                    prompt=forced_final_prompt,
+                    system_message=system_message,
+                    user_id=request.user.id,
+                    response_format=response_format,
+                )
+                total_tokens += llm_result.get("usage", {}).get("total_tokens", 0)
+                raw_content = llm_result.get("content") or raw_content
 
         # Store tool trace in metadata so the frontend can display it
         if tool_trace:
@@ -1483,27 +1711,43 @@ async def send_message(request, session_id: str):
     )
     total_tokens += normalize_tokens
 
-    # ---- Parse structured JSON response ----
-    ai_content, follow_ups, extracted_thinking = parse_llm_json_response(raw_content)
-    # Use thinking from JSON/tags, or fall back to reasoning captured from execute_llm
-    thinking = extracted_thinking or (llm_result.get("thinking") if llm_result else "")
+    # ---- Normalize final LLM output into canonical payload ----
+    payload = normalize_llm_payload(raw_content, provider, model, tool_context_text, metadata, llm_result=llm_result)
+
+    # Use human-renderable response as content and persist structured data in metadata
+    response_text = payload.get('response', '')
+
+    # Merge payload metadata into existing metadata
+    payload_meta = payload.copy()
+    payload_meta.pop('response', None)
+    inner_meta = payload_meta.pop('metadata', {}) if isinstance(payload_meta.get('metadata', {}), dict) else {}
+    # Update base metadata (keeps existing search/workflow keys)
+    metadata.update(inner_meta)
+
+    # Copy structured fields into metadata
+    for k in ('follow_ups', 'thinking', 'sources', 'images', 'videos', 'tool_trace'):
+        if payload_meta.get(k) is not None:
+            metadata[k] = payload_meta.get(k)
+
+    # Add interruption metadata if process was interrupted
+    if interrupted:
+        metadata['interrupted'] = True
+        metadata['partial_results'] = "\n\n".join(accumulated_tool_context)[:3000] if accumulated_tool_context else ""
+        metadata['iterations_completed'] = iteration + 1
+        metadata['max_iterations'] = actual_max_iterations
 
     # Update session token count
     session.total_tokens_used += total_tokens
     await session.asave(update_fields=['total_tokens_used'])
 
-    # Build metadata
+    # Ensure tokens in metadata
     metadata['tokens'] = total_tokens
-    if follow_ups:
-        metadata['follow_ups'] = follow_ups
-    if thinking:
-        metadata['thinking'] = thinking
 
     # Save AI response
     ai_msg = await ChatMessage.objects.acreate(
         session=session,
         role='assistant',
-        content=ai_content,
+        content=response_text,
         message_type='workflow_suggestion' if 'workflow_id' in metadata else ('search' if 'search_query' in metadata else 'chat'),
         metadata=metadata,
     )
@@ -1653,8 +1897,11 @@ async def send_message_stream(request, session_id: str):
 
         await sync_session_model_overrides(req_data, session, provider, model)
         c_time = current_time_string()
+        
+        # Check for previous interruptions to add optimization hints
+        interruption_context = await get_interruption_context(session)
 
-        system_message = build_augmented_system_message(session, c_time, intent, provider, model)
+        system_message = build_augmented_system_message(session, c_time, intent, provider, model, interruption_context)
         response_format = "json_object" if provider in ['openai', 'gemini', 'openrouter'] else "text"
 
         meta = {'intent': intent, 'model': model, 'provider': provider}
@@ -1684,10 +1931,19 @@ async def send_message_stream(request, session_id: str):
                     eager_results.append(f"[Eager Tool: web_search executed]\nResult: {search_data['eager_text']}")
                 else:
                     eager_results.append(f"[Eager Tool: web_search executed]\nResult: {search_data['raw_result']}")
-                if search_data["images"]:
-                    yield f"data: {json.dumps({'type': 'status', 'phase': 'searching', 'message': 'Fetching images...'})}\n\n"
-                    meta['images'] = search_data["images"]
+                # --- Proactive Media Search ---
+                yield f"data: {json.dumps({'type': 'status', 'phase': 'searching', 'message': 'Finding images and videos...'})}\n\n"
+                img_task = perform_image_search(clean_content)
+                vid_task = perform_video_search(clean_content)
+                img_res, vid_res = await asyncio.gather(img_task, vid_task)
+
+                if img_res.get("images"):
+                    meta['images'] = img_res["images"]
                     yield f"data: {json.dumps({'type': 'images_update', 'images': meta['images']})}\n\n"
+
+                if vid_res.get("videos"):
+                    meta['videos'] = vid_res["videos"]
+                    yield f"data: {json.dumps({'type': 'videos_update', 'videos': meta['videos']})}\n\n"
 
             elif intent == 'research':
                 
@@ -1704,25 +1960,21 @@ async def send_message_stream(request, session_id: str):
                     f"If the request is brand new and broad, ambiguous, or lacks context (e.g. 'Apple', 'React', 'What happened yesterday?'), you must ask ONE specific clarifying question (e.g., 'Are you referring to the company Apple or the fruit?'). Output exactly: {{\"needs_clarification\": true, \"question\": \"<your question here>\"}}\n\n"
                     f"Respond ONLY with valid JSON."
                 )
-                clarify_res = await execute_llm(provider, model, clarify_prompt, "You are a research planner. Output only valid JSON.", request.user.id)
-                total_tokens += clarify_res.get("usage", {}).get("total_tokens", 0)
-                
-                if isinstance(clarify_res, dict) and clarify_res.get("success") is False:
-                    # Handle LLM execution error
-                    ai_msg = await ChatMessage.objects.acreate(
-                        session=session, role='assistant',
-                        content=f"❌ **Research Error:** {clarify_res.get('error', 'Failed to analyze query.')}",
-                        message_type='chat', metadata={'intent': 'research_error', 'thinking': clarify_res.get('thinking', '')},
-                    )
-                    yield f"data: {json.dumps({'type': 'done', 'user_message': await serialize_message(user_msg), 'ai_response': await serialize_message(ai_msg)})}\n\n"
-                    return
+                clarify_content = ""
+                clarify_stream = await execute_llm(provider, model, clarify_prompt, "You are a research planner. Output only valid JSON.", request.user.id, stream=True)
+                async for chunk in clarify_stream:
+                    if chunk["type"] == "thinking":
+                        thought = chunk["content"]
+                        thinking += thought
+                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': thought})}\n\n"
+                    elif chunk["type"] == "content":
+                        clarify_content += chunk["content"]
+                    elif chunk["type"] == "metadata":
+                        total_tokens += chunk.get("usage", {}).get("total_tokens", 0)
+                    elif chunk["type"] == "error":
+                        logger.error(f"[Deep Research] Clarify stream error: {chunk.get('message')}")
 
-                # Capture inherent thinking from the planner
-                if clarify_res.get('thinking'):
-                    thinking += clarify_res['thinking'] + "\n\n"
-                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': clarify_res['thinking']})}\n\n"
-
-                clarify_json = parse_first_json_object(clarify_res.get('content', ''))
+                clarify_json = parse_first_json_object(clarify_content)
                 
                 if clarify_json.get("needs_clarification") and clarify_json.get("question"):
                     # Halt research and ask the user
@@ -1740,19 +1992,26 @@ async def send_message_stream(request, session_id: str):
 
                 plan_prompt = f"User asked for deep research: '{clean_content}'.\n\nCurrent System Datetime is {c_time}.\n\nGenerate a JSON object with two keys:\n1. 'queries': A list of 2 to 4 distinct search queries.\n2. 'total_links': An integer between 15 and 50.\n\nRespond ONLY with valid JSON."
                 plan_sys = "You are an expert research planner. Output only valid JSON."
-                plan_res = await execute_llm(provider, model, plan_prompt, plan_sys, request.user.id)
-                total_tokens += plan_res.get("usage", {}).get("total_tokens", 0)
+                plan_content = ""
+                plan_stream = await execute_llm(provider, model, plan_prompt, plan_sys, request.user.id, stream=True)
+                async for chunk in plan_stream:
+                    if chunk["type"] == "thinking":
+                        thought = chunk["content"]
+                        thinking += thought
+                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': thought})}\n\n"
+                    elif chunk["type"] == "content":
+                        plan_content += chunk["content"]
+                    elif chunk["type"] == "metadata":
+                        total_tokens += chunk.get("usage", {}).get("total_tokens", 0)
+                    elif chunk["type"] == "error":
+                        logger.error(f"[Deep Research] Plan stream error: {chunk.get('message')}")
 
-                if isinstance(plan_res, dict) and plan_res.get("success") is False:
-                    # Fallback to simple search if planner fails
+                plan_json = parse_first_json_object(plan_content)
+                if not plan_json:
+                    # Fallback if streaming failed to produce valid JSON
                     queries = [clean_content]
                     total_links_plan = 15
                 else:
-                    plan_json = parse_first_json_object(plan_res.get('content', ''))
-
-                    if plan_res.get('thinking'):
-                        thinking += plan_res['thinking'] + "\n\n"
-                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': plan_res['thinking']})}\n\n"
 
                     queries = normalize_research_queries(plan_json, clean_content)
                     total_links_plan = normalize_total_links(plan_json.get('total_links', 15))
@@ -1781,16 +2040,24 @@ async def send_message_stream(request, session_id: str):
                 meta['sources'] = valid_sources
                 yield f"data: {json.dumps({'type': 'sources_update', 'sources': valid_sources})}\n\n"
                 
-                # --- Integrated Image Search ---
-                yield f"data: {json.dumps({'type': 'status', 'phase': 'searching', 'message': 'Fetching images...'})}\n\n"
-                img_res = await perform_image_search(clean_content)
+                # --- Integrated Image/Video Search ---
+                yield f"data: {json.dumps({'type': 'status', 'phase': 'searching', 'message': 'Gathering visuals...'})}\n\n"
+                img_task = perform_image_search(clean_content)
+                vid_task = perform_video_search(clean_content)
+                img_res, vid_res = await asyncio.gather(img_task, vid_task)
+
                 if img_res.get("images"):
                     meta['images'] = img_res["images"]
                     yield f"data: {json.dumps({'type': 'images_update', 'images': meta['images']})}\n\n"
+                
+                if vid_res.get("videos"):
+                    meta['videos'] = vid_res["videos"]
+                    yield f"data: {json.dumps({'type': 'videos_update', 'videos': meta['videos']})}\n\n"
 
                 combined = "\n\n".join(scraped_texts)[:60000]
                 eager_results.append(
-                    f"[Deep Research Performed]\nQueries: {queries}\nLinks Analyzed: {len(valid_sources)}\n\n"
+                    f"[Deep Research Performed]\nQueries: {queries}\nLinks Analyzed: {len(valid_sources)}\n"
+                    f"Images Gathered: {len(meta.get('images', []))}\nVideos Gathered: {len(meta.get('videos', []))}\n\n"
                     f"Extracted Content:\n{combined}\n\nProvide an exceptionally robust response."
                 )
                 yield f"data: {json.dumps({'type': 'status', 'phase': 'analyzing', 'message': f'Analyzed {len(valid_sources)} sources. Synthesizing...'})}\n\n"
@@ -1866,6 +2133,7 @@ async def send_message_stream(request, session_id: str):
 
         # ---- Generate final response ----
         llm_result = None
+        interrupted = False  # Track if loop was interrupted due to timeout/limits
         if eager_results:
             yield f"data: {json.dumps({'type': 'status', 'phase': 'generating', 'message': 'Generating response...'})}\n\n"
             yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': 'Synthesizing all research findings and tool outputs into a final response...'})}\n\n"
@@ -1895,37 +2163,181 @@ async def send_message_stream(request, session_id: str):
 
             # Non-agentic: Standard LLM call with streaming
             
-            stream_gen = await execute_llm(
-                provider=provider, model=model, prompt=prompt_ctx, 
-                system_message=system_message, user_id=request.user.id, history=history_list,
-                response_format=response_format,
-                attachments=active_attachments,
-                stream=True
-            )
+            try:
+                stream_gen = await execute_llm(
+                    provider=provider, model=model, prompt=prompt_ctx, 
+                    system_message=system_message, user_id=request.user.id, history=history_list,
+                    response_format=response_format,
+                    attachments=active_attachments,
+                    stream=True
+                )
+            except Exception as e:
+                logger.exception(f"[Deep Research] Failed to start streaming LLM call: {e}")
+                stream_gen = None
+                raw_content = f"Error: Failed to start LLM synthesis: {str(e)}"
             
-            hide_thinking = False
-            async for chunk in stream_gen:
-                if chunk["type"] == "content":
-                    content = chunk["content"]
-                    raw_content += content
-                    # yield f"data: {json.dumps({'type': 'content_chunk', 'content': content})}\n\n"
-                elif chunk["type"] == "thinking":
-                    thought = chunk["content"]
-                    thinking += thought
-                    if not hide_thinking:
-                        t_lower = thinking.lower()
-                        # Provider-generic: catch ANY model drafting JSON, tool calls, or function invocations
-                        if any(_re_module.search(sig, t_lower) for sig in get_block_signatures()):
-                            hide_thinking = True
+            if stream_gen is not None:
+                try:
+                    async with asyncio.timeout(LLM_STREAM_TIMEOUT):
+                        async for chunk in stream_gen:
+                            if chunk["type"] == "content":
+                                content = chunk["content"]
+                                raw_content += content
+                                # yield f"data: {json.dumps({'type': 'content_chunk', 'content': content})}\n\n"
+                            elif chunk["type"] == "thinking":
+                                thought = chunk["content"]
+                                thinking += thought
+                                # Refined filter: always capture, only hide chunks that strictly contain tool signatures
+                                # to prevent UI pollution without silencing the model's logic.
+                                chunk_is_blocked = any(_re_module.search(sig, thought.lower()) for sig in get_block_signatures())
+                                if not chunk_is_blocked:
+                                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': thought})}\n\n"
+                                    # Live Activity Pulse: sync "Thinking" status to Agent Activity
+                                    if len(thinking) % 100 == 0:
+                                        yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': thinking[-120:].strip()})}\n\n"
+                            elif chunk["type"] == "error":
+                                err_msg = chunk.get('message', 'Unknown error')
+                                logger.error(f"[Deep Research] LLM error chunk: {err_msg}")
+                                yield f"data: {json.dumps({'type': 'status', 'phase': 'error', 'message': f'LLM error: {err_msg}'})}\n\n"
+                                if not raw_content:
+                                    raw_content = f"LLM Error during synthesis: {err_msg}"
+                                break
+                            elif chunk["type"] == "metadata":
+                                # Potentially update total_tokens here
+                                usage = chunk.get("usage", {})
+                                total_tokens += usage.get("total_tokens", usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
+                except asyncio.TimeoutError:
+                    logger.warning(f"[Deep Research] LLM synthesis stream timed out after {LLM_STREAM_TIMEOUT}s")
+                    yield f"data: {json.dumps({'type': 'status', 'phase': 'timeout', 'message': 'LLM synthesis timed out. Finalizing with available data...'})}\n\n"
+                except Exception as e:
+                    logger.exception(f"[Deep Research] Unexpected error during LLM streaming: {e}")
+                    if not raw_content:
+                        raw_content = f"Error during synthesis: {str(e)}"
+
+            logger.info(f"[Deep Research] raw_content length after streaming: {len(raw_content)}, preview: {raw_content[:200]}")
+            
+            # --- Intercept hallucinated tool calls in the eager results path ---
+            # Some models (e.g. via OpenRouter) emit tool-call XML instead of a final answer
+            # even when no tools are passed. Extract, execute, and re-synthesize.
+            from chat.extraction import extract_tool_calls as _extract_tc, strip_tool_calls as _strip_tc
+            
+            extracted_tcs = _extract_tc(raw_content) if raw_content else []
+            if extracted_tcs:
+                logger.info(f"[Deep Research] Intercepted {len(extracted_tcs)} hallucinated tool call(s) in eager path. Executing...")
+                yield f"data: {json.dumps({'type': 'status', 'phase': 'searching', 'message': f'Model requested {len(extracted_tcs)} additional tool(s). Executing...'})}\n\n"
+                
+                extra_tool_results = []
+                for tc in extracted_tcs:
+                    fn = tc['tool']
+                    ag = tc['args']
+                    if not isinstance(ag, dict):
+                        ag = parse_tool_arguments(ag)
+                    ag = _sanitize_tool_args(ag)
+                    
+                    # Default query to user content if missing
+                    if fn == "web_search" and not ag.get("query"):
+                        ag["query"] = clean_content
+                    
+                    tool_trace.append({"tool": fn, "args": ag, "iteration": "eager-extra"})
+                    yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'tool', 'tool': fn, 'args': ag, 'iteration': 'eager-extra'})}\n\n"
+                    
+                    ctx = {"user_id": request.user.id}
+                    try:
+                        res = await asyncio.wait_for(
+                            shared_tools.execute_tool(fn, ag, ctx),
+                            timeout=TOOL_EXECUTION_TIMEOUT
+                        )
+                        
+                        # Handle web_search results specially (extract sources/images)
+                        if fn == "web_search":
+                            meta['search_query'] = ag.get("query", clean_content)
+                            try:
+                                pr = json.loads(res)
+                                if pr.get("type") == "search_results":
+                                    existing = meta.get('sources', [])
+                                    seen = {s.get('url') for s in existing}
+                                    for src in pr.get('sources', []):
+                                        if src.get('url') not in seen:
+                                            existing.append(src)
+                                            seen.add(src.get('url'))
+                                    meta['sources'] = existing
+                                    yield f"data: {json.dumps({'type': 'sources_update', 'sources': existing})}\n\n"
+                                    extra_tool_results.append(f"[Tool: {fn}(query=\"{ag.get('query', '')}\")]\nResult: {pr.get('text', '')}")
+                                else:
+                                    extra_tool_results.append(f"[Tool: {fn}]\nResult: {res}")
+                            except Exception:
+                                extra_tool_results.append(f"[Tool: {fn}]\nResult: {res}")
                         else:
-                            yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': thought})}\n\n"
-                            # Live Activity Pulse: sync "Thinking" status to Agent Activity
-                            if len(thinking) % 100 == 0:
-                                yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': thinking[-120:].strip()})}\n\n"
-                elif chunk["type"] == "metadata":
-                    # Potentially update total_tokens here
-                    usage = chunk.get("usage", {})
-                    total_tokens += usage.get("total_tokens", usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
+                            extra_tool_results.append(f"[Tool: {fn}]\nResult: {res}")
+                    except asyncio.TimeoutError:
+                        extra_tool_results.append(f"[Tool: {fn}] Timeout error")
+                    except Exception as e:
+                        extra_tool_results.append(f"[Tool: {fn}] Error: {str(e)}")
+                
+                # Re-synthesize with the extra tool results
+                if extra_tool_results:
+                    extra_context = "\n\n".join(extra_tool_results)
+                    resynthesis_prompt = (
+                        f"{prompt_ctx}\n\n"
+                        f"Additional tool results from your requested tool calls:\n{extra_context}\n\n"
+                        f"Now provide your FINAL answer in the requested JSON format. Do NOT call any more tools."
+                    )
+                    yield f"data: {json.dumps({'type': 'status', 'phase': 'generating', 'message': 'Synthesizing with additional data...'})}\n\n"
+                    try:
+                        resynth_result = await execute_llm(
+                            provider=provider, model=model, prompt=resynthesis_prompt,
+                            system_message=system_message, user_id=request.user.id, history=history_list,
+                            response_format=response_format,
+                            stream=False,
+                        )
+                        raw_content = resynth_result.get("content") or ""
+                        total_tokens += resynth_result.get("usage", {}).get("total_tokens", 0)
+                        if resynth_result.get('thinking'):
+                            thinking += resynth_result['thinking'] + "\n\n"
+                        logger.info(f"[Deep Research] Re-synthesis result length: {len(raw_content)}")
+                    except Exception as e:
+                        logger.exception(f"[Deep Research] Re-synthesis LLM call failed: {e}")
+                        raw_content = ""
+            else:
+                # No tool calls found — but strip any residual tool syntax just in case
+                stripped = _strip_tc(raw_content).strip() if raw_content else ""
+                if stripped != raw_content.strip():
+                    logger.info(f"[Deep Research] Stripped residual tool syntax. Before: {len(raw_content)}, After: {len(stripped)}")
+                    raw_content = stripped
+            
+            # If streaming produced no content, build a direct (non-streaming) fallback
+            if not raw_content or len(raw_content.strip()) < 10:
+                logger.warning(f"[Deep Research] Streaming produced no/minimal content. Falling back to non-streaming LLM call.")
+                yield f"data: {json.dumps({'type': 'status', 'phase': 'generating', 'message': 'Retrying synthesis (non-streaming)...'})}\n\n"
+                try:
+                    # Explicitly tell the LLM NOT to use tools
+                    no_tool_prompt = (
+                        f"{prompt_ctx}\n\n"
+                        f"IMPORTANT: Do NOT call any tools or functions. You already have all the research data above. "
+                        f"Provide your FINAL answer in the requested JSON format immediately."
+                    )
+                    fallback_result = await execute_llm(
+                        provider=provider, model=model, prompt=no_tool_prompt,
+                        system_message=system_message, user_id=request.user.id, history=history_list,
+                        response_format=response_format,
+                        attachments=active_attachments,
+                        stream=False,
+                    )
+                    raw_content = fallback_result.get("content") or ""
+                    total_tokens += fallback_result.get("usage", {}).get("total_tokens", 0)
+                    if fallback_result.get('thinking'):
+                        thinking += fallback_result['thinking'] + "\n\n"
+                    logger.info(f"[Deep Research] Fallback LLM result length: {len(raw_content)}")
+                    
+                    # Strip tool calls from fallback too  
+                    if raw_content:
+                        fallback_extracted = _extract_tc(raw_content)
+                        if fallback_extracted:
+                            raw_content = _strip_tc(raw_content).strip()
+                            logger.warning(f"[Deep Research] Fallback also contained tool calls! Stripped. Remaining: {len(raw_content)}")
+                except Exception as e:
+                    logger.exception(f"[Deep Research] Fallback LLM call also failed: {e}")
+                    raw_content = ""
             
             # total_tokens is already updated inside the loop for simple chat
         else:
@@ -1938,7 +2350,8 @@ async def send_message_stream(request, session_id: str):
             
             actual_max_iterations = resolve_agent_iteration_limit(intent)
             final_answer_received = False
-                
+            interrupted = False  # Track if loop was interrupted due to timeout/limits
+            
             for iteration in range(actual_max_iterations):
                 # Check model capabilities for multimodal support (re-verify in loop if needed)
                 from nodes.models import AIModel
@@ -1966,47 +2379,60 @@ async def send_message_stream(request, session_id: str):
                     attachments=active_attachments,
                     stream=True
                 )
+                thinking_chunk_count = 0
+                stream_iteration_timeout = False
                 
-                hide_thinking = False
-                async for chunk in stream_gen:
-                    if chunk["type"] == "content":
-                        content = chunk["content"]
-                        iteration_content += content
-                        # yield f"data: {json.dumps({'type': 'content_chunk', 'content': content})}\n\n"
-                    elif chunk["type"] == "thinking":
-                        thought = chunk["content"]
-                        thinking += thought
-                        if not hide_thinking:
-                            t_lower = thinking.lower()
-                            # Provider-generic: catch ANY model drafting JSON, tool calls, or function invocations
-                            if any(_re_module.search(sig, t_lower) for sig in get_block_signatures()):
-                                hide_thinking = True
-                            else:
-                                yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': thought})}\n\n"
-                                # Live Activity Pulse: sync "Thinking" status to Agent Activity
-                                if len(thinking) % 100 == 0:
-                                    yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': thinking[-120:].strip()})}\n\n"
-                    elif chunk["type"] == "tool_calls":
-                        # Aggregate tool calls (OpenAI/Gemini format)
-                        for tc in chunk["tool_calls"]:
-                            idx = tc.get("index", 0)
-                            while len(tool_calls) <= idx:
-                                tool_calls.append({"type": "function", "function": {"name": "", "arguments": ""}})
-                            
-                            target = tool_calls[idx]
-                            if "id" in tc: target["id"] = tc["id"]
-                            if "function" in tc:
-                                if "name" in tc["function"]: target["function"]["name"] += tc["function"]["name"]
-                                if "arguments" in tc["function"]: target["function"]["arguments"] += tc["function"]["arguments"]
-                    elif chunk["type"] == "metadata":
-                        usage = chunk.get("usage", {})
-                        total_tokens += usage.get("total_tokens", usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
-                    elif chunk["type"] == "error":
-                        raw_content = f"LLM Error: {chunk['message']}"
-                        yield f"data: {json.dumps({'type': 'error', 'message': chunk['message']})}\n\n"
-                        break
+                try:
+                    # Use asyncio.timeout() context manager for timeout on async generator iteration
+                    async with asyncio.timeout(LLM_STREAM_TIMEOUT):
+                        async for chunk in stream_gen:
+                            # Check thinking chunk limit
+                            thinking_chunk_count += 1
+                            if thinking_chunk_count > MAX_THINKING_CHUNKS:
+                                yield f"data: {json.dumps({'type': 'status', 'phase': 'thinking', 'message': 'Max thinking limit reached. Forcing completion...'})}\n\n"
+                                stream_iteration_timeout = True
+                                break
+                                
+                            if chunk["type"] == "content":
+                                content = chunk["content"]
+                                iteration_content += content
+                                # yield f"data: {json.dumps({'type': 'content_chunk', 'content': content})}\n\n"
+                            elif chunk["type"] == "thinking":
+                                thought = chunk["content"]
+                                thinking += thought
+                                # Refined filter: always capture, only hide chunks that strictly contain tool signatures
+                                chunk_is_blocked = any(_re_module.search(sig, thought.lower()) for sig in get_block_signatures())
+                                if not chunk_is_blocked:
+                                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': thought})}\n\n"
+                                    # Live Activity Pulse: sync "Thinking" status to Agent Activity
+                                    if len(thinking) % 100 == 0:
+                                        yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': thinking[-120:].strip()})}\n\n"
+                            elif chunk["type"] == "tool_calls":
+                                # Aggregate tool calls (OpenAI/Gemini format)
+                                for tc in chunk["tool_calls"]:
+                                    idx = tc.get("index", 0)
+                                    while len(tool_calls) <= idx:
+                                        tool_calls.append({"type": "function", "function": {"name": "", "arguments": ""}})
+                                    
+                                    target = tool_calls[idx]
+                                    if "id" in tc: target["id"] = tc["id"]
+                                    if "function" in tc:
+                                        if "name" in tc["function"]: target["function"]["name"] += tc["function"]["name"]
+                                        if "arguments" in tc["function"]: target["function"]["arguments"] += tc["function"]["arguments"]
+                            elif chunk["type"] == "metadata":
+                                usage = chunk.get("usage", {})
+                                total_tokens += usage.get("total_tokens", usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
+                            elif chunk["type"] == "error":
+                                raw_content = f"LLM Error: {chunk['message']}"
+                                yield f"data: {json.dumps({'type': 'error', 'message': chunk['message']})}\n\n"
+                                break
+                except asyncio.TimeoutError:
+                    logger.warning(f"LLM stream timed out after {LLM_STREAM_TIMEOUT}s at iteration {iteration + 1}")
+                    yield f"data: {json.dumps({'type': 'status', 'phase': 'interrupted', 'message': 'LLM response timed out. Saving progress...'})}\n\n"
+                    stream_iteration_timeout = True
 
-                if "LLM Error" in raw_content:
+                if "LLM Error" in raw_content or stream_iteration_timeout:
+                    interrupted = True
                     break
 
                 raw_iteration_content = iteration_content
@@ -2068,7 +2494,15 @@ async def send_message_stream(request, session_id: str):
                     yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'tool', 'tool': fn, 'args': ag, 'iteration': iteration + 1, 'thought': thought_context})}\n\n"
 
                     ctx = {"user_id": request.user.id}
-                    res = await shared_tools.execute_tool(fn, ag, ctx)
+                    try:
+                        res = await asyncio.wait_for(
+                            shared_tools.execute_tool(fn, ag, ctx),
+                            timeout=TOOL_EXECUTION_TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Tool {fn} timed out after {TOOL_EXECUTION_TIMEOUT}s")
+                        tool_results_text.append(f"[Tool: {fn}] Timeout error - tool execution exceeded {TOOL_EXECUTION_TIMEOUT}s limit")
+                        continue
 
                     if fn == "web_search":
                         meta['search_query'] = ag.get("query", clean_content)
@@ -2152,59 +2586,140 @@ async def send_message_stream(request, session_id: str):
 
             if not final_answer_received:
                 combined_results = "\n\n".join(accumulated_tool_context)
-                yield f"data: {json.dumps({'type': 'status', 'phase': 'generating', 'message': 'Iteration limit reached. Finalizing answer from gathered evidence...'})}\n\n"
-                yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': 'Tool budget exhausted. Producing final synthesis now.'})}\n\n"
+                
+                if interrupted:
+                    # User interruption case - preserve thinking and search results
+                    yield f"data: {json.dumps({'type': 'status', 'phase': 'interrupted', 'message': 'Process interrupted by user. Preserving conversation history and tool trace...'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': 'User interruption - saving partial progress with available evidence.'})}\n\n"
+                    
+                    # Create interruption message preserving all context
+                    interruption_summary = (
+                        f"I was interrupted while processing your request. "
+                        f"Here's what I had gathered so far:\n\n"
+                        f"**Completed Tool Executions:**\n{combined_results if combined_results else 'None'}\n\n"
+                        f"**Thinking So Far:**\n{thinking[:5000] if thinking else 'No significant thinking recorded yet.'}\n\n"
+                        f"**Iterations Completed:** {iteration + 1} of {actual_max_iterations}\n\n"
+                        f"You can continue this conversation and I'll pick up where we left off, or rephrase your question."
+                    )
+                    
+                    # Use interruption summary only if we don't have substantial content
+                    if not raw_content or len(str(raw_content)) < 100:
+                        raw_content = json.dumps({
+                            "response": interruption_summary,
+                            "thinking": thinking[:5000] if thinking else "",
+                            "interrupted": True,
+                            "partial_results": combined_results[:3000] if combined_results else "",
+                            "iterations_completed": iteration + 1,
+                            "max_iterations": actual_max_iterations
+                        })
+                    thinking = thinking[:5000] if thinking else ""  # Preserve thinking in meta
+                else:
+                    # Normal case - max iterations reached
+                    yield f"data: {json.dumps({'type': 'status', 'phase': 'generating', 'message': 'Iteration limit reached. Finalizing answer from gathered evidence...'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': 'Tool budget exhausted. Producing final synthesis now.'})}\n\n"
 
-                forced_final_prompt = (
-                    f"{full_prompt}\n\n"
-                    f"Tool results gathered across {actual_max_iterations} iterations:\n{combined_results}\n\n"
-                    "You have reached the tool-iteration limit. You MUST now provide the best possible final answer "
-                    "in the required JSON format using available evidence. Do NOT call tools again."
-                )
-                llm_result = await execute_llm(
-                    provider=provider,
-                    model=model,
-                    prompt=forced_final_prompt,
-                    system_message=system_message,
-                    user_id=request.user.id,
-                    history=history_list,
-                    response_format=response_format,
-                )
-                total_tokens += llm_result.get("usage", {}).get("total_tokens", 0)
-                raw_content = llm_result.get("content") or raw_content
+                    forced_final_prompt = (
+                        f"{full_prompt}\n\n"
+                        f"Tool results gathered across {actual_max_iterations} iterations:\n{combined_results}\n\n"
+                        "You have reached the tool-iteration limit. You MUST now provide the best possible final answer "
+                        "in the required JSON format using available evidence. Do NOT call tools again."
+                    )
+                    llm_result = await execute_llm(
+                        provider=provider,
+                        model=model,
+                        prompt=forced_final_prompt,
+                        system_message=system_message,
+                        user_id=request.user.id,
+                        history=history_list,
+                        response_format=response_format,
+                    )
+                    total_tokens += llm_result.get("usage", {}).get("total_tokens", 0)
+                    if llm_result.get('thinking'):
+                        thinking += llm_result['thinking'] + "\n\n"
+                    raw_content = llm_result.get("content") or raw_content
 
         # ---- Finalize ----
-        if tool_trace:
-            meta['tool_trace'] = tool_trace
+        try:
+            if tool_trace:
+                meta['tool_trace'] = tool_trace
 
-        if raw_content is None:
-            raw_content = ""
-        
-        tool_context_text = "\n\n".join(accumulated_tool_context) if accumulated_tool_context else "\n\n".join(eager_results)
-        raw_content, normalize_tokens = await ensure_final_response_payload(
-            raw_content=raw_content,
-            full_prompt=full_prompt,
-            provider=provider,
-            model=model,
-            system_message=system_message,
-            user_id=request.user.id,
-            response_format=response_format,
-            tool_context_text=tool_context_text,
-        )
-        total_tokens += normalize_tokens
+            if raw_content is None:
+                raw_content = ""
+            
+            if thinking:
+                meta['thinking'] = thinking
+            
+            tool_context_text = "\n\n".join(accumulated_tool_context) if accumulated_tool_context else "\n\n".join(eager_results)
+            raw_content, normalize_tokens = await ensure_final_response_payload(
+                raw_content=raw_content,
+                full_prompt=full_prompt,
+                provider=provider,
+                model=model,
+                system_message=system_message,
+                user_id=request.user.id,
+                response_format=response_format,
+                tool_context_text=tool_context_text,
+            )
+            total_tokens += normalize_tokens
 
-        ai_content, follow_ups, extracted_thinking = parse_llm_json_response(raw_content)
-        # Use thinking extracted from JSON/tags, or fall back to reasoning captured by execute_llm
-        thinking = extracted_thinking or thinking or (llm_result.get("thinking") if llm_result else "")
+            # Normalize final LLM output into canonical payload
+            payload = normalize_llm_payload(raw_content, provider, model, tool_context_text, meta, llm_result=llm_result)
+
+            response_text = payload.get('response', '')
+
+            # Merge payload metadata into meta
+            payload_meta = payload.copy()
+            payload_meta.pop('response', None)
+            inner_meta = payload_meta.pop('metadata', {}) if isinstance(payload_meta.get('metadata', {}), dict) else {}
+            meta.update(inner_meta)
+
+            for k in ('follow_ups', 'thinking', 'sources', 'images', 'videos', 'tool_trace'):
+                if payload_meta.get(k) is not None:
+                    meta[k] = payload_meta.get(k)
+
+            # Add interruption metadata if process was interrupted
+            if interrupted:
+                meta['interrupted'] = True
+                meta['partial_results'] = "\n\n".join(accumulated_tool_context)[:3000] if accumulated_tool_context else ""
+                meta['iterations_completed'] = iteration + 1
+                meta['max_iterations'] = actual_max_iterations
+
+        except Exception as finalize_err:
+            logger.exception(f"[Finalize] Error during response normalization: {finalize_err}")
+            # Emergency fallback: use whatever raw_content we have
+            response_text = str(raw_content or '').strip()
+            if not response_text or response_text.startswith('Error:') or response_text.startswith('LLM Error'):
+                # Build a meaningful fallback from gathered research data
+                source_summary = ""
+                if meta.get('sources'):
+                    top_sources = meta['sources'][:5]
+                    source_lines = [f"- [{s.get('title', 'Source')}]({s.get('url', '#')})" for s in top_sources]
+                    source_summary = "\n\n**Sources found:**\n" + "\n".join(source_lines)
+                response_text = (
+                    "I encountered an error while synthesizing the research results, but I was able to gather the sources shown above. "
+                    "Please try again or rephrase your query for a fresh attempt."
+                    + source_summary
+                )
+
+        # Ensure response_text is never empty after finalization
+        if not response_text or not response_text.strip():
+            logger.warning(f"[Finalize] response_text is empty after normalization. raw_content preview: {str(raw_content)[:300]}")
+            source_summary = ""
+            if meta.get('sources'):
+                top_sources = meta['sources'][:5]
+                source_lines = [f"- [{s.get('title', 'Source')}]({s.get('url', '#')})" for s in top_sources]
+                source_summary = "\n\n**Sources found:**\n" + "\n".join(source_lines)
+            response_text = (
+                "I was unable to generate a synthesized response for this research query. "
+                "The sources have been gathered and are shown above. "
+                "Please try again — this may be a temporary issue with the AI model."
+                + source_summary
+            )
 
         session.total_tokens_used += total_tokens
         await session.asave(update_fields=['total_tokens_used'])
 
         meta['tokens'] = total_tokens
-        if follow_ups:
-            meta['follow_ups'] = follow_ups
-        if thinking:
-            meta['thinking'] = thinking
 
         msg_type = 'chat'
         if 'workflow_id' in meta:
@@ -2217,16 +2732,19 @@ async def send_message_stream(request, session_id: str):
             msg_type = 'video'
 
         ai_msg = await ChatMessage.objects.acreate(
-            session=session, role='assistant', content=ai_content,
+            session=session, role='assistant', content=response_text,
             message_type=msg_type,
             metadata=meta,
         )
 
         # PERSIST GENERATION (Save to Documents/RAG)
-        await persist_llm_generation(request.user, session, ai_msg)
+        try:
+            await persist_llm_generation(request.user, session, ai_msg)
+        except Exception as persist_err:
+            logger.error(f"[Finalize] persist_llm_generation failed: {persist_err}")
 
         # [TWO-STAGE FEEDING]: Truncate long assistant messages for context limit management
-        word_count = len(ai_content.split())
+        word_count = len(response_text.split())
         if word_count > ASSISTANT_SUMMARY_WORD_LIMIT:
             # Create a smart, clean user-friendly preview
             
@@ -2239,7 +2757,7 @@ async def send_message_stream(request, session_id: str):
             
             smart_summary = None
             for pattern in conclusion_patterns:
-                match = _re_module.search(pattern, ai_content, _re_module.DOTALL)
+                match = _re_module.search(pattern, response_text, _re_module.DOTALL)
                 if match:
                     # It found a likely conclusion section! Use it.
                     smart_summary = match.group(match.lastindex).strip()
@@ -2247,7 +2765,7 @@ async def send_message_stream(request, session_id: str):
             
             if not smart_summary or len(smart_summary.split()) < 10:
                 # No clear conclusion found, or it was too short. Fall back to cleaned beginning.
-                clean_source = ai_content
+                clean_source = response_text
             else:
                 # We have a smart summary! Prepend a label
                 clean_source = f"[Key Points]: {smart_summary}"
@@ -2345,21 +2863,31 @@ async def persist_llm_generation(user, session, ai_msg):
 
 
 
-def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str]:
+def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str, str]:
     """
     Parse structured JSON response from LLM.
     Expected format: {"response": "...", "follow_ups": ["...", ...], "thinking": "..."}
     
-    Returns (content, follow_ups, thinking). Gracefully falls back if JSON parsing fails.
+    Returns (content, follow_ups, thinking, summary). Gracefully falls back if JSON parsing fails.
     """
     
     if not raw:
-        return "", [], ""
+        return "", [], "", ""
 
-    def extract_from_dict(data: dict) -> tuple[str, list[str], str]:
+    # DeepSeek R1 and similar sometimes output <think> tags completely outside the JSON payload.
+    # We must extract this from the raw string *before* truncating to JSON braces.
+    thinking_outside = ""
+    if isinstance(raw, str):
+        think_matches = _re_module.findall(r'<(?:think|thought)>(.*?)</(?:think|thought)>', raw, _re_module.DOTALL | _re_module.IGNORECASE)
+        if think_matches:
+            thinking_outside = "\n\n".join([m.strip() for m in think_matches if m.strip()])
+
+    def extract_from_dict(data: dict) -> tuple[str, list[str], str, str]:
         content = data.get('response', '')
         follow_ups = data.get('follow_ups', [])
-        thinking = data.get('thinking', '')
+        # Provide external thinking if the JSON didn't include it gracefully
+        thinking = data.get('thinking', '') or thinking_outside
+        summary = data.get('summary', '')
         
         # If the LLM returned JSON but forgot the 'response' wrapper key
         if not content and len(data) > 0 and 'response' not in data:
@@ -2379,12 +2907,14 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str]:
         follow_ups = [str(q) for q in follow_ups if q][:5]
         if not isinstance(thinking, str):
             thinking = str(thinking) if thinking else ""
+        if not isinstance(summary, str):
+            summary = str(summary) if summary else ""
             
         # Proactively strip any lingering tool calls from the content field
         if content:
             content = strip_tool_calls(content)
             
-        return content, follow_ups, thinking
+        return content, follow_ups, thinking, summary
 
     # 1. Handle case where it's already a dict
     if isinstance(raw, dict):
@@ -2441,6 +2971,11 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str]:
         data = json.loads(text, strict=False)
         return extract_from_dict(data)
     except (json.JSONDecodeError, AttributeError, TypeError) as e:
+        # Fallback 1: Try fuzzy_json_loads for python-style dicts (single quotes)
+        fuzzy_data = fuzzy_json_loads(text)
+        if isinstance(fuzzy_data, dict) and ('response' in fuzzy_data or 'content' in fuzzy_data or 'answer' in fuzzy_data):
+            return extract_from_dict(fuzzy_data)
+
         # If it's a string that doesn't even look like JSON (no braces or tags), 
         # treat it as a silent plain-text fallback instead of warning.
         if isinstance(raw, str) and "{" not in raw and "<json_response>" not in raw:
@@ -2452,10 +2987,10 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str]:
                 clean_content = _re_module.sub(r'<think>.*?</think>', raw, flags=_re_module.DOTALL | _re_module.IGNORECASE).strip()
                 # Ensure tools are stripped from fallback content
                 clean_content = strip_tool_calls(clean_content)
-                return clean_content, [], thinking
+                return clean_content, [], thinking, ""
             
             clean_raw = strip_tool_calls(raw.strip())
-            return clean_raw, [], ""
+            return clean_raw, [], "", ""
 
         logger.warning(f"LLM did not return valid JSON: {str(e)}. Attempting regex fallback on: {raw[:200]}...")
         
@@ -2464,22 +2999,22 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str]:
         
         # Regex fallback to extract "response", "follow_ups", and "thinking"
         thinking = ""
-        think_match = _re_module.search(r'"thinking"\s*:\s*"(.*?)"', clean_raw, _re_module.DOTALL | _re_module.IGNORECASE)
+        think_match = _re_module.search(r'[\'"]thinking[\'"]\s*:\s*[\'"](.*?)[\'"]', clean_raw, _re_module.DOTALL | _re_module.IGNORECASE)
         if think_match:
-            thinking = think_match.group(1).replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+            thinking = think_match.group(1).replace('\\n', '\n').replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
 
-        resp_match = _re_module.search(r'"response"\s*:\s*"(.*?)"(?:\s*,\s*"follow_ups"|\s*,\s*"thinking"|\s*\})', clean_raw, _re_module.DOTALL | _re_module.IGNORECASE)
+        resp_match = _re_module.search(r'[\'"]response[\'"]\s*:\s*[\'"](.*?)[\'"](?:\s*,\s*[\'"]follow_ups[\'"]|\s*,\s*[\'"]thinking[\'"]|\s*\})', clean_raw, _re_module.DOTALL | _re_module.IGNORECASE)
         if resp_match:
             content = resp_match.group(1)
-            content = content.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+            content = content.replace('\\n', '\n').replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
             
             follow_ups = []
-            fu_match = _re_module.search(r'"follow_ups"\s*:\s*\[(.*?)\]', clean_raw, _re_module.DOTALL | _re_module.IGNORECASE)
+            fu_match = _re_module.search(r'[\'"]follow_ups[\'"]\s*:\s*\[(.*?)\]', clean_raw, _re_module.DOTALL | _re_module.IGNORECASE)
             if fu_match:
                 fu_text = fu_match.group(1)
-                follow_ups = _re_module.findall(r'"([^"]+)"', fu_text)
+                follow_ups = _re_module.findall(r'[\'"]([^\'"]+)[\'"]', fu_text)
                 
-            return content, follow_ups[:5], thinking
+            return content, follow_ups[:5], thinking, ""
 
         # If thinking wasn't in JSON, maybe it's in <think> tags
         if not thinking:
@@ -2513,7 +3048,9 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str]:
         # Final safety check for tools on the cleaned string
         clean_raw = strip_tool_calls(clean_raw)
 
-        return clean_raw, [], thinking
+        return clean_raw, [], thinking, ""
+
+
 
 # ==================== Delete Message ====================
 @sync_api_view(['DELETE'])
