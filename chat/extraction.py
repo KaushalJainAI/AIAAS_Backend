@@ -25,6 +25,7 @@ PATTERNS = {
     'xml_tool_block': r'<(?:tool_call|invoke|tool|FunctionCall|call:[a-z0-9_]+)[\s>].*?</(?:tool_call|invoke|tool|FunctionCall|call:[a-z0-9_]+)>',
     # Arrow hash: {tool => "name", args => ...} - keys may be quoted or bare
     'arrow_hash': r"\{\s*['\"]?tool['\"]?\s*=>\s*['\"]([a-z0-9_]+)['\"]\s*,\s*['\"]?args['\"]?\s*=>\s*((?:\{[^}]*\}|[^,}]+))",
+    'python_markdown': r'```(?:python|py)\s*\n(.*?)\n```',
 }
 
 def clean_json_string(s: str) -> str:
@@ -343,6 +344,22 @@ def extract_tool_calls(content: str):
         args = parse_tool_arguments(args_raw)
         tool_calls.append({'tool': name, 'args': args, 'raw': raw})
 
+    # 16. Pure Python Markdown Block fallback (assumes execute_python_code tool)
+    for match in re.finditer(PATTERNS['python_markdown'], content, re.DOTALL):
+        raw = match.group(0)
+        code = match.group(1).strip()
+        if code and not any(raw in tc['raw'] or tc['raw'] in raw for tc in tool_calls):
+            # Check if it's actually just JSON inside a ```python block
+            try:
+                data = fuzzy_json_loads(code)
+                if isinstance(data, dict) and 'tool' in data:
+                    tool_calls.append({'tool': data.get('tool'), 'args': data.get('args', {}), 'raw': raw})
+                    continue
+            except Exception:
+                pass
+            
+            tool_calls.append({'tool': 'execute_python_code', 'args': {'code': code}, 'raw': raw})
+
     return tool_calls
 
 def strip_tool_calls(content: str) -> str:
@@ -356,7 +373,7 @@ def strip_tool_calls(content: str) -> str:
     cleaned = content
     
     # Priority 1: Specific block patterns (aggressive)
-    for key in ['xml_tool_block', 'code_block', 'json_block', 'standard', 'anthropic_tool', 'nested_tags', 'unified_tag', 'minimax']:
+    for key in ['xml_tool_block', 'code_block', 'json_block', 'python_markdown', 'standard', 'anthropic_tool', 'nested_tags', 'unified_tag', 'minimax']:
         if key in PATTERNS:
             cleaned = re.sub(PATTERNS[key], '', cleaned, flags=re.DOTALL)
             

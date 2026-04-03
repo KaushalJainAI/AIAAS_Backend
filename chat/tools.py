@@ -147,6 +147,29 @@ AVAILABLE_TOOLS = [
                 "additionalProperties": False
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_python_code",
+            "description": "Execute python code in a secure sandbox. Use this to perform calculations, data transformation, or execute logic. Print your results to standard output so they can be captured.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The python code string to execute."
+                    },
+                    "engine": {
+                        "type": "string",
+                        "enum": ["in_process", "wasm"],
+                        "description": "The sandbox engine. 'in_process' is fastest but uses AST limits. 'wasm' enforces strict CPU/RAM limits via WebAssembly (good for untrusted logic)."
+                    }
+                },
+                "required": ["code"],
+                "additionalProperties": False
+            }
+        }
     }
 ]
 
@@ -282,6 +305,31 @@ async def execute_tool(func_name: str, args: Dict[str, Any], context: Dict[str, 
                 })
             except Exception as e:
                 return f"Error: Failed to read message from database: {str(e)}"
+            
+        elif func_name == "execute_python_code":
+            code = args.get("code", "")
+            engine = args.get("engine", "in_process")
+            if not code:
+                return "Error: Missing code"
+            try:
+                import asyncio
+                from executor.sandbox.safe_execution import safe_execute
+                exec_res = await asyncio.to_thread(safe_execute, code, None, engine)
+                import json
+                if not exec_res.get("success"):
+                    return json.dumps({
+                        "status": "error", 
+                        "error": exec_res.get("error") or "Execution failed with no error message.",
+                        "stderr": exec_res.get("stderr") or ""
+                    })
+                else:
+                    return json.dumps({
+                        "status": "success",
+                        "output": exec_res.get("output"),
+                        "result": str(exec_res.get("result")) if exec_res.get("result") is not None else None
+                    })
+            except Exception as e:
+                return f"Error: Sandbox execution failed: {str(e)}"
             
         else:
             return f"Error: Tool '{func_name}' is not recognized."

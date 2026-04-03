@@ -61,32 +61,14 @@ class CodeNode(BaseNodeHandler):
             return match.group(1).strip()
         return text.strip()
 
-    def _get_sandbox_globals(self):
-        """Define a strict whitelist for in-process safety."""
-        import math, json, datetime
-        return {
-            "extract_code": self._extract_code,
-            "__builtins__": {
-                "len": len, "range": range, "min": min, "max": max,
-                "sum": sum, "abs": abs, "str": str, "int": int,
-                "float": float, "list": list, "dict": dict, "set": set,
-                "bool": bool, "enumerate": enumerate, "zip": zip,
-                "round": round, "any": any, "all": all, "sorted": sorted,
-                "getattr": getattr, "hasattr": hasattr,
-                "Exception": Exception, "ValueError": ValueError, "TypeError": TypeError,
-            },
-            "math": math,
-            "json": json,
-            "datetime": datetime,
-            "NodeExecutionError": NodeExecutionError,
-        }
-
     async def execute(
         self,
         input_data: dict[str, Any],
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
+        from executor.sandbox.safe_execution import get_sandbox
+        
         user_code = config.get("code", "").strip()
         if not user_code:
             return NodeExecutionResult(success=False, error="No code provided")
@@ -95,34 +77,39 @@ class CodeNode(BaseNodeHandler):
         user_code = self._extract_code(user_code)
 
         # 1. Prepare Sandbox
-        sandbox_globals = self._get_sandbox_globals()
+        sandbox = get_sandbox()
         
         # 2. Detection Logic: Full Function vs Body Only
-        # If the user defines 'main(item, context)', we'll call that.
-        # Otherwise, we wrap it in a function like before.
-        
         is_full_function = "def main(" in user_code
         
         if is_full_function:
-            try:
-                # Execute the code to define functions
-                code_obj = compile(user_code, "<user_code>", "exec")
-                exec(code_obj, sandbox_globals)
-                user_fn = sandbox_globals.get("main")
-            except Exception as e:
-                return NodeExecutionResult(success=False, error=f"Compilation/Execution Error: {str(e)}")
+            exec_res = sandbox.execute(
+                user_code, 
+                {"NodeExecutionError": NodeExecutionError, "extract_code": self._extract_code}
+            )
+            if not exec_res["success"]:
+                err_msg = exec_res["error"]
+                if exec_res.get("stderr"):
+                    err_msg += f"\n{exec_res['stderr']}"
+                return NodeExecutionResult(success=False, error=f"Compilation/Execution Error: {err_msg}")
+            user_fn = exec_res["locals"].get("main")
         else:
             # Body-only mode (legacy/simple)
-            wrapped_code = "def __user_fn__(item, context, config):\n"
+            wrapped_code = "def wrapped_user_fn(item, context, config):\n"
             wrapped_code += "\n".join(f"    {line}" for line in user_code.splitlines())
-            try:
-                code_obj = compile(wrapped_code, "<user_code>", "exec")
-                exec(code_obj, sandbox_globals)
-                user_fn = sandbox_globals.get("__user_fn__")
-            except Exception as e:
-                return NodeExecutionResult(success=False, error=f"Syntax Error: {str(e)}")
+            
+            exec_res = sandbox.execute(
+                wrapped_code, 
+                {"NodeExecutionError": NodeExecutionError, "extract_code": self._extract_code}
+            )
+            if not exec_res["success"]:
+                err_msg = exec_res["error"]
+                if exec_res.get("stderr"):
+                    err_msg += f"\n{exec_res['stderr']}"
+                return NodeExecutionResult(success=False, error=f"Syntax Error: {err_msg}")
+            user_fn = exec_res["locals"].get("wrapped_user_fn")
 
-        if not user_fn:
+        if not user_fn or not callable(user_fn):
             return NodeExecutionResult(success=False, error="Failed to find entry point 'main' or valid logic.")
 
         # 3. Execution Context Data
@@ -133,7 +120,7 @@ class CodeNode(BaseNodeHandler):
 
         # 4. Item Processing
         def run_in_sandbox(item_json):
-            # If calling 'main', it's (item, context). If '__user_fn__', it's (item, context, config).
+            # If calling 'main', it's (item, context). If 'wrapped_user_fn', it's (item, context, config).
             if is_full_function:
                 result = user_fn(item_json, context_data)
             else:

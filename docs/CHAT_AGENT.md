@@ -6,13 +6,13 @@ This document explains the architecture and capabilities of the Standalone AI Ch
 
 While the `KingOrchestrator` (`Backend/orchestrator/`) manages complex, deterministic multi-step DAG workflows, the **Chat Agent** provides a standalone, unstructured chat interface. 
 
-It acts as an intelligent sidekick or "Copilot", designed to quickly answer questions, perform web research, suggest workflows, and summarize dragged-and-dropped documents without requiring the user to build a node-based workflow.
+It acts as an intelligent sidekick or "Copilot", designed to quickly answer questions, perform web research, suggest workflows, execute code, and summarize dragged-and-dropped documents without requiring the user to build a node-based workflow.
 
 ## 2. Core Capabilities
 
 ### A. Dynamic LLM Routing
 The Chat Agent does not hardcode its LLM API calls. Instead, it leverages the `PROVIDER_NODE_MAP` and existing `Credential` schemas to route requests through the visual node registry.
-- Supported Providers: `openai`, `gemini`, `ollama`, `openrouter`, `perplexity`, `huggingface`, `anthropic`, `deepseek`.
+- Supported Providers: `openai`, `gemini`, `ollama`, `openrouter`, `perplexity`, `huggingface`, `anthropic`, `deepseek`, `xai`.
 - It dynamically fetches the active `Credential` for the requesting user based on the selected provider slug.
 
 ### B. Smart Memory & Context Management (Two-Tiered)
@@ -26,85 +26,84 @@ The Agent utilizes a sophisticated two-tiered context management system to optim
 - Token tracking ensures LLM usage analytics are persistently stored on the session level (`total_tokens_used`).
 
 ### C. Intent-Aware Execution & Eager Tool Calls
-Responses are categorized by "Intent" (e.g., `chat`, `search`, `image`, `video`, `workflow`). Intents are passed explicitly by the frontend or classified via heuristics (like `what is...`, `how to...` prompts).
-- **Eager Tool Execution**: If the intent is explicitly `search` or `workflow`, the chat agent directly invokes the web search or workflow lookup *before* communicating with the LLM. This saves an entire LLM "Agentic" planning roundtrip, reducing response times by ~5–10 seconds.
-- It then injects the tool outputs into the LLM context to synthesize the final markdown response.
+Responses are categorized by "Intent" (e.g., `chat`, `search`, `image`, `video`, `workflow`, `coding`). Intents are passed explicitly by the frontend or classified via heuristics or slash commands.
+- **Eager Tool Execution**: If the intent is explicitly `search`, `research`, or `workflow`, the chat agent directly invokes tools *before* the main LLM call. This saves an entire LLM "Agentic" planning roundtrip.
+- **Slash Commands**: 
+  - `/search <query>`: Triggers web search.
+  - `/research <query>`: Triggers deep research loop.
+  - `/image <query>`: Triggers image search/generation.
+  - `/video <query>`: Triggers video search (coming soon).
+  - `/workflow <query>`: Suggests a platform workflow.
+  - `/coding <query>`: Activates Coding Mode with sandbox access.
 
-### D. Integrated Web Search & Deep Research
+### D. Coding Mode & Python Sandbox
+Activated via `/coding` or predicted intent, this mode enables technical problem-solving.
+- **`execute_python_code` Tool**: Allows the AI to write and run Python scripts.
+- **Execution Engines**:
+  - `in_process`: Fast execution with AST-based security limits.
+  - `wasm`: Strict CPU/RAM isolation via WebAssembly for untrusted logic.
+- **Safety**: Code is executed in a secure sandbox, capturing `stdout` and `stderr` for the AI to debug its own output.
+
+### E. Integrated Web Search & Deep Research
 Powered by DuckDuckGo (`perform_web_search`), the AI has live internet access. 
 - **Standard Search**: Performs lookup and injects raw search snippet JSONs into the LLM prompt. Retains URLs as structured `sources` metadata.
-- **Deep Research Loop**: When the intent is `research` (e.g., via `/research` command), the agent shifts into an iterative data-gathering loop:
-  1. A standalone LLM runs the user's prompt alongside the exact system Datetime/Location strings.
-  2. The LLM generates a comprehensive JSON execution plan defining 2-4 nuanced web search queries and a decided cap of links to consume (15-50).
-  3. The backend executes all searches consecutively to gather unique URLs.
-  4. An asynchronous web scraper natively visits each URL and leverages BeautifulSoup to ingest up to 60k text characters of live content.
-  5. The extracted texts are combined and embedded directly into the final LLM synthesis prompt.
-- **Session Locking**: Due to the heavily contextual nature of full deep research, if a chat session is initialized with the `research` intent, the UI natively *locks* the session into Deep Research mode preventing accidental mid-stream mode switching.
+- **Deep Research Loop**: When the intent is `research`, the agent shifts into an iterative data-gathering loop:
+  1. A "Research Planner" LLM generates 2-4 distinct search queries and a link depth (15-50).
+  2. The backend executes all searches and scrapes up to 60k text characters across all valid sources.
+  3. The extracted texts are combined and embedded directly into the final LLM synthesis prompt.
 
-### E. Document Indexing (Inference-style RAG)
-Users can upload files natively via the `/chat/sessions/{id}/upload/` endpoint. This follows the "Inference App" pattern where documents are treated as persistent, indexed resources.
+### F. Document Indexing (Inference-style RAG)
+Users can upload files natively. This follows the "Inference App" pattern.
 - Support for PDFs, PPTX, TXT, CSV, JSON, and Images.
-- Native parser functions (`_extract_pdf_text_sync`, etc.) extract text and securely save it in the database as a `ChatAttachment` with a unique **Reference ID (UUID)**.
-- **Autonomous Recall**: Instead of bloating the context by injecting the full file on every turn, the system injects only a summary and the Reference ID. The AI is explicitly instructed that it has the decision-making power to use the `read_attachment_text` tool to "fetch" the full content from the database if the summary is insufficient.
+- **Autonomous Recall**: The system injects only a summary and ID. The AI uses the `read_attachment_text` tool to "fetch" full content if needed.
 
-### F. Semantic Workflow Suggestion
-The Agent indexes the user's available visual workflows in the `orchestrator_workflow` table.
+### G. Semantic Workflow Suggestion
 - Utilizing `suggest_workflow`, it searches workflow descriptions, titles, and IDs.
-- If it detects the user wants to accomplish a structured task (e.g. "Send an email"), it returns a custom `workflow_suggestion` message payload allowing the frontend to quickly present a clickable link to that workflow.
+- Returns a `workflow_suggestion` message payload allowing the frontend to present a clickable link.
 
-### G. Extended Native Tools
-Beyond search and workflow lookup, the Chat Agent natively includes utility tools:
-- **`read_attachment_text`**: Allows the AI to query the database by Reference ID to retrieve the full context of a previously uploaded document. This is the core of the autonomous recall capability.
-- **`read_url`**: Directly scrapes and converts a web page completely into raw text using BeautifulSoup. Injectable automatically into the LLM flow without writing any python.
-- **`get_current_time`**: Exposes the host's system clock for native timestamp awareness. Additionally, the system automatically injects the exact Datetime via `system_prompt` on every conversational turn to inherently ground the AI.
+### H. Extended Native Tools
+- `web_search`: DuckDuckGo text/image/video search.
+- `read_attachment_text`: Query DB for full file content.
+- `read_url`: Scrape and convert a web page to text.
+- `execute_python_code`: Secure code execution.
+- `get_current_time`: Host system clock awareness.
+- `get_chat_message_full_text`: Retrieve full content of summarized history messages.
 
-### H. Strict JSON Structure Enforcements
-To ensure a consistent UI experience, the LLM is explicitly instructed to respond using a rigid JSON schema:
+### I. Agentic Tool Loop & Stabilization
+The chat engine features a robust iterative loop (`send_message_stream`) that allows the AI to use multiple tools in sequence.
+- **Iteration Limits**: Dynamically bounded based on intent (e.g., higher for research).
+- **Timeouts**: LLM calls (180s) and Tool runs (120s) have strict timeouts to prevent hanging.
+- **JSON Repair**: If the LLM returns invalid JSON or fails to follow the schema, a "Repair" pass is triggered to normalize the output.
+- **Sanitization**: Tool arguments are stripped of hallucinated XML/HTML tags before execution.
+
+### J. Strict JSON Output Structure
+The LLM must respond using a rigid JSON schema:
 ```json
 {
   "response": "Detailed markdown explanation...",
-  "follow_ups": ["Can you clarify X?", "What is Y?", "How do I do Z?"]
+  "summary": "Quick one-sentence summary...",
+  "follow_ups": ["Q1", "Q2", "Q3"],
+  "sources": [...],
+  "thinking": "Internal reasoning process..."
 }
 ```
-A robust fallback parser uses regex and substring matching to extract the JSON safely even if the LLM hallucinates markdown code blocks or additional conversational text.
 
-### I. Context Referencing (Message Referencing)
-Users can highlight text in the UI and seamlessly reference it without copying raw text bounds. The frontend sends `reference: {message_id: int}` directly to the chat backend API, which is silently injected as a `[SYSTEM INSTRUCTION]` to bias the LLM's attention to the specific portion of the selected conversational history. This feature drastically reduces token replication overhead while maintaining high-fidelity conversational grounding.
+### K. Context Referencing (Message Referencing)
+Users can reference specific messages or highlighted text. This is injected as a silent system instruction to bias the LLM's attention without duplicating text in the prompt.
 
 ## 3. Database Architecture (`models.py`)
 
-- **`ChatSession`**: Defines a single interaction thread. Stores the LLM configuration (Model + Provider) and total token telemetry.
-- **`ChatMessage`**: Represents turns in the conversation. Stores strict `role` enums (`user`, `assistant`, `system`) and utilizes a powerful `metadata` JSON blob to store citations, execution durations, workflow targets, and bounding variables.
-- **`ChatAttachment`**: Stores uploaded media and previously extracted raw text to prevent repetitive document parsing over multiple message turn cycles.
+- **`ChatSession`**: Stores LLM configuration, session title, and token usage.
+- **`ChatMessage`**: Stores turns with roles (`user`, `assistant`, `system`) and a `metadata` blob for citations, tool traces, and media.
+- **`ChatAttachment`**: Stores uploaded files and extracted text. Linked to `inference.Document` for RAG support.
 
 ## 4. API Structure (`urls.py` / `views.py`)
-- `POST /api/chat/sessions/`: Create a new standalone chat session.
-- `POST /api/chat/sessions/<id>/message/`: Main websocket-like response generator handling the heavy Agentic loop.
-- `POST /api/chat/sessions/<id>/upload/`: Ingress endpoint for conversational attachments.
-- `DELETE /api/chat/sessions/<id>/message/<id>/`: Handles targeted message expunging, automatically cleaning up underlying attachments from the storage volume.
-## Advanced Interaction Patterns
+- `POST /api/chat/sessions/`: Create session.
+- `POST /api/chat/sessions/<id>/message/`: Sync/Async message endpoint.
+- `GET /api/chat/sessions/<id>/stream/`: Server-Sent Events (SSE) stream for real-time AI response rendering.
+- `POST /api/chat/sessions/<id>/upload/`: File upload.
 
-### 🚀 Eager Intent Execution
-Standard agent loops wait for the LLM to call tools. The Standalone Chat Agent uses a hybrid "Eager" approach for high-confidence intents:
-- **Search/Research/Workflow**: These trigger tools *before* the first LLM generation. 
-- **Synthesis Prompting**: Tool results are injected into the initial system prompt as "Additional context from tools," leading to faster, more accurate first responses.
-
-### 🔍 Deep Research Clarification Loop
-The `/research` intent follows a rigorous multi-stage pipeline:
-1. **Clarification Check**: An LLM analyzes the query. If too broad (e.g., "AI industry"), it pauses to ask the user a specific clarifying question.
-2. **Strategy Planning**: Once clear, a "Research Planner" LLM generates 2-4 distinct search queries and a target link depth (15-50 links).
-3. **Execution**: Concurrent scraping and text extraction synthesized into a final report.
-
-## 🧠 Memory & Context Strategy
-
-### Two-Tiered Context Management
-To maintain high performance and low token costs, the agent uses a differential context strategy:
-- **Phase 1: Flash Summary**: Upon file upload, a ~1500 character snippet is immediately extracted and persisted in the conversation thread for "instant context."
-- **Phase 2: Deep Knowledge (RAG)**: Files larger than **30,000 characters** are indexed into the Hierarchical RAG system. The RAG pipeline uses a **Global Singleton Embedder** (`all-MiniLM-L6-v2`) shared across all user sessions to ensure near-zero latency and minimal server memory footprint.
-- **Phase 3: Deep Recall**: The AI can fetch any part of the document on-demand using the `read_attachment_text` tool, referencing the stored `attachment_id`.
-
-### Hierarchical RAG Integration
-The agent automatically searches three scopes for every query:
-1. **File Level**: Targeted retrieval if the user specifies a particular attachment.
-2. **User Level**: Searches all documents previously uploaded by the session owner.
-3. **Platform Level**: Searches global, shared knowledge bases.
+## 5. Memory & Context Strategy
+- **Two-Tiered Context**: Snippets for history, full text on-demand via tools.
+- **Hierarchical RAG**: Scopes include File-level, User-level, and Platform-level knowledge.
+- **Token Optimization**: Automatic truncation of older history and large tool blocks to stay within 100k token limits.

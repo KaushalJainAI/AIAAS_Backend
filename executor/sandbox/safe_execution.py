@@ -64,7 +64,7 @@ ALLOWED_MODULES = {
     'urllib.parse': ['urlencode', 'quote', 'unquote', 'urlparse', 'parse_qs'],
     'itertools': ['chain', 'combinations', 'permutations', 'product', 'repeat'],
     'functools': ['reduce', 'partial'],
-    'collections': ['Counter', 'defaultdict', 'OrderedDict', 'namedtuple'],
+    'collections': ['Counter', 'defaultdict', 'OrderedDict', 'namedtuple', 'deque'],
     'string': ['ascii_letters', 'digits', 'punctuation', 'Template'],
 }
 
@@ -274,9 +274,42 @@ class CodeSandbox:
         stderr_capture = io.StringIO()
         
         try:
-            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                # Execute with timeout using signal (Unix) or threading (cross-platform)
-                exec(compile(code, '<sandbox>', 'exec'), safe_globals, safe_locals)
+            import threading
+            
+            class SandboxThread(threading.Thread):
+                def __init__(self, code_obj, glbs, lcls):
+                    super().__init__(daemon=True)
+                    self.code_obj = code_obj
+                    self.glbs = glbs
+                    self.lcls = lcls
+                    self.success = False
+                    self.error = None
+                
+                def run(self):
+                    try:
+                        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                            exec(self.code_obj, self.glbs, self.lcls)
+                        self.success = True
+                    except Exception as e:
+                        self.error = e
+
+            compiled_code = compile(code, '<sandbox>', 'exec')
+            sandbox_thread = SandboxThread(compiled_code, safe_globals, safe_locals)
+            
+            sandbox_thread.start()
+            sandbox_thread.join(timeout=timeout or self.timeout)
+            
+            if sandbox_thread.is_alive():
+                return {
+                    'success': False,
+                    'error': f"Execution Timeout: Code did not complete within {timeout or self.timeout} seconds.",
+                    'result': None,
+                    'output': stdout_capture.getvalue(),
+                    'stderr': stderr_capture.getvalue(),
+                }
+            
+            if not sandbox_thread.success and sandbox_thread.error:
+                raise sandbox_thread.error
             
             # Get result (last expression or 'result' variable)
             result = safe_locals.get('result', safe_locals.get('output'))
@@ -380,15 +413,25 @@ class MethodWhitelist:
 
 # Global instances
 _sandbox: CodeSandbox | None = None
+_wasm_sandbox = None
 _whitelist: MethodWhitelist | None = None
 
 
 def get_sandbox() -> CodeSandbox:
-    """Get global code sandbox."""
+    """Get global in-process code sandbox."""
     global _sandbox
     if _sandbox is None:
         _sandbox = CodeSandbox()
     return _sandbox
+
+
+def get_wasm_sandbox():
+    """Get global WebAssembly code sandbox."""
+    global _wasm_sandbox
+    if _wasm_sandbox is None:
+        from .wasm_sandbox import WasmCodeSandbox
+        _wasm_sandbox = WasmCodeSandbox()
+    return _wasm_sandbox
 
 
 def get_method_whitelist() -> MethodWhitelist:
@@ -399,6 +442,11 @@ def get_method_whitelist() -> MethodWhitelist:
     return _whitelist
 
 
-def safe_execute(code: str, context: dict | None = None) -> dict:
-    """Convenience function for sandbox execution."""
+def safe_execute(code: str, context: dict | None = None, engine: str = "in_process") -> dict:
+    """
+    Convenience function for sandbox execution.
+    engine: 'in_process' (fast, AST-restricted) or 'wasm' (strict memory/cpu limit via WebAssembly)
+    """
+    if engine == "wasm":
+        return get_wasm_sandbox().execute(code, context)
     return get_sandbox().execute(code, context)

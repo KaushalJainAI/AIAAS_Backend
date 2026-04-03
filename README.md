@@ -33,7 +33,13 @@ To understand how this system truly operates, we have prepared detailed, step-by
 *   **[WORKFLOW_DEPLOYMENT.md](./docs/WORKFLOW_DEPLOYMENT.md)**
     *   Details the strict criteria (Static Validation + Proof of Success) required before a workflow can be activated for automated running.
 
-### 5. Advanced RAG Strategy
+### 5. AI Chat Agent Architecture
+*   **[CHAT_AGENT.md](./docs/CHAT_AGENT.md)**
+    *   Details the "Perplexity-style" conversational AI engine.
+    *   Covers the agentic tool loop, web search, deep research, and Python sandbox execution.
+    *   Explains the two-tiered context/memory strategy for RAG and history.
+
+### 6. Advanced RAG Strategy
 *   **[RAG_STRATEGY.md](./docs/RAG_STRATEGY.md)**
     *   Explains the Hierarchical RAG (File, User, Platform level) used in the chat system.
     *   Details the automatic indexing of documents and the multi-tier retrieval logic.

@@ -249,6 +249,12 @@ class OpenAINode(BaseNodeHandler):
 
                 messages.append({"role": "user", "content": user_content})
 
+                tools_payload = config.get("tools")
+                enable_tools_ui = config.get("enable_tools", False)
+                if not tools_payload and enable_tools_ui:
+                    import chat.tools as shared_tools
+                    tools_payload = shared_tools.AVAILABLE_TOOLS
+
                 payload = {
                     "model": model,
                     "messages": messages,
@@ -257,6 +263,8 @@ class OpenAINode(BaseNodeHandler):
                     "stream": True,
                     "stream_options": {"include_usage": True}
                 }
+                if tools_payload:
+                    payload["tools"] = tools_payload
 
                 async with client.stream(
                     "POST", 
@@ -292,6 +300,21 @@ class OpenAINode(BaseNodeHandler):
                                 continue
 
                             if "content" in delta and delta["content"]:
+                                text = delta["content"]
+                                if "<think>" in text:
+                                    in_thinking = True
+                                    parts = text.split("<think>", 1)
+                                    if parts[0]: yield {"type": "content", "content": parts[0]}
+                                text = delta["content"]
+                                if "<think>" in text:
+                                    in_thinking = True
+                                    parts = text.split("<think>", 1)
+                                text = delta["content"]
+                                if "<think>" in text:
+                                    in_thinking = True
+                                    parts = text.split("<think>", 1)
+                                    if parts[0]: yield {"type": "content", "content": parts[0]}
+                                    text = parts[1]
                                 text = delta["content"]
                                 if "<think>" in text:
                                     in_thinking = True
@@ -800,6 +823,24 @@ class GeminiNode(BaseNodeHandler):
                     "contents": contents,
                     "generationConfig": generation_config,
                 }
+
+                tools_payload = config.get("tools")
+                enable_tools_ui = config.get("enable_tools", False)
+                if not tools_payload and enable_tools_ui:
+                    import chat.tools as shared_tools
+                    tools_payload = shared_tools.AVAILABLE_TOOLS
+
+                if tools_payload:
+                    gemini_tools = []
+                    for t in tools_payload:
+                        if t.get("type") == "function":
+                            gemini_tools.append({
+                                "name": t["function"]["name"],
+                                "description": t["function"].get("description", ""),
+                                "parameters": t["function"].get("parameters", {})
+                            })
+                    if gemini_tools:
+                        payload["tools"] = [{"functionDeclarations": gemini_tools}]
 
                 # Streaming URL
                 url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:streamGenerateContent"
@@ -1616,6 +1657,12 @@ class PerplexityNode(BaseNodeHandler):
                 if history: messages.extend(history)
                 messages.append({"role": "user", "content": prompt})
 
+                tools_payload = config.get("tools")
+                enable_tools_ui = config.get("enable_tools", False)
+                if not tools_payload and enable_tools_ui:
+                    import chat.tools as shared_tools
+                    tools_payload = shared_tools.AVAILABLE_TOOLS
+
                 payload = {
                     "model": model,
                     "messages": messages,
@@ -1623,6 +1670,8 @@ class PerplexityNode(BaseNodeHandler):
                     "max_tokens": max_tokens,
                     "stream": True
                 }
+                if tools_payload:
+                    payload["tools"] = tools_payload
 
                 in_thinking = False
                 async with client.stream(
@@ -1648,6 +1697,10 @@ class PerplexityNode(BaseNodeHandler):
                             
                             if "reasoning_content" in delta and delta["reasoning_content"]:
                                 yield {"type": "thinking", "content": delta["reasoning_content"]}
+                                continue
+
+                            if "tool_calls" in delta:
+                                yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
                                 continue
 
                             if "content" in delta and delta["content"]:
@@ -2045,6 +2098,12 @@ class OpenRouterNode(BaseNodeHandler):
                 if history: messages.extend(history)
                 messages.append({"role": "user", "content": prompt})
 
+                tools_payload = config.get("tools")
+                enable_tools_ui = config.get("enable_tools", False)
+                if not tools_payload and enable_tools_ui:
+                    import chat.tools as shared_tools
+                    tools_payload = shared_tools.AVAILABLE_TOOLS
+
                 payload = {
                     "model": model,
                     "messages": messages,
@@ -2052,6 +2111,8 @@ class OpenRouterNode(BaseNodeHandler):
                     "max_tokens": max_tokens,
                     "stream": True
                 }
+                if tools_payload:
+                    payload["tools"] = tools_payload
 
                 in_thinking = False
                 async with client.stream(
@@ -2081,6 +2142,10 @@ class OpenRouterNode(BaseNodeHandler):
                             
                             if "reasoning_content" in delta and delta["reasoning_content"]:
                                 yield {"type": "thinking", "content": delta["reasoning_content"]}
+                                continue
+
+                            if "tool_calls" in delta:
+                                yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
                                 continue
 
                             if "content" in delta and delta["content"]:
@@ -3174,6 +3239,15 @@ class XAINode(BaseNodeHandler):
                 "stream": True
             }
 
+            tools_payload = config.get("tools")
+            enable_tools_ui = config.get("enable_tools", False)
+            if not tools_payload and enable_tools_ui:
+                import chat.tools as shared_tools
+                tools_payload = shared_tools.AVAILABLE_TOOLS
+
+            if tools_payload:
+                payload["tools"] = tools_payload
+
             async with httpx.AsyncClient(timeout=120) as client:
                 in_thinking = False
                 async with client.stream(
@@ -3204,6 +3278,10 @@ class XAINode(BaseNodeHandler):
                                 yield {"type": "thinking", "content": delta["reasoning_content"]}
                                 continue
 
+                            if "tool_calls" in delta:
+                                yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
+                                continue
+
                             if "content" in delta and delta["content"]:
                                 text = delta["content"]
                                 if "<think>" in text:
@@ -3227,7 +3305,6 @@ class XAINode(BaseNodeHandler):
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}
-
     async def execute(
         self,
         input_data: dict[str, Any],

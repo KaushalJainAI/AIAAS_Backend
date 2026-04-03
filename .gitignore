@@ -64,3 +64,6 @@ celerybeat.pid
 # ChromaDB / Vector stores
 chroma_data/
 *.faiss
+
+# WebAssembly binaries
+executor/sandbox/wasm/

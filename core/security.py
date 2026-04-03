@@ -197,14 +197,28 @@ class InputSanitizer:
         return len(text) <= self.max_length
     
     def _escape_html(self, text: str) -> str:
-        """Escape HTML special characters."""
-        # Only escape if there are actual HTML-like patterns
-        if '<' in text or '>' in text:
-            # Preserve legitimate angle brackets in code
-            # but escape potential HTML tags
-            text = re.sub(r'<(?!/?(?:code|pre|br)\s*/?>)', '&lt;', text)
-            text = re.sub(r'(?<!</?(?:code|pre|br))>', '&gt;', text)
-        return text
+        """Escape HTML special characters while preserving certain tags."""
+        if not text:
+            return text
+        
+        if '<' not in text and '>' not in text:
+            return text
+
+        # Protect <code>, <pre>, <br> (and their variations) while escaping other < and >
+        # Group 1 captures protected tags
+        protected_tag_regex = r'(</?(?:code|pre|br)\s*/?>)'
+        
+        def replace(match):
+            # If group 1 matched, it's one of our protected tags - keep it
+            if match.group(1):
+                return match.group(1)
+            # Otherwise it's a raw bracket to escape
+            char = match.group(0)
+            if char == '<':
+                return '&lt;'
+            return '&gt;'
+
+        return re.sub(f'{protected_tag_regex}|<|>', replace, text, flags=re.IGNORECASE)
     
     def _log_violations(self, original: str, violations: list[SecurityViolation]):
         """Log security violations for audit."""
