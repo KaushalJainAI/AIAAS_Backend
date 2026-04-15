@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,13 +30,83 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-default-key-change-in
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
+
+def _split_env_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(',') if item.strip()]
+
+
+def _database_config():
+    database_url = os.environ.get('DATABASE_URL', '').strip()
+
+    if database_url:
+        parsed = urlparse(database_url)
+        query_params = parse_qs(parsed.query)
+        engine_map = {
+            'postgres': 'django.db.backends.postgresql',
+            'postgresql': 'django.db.backends.postgresql',
+            'sqlite': 'django.db.backends.sqlite3',
+        }
+        engine = engine_map.get(parsed.scheme)
+
+        if engine == 'django.db.backends.sqlite3':
+            db_name = parsed.path or '/app/data/db.sqlite3'
+            return {
+                'ENGINE': engine,
+                'NAME': db_name.lstrip('/'),
+                'OPTIONS': {
+                    'timeout': 20,
+                }
+            }
+
+        if engine:
+            options = {}
+            sslmode = query_params.get('sslmode', [os.environ.get('DB_SSLMODE', '')])[0]
+            if sslmode:
+                options['sslmode'] = sslmode
+            return {
+                'ENGINE': engine,
+                'NAME': parsed.path.lstrip('/'),
+                'USER': parsed.username or '',
+                'PASSWORD': parsed.password or '',
+                'HOST': parsed.hostname or '',
+                'PORT': str(parsed.port or ''),
+                'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+                'OPTIONS': options,
+            }
+
+    db_engine = os.environ.get('DB_ENGINE', 'sqlite').strip().lower()
+    if db_engine in {'postgres', 'postgresql'}:
+        options = {}
+        sslmode = os.environ.get('DB_SSLMODE', '').strip()
+        if sslmode:
+            options['sslmode'] = sslmode
+        return {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('POSTGRES_DB', 'aiaas'),
+            'USER': os.environ.get('POSTGRES_USER', 'postgres'),
+            'PASSWORD': os.environ.get('POSTGRES_PASSWORD', ''),
+            'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
+            'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+            'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+            'OPTIONS': options,
+        }
+
+    return {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': Path(os.environ.get('SQLITE_PATH', BASE_DIR / 'db.sqlite3')),
+        'OPTIONS': {
+            'timeout': 20,
+        }
+    }
+
 ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
     '.ngrok-free.app',
     '.ngrok-free.dev',
-    os.environ.get('PUBLIC_URL', '').replace('https://', '').replace('http://', '').split('/')[0]
+    os.environ.get('PUBLIC_URL', '').replace('https://', '').replace('http://', '').split('/')[0],
 ]
+ALLOWED_HOSTS.extend(_split_env_list(os.environ.get('ALLOWED_HOSTS', '')))
 ALLOWED_HOSTS = [h for h in ALLOWED_HOSTS if h]  # Remove empties
 
 
@@ -116,13 +187,7 @@ WSGI_APPLICATION = 'workflow_backend.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-        'OPTIONS': {
-            'timeout': 20,
-        }
-    }
+    'default': _database_config()
 }
 
 
@@ -238,8 +303,9 @@ except ImportError:
 # ============================================
 # CORS Configuration
 # ============================================
-CORS_ALLOW_ALL_ORIGINS = True  # For development only
+CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'True') == 'True'
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = _split_env_list(os.environ.get('CORS_ALLOWED_ORIGINS', ''))
 
 # For production, replace with:
 # CORS_ALLOWED_ORIGINS = [
@@ -252,23 +318,31 @@ CORS_ALLOW_CREDENTIALS = True
 # ============================================
 ASGI_APPLICATION = 'workflow_backend.asgi.application'
 
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels.layers.InMemoryChannelLayer',
-        # For production, use Redis:
-        # 'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        # 'CONFIG': {
-        #     'hosts': [('127.0.0.1', 6379)],
-        # },
-    },
-}
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+USE_REDIS_CHANNEL_LAYER = os.environ.get('USE_REDIS_CHANNEL_LAYER', 'False') == 'True'
+
+if USE_REDIS_CHANNEL_LAYER:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': [REDIS_URL],
+            },
+        },
+    }
+else:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
+    }
 
 
 # ============================================
 # Celery Configuration (Task Queue)
 # ============================================
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', REDIS_URL)
+CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', REDIS_URL)
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
