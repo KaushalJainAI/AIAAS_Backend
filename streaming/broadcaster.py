@@ -332,7 +332,8 @@ class SSEBroadcaster:
         execution_id: str,
         node_id: str,
         node_type: str,
-        node_name: str
+        node_name: str,
+        input_data: Optional[dict] = None
     ):
         """Send node started event."""
         await self.send_event(
@@ -343,8 +344,10 @@ class SSEBroadcaster:
                 'node_type': node_type,
                 'node_name': node_name,
                 'status': 'running',
+                'input': input_data,
             }
         )
+
     
     async def node_completed(
         self,

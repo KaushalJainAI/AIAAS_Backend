@@ -291,14 +291,22 @@ class ExecutionLogger:
         buffer = await self._get_buffer(execution_id)
         buffer.append(log_entry)
         
-        if len(buffer) >= self.MAX_BUFFER_SIZE:
+        if len(buffer) >= self.MAX_BUFFER_SIZE or len(buffer) == 1:
              await self.flush_execution_logs(execution_id)
         else:
              self._schedule_flush(execution_id)
 
+
         try:
-            await get_broadcaster().node_started(str(execution_id), node_id, node_type, node_name or node_id)
+            await get_broadcaster().node_started(
+                str(execution_id), 
+                node_id, 
+                node_type, 
+                node_name or node_id,
+                input_data=input_data
+            )
         except Exception: pass
+
 
     async def log_node_complete(
         self,
