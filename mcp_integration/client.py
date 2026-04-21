@@ -16,12 +16,14 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from asgiref.sync import sync_to_async
+from django.core.exceptions import PermissionDenied
+from django.db.models import Q
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult
 
-from .credential_injector import CredentialInjector, ResolvedCredentials
+from .credential_injector import CredentialInjector, ResolvedCredentials, _coerce_user_id
 from .models import MCPServer
 from .tool_cache import MCPToolCache
 
@@ -36,7 +38,14 @@ class MCPClientManager:
         self.user = user
 
     async def get_server_config(self) -> MCPServer:
-        return await MCPServer.objects.aget(id=self.server_id)
+        server = await sync_to_async(_get_visible_server_sync)(
+            self.server_id,
+            _coerce_user_id(self.user),
+            True,
+        )
+        if server is None:
+            raise PermissionDenied("MCP server is not available for this user.")
+        return server
 
     async def _resolve_credentials(self, server: MCPServer) -> ResolvedCredentials:
         return await CredentialInjector.resolve(server, self.user)
@@ -113,12 +122,16 @@ class MCPClientManager:
         to force a live fetch (used by the tool-cache invalidation path
         and by debug endpoints).
         """
+        server = await self.get_server_config()
+        resolved = await self._resolve_credentials(server)
+        user_id = _coerce_user_id(self.user)
+
         if use_cache:
-            cached = await MCPToolCache.get(self.server_id)
+            cached = await MCPToolCache.get(self.server_id, user_id)
             if cached is not None:
                 return cached
 
-        async with self.connect() as session:
+        async with self._connect_resolved(server, resolved) as session:
             result = await session.list_tools()
             tools = [
                 {
@@ -129,7 +142,7 @@ class MCPClientManager:
                 for t in result.tools
             ]
 
-        await MCPToolCache.set(self.server_id, tools)
+        await MCPToolCache.set(self.server_id, user_id, tools)
         return tools
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
@@ -141,6 +154,17 @@ class MCPClientManager:
             raise RuntimeError(f"MCP tool '{tool_name}' reported error: {result}")
 
         return _serialise_tool_result(result)
+
+    @asynccontextmanager
+    async def _connect_resolved(self, server: MCPServer, resolved: ResolvedCredentials):
+        if server.type == "stdio":
+            async with self._connect_stdio(server, resolved) as session:
+                yield session
+        elif server.type == "sse":
+            async with self._connect_sse(server, resolved) as session:
+                yield session
+        else:
+            raise ValueError(f"Unsupported MCP server type: {server.type}")
 
 
 def _serialise_tool_result(result: CallToolResult) -> Any:
@@ -172,23 +196,41 @@ def _serialise_tool_result(result: CallToolResult) -> Any:
     return parts
 
 
+def _visible_servers_queryset(user_id: int | None, enabled_only: bool = True):
+    qs = MCPServer.objects.all()
+    if enabled_only:
+        qs = qs.filter(enabled=True)
+    if user_id is None:
+        return qs.filter(user__isnull=True)
+    return qs.filter(Q(user__isnull=True) | Q(user_id=user_id))
+
+
+def _get_visible_server_sync(server_id: int, user_id: int | None, enabled_only: bool = True) -> MCPServer | None:
+    return _visible_servers_queryset(user_id, enabled_only).filter(id=server_id).first()
+
+
 def _servers_for_user_sync(user_id: int | None):
     """Servers visible to this user (their own + system-wide)."""
-    from django.db.models import Q
-
-    qs = MCPServer.objects.filter(enabled=True)
-    if user_id is None:
-        qs = qs.filter(user__isnull=True)
-    else:
-        qs = qs.filter(Q(user__isnull=True) | Q(user_id=user_id))
-    return list(qs)
+    return list(_visible_servers_queryset(user_id, enabled_only=True))
 
 
 async def get_servers_for_user(user) -> list[MCPServer]:
     """Return enabled MCPServer rows visible to the given user or user_id."""
-    from .credential_injector import _coerce_user_id
-
     return await sync_to_async(_servers_for_user_sync)(_coerce_user_id(user))
+
+
+async def get_visible_server_for_user(
+    server_id: int,
+    user,
+    *,
+    enabled_only: bool = True,
+) -> MCPServer | None:
+    """Return a visible MCPServer row, or None if missing/inaccessible."""
+    return await sync_to_async(_get_visible_server_sync)(
+        server_id,
+        _coerce_user_id(user),
+        enabled_only,
+    )
 
 
 async def get_all_tools_from_all_servers(user) -> list[dict[str, Any]]:

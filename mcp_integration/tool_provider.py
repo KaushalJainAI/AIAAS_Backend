@@ -21,7 +21,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from hashlib import sha1
 from typing import Any
+
+from django.core.exceptions import PermissionDenied
 
 from .client import MCPClientManager, get_servers_for_user
 from .credential_injector import CredentialInvalidError, CredentialMissingError
@@ -38,17 +41,16 @@ MAX_NAME_LEN = 64
 
 def encode_tool_name(server_id: int, tool_name: str) -> str:
     """Produce a namespaced, schema-safe tool name."""
-    safe = _SAFE_TOOL_NAME_RE.sub("_", tool_name)
-    name = f"{TOOL_PREFIX}{server_id}__{safe}"
-    if len(name) > MAX_NAME_LEN:
-        # Keep the server_id prefix and truncate the tool portion.
-        keep = MAX_NAME_LEN - len(f"{TOOL_PREFIX}{server_id}__")
-        name = f"{TOOL_PREFIX}{server_id}__{safe[:keep]}"
-    return name
+    safe = _SAFE_TOOL_NAME_RE.sub("_", tool_name).strip("_") or "tool"
+    digest = sha1(tool_name.encode("utf-8")).hexdigest()[:8]
+    prefix = f"{TOOL_PREFIX}{server_id}__"
+    suffix_len = 9  # "_" + 8-char digest
+    keep = max(1, MAX_NAME_LEN - len(prefix) - suffix_len)
+    return f"{prefix}{safe[:keep]}_{digest}"
 
 
 def decode_tool_name(name: str) -> tuple[int, str] | None:
-    """Reverse of `encode_tool_name`. Returns None if not an MCP tool name."""
+    """Return the server id and encoded tool suffix for an MCP tool name."""
     m = _NAME_RE.match(name)
     if not m:
         return None
@@ -112,27 +114,46 @@ class MCPToolProvider:
         return descriptors
 
     @staticmethod
+    async def _resolve_binding(name: str, user) -> _ToolBinding | None:
+        decoded = decode_tool_name(name)
+        if decoded is None:
+            return None
+        server_id, _ = decoded
+        manager = MCPClientManager(server_id, user=user)
+        server = await manager.get_server_config()
+        tools = await manager.list_tools()
+        for tool in tools:
+            original_name = tool.get("name", "")
+            if encode_tool_name(server_id, original_name) == name:
+                return _ToolBinding(
+                    server_id=server_id,
+                    server_name=server.name,
+                    original_tool_name=original_name,
+                )
+        return None
+
+    @staticmethod
     async def execute(name: str, arguments: dict[str, Any] | None, user) -> str:
         """
         Execute a namespaced MCP tool. Returns a string (JSON-encoded for
         structured payloads) so it plugs directly into the chat tool loop,
         which expects `str` results.
         """
-        decoded = decode_tool_name(name)
-        if decoded is None:
-            return f"Error: '{name}' is not a valid MCP tool name."
-        server_id, tool_name = decoded
-
         try:
-            manager = MCPClientManager(server_id, user=user)
-            result = await manager.call_tool(tool_name, arguments or {})
+            binding = await MCPToolProvider._resolve_binding(name, user)
+            if binding is None:
+                return json.dumps({"error": f"Unknown or unavailable MCP tool '{name}'.", "code": "tool_not_found"})
+            manager = MCPClientManager(binding.server_id, user=user)
+            result = await manager.call_tool(binding.original_tool_name, arguments or {})
+        except PermissionDenied:
+            return json.dumps({"error": f"Unknown or unavailable MCP tool '{name}'.", "code": "tool_not_found"})
         except CredentialMissingError as e:
             return json.dumps({"error": str(e), "code": "credential_missing"})
         except CredentialInvalidError as e:
             return json.dumps({"error": str(e), "code": "credential_invalid"})
         except Exception as e:  # noqa: BLE001
             logger.exception("MCP tool %s failed", name)
-            return json.dumps({"error": f"MCP tool '{tool_name}' failed: {e}", "code": "tool_error"})
+            return json.dumps({"error": f"MCP tool '{name}' failed: {e}", "code": "tool_error"})
 
         if isinstance(result, str):
             return result

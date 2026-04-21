@@ -11,10 +11,8 @@ from __future__ import annotations
 
 import logging
 
-from asgiref.sync import sync_to_async
-
+from .client import get_visible_server_for_user
 from .credential_injector import CredentialInjector
-from .models import MCPServer
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +42,6 @@ def _collect_mcp_server_ids(workflow_json: dict) -> set[int]:
     return ids
 
 
-def _load_servers_sync(ids: set[int]) -> list[MCPServer]:
-    return list(MCPServer.objects.filter(id__in=list(ids)))
-
-
 async def validate_mcp_nodes(workflow_json: dict, user) -> list[str]:
     """
     Return a list of human-readable errors. Empty means OK to execute.
@@ -59,14 +53,11 @@ async def validate_mcp_nodes(workflow_json: dict, user) -> list[str]:
     if not server_ids:
         return []
 
-    servers = await sync_to_async(_load_servers_sync)(server_ids)
-    by_id = {s.id: s for s in servers}
-
     errors: list[str] = []
     for sid in server_ids:
-        server = by_id.get(sid)
+        server = await get_visible_server_for_user(sid, user, enabled_only=False)
         if server is None:
-            errors.append(f"Workflow references unknown MCP server (id={sid}).")
+            errors.append(f"Workflow references unavailable MCP server (id={sid}).")
             continue
         if not server.enabled:
             errors.append(f"MCP server '{server.name}' is disabled.")

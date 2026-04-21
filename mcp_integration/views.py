@@ -4,6 +4,7 @@ from asgiref.sync import async_to_sync
 from django.db.models import Q
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from .client import MCPClientManager
@@ -44,18 +45,18 @@ class MCPServerViewSet(viewsets.ModelViewSet):
 
     def _assert_owner(self, server: MCPServer):
         if server.user_id is None:
-            raise PermissionError("System-wide MCP servers cannot be modified via the API.")
+            raise PermissionDenied("System-wide MCP servers cannot be modified via the API.")
         if server.user_id != self.request.user.id:
-            raise PermissionError("You do not own this MCP server.")
+            raise PermissionDenied("You do not own this MCP server.")
 
     def perform_update(self, serializer):
         self._assert_owner(serializer.instance)
         serializer.save()
-        async_to_sync(MCPToolCache.invalidate)(serializer.instance.id)
+        async_to_sync(MCPToolCache.invalidate)(serializer.instance.id, serializer.instance.user_id)
 
     def perform_destroy(self, instance):
         self._assert_owner(instance)
-        async_to_sync(MCPToolCache.invalidate)(instance.id)
+        async_to_sync(MCPToolCache.invalidate)(instance.id, instance.user_id)
         instance.delete()
 
     # ---- Tool discovery / credential diagnostics ----
