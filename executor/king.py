@@ -1262,6 +1262,32 @@ Output ONLY the JSON object, no other text."""
         except Exception as e:
             logger.error(f"Failed to create execution log for {execution_id}: {e}")
 
+        # --- MCP Pre-flight: fail fast if required credentials are missing ---
+        try:
+            from mcp_integration.workflow_validator import (
+                MCPWorkflowValidationError,
+                assert_mcp_nodes_valid,
+            )
+            await assert_mcp_nodes_valid(workflow_json, effective_user_id)
+        except MCPWorkflowValidationError as mcp_err:
+            error_msg = "MCP configuration error: " + "; ".join(mcp_err.errors)
+            logger.warning(
+                f"Cannot start workflow {workflow_id} for user {effective_user_id}: {error_msg}"
+            )
+            if exec_logger:
+                await exec_logger.complete_execution(
+                    execution_id=execution_id,
+                    status='failed',
+                    error_message=error_msg,
+                    error_node_id="mcp_preflight",
+                )
+            raise Exception(error_msg)
+        except ImportError:
+            # mcp_integration is optional; skip silently if not installed.
+            pass
+        except Exception as e:
+            logger.exception(f"MCP pre-flight validation crashed for workflow {workflow_id}: {e}")
+
         # --- NEW: Orchestrator Health Check ---
         if supervision_level != SupervisionLevel.NONE:
             is_healthy, health_error = await self.check_health(user_id=effective_user_id)

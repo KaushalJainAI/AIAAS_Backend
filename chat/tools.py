@@ -173,8 +173,35 @@ AVAILABLE_TOOLS = [
     }
 ]
 
+async def get_available_tools(user_id: int | None) -> List[Dict[str, Any]]:
+    """
+    Return the full tool list for this user: built-in tools + any MCP tools
+    the user has enabled. Safe to call on every agent turn (MCP tool lists
+    are cached in Redis).
+    """
+    tools = list(AVAILABLE_TOOLS)
+    if user_id is None:
+        return tools
+    try:
+        from mcp_integration.tool_provider import MCPToolProvider
+        mcp_descriptors = await MCPToolProvider.get_openai_tool_descriptors(user_id)
+        tools.extend(mcp_descriptors)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not load MCP tools for user {user_id}: {e}")
+    return tools
+
+
 async def execute_tool(func_name: str, args: Dict[str, Any], context: Dict[str, Any]) -> str:
     """Execute a tool dynamically and return the string response."""
+    # Delegate namespaced MCP tools (mcp__<server_id>__<tool>) to the provider.
+    try:
+        from mcp_integration.tool_provider import is_mcp_tool, MCPToolProvider
+        if is_mcp_tool(func_name):
+            return await MCPToolProvider.execute(func_name, args, context.get("user_id"))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"MCP dispatch failed for {func_name}: {e}")
+        return f"Error executing MCP tool {func_name}: {str(e)}"
+
     try:
         if func_name == "web_search":
             from .views import perform_web_search

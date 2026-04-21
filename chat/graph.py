@@ -142,8 +142,12 @@ async def agent_node(state: ChatAgentState) -> dict:
     else:
         prompt = original_prompt
 
-    # Don't pass tools if at iteration limit (forces final answer)
-    tools_payload = None if at_limit else shared_tools.AVAILABLE_TOOLS
+    # Don't pass tools if at iteration limit (forces final answer).
+    # Tool list = built-in + MCP tools enabled for this user.
+    if at_limit:
+        tools_payload = None
+    else:
+        tools_payload = await shared_tools.get_available_tools(state.get("user_id"))
 
     thinking_delta = ""
     content = ""
