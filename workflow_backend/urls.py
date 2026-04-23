@@ -57,6 +57,12 @@ urlpatterns = [
     
     # Standalone Chat
     path('api/chat/', include('chat.urls')),
+    
+    # Buddy (Help Assistant)
+    path('api/buddy/', include('buddy.urls')),
+
+    # BrowserOS
+    path('api/browseros/', include('browserOS.urls')),
 ]
 
 

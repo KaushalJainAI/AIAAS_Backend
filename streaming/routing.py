@@ -5,6 +5,7 @@ Defines WebSocket URL patterns for real-time features.
 """
 from django.urls import re_path
 from . import consumers
+from buddy.consumers import BuddyConsumer
 
 websocket_urlpatterns = [
     # Execution updates and HITL (per-execution)
@@ -17,5 +18,11 @@ websocket_urlpatterns = [
     re_path(
         r'ws/hitl/$',
         consumers.HITLNotificationConsumer.as_asgi()
+    ),
+
+    # Buddy (Help Assistant)
+    re_path(
+        r'ws/buddy/$',
+        BuddyConsumer.as_asgi()
     ),
 ]

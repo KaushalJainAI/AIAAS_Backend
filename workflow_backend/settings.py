@@ -144,7 +144,9 @@ INSTALLED_APPS = [
     'mcp_integration',
     'skills',
     'chat',
+    'browserOS',
     'django_celery_beat',
+    'buddy',
 ]
 
 MIDDLEWARE = [

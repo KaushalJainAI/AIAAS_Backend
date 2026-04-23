@@ -19,27 +19,12 @@ This checklist details the architectural and implementation requirements to achi
     - [ ] **Cost tracking & Budgeting**: Implement real-time cost-per-task tracking and budget hard-halts.
     - [ ] **Platform Insights**: Develop a dashboard for execution trends, ROI analysis, and system health.
     - [x] Build encrypted credential injection for secure tool-use.
+- [ ] **Three-System Architecture Split**: *(Postponed / Backlog)*
+    - [ ] Split into Platform Backend, Personal Backend, and Deployment System.
 
 ---
 
-## 📓 2. AI Productivity Suite (Frontend & Backend)
-
-- [ ] **Real-time Collaborative Core**:
-    - [ ] Integrate **Yjs or Automerge (CRDTs)** for low-latency collaboration in AI Notes and Word.
-    - [ ] Build a "Remote Selection" visualizer to see what the AI is highlighting/editing.
-- [ ] **Sandboxed Code Execution**:
-    - [ ] Set up a **WebContainer or Docker** backend for AI Code Hub and Jupyter.
-    - [ ] Implement resource isolation (CPU/Memory limits) for agentic code execution.
-- [ ] **Generative Design Engine (Figma-AI)**:
-    - [ ] Build an SVG/Canvas manipulation layer controlled by JSON-based design tokens.
-    - [ ] Implement "Visual Diffusion" to generate UI mockups directly into the editor.
-- [ ] **Data Orchestration layer**:
-    - [ ] Develop a "Data Schema Agent" that auto-maps disparate CSV/SQL sources for the AI Analyst.
-    - [ ] Implement Plotly/Matplotlib streaming from backend for real-time dashboard updates.
-
----
-
-## 🖥️ 3. BrowserOS & Unified UX
+## 🖥️ 2. BrowserOS & Unified UX (Includes AI Productivity Suite)
 
 - [ ] **Micro-Frontend Orchestrator**:
     - [ ] Implement a host system capable of lazy-loading widget modules (Notes, Analytics, etc.).
@@ -50,6 +35,11 @@ This checklist details the architectural and implementation requirements to achi
 - [ ] **Proactive Notification System**:
     - [ ] Build a WebSocket-based event bus for "King Agent Alerts."
     - [ ] Implement OS-level deep research status bars.
+- [ ] **BrowserOS Native Apps (The AI Productivity Suite)**:
+    - [ ] **Real-time Collaborative Core**: Integrate Yjs or Automerge (CRDTs) for low-latency collaboration in AI Notes and Word.
+    - [ ] **Sandboxed Code Execution**: Set up a WebContainer or Docker backend for AI Code Hub and Jupyter.
+    - [ ] **Generative Design Engine (Figma-AI)**: Build an SVG/Canvas manipulation layer controlled by JSON-based design tokens.
+    - [ ] **Data Orchestration layer**: Develop a "Data Schema Agent" that auto-maps disparate CSV/SQL sources for the AI Analyst.
 
 ---
 
