@@ -818,7 +818,13 @@ async def scrape_sources(
     """
     Fetch and extract text for source URLs, returning extracted blocks and valid source metadata.
     """
+    from .tools import validate_url_for_ssrf
+
     def _scrape_url(url: str) -> str:
+        # SSRF protection: validate URL before fetching
+        is_safe, _err = validate_url_for_ssrf(url)
+        if not is_safe:
+            return ""
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
             html = urllib.request.urlopen(req, timeout=5).read()

@@ -1,11 +1,74 @@
 """
 Shared Tool Registry for Agentic Execution
 """
+import ipaddress
 import logging
+import socket
 from typing import Any, Dict, List
+from django.db.models import Q as models_Q
+from urllib.parse import urlparse
 from workflow_backend.thresholds import READ_URL_CHAR_LIMIT
 
 logger = logging.getLogger(__name__)
+
+
+# ======================== SSRF Protection ========================
+
+# Blocked IP ranges: private, loopback, link-local, metadata endpoints
+_BLOCKED_IP_RANGES = [
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+    ipaddress.ip_network('127.0.0.0/8'),
+    ipaddress.ip_network('169.254.0.0/16'),  # AWS/GCP metadata
+    ipaddress.ip_network('::1/128'),
+    ipaddress.ip_network('fc00::/7'),
+    ipaddress.ip_network('fe80::/10'),
+    ipaddress.ip_network('0.0.0.0/8'),
+]
+
+_BLOCKED_HOSTNAMES = {
+    'metadata.google.internal',
+    'metadata.google',
+    'kubernetes.default',
+    'kubernetes.default.svc',
+}
+
+
+def validate_url_for_ssrf(url: str) -> tuple[bool, str]:
+    """
+    Validate a URL to prevent SSRF attacks.
+    Returns (is_safe, error_message).
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "Invalid URL format"
+
+    # Scheme check
+    if parsed.scheme not in ('http', 'https'):
+        return False, f"URL scheme '{parsed.scheme}' is not allowed. Only http/https permitted."
+
+    hostname = parsed.hostname
+    if not hostname:
+        return False, "URL has no hostname"
+
+    # Block known metadata hostnames
+    if hostname.lower() in _BLOCKED_HOSTNAMES:
+        return False, f"Access to '{hostname}' is blocked"
+
+    # Resolve DNS and check IP
+    try:
+        resolved_ips = socket.getaddrinfo(hostname, parsed.port or 80, proto=socket.IPPROTO_TCP)
+        for family, _type, _proto, _canonname, sockaddr in resolved_ips:
+            ip = ipaddress.ip_address(sockaddr[0])
+            for blocked_range in _BLOCKED_IP_RANGES:
+                if ip in blocked_range:
+                    return False, f"Access to internal/private network addresses is blocked"
+    except socket.gaierror:
+        return False, f"Could not resolve hostname '{hostname}'"
+
+    return True, ""
 
 # Define the tools available to the LLM
 AVAILABLE_TOOLS = [
@@ -170,6 +233,119 @@ AVAILABLE_TOOLS = [
                 "additionalProperties": False
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_base_search",
+            "description": "Search the user's uploaded documents and knowledge base using semantic similarity (RAG). Use this when the user asks about content from their uploaded files or documents.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The natural-language query to search for in the knowledge base."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of top results to return (default 5, max 20)."
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scrape_webpage",
+            "description": "Scrape a webpage and extract structured content including headings, links, tables, and metadata. More powerful than read_url — use this when you need structured data from a page, not just raw text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL of the webpage to scrape."
+                    },
+                    "extract": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["text", "headings", "links", "tables", "metadata", "images"]},
+                        "description": "What to extract from the page (default: all). Specify a subset to reduce output size."
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate an AI image from a text prompt using an image generation model. Use when the user asks you to create, draw, or generate an image.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "A detailed description of the image to generate."
+                    },
+                    "size": {
+                        "type": "string",
+                        "enum": ["256x256", "512x512", "1024x1024", "1024x1792", "1792x1024"],
+                        "description": "Image dimensions (default 1024x1024)."
+                    },
+                    "style": {
+                        "type": "string",
+                        "enum": ["natural", "vivid"],
+                        "description": "Image style (default vivid)."
+                    }
+                },
+                "required": ["prompt"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_workflows",
+            "description": "List all workflows available in the user's account. Use this to show the user their existing automations or to find a workflow before running it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "search": {
+                        "type": "string",
+                        "description": "Optional search term to filter workflows by name or description."
+                    }
+                },
+                "required": [],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_workflow",
+            "description": "Trigger the execution of a user's workflow by its ID. Use after finding a workflow via list_workflows or suggest_workflow.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "integer",
+                        "description": "The ID of the workflow to execute."
+                    },
+                    "input_data": {
+                        "type": "object",
+                        "description": "Optional input parameters to pass to the workflow."
+                    }
+                },
+                "required": ["workflow_id"],
+                "additionalProperties": False
+            }
+        }
     }
 ]
 
@@ -281,6 +457,11 @@ async def execute_tool(func_name: str, args: Dict[str, Any], context: Dict[str, 
             url = args.get("url", "")
             if not url:
                 return "Error: Missing URL"
+            # SSRF protection: validate URL before fetching
+            is_safe, ssrf_error = validate_url_for_ssrf(url)
+            if not is_safe:
+                import json
+                return json.dumps({"error": f"URL blocked: {ssrf_error}"})
             try:
                 import urllib.request
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
@@ -304,9 +485,15 @@ async def execute_tool(func_name: str, args: Dict[str, Any], context: Dict[str, 
             try:
                 from .models import ChatAttachment
                 from uuid import UUID
-                att = await ChatAttachment.objects.filter(id=UUID(att_id)).afirst()
+                user_id = context.get("user_id")
+                # Ownership check: only allow access to attachments in sessions owned by the user
+                att = await ChatAttachment.objects.select_related('message__session').filter(
+                    id=UUID(att_id)
+                ).afirst()
                 if not att:
                     return f"Error: Attachment with ID {att_id} not found."
+                if user_id and att.message and att.message.session and att.message.session.user_id != user_id:
+                    return "Error: Access denied — attachment does not belong to your session."
                 import json
                 return json.dumps({
                     "attachment_id": att_id,
@@ -322,9 +509,15 @@ async def execute_tool(func_name: str, args: Dict[str, Any], context: Dict[str, 
                 return "Error: Missing message_id"
             try:
                 from .models import ChatMessage
-                msg = await ChatMessage.objects.filter(id=int(msg_id)).afirst()
+                user_id = context.get("user_id")
+                # Ownership check: only allow access to messages in sessions owned by the user
+                msg = await ChatMessage.objects.select_related('session').filter(
+                    id=int(msg_id)
+                ).afirst()
                 if not msg:
                     return f"Error: Message with ID {msg_id} not found."
+                if user_id and msg.session and msg.session.user_id != user_id:
+                    return "Error: Access denied — message does not belong to your session."
                 import json
                 return json.dumps({
                     "message_id": msg_id,
@@ -358,6 +551,185 @@ async def execute_tool(func_name: str, args: Dict[str, Any], context: Dict[str, 
             except Exception as e:
                 return f"Error: Sandbox execution failed: {str(e)}"
             
+        elif func_name == "knowledge_base_search":
+            query = args.get("query", "")
+            if not query:
+                return "Error: Missing search query"
+            top_k = min(int(args.get("top_k", 5)), 20)
+            try:
+                from inference.engine import get_user_knowledge_base
+                user_id = context.get("user_id")
+                if not user_id:
+                    return "Error: No user context for knowledge base search."
+                kb = get_user_knowledge_base(user_id)
+                results = await kb.search(query, top_k=top_k)
+                if not results:
+                    import json
+                    return json.dumps({"status": "no_results", "message": "No relevant documents found in your knowledge base. Upload files first."})
+                import json
+                items = []
+                for r in results:
+                    items.append({
+                        "document_id": r.document_id,
+                        "score": round(r.score, 4),
+                        "content": r.content[:2000],
+                        "metadata": r.metadata,
+                    })
+                return json.dumps({"status": "success", "results": items, "count": len(items)})
+            except Exception as e:
+                return f"Error: Knowledge base search failed: {str(e)}"
+
+        elif func_name == "scrape_webpage":
+            url = args.get("url", "")
+            if not url:
+                return "Error: Missing URL"
+            # SSRF protection
+            is_safe, ssrf_error = validate_url_for_ssrf(url)
+            if not is_safe:
+                import json
+                return json.dumps({"error": f"URL blocked: {ssrf_error}"})
+            extract_types = args.get("extract", ["text", "headings", "links", "tables", "metadata", "images"])
+            try:
+                import urllib.request
+                import asyncio
+                def _scrape():
+                    req = urllib.request.Request(url, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    })
+                    html_bytes = urllib.request.urlopen(req, timeout=15).read()
+                    return html_bytes
+                html_bytes = await asyncio.to_thread(_scrape)
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html_bytes, 'html.parser')
+                except ImportError:
+                    import json
+                    text = html_bytes.decode('utf-8', errors='ignore')[:READ_URL_CHAR_LIMIT]
+                    return json.dumps({"url": url, "text": text, "error": "BeautifulSoup not installed, returning raw text"})
+
+                result = {"url": url}
+
+                if "metadata" in extract_types:
+                    result["metadata"] = {
+                        "title": soup.title.string.strip() if soup.title and soup.title.string else "",
+                        "description": "",
+                        "og_image": "",
+                    }
+                    meta_desc = soup.find("meta", attrs={"name": "description"})
+                    if meta_desc:
+                        result["metadata"]["description"] = meta_desc.get("content", "")[:500]
+                    og_img = soup.find("meta", attrs={"property": "og:image"})
+                    if og_img:
+                        result["metadata"]["og_image"] = og_img.get("content", "")
+
+                if "headings" in extract_types:
+                    headings = []
+                    for level in range(1, 7):
+                        for h in soup.find_all(f"h{level}"):
+                            text = h.get_text(strip=True)
+                            if text:
+                                headings.append({"level": level, "text": text[:200]})
+                    result["headings"] = headings[:50]
+
+                if "links" in extract_types:
+                    links = []
+                    for a in soup.find_all("a", href=True):
+                        href = a["href"]
+                        link_text = a.get_text(strip=True)[:100]
+                        if href and not href.startswith(("#", "javascript:")):
+                            links.append({"text": link_text, "href": href})
+                    result["links"] = links[:100]
+
+                if "tables" in extract_types:
+                    tables = []
+                    for table in soup.find_all("table")[:5]:
+                        rows = []
+                        for tr in table.find_all("tr")[:30]:
+                            cells = [td.get_text(strip=True)[:200] for td in tr.find_all(["td", "th"])]
+                            if cells:
+                                rows.append(cells)
+                        if rows:
+                            tables.append(rows)
+                    result["tables"] = tables
+
+                if "images" in extract_types:
+                    images = []
+                    for img in soup.find_all("img", src=True)[:20]:
+                        src = img.get("src", "")
+                        alt = img.get("alt", "")[:100]
+                        if src:
+                            images.append({"src": src, "alt": alt})
+                    result["images"] = images
+
+                if "text" in extract_types:
+                    # Remove script/style tags for clean text
+                    for tag in soup(["script", "style", "nav", "footer", "header"]):
+                        tag.decompose()
+                    text = soup.get_text(separator="\n", strip=True)
+                    result["text"] = text[:READ_URL_CHAR_LIMIT]
+
+                import json
+                return json.dumps({"status": "success", **result})
+            except Exception as e:
+                import json
+                return json.dumps({"status": "error", "error": f"Failed to scrape '{url}': {str(e)}"})
+
+
+        elif func_name == "list_workflows":
+            user_id = context.get("user_id")
+            if not user_id:
+                return "Error: Missing user context"
+            search_term = args.get("search", "")
+            try:
+                from orchestrator.models import Workflow
+                from asgiref.sync import sync_to_async
+                qs = Workflow.objects.filter(user_id=user_id)
+                if search_term:
+                    qs = qs.filter(
+                        models_Q(name__icontains=search_term) | models_Q(description__icontains=search_term)
+                    )
+                workflows = await sync_to_async(list)(qs.values('id', 'name', 'description', 'is_active')[:50])
+                import json
+                return json.dumps({"status": "success", "workflows": workflows, "count": len(workflows)})
+            except Exception as e:
+                return f"Error: Failed to list workflows: {str(e)}"
+
+        elif func_name == "run_workflow":
+            workflow_id = args.get("workflow_id")
+            if not workflow_id:
+                return "Error: Missing workflow_id"
+            user_id = context.get("user_id")
+            input_data = args.get("input_data", {})
+            try:
+                from orchestrator.models import Workflow
+                from asgiref.sync import sync_to_async
+                wf = await sync_to_async(Workflow.objects.filter(id=int(workflow_id), user_id=user_id).first)()
+                if not wf:
+                    import json
+                    return json.dumps({"status": "error", "error": f"Workflow {workflow_id} not found or access denied."})
+                # Trigger execution via the compiler
+                try:
+                    from compiler.engine import WorkflowEngine
+                    engine = WorkflowEngine()
+                    result = await engine.execute(workflow_id=wf.id, user_id=user_id, input_data=input_data)
+                    import json
+                    return json.dumps({
+                        "status": "success",
+                        "workflow_id": wf.id,
+                        "workflow_name": wf.name,
+                        "execution_result": str(result)[:3000],
+                    })
+                except ImportError:
+                    import json
+                    return json.dumps({
+                        "status": "queued",
+                        "workflow_id": wf.id,
+                        "workflow_name": wf.name,
+                        "message": "Workflow execution has been queued. The workflow engine will process it.",
+                    })
+            except Exception as e:
+                return f"Error: Failed to run workflow: {str(e)}"
+
         else:
             return f"Error: Tool '{func_name}' is not recognized."
             

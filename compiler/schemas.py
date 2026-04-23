@@ -271,15 +271,20 @@ class ExecutionContext(BaseModel):
             return val
             
         # 2. $json or $input handling (Current node input)
+        # n8n: $json refers to the first item's .json data; $json.field navigates into it.
         elif expr.startswith("$json") or expr.startswith("$input"):
             path = ""
             if expr.startswith("$json."): path = expr[6:]
             elif expr.startswith("$input."): path = expr[7:]
             elif expr.startswith("$json["): path = expr[5:]
             elif expr.startswith("$input["): path = expr[6:]
-            
-            # n8n $json refers to the current item's json property.
-            # In our case, we'll look at self.current_input (which is list of items)
+
+            if not path:
+                # $json / $input alone → return the first item's json dict, not the full list
+                if self.current_input and isinstance(self.current_input[0], dict):
+                    return self.current_input[0].get("json", self.current_input[0])
+                return {}
+
             return self._get_value_by_path(self.current_input, path)
             
         # 3. $vars handling

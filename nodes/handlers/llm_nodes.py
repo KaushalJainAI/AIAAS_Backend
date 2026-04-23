@@ -21,6 +21,25 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+
+def _validate_attachment_path(file_path: str) -> bool:
+    """
+    Validate that an attachment file path is within the allowed MEDIA_ROOT.
+    Prevents path traversal attacks (e.g. ../../../etc/passwd).
+    """
+    import os
+    try:
+        from django.conf import settings
+        media_root = getattr(settings, 'MEDIA_ROOT', None)
+        if not media_root:
+            abs_path = os.path.abspath(file_path)
+            return '..' not in os.path.relpath(abs_path)
+        abs_media = os.path.abspath(media_root)
+        abs_file = os.path.abspath(file_path)
+        return abs_file.startswith(abs_media)
+    except Exception:
+        return False
+
 def format_skills_as_context(skills: list[dict]) -> str:
     """Format skill list into a context block for LLM prompts."""
     if not skills:
@@ -242,6 +261,9 @@ class OpenAINode(BaseNodeHandler):
                         if att.file_type != 'image': continue
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}})
@@ -404,12 +426,13 @@ class OpenAINode(BaseNodeHandler):
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
                 }
                 
-                # Setup tools if requested either via internal config or node UI toggle
-                tools_payload = config.get("tools")
+                # Build tools list — when enable_tools is on, include both built-in
+                # tools and every MCP tool the user has configured (already cached).
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 history = config.get("history", [])
                 
@@ -432,6 +455,10 @@ class OpenAINode(BaseNodeHandler):
                                 continue
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            # Path traversal protection
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal attempt in attachment: {att.filename}")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -440,12 +467,7 @@ class OpenAINode(BaseNodeHandler):
                                     "type": "image_url",
                                     "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}
                                 })
-                            elif att.file_type == 'video':
-                                # OpenRouter supports video_url for multimodal inputs
-                                user_msg_content.append({
-                                    "type": "video_url",
-                                    "video_url": {"url": f"data:video/mp4;base64,{b64_data}"}
-                                })
+                            # Note: video type is already filtered out by the file_type check above
                             elif att.file_type == 'pdf':
                                 # GPT-4o supports PDF as document blocks in certain regions/API versions
                                 # but usually it's better to stick to standard multimodal parts if supported
@@ -524,41 +546,81 @@ class OpenAINode(BaseNodeHandler):
                             param_name = key.replace("custom_", "")
                             payload[param_name] = value
 
-                response = await client.post(
-                    endpoint,
-                    headers=headers,
-                    json=payload,
-                )
-                
-                if response.status_code != 200:
-                    try:
-                        error_data = response.json()
-                        error_msg = error_data.get("error", {}).get("message", response.text)
-                    except:
-                        error_msg = response.text
-                    return NodeExecutionResult(
-                        success=False,
-                        error=f"OpenAI API error: {error_msg}",
-                        output_handle="output-0"
-                    )
-                
-                data = response.json()
+                # ── Agentic tool loop ──────────────────────────────────────────
+                # Keeps calling the model until it stops requesting tool calls
+                # (or we hit MAX_TOOL_TURNS as a safety cap).
+                MAX_TOOL_TURNS = int(config.get("max_tool_turns", 5))
+                tool_calls_made: list[dict] = []
                 content = ""
                 media_url = None
-                usage = {}
+                usage: dict = {}
                 finish_reason = "stop"
+                data: dict = {}
 
-                if is_gen:
-                    # Parse image generation response
-                    image_data = data.get("data", [{}])[0]
-                    media_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
-                    content = f"Generated image: {media_url}" if not image_data.get("url") else "Image generated successfully."
-                else:
-                    # Parse chat response
+                import json as _json
+                while True:
+                    response = await client.post(
+                        endpoint,
+                        headers=headers,
+                        json=payload,
+                    )
+
+                    if response.status_code != 200:
+                        try:
+                            error_data = response.json()
+                            error_msg = error_data.get("error", {}).get("message", response.text)
+                        except Exception:
+                            error_msg = response.text
+                        return NodeExecutionResult(
+                            success=False,
+                            error=f"OpenAI API error: {error_msg}",
+                            output_handle="output-0"
+                        )
+
+                    data = response.json()
+
+                    if is_gen:
+                        # Image / video generation — single call, no tool loop
+                        image_data = data.get("data", [{}])[0]
+                        media_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
+                        content = f"Generated image: {media_url}" if not image_data.get("url") else "Image generated successfully."
+                        break
+
                     choice = data["choices"][0]
-                    content = choice["message"]["content"]
                     usage = data.get("usage", {})
                     finish_reason = choice.get("finish_reason", "stop")
+
+                    if finish_reason != "tool_calls" or len(tool_calls_made) >= MAX_TOOL_TURNS:
+                        content = choice["message"].get("content") or ""
+                        break
+
+                    # Execute each requested tool, append results, then loop
+                    assistant_msg = choice["message"]
+                    messages.append(assistant_msg)
+
+                    from chat.tools import execute_tool as _chat_execute_tool
+                    tool_context = {"user_id": context.user_id}
+
+                    for tc in assistant_msg.get("tool_calls", []):
+                        tc_id = tc.get("id", "")
+                        fn = tc.get("function", {})
+                        fn_name = fn.get("name", "")
+                        try:
+                            fn_args = _json.loads(fn.get("arguments", "{}"))
+                        except Exception:
+                            fn_args = {}
+
+                        logger.info("OpenAI node tool call: %s args=%s", fn_name, fn_args)
+                        result_str = await _chat_execute_tool(fn_name, fn_args, tool_context)
+                        tool_calls_made.append({"tool": fn_name, "args": fn_args, "result": result_str})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": result_str,
+                        })
+
+                    payload["messages"] = messages
+                # ── End agentic tool loop ──────────────────────────────────────
 
                 result_data = {
                     "content": content,
@@ -566,8 +628,10 @@ class OpenAINode(BaseNodeHandler):
                     "media_url": media_url,
                     "usage": usage,
                     "finish_reason": finish_reason,
-                    "generation_id": data.get("id")
+                    "generation_id": data.get("id"),
                 }
+                if tool_calls_made:
+                    result_data["tool_calls"] = tool_calls_made
                 
                 captured_thinking = None
                 
@@ -582,9 +646,10 @@ class OpenAINode(BaseNodeHandler):
                     except:
                         pass # Fallback to raw content
 
-                if show_thinking and not captured_thinking:
-                    # Support OpenAI's specific reasoning field
-                    captured_thinking = choice["message"].get("reasoning_content")
+                if show_thinking and not captured_thinking and not is_gen:
+                    # Support OpenAI's specific reasoning field (use safe access to avoid NameError)
+                    safe_choice = data.get("choices", [{}])[0]
+                    captured_thinking = safe_choice.get("message", {}).get("reasoning_content")
                     
                     # Fallback to <think> tags for models that use them (e.g. fine-tuned)
                     if not captured_thinking:
@@ -809,6 +874,9 @@ class GeminiNode(BaseNodeHandler):
                         if att.file_type not in ('image', 'pdf', 'video'): continue
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             mime_type = "application/pdf"
@@ -1030,6 +1098,9 @@ class GeminiNode(BaseNodeHandler):
                                 continue
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -1260,6 +1331,9 @@ class OllamaNode(BaseNodeHandler):
                         if att.file_type != 'image': continue
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             user_content.append({"type": "image", "image": b64_data})
@@ -1486,6 +1560,9 @@ class OllamaNode(BaseNodeHandler):
                                 continue
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -2387,6 +2464,9 @@ class OpenRouterNode(BaseNodeHandler):
                 for att in attachments:
                     try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -3356,6 +3436,9 @@ class XAINode(BaseNodeHandler):
                                 continue
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             

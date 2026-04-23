@@ -80,6 +80,29 @@ def _count_ai_messages(messages: list) -> int:
     return sum(1 for m in messages if isinstance(m, AIMessage))
 
 
+async def _is_vision_enabled_model(model_value: str, provider_slug: str) -> bool:
+    """Check the database to see if this model supports image input (vision)."""
+    try:
+        from nodes.models import AIModel
+        
+        # Look up by model technical value (e.g. 'gpt-4o', 'gemini-1.5-pro')
+        model_obj = await AIModel.objects.filter(value=model_value, provider__slug=provider_slug).afirst()
+        if model_obj:
+            return model_obj.supports_image_input
+            
+        # Fallback to keyword matching for models not in the registry (e.g. new OpenRouter models)
+        m = model_value.lower()
+        vision_keywords = [
+            "vision", "gpt-4o", "gpt-4-turbo", "gemini", "claude-3", 
+            "pixtral", "llama-3.2", "qwen-vl", "lava", "moondream", "llava"
+        ]
+        if any(k in m for k in vision_keywords) and "gpt-3.5" not in m:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 # ─────────────── Agent Node ───────────────
 
 async def agent_node(state: ChatAgentState) -> dict:
@@ -381,6 +404,45 @@ async def tools_node(state: ChatAgentState) -> dict:
                 metadata["has_code_execution"] = True
                 if callback:
                     await callback("code_execution", {"code": args.get("code", ""), "output": parsed.get("output", ""), "result": parsed.get("result", ""), "error": parsed.get("error", "") if parsed.get("status") == "error" else ""})
+            elif fn == "generate_image":
+                parsed = json.loads(res)
+                if parsed.get("status") == "success" and parsed.get("image_url"):
+                    imgs = metadata.get("images", [])
+                    imgs.append({
+                        "title": "AI Generated Image",
+                        "image": parsed["image_url"],
+                        "url": parsed["image_url"],
+                        "source": "DALL-E 3",
+                    })
+                    metadata["images"] = imgs
+                    metadata["has_generated_image"] = True
+                    if callback:
+                        await callback("images_update", {"images": imgs})
+            elif fn == "knowledge_base_search":
+                parsed = json.loads(res)
+                if parsed.get("status") == "success":
+                    metadata["kb_search_results"] = parsed.get("results", [])
+                    if callback:
+                        await callback("status", {"phase": "rag_results", "message": f"Found {parsed.get('count', 0)} relevant document chunks."})
+            elif fn == "scrape_webpage":
+                parsed = json.loads(res)
+                if parsed.get("status") == "success":
+                    if callback:
+                        await callback("status", {"phase": "page_scraped", "message": f"Scraped {parsed.get('url', 'page')} successfully."})
+            elif fn == "run_workflow":
+                parsed = json.loads(res)
+                if parsed.get("status") in ("success", "queued"):
+                    metadata["workflow_execution"] = {
+                        "workflow_id": parsed.get("workflow_id"),
+                        "workflow_name": parsed.get("workflow_name"),
+                        "status": parsed.get("status"),
+                    }
+                    if callback:
+                        await callback("status", {"phase": "workflow_triggered", "message": f"Workflow '{parsed.get('workflow_name')}' {parsed.get('status')}."})
+            elif fn == "list_workflows":
+                parsed = json.loads(res)
+                if parsed.get("status") == "success":
+                    metadata["available_workflows"] = parsed.get("workflows", [])
         except (json.JSONDecodeError, TypeError, AttributeError):
             pass
 
@@ -447,6 +509,51 @@ async def run_agent_loop(
     if max_iterations <= 0:
         max_iterations = resolve_agent_iteration_limit(intent)
 
+    # ── Handle Text-Only models ──
+    # If the model doesn't support vision, we pre-extract text from attachments
+    # and inject it into the prompt context so the agent doesn't need to 'see' them.
+    vision_enabled = await _is_vision_enabled_model(model, provider)
+    processed_attachments = []
+    attachment_context = []
+    
+    if attachments:
+        for att in attachments:
+            if vision_enabled:
+                processed_attachments.append(att)
+            else:
+                # Text-only model: extract content if possible
+                try:
+                    from inference.utils import extract_text_from_file
+                    file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                    # Only extract if it's a document/text. Media gets a placeholder.
+                    if att.file_type in ('image', 'video'):
+                        attachment_context.append(f"### Attachment: {att.filename} ({att.file_type.capitalize()})\n[Note: This model does not support visual input. You cannot see this {att.file_type} directly.]")
+                    else:
+                        # Use pre-extracted text if available, otherwise extract now
+                        text = getattr(att, 'extracted_text', "")
+                        if not text:
+                            try:
+                                from inference.utils import extract_text_from_file
+                                file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                                text = await asyncio.to_thread(extract_text_from_file, file_path, att.file_type)
+                            except Exception as e:
+                                logger.warning(f"Failed to extract text from {att.filename}: {e}")
+                        
+                        if text:
+                            # Cap to avoid context overflow (20k chars is usually enough for a preview)
+                            preview = text[:20000]
+                            attachment_context.append(f"### Attachment: {att.filename}\n{preview}")
+                        else:
+                            attachment_context.append(f"### Attachment: {att.filename}\n[Content could not be extracted directly.]")
+                except Exception as e:
+                    logger.warning(f"Failed to pre-extract text from attachment {att.filename}: {e}")
+                    attachment_context.append(f"### Attachment: {att.filename}\n[Error during text extraction.]")
+
+    # Inject attachment context if any was extracted
+    if attachment_context:
+        context_block = "\n\n## Uploaded Files Context\n" + "\n\n".join(attachment_context)
+        full_prompt += context_block
+
     initial_state: ChatAgentState = {
         "messages": [HumanMessage(content=full_prompt)],
         "metadata": dict(metadata),
@@ -461,7 +568,7 @@ async def run_agent_loop(
         "clean_content": clean_content,
         "intent": intent,
         "history_list": history_list,
-        "attachments": attachments or [],
+        "attachments": processed_attachments, # Only send multimodal-compatible ones
         "max_iterations": max_iterations,
         "stream_callback": stream_callback,
     }

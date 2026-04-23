@@ -95,31 +95,22 @@ def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
                 if has_bad_cycle(neighbor):
                     return True
             elif neighbor in rec_stack:
-                # Cycle detected!
-                # Check if any node in the current cycle path is a loop node
-                # The cycle consists of nodes from 'neighbor' to current 'node_id' in path_nodes
-                try:
-                    start_index = path_nodes.index(neighbor)
-                    cycle_path = path_nodes[start_index:]
-                    
-                    # Check if any node in the cycle is a loop node
-                    has_loop_node = any(node_types.get(nid) in LOOP_NODE_TYPES for nid in cycle_path)
-                    
-                    if not has_loop_node:
-                        errors.append(CompileError(
-                            node_id=neighbor,
-                            error_type="dag_cycle",
-                            message=f"Infinite cycle detected involving nodes: {', '.join(cycle_path)}"
-                        ))
-                        return True # Bad cycle found
-                    
-                    # If it has a loop node, it's a valid loop/cycle, so exclude it from being flagged
-                    # but we generally stop exploring this path to avoid infinite recursion in DFS
-                    # checks, though here we just return False to ignore *this* back-edge as an error.
-                    
-                except ValueError:
-                    # Should not happen if logic is correct
-                    pass
+                # Back-edge found — cycle detected.
+                # A cycle is only valid when the back-edge target IS a loop node
+                # (i.e. the loop node is the entry point that closes the cycle).
+                # A cycle with a loop node somewhere in the middle is still infinite.
+                if node_types.get(neighbor) not in LOOP_NODE_TYPES:
+                    try:
+                        start_index = path_nodes.index(neighbor)
+                        cycle_path = path_nodes[start_index:]
+                    except ValueError:
+                        cycle_path = [neighbor]
+                    errors.append(CompileError(
+                        node_id=neighbor,
+                        error_type="dag_cycle",
+                        message=f"Infinite cycle detected involving nodes: {', '.join(cycle_path)}"
+                    ))
+                    return True  # Bad cycle — stop DFS
         
         rec_stack.remove(node_id)
         path_nodes.pop()
@@ -514,7 +505,6 @@ def validate_type_compatibility(
                     message=f"Type mismatch: '{source_type}' outputs '{output_type}' but '{target_type}' expects {acceptable_inputs}"
                 ))
     
-    return errors
     return errors
 
 

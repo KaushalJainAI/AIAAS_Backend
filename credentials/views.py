@@ -3,6 +3,9 @@ from adrf import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.conf import settings as django_settings
+from django.core import signing
+from urllib.parse import urlparse
 from .models import Credential, CredentialType, CredentialAuditLog
 from .serializers import (
     CredentialSerializer, 
@@ -12,6 +15,22 @@ from .serializers import (
     CredentialOAuthCallbackSerializer
 )
 from asgiref.sync import sync_to_async
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Allowed OAuth redirect URI origins (add production domain)
+ALLOWED_REDIRECT_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+]
+# Extend with CORS origins from settings if available
+try:
+    ALLOWED_REDIRECT_ORIGINS.extend(getattr(django_settings, 'CORS_ALLOWED_ORIGINS', []))
+except Exception:
+    pass
 
 class CredentialTypeViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -140,7 +159,7 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def init(self, request):
         """
-        Generate Google Authorization URL.
+        Generate Google Authorization URL with CSRF state token.
         """
         from .oauth import GoogleOAuthProvider
         
@@ -149,6 +168,15 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         
         redirect_uri = serializer.validated_data['redirect_uri']
         scopes = serializer.validated_data.get('scopes')
+        
+        # Validate redirect_uri against allowlist to prevent open redirect
+        parsed_redirect = urlparse(redirect_uri)
+        redirect_origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+        if redirect_origin not in ALLOWED_REDIRECT_ORIGINS:
+            return Response(
+                {'error': f'Redirect URI origin is not allowed: {redirect_origin}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
             
         # Default scopes for our main integration use cases (Sheets, etc)
         if not scopes:
@@ -157,8 +185,14 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
                 'https://www.googleapis.com/auth/drive.readonly'
             ]
         
+        # Generate CSRF state token (signed with Django SECRET_KEY, expires in 10 min)
+        state = signing.dumps(
+            {'user_id': request.user.id, 'redirect_uri': redirect_uri},
+            salt='oauth-state'
+        )
+        
         provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
-        url = provider.get_auth_url(scopes=scopes)
+        url = provider.get_auth_url(scopes=scopes, state=state)
         
         return Response({'url': url})
 
@@ -166,6 +200,7 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
     async def callback(self, request):
         """
         Exchange code for tokens and create/update Credential.
+        Validates the CSRF state token to prevent CSRF/open redirect attacks.
         """
         from .oauth import GoogleOAuthProvider
         from .models import Credential, CredentialType
@@ -176,6 +211,31 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         code = serializer.validated_data['code']
         redirect_uri = serializer.validated_data['redirect_uri']
         name = serializer.validated_data['name']
+        state = serializer.validated_data.get('state') or request.data.get('state')
+        
+        # Validate CSRF state token
+        if state:
+            try:
+                state_data = signing.loads(state, salt='oauth-state', max_age=600)  # 10 min expiry
+                if state_data.get('user_id') != request.user.id:
+                    return Response({'error': 'OAuth state token user mismatch'}, status=400)
+                if state_data.get('redirect_uri') != redirect_uri:
+                    return Response({'error': 'OAuth state token redirect_uri mismatch'}, status=400)
+            except signing.BadSignature:
+                return Response({'error': 'Invalid OAuth state token'}, status=400)
+            except signing.SignatureExpired:
+                return Response({'error': 'OAuth state token expired. Please try again.'}, status=400)
+        else:
+            logger.warning(f"OAuth callback missing state parameter for user {request.user.id}")
+        
+        # Validate redirect_uri against allowlist
+        parsed_redirect = urlparse(redirect_uri)
+        redirect_origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+        if redirect_origin not in ALLOWED_REDIRECT_ORIGINS:
+            return Response(
+                {'error': f'Redirect URI origin is not allowed'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
             
         provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
         
@@ -224,12 +284,14 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
                 'name': user_info.get('name')
             }
             credential.is_verified = True
-        except:
+        except Exception:
             credential.is_verified = False
             
         await sync_to_async(credential.save)()
-            
-        return Response(CredentialSerializer(credential).data)
+        
+        # Use sync_to_async for serializer in async context
+        serialized_data = await sync_to_async(lambda: CredentialSerializer(credential).data)()
+        return Response(serialized_data)
 
 
 class CredentialAuditLogViewSet(viewsets.ReadOnlyModelViewSet):

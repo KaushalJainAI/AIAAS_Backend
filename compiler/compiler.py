@@ -386,7 +386,14 @@ class WorkflowCompiler:
                     
                     # Serialize results for state storage (and next nodes)
                     serialized_items = [item.model_dump(by_alias=True) for item in result.items]
-                    
+
+                    # Sync mutable context state back to workflow state.
+                    # ExecutionContext is created fresh each node call (Pydantic copies dicts),
+                    # so loop cursor, items, and other variable mutations made inside the node
+                    # must be written back to state so they survive across iterations.
+                    state['variables'] = dict(context.variables)
+                    state['loop_stats'] = dict(context.loop_stats)
+
                     # Update state
                     state['node_outputs'][node_id] = serialized_items
                     state['node_outputs'][f"_handle_{node_id}"] = result.output_handle
@@ -414,28 +421,10 @@ class WorkflowCompiler:
                     )
                     raise e # Re-raise to be caught by outer try/except for supervision handling
                 
-                # Track loop iterations
+                # Track loop iterations — must happen AFTER syncing context back to state
+                # so the post-sync increment is not overwritten.
                 if node_type in ['loop', 'split_in_batches']:
                     state['loop_stats'][node_id] = state['loop_stats'].get(node_id, 0) + 1
-                
-                # Check if this node feeds back to a loop node - accumulate results
-                # This enables the loop node to return all accumulated results when done
-                for edge in self.edges:
-                    if edge.get('source') == node_id:
-                        target = edge.get('target')
-                        target_type = self._node_map.get(target, {}).get('type')
-                        if target_type in ['loop', 'split_in_batches']:
-                            # This node's output feeds a loop - accumulate for the loop node
-                            acc_key = f"_accumulated_{target}"
-                            if acc_key not in state['variables']:
-                                state['variables'][acc_key] = []
-                            # We might need to restructure how loop accumulation works with items
-                            # For now just appending the serialized items
-                            # But wait, look accumulation logic was outside result.success check before
-                            # Moving loops logic to AFTER success check is better anyway.
-                            # But I need to be careful not to introduce bugs if loop accumulation logic was intended for partial results? 
-                            # Usually only successful executions produce data worth accumulating.
-                            pass # Logic moved inside success block
 
                 if not result.success:
                     # on_error called for FULL and ERROR_ONLY supervision
@@ -473,18 +462,17 @@ class WorkflowCompiler:
                         state['error'] = result.error
                         state['status'] = 'failed'
                 else:
-                    # Check if this node feeds back to a loop node - accumulate results
-                    # This enables the loop node to return all accumulated results when done
+                    # Accumulate results for the loop node this output feeds back into.
                     for edge in self.edges:
                         if edge.get('source') == node_id:
                             target = edge.get('target')
-                            target_type = self._node_map.get(target, {}).get('type')
+                            target_type = get_node_type(self._node_map.get(target, {}))
                             if target_type in ['loop', 'split_in_batches']:
-                                # This node's output feeds a loop - accumulate for the loop node
                                 acc_key = f"_accumulated_{target}"
                                 if acc_key not in state['variables']:
                                     state['variables'][acc_key] = []
-                                state['variables'][acc_key].append(serialized_items)
+                                # Extend with individual items, not append a nested list
+                                state['variables'][acc_key].extend(serialized_items)
 
                     # after_node only for FULL supervision
                     should_call_after = (

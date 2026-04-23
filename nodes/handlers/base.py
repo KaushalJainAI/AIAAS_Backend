@@ -132,7 +132,7 @@ class NodeExecutionResult(BaseModel):
     items: list[NodeItem] = Field(default_factory=list, description="Output items array")
     data: dict[str, Any] | None = Field(default=None, exclude=True, description="DEPRECATED: Use items instead")
     error: str | None = None
-    output_handle: str = "output"  # Which output handle to use
+    output_handle: str | None = "output"  # Which output handle to use; None = terminal (no routing)
     
     def __init__(self, **data):
         """Handle backward compatibility with old 'data' field."""

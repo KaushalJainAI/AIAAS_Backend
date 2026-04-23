@@ -1419,12 +1419,15 @@ def receive_webhook(request, user_id, webhook_path):
     # Generic Webhook Auth Check
     if auth_type != "none":
         auth_key = config.get("auth_key", "")
+        auth_value = config.get("auth_value", "")
         if auth_type == "header":
-            if auth_key not in request.headers:
-                return JsonResponse({"error": "Unauthorized - Missing Header"}, status=401)
+            incoming = request.headers.get(auth_key, "")
+            if not incoming or (auth_value and incoming != auth_value):
+                return JsonResponse({"error": "Unauthorized"}, status=401)
         elif auth_type == "query":
-            if auth_key not in request.GET:
-                return JsonResponse({"error": "Unauthorized - Missing Query Parameter"}, status=401)
+            incoming = request.GET.get(auth_key, "")
+            if not incoming or (auth_value and incoming != auth_value):
+                return JsonResponse({"error": "Unauthorized"}, status=401)
 
     # 3. Parse Body
     body_data = {}

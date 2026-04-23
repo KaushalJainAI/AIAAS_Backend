@@ -60,7 +60,8 @@ class TriggerManager:
                     "method": config.get("method", "POST"),
                     "authentication": config.get("authentication", "none"),
                     "auth_key": config.get("auth_key", ""),
-                    "secret_token": config.get("secret_token", ""), # Added for security
+                    "auth_value": config.get("auth_value", ""),
+                    "secret_token": config.get("secret_token", ""),
                     "node_type": node_type,
                     "node_id": node.get("id"),
                 }

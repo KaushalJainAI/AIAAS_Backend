@@ -205,20 +205,21 @@ class InputSanitizer:
             return text
 
         # Protect <code>, <pre>, <br> (and their variations) while escaping other < and >
-        # Group 1 captures protected tags
-        protected_tag_regex = r'(</?(?:code|pre|br)\s*/?>)'
+        # Use a single regex with alternation: protected tags are captured in group 1,
+        # while bare < and > are captured in group 2.
+        protected_tag_regex = r'(</?(?:code|pre|br)\s*/?>)|([<>])'
         
         def replace(match):
             # If group 1 matched, it's one of our protected tags - keep it
             if match.group(1):
                 return match.group(1)
-            # Otherwise it's a raw bracket to escape
-            char = match.group(0)
+            # Group 2 matched a raw bracket to escape
+            char = match.group(2)
             if char == '<':
                 return '&lt;'
             return '&gt;'
 
-        return re.sub(f'{protected_tag_regex}|<|>', replace, text, flags=re.IGNORECASE)
+        return re.sub(protected_tag_regex, replace, text, flags=re.IGNORECASE)
     
     def _log_violations(self, original: str, violations: list[SecurityViolation]):
         """Log security violations for audit."""
@@ -348,7 +349,7 @@ SECRET_PATTERNS = [
     (r'(?i)(refresh[_-]?token)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_.-]{20,})', 'REFRESH_TOKEN'),
     
     # Passwords
-    (r'(?i)(password|passwd|pwd)["\']?\s*[:=]\s*["\']?([^\s"\']{{8,}})', 'PASSWORD'),
+    (r'(?i)(password|passwd|pwd)["\']?\s*[:=]\s*["\']?([^\s"\']{8,})', 'PASSWORD'),
     
     # AWS
     (r'AKIA[0-9A-Z]{16}', 'AWS_ACCESS_KEY'),

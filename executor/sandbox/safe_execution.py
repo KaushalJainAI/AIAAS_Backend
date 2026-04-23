@@ -21,7 +21,7 @@ SAFE_BUILTINS = {
     'bytes', 'bytearray',
     
     # Type checking
-    'type', 'isinstance', 'issubclass', 'callable', 'hasattr', 'getattr',
+    'type', 'isinstance', 'issubclass', 'callable', 'hasattr',
     
     # Iteration
     'len', 'range', 'enumerate', 'zip', 'map', 'filter', 'sorted',
@@ -47,6 +47,7 @@ SAFE_BUILTINS = {
 BLOCKED_BUILTINS = {
     'eval', 'exec', 'compile', '__import__', 'open', 'file',
     'memoryview', 'globals', 'locals', 'breakpoint',
+    'getattr', 'setattr', 'delattr',
 }
 
 
@@ -149,6 +150,8 @@ class SafeCodeValidator(ast.NodeVisitor):
         dangerous_attrs = {
             '__class__', '__base__', '__bases__', '__subclasses__',
             '__mro__', '__globals__', '__code__', '__builtins__',
+            '__dict__', '__init__', '__new__', '__getattr__', '__setattr__',
+            '__import__', '__loader__', '__spec__',
         }
         
         if node.attr in dangerous_attrs:

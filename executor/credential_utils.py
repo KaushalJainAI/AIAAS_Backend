@@ -1,6 +1,9 @@
 from typing import Any, Dict, Set
 import json
+import logging
 from credentials.models import Credential
+
+logger = logging.getLogger(__name__)
 
 def get_user_credentials(user_id: int) -> Dict[str, Any]:
     """
@@ -46,7 +49,7 @@ def get_user_credentials(user_id: int) -> Dict[str, Any]:
                     
         except Exception as e:
             # Log error but don't fail entire execution
-            print(f"Failed to decrypt credential {cred.id}: {e}")
+            logger.error(f"Failed to decrypt credential {cred.id}: {e}")
             continue
             
 
@@ -93,6 +96,6 @@ def get_workflow_credentials(user_id: int, workflow_json: dict) -> Dict[str, Any
             result[str_id]['_injected'] = True
             
         except Exception as e:
-            print(f"Failed to decrypt referenced credential {cred.id}: {e}")
+            logger.error(f"Failed to decrypt referenced credential {cred.id}: {e}")
             
     return result

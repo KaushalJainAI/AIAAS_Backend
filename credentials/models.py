@@ -228,9 +228,10 @@ class Credential(models.Model):
         """Check if access token is expired (with buffer)"""
         if not self.token_expires_at:
             return False 
+        from datetime import timedelta
         from django.utils import timezone
         # 5 minute buffer
-        return timezone.now() > (self.token_expires_at - timezone.timedelta(minutes=5))
+        return timezone.now() > (self.token_expires_at - timedelta(minutes=5))
 
     def get_valid_access_token(self):
         """
@@ -264,7 +265,7 @@ class Credential(models.Model):
             
         try:
             refresh_token = fernet.decrypt(self.refresh_token).decode()
-        except:
+        except Exception:
             return None
             
         config = self.credential_type.oauth_config
@@ -273,40 +274,54 @@ class Credential(models.Model):
         client_secret = settings.GOOGLE_OAUTH_CLIENT_SECRET
         
         try:
-            resp = requests.post(token_url, data={
-                'client_id': client_id,
-                'client_secret': client_secret,
-                'refresh_token': refresh_token,
-                'grant_type': 'refresh_token'
-            }, timeout=10)
-            
-            if resp.status_code != 200:
-                logger.error(f"Token refresh failed: {resp.text}")
-                self.last_error = f"Token refresh failed: {resp.status_code}"
-                self.is_verified = False
-                self.save()
-                return None
+            from django.db import transaction
+            with transaction.atomic():
+                # Re-fetch with lock to prevent concurrent refresh race conditions
+                locked_cred = Credential.objects.select_for_update().get(id=self.id)
                 
-            new_tokens = resp.json()
-            new_access = new_tokens.get('access_token')
-            expires_in = new_tokens.get('expires_in')
-            
-            if new_access:
-                self.access_token = fernet.encrypt(new_access.encode())
-                if expires_in:
-                    self.token_expires_at = timezone.now() + timedelta(seconds=expires_in)
-                self.is_verified = True
-                self.last_error = ""
-                self.save()
+                # Double-check: another thread may have already refreshed
+                if not locked_cred.is_token_expired():
+                    try:
+                        return fernet.decrypt(locked_cred.access_token).decode()
+                    except Exception:
+                        pass
                 
-                # Log audit
-                CredentialAuditLog.objects.create(
-                    credential=self,
-                    user=self.user,
-                    action='updated', # Refreshed
-                    user_agent='System/AutoRefresh'
-                )
-                return new_access
+                resp = requests.post(token_url, data={
+                    'client_id': client_id,
+                    'client_secret': client_secret,
+                    'refresh_token': refresh_token,
+                    'grant_type': 'refresh_token'
+                }, timeout=10)
+                
+                if resp.status_code != 200:
+                    logger.error(f"Token refresh failed: {resp.text}")
+                    locked_cred.last_error = f"Token refresh failed: {resp.status_code}"
+                    locked_cred.is_verified = False
+                    locked_cred.save(update_fields=['last_error', 'is_verified'])
+                    return None
+                    
+                new_tokens = resp.json()
+                new_access = new_tokens.get('access_token')
+                expires_in = new_tokens.get('expires_in')
+                
+                if new_access:
+                    locked_cred.access_token = fernet.encrypt(new_access.encode())
+                    if expires_in:
+                        locked_cred.token_expires_at = timezone.now() + timedelta(seconds=expires_in)
+                    locked_cred.is_verified = True
+                    locked_cred.last_error = ""
+                    locked_cred.save(update_fields=[
+                        'access_token', 'token_expires_at', 'is_verified', 'last_error'
+                    ])
+                    
+                    # Log audit
+                    CredentialAuditLog.objects.create(
+                        credential=locked_cred,
+                        user=locked_cred.user,
+                        action='updated', # Refreshed
+                        user_agent='System/AutoRefresh'
+                    )
+                    return new_access
                 
         except Exception as e:
             logger.error(f"Token refresh error: {e}")

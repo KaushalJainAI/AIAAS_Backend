@@ -12,8 +12,15 @@ def health_check(request):
     return JsonResponse({'status': 'healthy', 'service': 'workflow-backend'})
 
 
+from core.auth_views import GoogleLogin
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    
+    # Authentication
+    path('api/auth/google/', GoogleLogin.as_view(), name='google_login'),
+    path('api/auth/', include('dj_rest_auth.urls')),
+    path('api/auth/registration/', include('dj_rest_auth.registration.urls')),
     
     # Health check
     path('api/health/', health_check, name='health-check'),
