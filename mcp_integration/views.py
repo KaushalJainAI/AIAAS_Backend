@@ -40,6 +40,12 @@ class MCPServerViewSet(viewsets.ModelViewSet):
             Q(user=user) | Q(user__isnull=True)
         ).order_by("name")
 
+    def list(self, request, *args, **kwargs):
+        """Return wrapped list of servers, matching credentials pattern."""
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({'servers': serializer.data})
+
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
