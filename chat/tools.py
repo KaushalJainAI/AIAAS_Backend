@@ -346,6 +346,64 @@ AVAILABLE_TOOLS = [
                 "additionalProperties": False
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "frontend_click",
+            "description": "Click an element on the user's active screen. Use this when the user asks you to interact with the UI. You must provide the 'buddy_id' of the element from the screen context.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "buddy_id": {
+                        "type": "string",
+                        "description": "The data-buddy-id of the element to click."
+                    }
+                },
+                "required": ["buddy_id"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "frontend_fill",
+            "description": "Type text into an input field or form on the user's active screen. Use this when the user asks you to fill out a form or search bar. You must provide the 'buddy_id' of the input element.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "buddy_id": {
+                        "type": "string",
+                        "description": "The data-buddy-id of the input element."
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The text to type into the element."
+                    }
+                },
+                "required": ["buddy_id", "value"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "frontend_navigate",
+            "description": "Navigate the user's active screen to a new URL. Use this to open pages within the application.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to navigate to."
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": False
+            }
+        }
     }
 ]
 
@@ -729,6 +787,33 @@ async def execute_tool(func_name: str, args: Dict[str, Any], context: Dict[str, 
                     })
             except Exception as e:
                 return f"Error: Failed to run workflow: {str(e)}"
+
+        elif func_name in ("frontend_click", "frontend_fill", "frontend_navigate"):
+            user_id = context.get("user_id")
+            if not user_id:
+                return "Error: Missing user context. Cannot interact with frontend."
+            try:
+                from channels.layers import get_channel_layer
+                channel_layer = get_channel_layer()
+                if not channel_layer:
+                    return "Error: Channel layer is not configured."
+                
+                # Send the action via WebSocket
+                await channel_layer.group_send(
+                    f"buddy_{user_id}",
+                    {
+                        "type": "trigger_action",
+                        "action": func_name,
+                        "parameters": args,
+                    }
+                )
+                import json
+                return json.dumps({
+                    "status": "success",
+                    "message": f"Action '{func_name}' sent to the frontend successfully."
+                })
+            except Exception as e:
+                return f"Error: Failed to execute {func_name}: {str(e)}"
 
         else:
             return f"Error: Tool '{func_name}' is not recognized."

@@ -969,6 +969,17 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
         f"\n- Knowledge Cutoff: Your training data is not up-to-date. Assume you don't know recent events."
     )
     
+    # Inject Buddy Screen Context
+    from django.core.cache import cache
+    buddy_context = cache.get(f"buddy_context_{session.user.id}")
+    if buddy_context:
+        context_block += f"\n\n### SCREEN CONTEXT (BUDDY MODE) ###\n"
+        context_block += f"The user is currently looking at: {buddy_context.get('title', 'Unknown Page')} (URL: {buddy_context.get('url', '')})\n"
+        context_block += "Visible interactive elements:\n"
+        for item in buddy_context.get('interactables', [])[:100]:
+            context_block += f"- [{item.get('buddy_id')}] <{item.get('tag')}> {item.get('text', '')[:100]} (type: {item.get('type') or 'N/A'})\n"
+        context_block += "You can use 'frontend_click', 'frontend_fill', or 'frontend_navigate' tools to interact with the screen. Always use the provided buddy_id for elements."
+    
     directives = (
         f"\n\n### CORE OPERATING RULES ###"
         f"\n1. ANTI-HALLUCINATION: Never fabricate facts, dates, or URLs. If unsure, you MUST call 'web_search'."

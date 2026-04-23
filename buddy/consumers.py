@@ -35,8 +35,10 @@ class BuddyConsumer(AsyncWebsocketConsumer):
         if message_type == 'context_update':
             # Handle context update (e.g., screen content)
             context = data.get('context', {})
-            # Log or process context
-            print(f"Received context from user {self.user.id}: {context}")
+            
+            # Save context to cache so the LLM can read it
+            from django.core.cache import cache
+            cache.set(f"buddy_context_{self.user.id}", context, timeout=3600)
             
             # Echo for now
             await self.send(text_data=json.dumps({
