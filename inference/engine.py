@@ -77,11 +77,17 @@ def _load_qwen_embedder() -> QwenEmbedder:
 
     logger.info(f"[Embedder] Loading {EMBEDDING_MODEL} | device=cpu | quant=int8")
 
-    tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL, trust_remote_code=True)
+    cache_dir = Path(settings.BASE_DIR) / "static" / "model_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        EMBEDDING_MODEL, trust_remote_code=True, cache_dir=cache_dir
+    )
     model = AutoModel.from_pretrained(
         EMBEDDING_MODEL,
-        torch_dtype=torch.float32,
+        dtype=torch.float32,
         trust_remote_code=True,
+        cache_dir=cache_dir,
     )
     model.eval()
 

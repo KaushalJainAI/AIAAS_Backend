@@ -2,7 +2,7 @@ import asyncio
 from typing import Any
 
 # Timeout constants for agentic loop (in seconds)
-LLM_STREAM_TIMEOUT = 180  # Max time to wait for LLM stream (in seconds)
+LLM_STREAM_TIMEOUT = 300  # Max time to wait for LLM stream (in seconds)
 TOOL_EXECUTION_TIMEOUT = 120  # Max time to wait for tool execution
 MAX_THINKING_CHUNKS = 100000  # Max thinking chunks before forcing exit
 
