@@ -318,7 +318,8 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
             )
             
             # Determine status based on response
-            response_value = response.get('value', response)
+            # Accept either a wrapped {"value": ...} or a bare response value.
+            response_value = response.get('value', response) if isinstance(response, dict) else response
             if response_value in ('approve', 'approved', True):
                 hitl_request.status = 'approved'
             elif response_value in ('reject', 'rejected', False):
@@ -495,7 +496,8 @@ class HITLNotificationConsumer(AsyncWebsocketConsumer):
                 status='pending'
             )
             
-            response_value = response.get('value', response)
+            # Accept either a wrapped {"value": ...} or a bare response value.
+            response_value = response.get('value', response) if isinstance(response, dict) else response
             if response_value in ('approve', 'approved', True):
                 hitl_request.status = 'approved'
             elif response_value in ('reject', 'rejected', False):

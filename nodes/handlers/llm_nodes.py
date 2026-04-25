@@ -271,11 +271,11 @@ class OpenAINode(BaseNodeHandler):
 
                 messages.append({"role": "user", "content": user_content})
 
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 payload = {
                     "model": model,
@@ -892,11 +892,11 @@ class GeminiNode(BaseNodeHandler):
                     "generationConfig": generation_config,
                 }
 
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 if tools_payload:
                     gemini_tools = []
@@ -1168,11 +1168,11 @@ class GeminiNode(BaseNodeHandler):
                     if "size" in config: payload["parameters"]["aspectRatio"] = config["size"]
 
                 # Setup tools if requested (map OpenAI schema to Gemini schema)
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 if tools_payload:
                     gemini_tools = []
@@ -1590,11 +1590,11 @@ class OllamaNode(BaseNodeHandler):
                 }
 
                 # Setup tools if requested either via internal config or node UI toggle
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 if tools_payload:
                     req_payload["tools"] = tools_payload
@@ -1734,11 +1734,11 @@ class PerplexityNode(BaseNodeHandler):
                 if history: messages.extend(history)
                 messages.append({"role": "user", "content": prompt})
 
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 payload = {
                     "model": model,
@@ -2175,11 +2175,11 @@ class OpenRouterNode(BaseNodeHandler):
                 if history: messages.extend(history)
                 messages.append({"role": "user", "content": prompt})
 
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 payload = {
                     "model": model,

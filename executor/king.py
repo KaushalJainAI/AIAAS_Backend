@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from enum import Enum
 from typing import Any, Callable, Dict, Optional
 from uuid import UUID, uuid4
 from dataclasses import dataclass, field
@@ -38,55 +37,35 @@ from orchestrator.interface import (
     SupervisionLevel,
 )
 from executor.engine import ExecutionEngine
+from executor.exceptions import (
+    AuthorizationError,
+    ExecutionNotFoundError,
+    HITLTimeoutError,
+    LLMProviderError,
+    StateConflictError,
+)
+from executor.hitl import HITLRequest, HITLRequestType
 from logs.models import ExecutionLog
 from skills.models import Skill
 from workflow_backend.thresholds import DEFAULT_HITL_TIMEOUT_SECONDS, MAX_LOOP_COUNT, EXECUTION_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
 
-
-class HITLRequestType(str, Enum):
-    """Types of human-in-the-loop requests."""
-    APPROVAL = "approval"
-    CLARIFICATION = "clarification"
-    ERROR_RECOVERY = "error_recovery"
-    REVIEW = "review"
-
-
-class AuthorizationError(Exception):
-    """Raised when user is not authorized to perform an action."""
-    pass
-
-
-class HITLTimeoutError(Exception):
-    """Raised when HITL request times out."""
-    pass
-
-
-class StateConflictError(Exception):
-    """Raised when an operation is invalid for the current execution state."""
-    pass
-
-
-class ExecutionNotFoundError(Exception):
-    """Raised when an execution cannot be found."""
-    pass
-
-
-@dataclass
-class HITLRequest:
-    """A human-in-the-loop interaction request."""
-    id: str
-    request_type: HITLRequestType
-    execution_id: UUID  # Added for auth
-    user_id: int  # Added for auth
-    node_id: str
-    message: str
-    options: list[str] = field(default_factory=list)
-    timeout_seconds: int = DEFAULT_HITL_TIMEOUT_SECONDS
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    response: Any = None
-    responded_at: datetime | None = None
+# Public re-exports — other apps import these from this module. Keep them
+# exported so that relocation doesn't break `from executor.king import ...`.
+__all__ = [
+    "KingOrchestrator",
+    "WorkflowOrchestrator",
+    "get_orchestrator",
+    "ExecutionHandle",
+    "HITLRequest",
+    "HITLRequestType",
+    "AuthorizationError",
+    "HITLTimeoutError",
+    "StateConflictError",
+    "ExecutionNotFoundError",
+    "LLMProviderError",
+]
 
 
 @dataclass
@@ -221,6 +200,28 @@ User request: {description}
 
 Generate ONLY valid JSON, no explanation:"""
 
+    MODIFY_PROMPT = """You are an AI assistant that modifies workflow definitions.
+
+Given an existing workflow JSON and a natural-language modification request,
+produce a new workflow JSON that applies the change.
+
+Available node types:
+{node_types}
+
+Existing workflow:
+{workflow_json}
+
+Modification request:
+{modification}
+
+Rules:
+- Preserve node IDs and positions that don't need to change.
+- Only add, remove, or reconfigure nodes strictly required by the request.
+- Keep edges consistent (every edge's source/target must exist).
+- Output ONLY valid JSON with the same shape as the input (name, description,
+  nodes, edges). No prose, no code fences.
+"""
+
     SUPERVISE_PROMPT = """You are the King Orchestrator, the supreme AI supervisor of a workflow execution.
 Your job is to provide high-level reasoning and oversight for each step.
 
@@ -253,41 +254,39 @@ Provide your response in VALID JSON format with the following fields:
 
 Output ONLY the JSON object, no other text."""
     
-    def __init__(self, user_id: int | None = None, llm_type: str = "openrouter", llm_model: str = "google/gemini-2.0-flash-exp:free", credential_id: str | None = None):
-        # Identity
+    def __init__(
+        self,
+        user_id: int | None = None,
+        llm_type: str = "openrouter",
+        llm_model: str = "google/gemini-2.0-flash-exp:free",
+        credential_id: str | None = None,
+    ):
+        # Identity + LLM config (defaults; may be overridden by user profile).
         self.user_id = user_id
-
-        # Config (Defaults)
         self.llm_type = llm_type
         self.llm_model = llm_model
         self.credential_id = credential_id
-        
         self.settings_loaded = False
 
-        # State tracking (thread-safe access)
+        # Thread-safe state. _lock guards every mutation of the dicts below.
         self._lock = RLock()
         self._executions: dict[UUID, ExecutionHandle] = {}
         self._tasks: dict[UUID, asyncio.Task] = {}
         self._pause_events: dict[UUID, asyncio.Event] = {}
-        self._hitl_requests: dict[str, HITLRequest] = {}  # request_id -> request (for auth)
+        self._hitl_requests: dict[str, HITLRequest] = {}
         self._hitl_responses: dict[str, asyncio.Queue] = {}
-        
-        # The Worker (execution engine)
+
+        # The deterministic worker.
         self.engine = ExecutionEngine(orchestrator=self)
-        
-        # Scheduling
+
+        # Background eviction task (started lazily if an event loop exists).
         self._cleanup_task: asyncio.Task | None = None
         self._schedule_cleanup()
 
-        # LLM capabilities (from AIWorkflowGenerator)
-        self.llm_type = llm_type
-        self.llm_model = llm_model
-        self._registry = None  # Lazy loaded
-        
-        # Design-time context cache (for workflow generation ONLY)
-        self._design_context: dict = {}  # Context for the specific user instance
-        
-        # Callbacks
+        self._registry = None  # Lazy-loaded node registry.
+        self._design_context: dict = {}
+
+        # Callbacks (set via set_callbacks).
         self._on_state_change: Callable[[ExecutionHandle], None] | None = None
         self._on_progress: Callable[[UUID, str, float], None] | None = None
         self._on_hitl_request: Callable[[HITLRequest], None] | None = None
@@ -302,9 +301,17 @@ Output ONLY the JSON object, no other text."""
             logger.warning(f"Could not schedule King cleanup: {e}")
 
     async def _cleanup_loop(self):
-        """Evict old executions to prevent memory leaks (OOM prevention)."""
+        """
+        Evict old in-memory executions and reap DB zombies on a 5-minute loop.
+
+        Exits cleanly on CancelledError so orchestrator teardown doesn't spam
+        the logs with a spurious error.
+        """
         while True:
-            await asyncio.sleep(300)  # Check every 5 minutes
+            try:
+                await asyncio.sleep(300)
+            except asyncio.CancelledError:
+                return
             try:
                 now = datetime.utcnow()
                 expired = []
@@ -394,22 +401,26 @@ Output ONLY the JSON object, no other text."""
         """
         handle = self._executions.get(execution_id)
         
-        # Fallback to DB if handle lost (multi-server)
+        # Fallback to DB if the handle is not in memory (multi-worker setup).
         if not handle:
             try:
-                # We need to reconstruct a minimal handle from the DB
                 from logs.models import ExecutionLog
-                # Use aget for async DB access
                 log = await ExecutionLog.objects.aget(execution_id=execution_id)
+                # Coerce the DB string status into the ExecutionState enum so
+                # downstream identity checks (`handle.state == ExecutionState.X`)
+                # work identically to in-memory handles.
+                try:
+                    state = ExecutionState(str(log.status))
+                except ValueError:
+                    state = ExecutionState.PENDING
                 handle = ExecutionHandle(
                     execution_id=log.execution_id,
                     workflow_id=log.workflow_id,
                     user_id=log.user_id,
-                    state=str(log.status),
+                    state=state,
                     started_at=log.started_at,
-                    supervision_level=SupervisionLevel.FULL, # Default fallback
+                    supervision_level=SupervisionLevel.FULL,
                 )
-                # Cache it locally for a while
                 with self._lock:
                     self._executions[execution_id] = handle
             except Exception:
@@ -832,22 +843,28 @@ Output ONLY the JSON object, no other text."""
 
             return content
         else:
-            # Check for connection-related errors (especially for Ollama)
             error_msg = result.error or "Unknown LLM error"
-            is_connection_error = any(phrase in error_msg.lower() for phrase in [
-                "connection", "unreachable", "refused", "failed to connect", "not found"
-            ])
-            
+            # Heuristic: pick out connection-class failures so callers can
+            # distinguish provider-down from provider-said-something-wrong
+            # without resorting to string matching themselves.
+            is_connection_error = any(
+                phrase in error_msg.lower()
+                for phrase in ("connection", "unreachable", "refused", "failed to connect", "not found")
+            )
+
             if is_connection_error:
                 asyncio.create_task(get_execution_logger().log_orchestrator_thought(
                     execution_id=execution_id,
-                    content=f"CRITICAL: Failed to connect to {self.llm_type} ({self.llm_model}). Please ensure the service is running locally.",
+                    content=(
+                        f"CRITICAL: Failed to connect to {self.llm_type} "
+                        f"({self.llm_model}). Ensure the service is reachable."
+                    ),
                     reasoning=error_msg,
-                    thought_type='error',
-                    node_id=node_id or "orchestrator"
+                    thought_type="error",
+                    node_id=node_id or "orchestrator",
                 ))
-            
-            raise Exception(error_msg)
+
+            raise LLMProviderError(error_msg, is_connection_error=is_connection_error)
     
     def _parse_json_response(self, response: str) -> dict:
         """Parse JSON from LLM response."""
@@ -1661,10 +1678,19 @@ Output ONLY the JSON object, no other text."""
             if handle.state != ExecutionState.PAUSED:
                 raise StateConflictError(f"Cannot resume execution in state {handle.state}")
 
-            # Verify Liveness
+            # Verify liveness: the task must still be running to resume.
             if not task or task.done():
-                logger.warning(f"Resume requested for dead execution {execution_id}. Cleaning up.")
-                handle.state = ExecutionState.FAILED if not task or not task.cancelled() else ExecutionState.CANCELLED
+                logger.warning(
+                    f"Resume requested for dead execution {execution_id}. Cleaning up.",
+                )
+                # A cancelled task reports `.cancelled() == True` only after it
+                # has fully unwound. Anything else — including crashed, normal
+                # completion, or never-started — is a failure from resume's view.
+                handle.state = (
+                    ExecutionState.CANCELLED
+                    if task and task.cancelled()
+                    else ExecutionState.FAILED
+                )
                 self._cleanup_execution(execution_id)
                 self._notify_state_change(handle)
                 raise StateConflictError("Execution task is no longer active")

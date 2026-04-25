@@ -113,14 +113,17 @@ class CredentialManager:
                 logger.warning(f"Credential '{credential_id}' not found for user {user_id}")
                 return None
         
-        # Check if OAuth token refresh needed
+        # Check if OAuth token refresh needed (5-minute buffer to avoid
+        # returning a token that expires mid-request).
         if (
             refresh_if_expired
             and credential.credential_type.auth_method == 'oauth2'
             and credential.token_expires_at
-            and credential.token_expires_at <= timezone.now()
+            and credential.token_expires_at - timedelta(minutes=5) <= timezone.now()
         ):
             await self.refresh_oauth_token(credential)
+            # Bust cache for this credential so we don't return the stale token below.
+            self._cache.pop(cache_key, None)
         
         # Decrypt and return
         try:
@@ -215,7 +218,13 @@ class CredentialManager:
                 new_access_token = data.get('access_token')
                 new_refresh_token = data.get('refresh_token', refresh_token)
                 expires_in = data.get('expires_in', 3600)
-                
+
+                if not new_access_token:
+                    logger.error(f"OAuth refresh for credential {credential.id} returned no access_token")
+                    credential.last_error = "Refresh response missing access_token"
+                    await sync_to_async(credential.save)(update_fields=['last_error'])
+                    return False
+
                 credential.access_token = fernet.encrypt(new_access_token.encode())
                 credential.refresh_token = fernet.encrypt(new_refresh_token.encode())
                 credential.token_expires_at = timezone.now() + timedelta(seconds=expires_in)

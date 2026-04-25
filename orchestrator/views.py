@@ -729,46 +729,58 @@ def conversation_messages(request, conversation_id: str = None, message_id: int 
 
 # ======================== Version History API ========================
 
+# Upper bound on stored versions per workflow. Older snapshots are dropped
+# when a new one is created.
+_MAX_WORKFLOW_VERSIONS = 10
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def workflow_versions(request, workflow_id: int):
     """
-    GET: List versions
-    POST: Create new version (snapshot)
+    GET:  List versions for a workflow.
+    POST: Snapshot the workflow's current state as a new version.
     """
     workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
-    
+
     if request.method == 'GET':
         versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number')
         return Response({'versions': WorkflowVersionSerializer(versions, many=True).data})
-    
-        # Use serializer for validation
-        serializer = WorkflowVersionSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        # Get next version number
-        last_version = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number').first()
-        next_version = (last_version.version_number + 1) if last_version else 1
-        
-        # Limit version history logic (redundant but kept for specific manual triggers)
-        MAX_VERSIONS = 10
-        current_versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('version_number')
-        if current_versions.count() >= MAX_VERSIONS:
-            to_delete_count = current_versions.count() - MAX_VERSIONS + 1
-            if to_delete_count > 0:
-                to_delete_ids = list(current_versions.values_list('id', flat=True)[:to_delete_count])
-                WorkflowVersion.objects.filter(id__in=to_delete_ids).delete()
 
-        version = serializer.save(
-            workflow=workflow,
-            version_number=next_version,
-            nodes=workflow.nodes,
-            edges=workflow.edges,
-            workflow_settings=workflow.workflow_settings,
-            created_by=request.user
+    # POST — previously UNREACHABLE: the body was accidentally indented inside
+    # the GET branch after its `return`, so creating a version had been a no-op
+    # producing a 500.
+    serializer = WorkflowVersionSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    last_version = (
+        WorkflowVersion.objects.filter(workflow=workflow)
+        .order_by('-version_number').first()
+    )
+    next_number = (last_version.version_number + 1) if last_version else 1
+
+    # Ring-buffer behaviour: drop oldest version(s) if we're at the cap.
+    current_count = WorkflowVersion.objects.filter(workflow=workflow).count()
+    overflow = current_count - _MAX_WORKFLOW_VERSIONS + 1
+    if overflow > 0:
+        oldest_ids = list(
+            WorkflowVersion.objects.filter(workflow=workflow)
+            .order_by('version_number').values_list('id', flat=True)[:overflow]
         )
-        
-        return Response(WorkflowVersionSerializer(version).data, status=status.HTTP_201_CREATED)
+        WorkflowVersion.objects.filter(id__in=oldest_ids).delete()
+
+    version = serializer.save(
+        workflow=workflow,
+        version_number=next_number,
+        nodes=workflow.nodes,
+        edges=workflow.edges,
+        workflow_settings=workflow.workflow_settings,
+        created_by=request.user,
+    )
+    return Response(
+        WorkflowVersionSerializer(version).data,
+        status=status.HTTP_201_CREATED,
+    )
 
 
 @api_view(['POST'])
@@ -1580,22 +1592,14 @@ async def background_tasks(request):
         'history': history_executions,
         'count': len(active_executions)
     })
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-async def thought_history(request, execution_id):
-    """
-    Get AI thought history for a specific execution.
-    """
-    from .chat_context import get_thought_history
-    
-    history = get_thought_history(str(execution_id))
-    thoughts = history.get_thoughts()
-    
-    return Response({
-        'execution_id': str(execution_id),
-        'thoughts': thoughts,
-        'summary': history.to_summary()
-    })
+
+
+# NOTE: A duplicate async `thought_history` used to live here. It shadowed the
+# sync definition at the top of the file by name, so the URL pattern
+# `views.thought_history` resolved to whichever was defined last — silently
+# making the sync version dead code. Keeping the single sync version upstream.
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def system_info(request):

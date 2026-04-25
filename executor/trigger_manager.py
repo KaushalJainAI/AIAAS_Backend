@@ -2,9 +2,19 @@ import json
 import logging
 import redis
 from django.conf import settings
+
+from compiler.config_access import get_node_config
+from compiler.utils import get_node_type
 from workflow_backend.celery import app
 
 logger = logging.getLogger(__name__)
+
+# Trigger node classifications — centralised so adding a new polling/webhook
+# trigger is a single-line change.
+_WEBHOOK_TRIGGERS = {"webhook_trigger", "github_trigger", "telegram_trigger"}
+_POLLING_TRIGGERS = {
+    "rss_feed_trigger", "email_trigger", "google_sheets_trigger", "telegram_trigger",
+}
 
 class TriggerManager:
     """
@@ -35,53 +45,29 @@ class TriggerManager:
         self.unregister_triggers(workflow_id)
 
         for node in (workflow.nodes or []):
-            data = node.get('data', {})
-            node_type = data.get('nodeType')
-            config = data.get('config', {})
-            
-            if node_type in ["webhook_trigger", "github_trigger", "telegram_trigger"]:
-                path = config.get("path", "").strip("/")
-                
-                # For Telegram, we might use a default path if not specified
-                if not path and node_type == "telegram_trigger":
-                    path = "telegram"
-                
-                if not path:
-                    # For GitHub, we might fall back to repo name if path is missing
-                    if node_type == "github_trigger" and config.get("repository"):
-                        path = f"github/{config.get('repository').replace('/', '-')}"
-                    else:
-                        continue
-                    
-                key = f"webhook:{user_id}/{path}"
-                webhook_config = {
-                    "workflow_id": workflow_id,
-                    "user_id": user_id,
-                    "method": config.get("method", "POST"),
-                    "authentication": config.get("authentication", "none"),
-                    "auth_key": config.get("auth_key", ""),
-                    "auth_value": config.get("auth_value", ""),
-                    "secret_token": config.get("secret_token", ""),
-                    "node_type": node_type,
-                    "node_id": node.get("id"),
-                }
-                
-                self._redis.set(key, json.dumps(webhook_config))
-                registered_keys.append(key)
-                logger.info(f"Registered {node_type}: {key} for workflow {workflow_id}")
+            node_type = get_node_type(node)
+            config = get_node_config(node)
 
+            if node_type in _WEBHOOK_TRIGGERS:
+                key = self._register_webhook(node, node_type, config, user_id, workflow_id)
+                if key:
+                    registered_keys.append(key)
 
             elif node_type == "schedule_trigger":
                 self._register_schedule(workflow, config)
-                # Keep track of the schedule key for cleanup
                 registered_keys.append(f"schedule:{workflow_id}")
                 logger.info(f"Registered schedule for workflow {workflow_id}")
 
-            elif node_type in ["rss_feed_trigger", "email_trigger", "google_sheets_trigger", "telegram_trigger"]:
-                self._setup_periodic_polling(workflow, node['id'], config)
+            # NB: telegram_trigger appears in both webhook + polling sets; the
+            # webhook branch runs first and `continue`s, so polling registration
+            # only fires for nodes whose type isn't already webhook-handled.
+            if node_type in _POLLING_TRIGGERS and node_type not in _WEBHOOK_TRIGGERS:
+                self._setup_periodic_polling(workflow, node["id"], config)
                 polling_key = f"polling:{workflow_id}:{node['id']}"
                 registered_keys.append(polling_key)
-                logger.info(f"Registered polling for {node_type} ({node['id']}) in workflow {workflow_id}")
+                logger.info(
+                    f"Registered polling for {node_type} ({node['id']}) in workflow {workflow_id}"
+                )
 
         # Store keys in a set for easier cleanup later
         if registered_keys:
@@ -113,6 +99,39 @@ class TriggerManager:
         if data:
             return json.loads(data)
         return None
+
+    def _register_webhook(
+        self, node: dict, node_type: str, config: dict,
+        user_id: int, workflow_id: int,
+    ) -> str | None:
+        """
+        Register a single webhook trigger in Redis. Returns the key on
+        success, or None if the node lacks enough config to register.
+        """
+        path = (config.get("path") or "").strip("/")
+        if not path:
+            if node_type == "telegram_trigger":
+                path = "telegram"
+            elif node_type == "github_trigger" and config.get("repository"):
+                path = f"github/{config['repository'].replace('/', '-')}"
+            else:
+                return None
+
+        key = f"webhook:{user_id}/{path}"
+        webhook_config = {
+            "workflow_id": workflow_id,
+            "user_id": user_id,
+            "method": config.get("method", "POST"),
+            "authentication": config.get("authentication", "none"),
+            "auth_key": config.get("auth_key", ""),
+            "auth_value": config.get("auth_value", ""),
+            "secret_token": config.get("secret_token", ""),
+            "node_type": node_type,
+            "node_id": node.get("id"),
+        }
+        self._redis.set(key, json.dumps(webhook_config))
+        logger.info(f"Registered {node_type}: {key} for workflow {workflow_id}")
+        return key
 
     def _register_schedule(self, workflow, config):
         """

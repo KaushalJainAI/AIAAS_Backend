@@ -237,14 +237,36 @@ AVAILABLE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_knowledge_bases",
+            "description": "List all knowledge bases (KBs) available to the user. Call this first to discover which KBs exist and their IDs before deciding which one to search. Each KB has a name, document count, and vector count.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "knowledge_base_search",
-            "description": "Search the user's uploaded documents and knowledge base using semantic similarity (RAG). Use this when the user asks about content from their uploaded files or documents.",
+            "description": (
+                "Search a specific knowledge base (or the user's default KB) using semantic similarity. "
+                "Use this when the user asks about content from their uploaded documents. "
+                "Call list_knowledge_bases first if you are unsure which KB to search. "
+                "Do NOT call this unless the query is genuinely about document content — avoid for factual/coding questions."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The natural-language query to search for in the knowledge base."
+                        "description": "Natural-language query to search for in the knowledge base."
+                    },
+                    "kb_id": {
+                        "type": "integer",
+                        "description": "ID of the specific KB to search (from list_knowledge_bases). Omit to search the user's default KB."
                     },
                     "top_k": {
                         "type": "integer",
@@ -609,30 +631,76 @@ async def execute_tool(func_name: str, args: Dict[str, Any], context: Dict[str, 
             except Exception as e:
                 return f"Error: Sandbox execution failed: {str(e)}"
             
+        elif func_name == "list_knowledge_bases":
+            import json
+            user_id = context.get("user_id")
+            if not user_id:
+                return json.dumps({"error": "No user context."})
+            try:
+                from inference.models import KnowledgeBase
+                from asgiref.sync import sync_to_async
+
+                def _list():
+                    kbs = KnowledgeBase.objects.filter(user_id=user_id).values(
+                        'id', 'name', 'description', 'doc_count', 'vector_count',
+                        'index_size_bytes', 'is_default', 'embedding_model',
+                    )
+                    return list(kbs)
+
+                kbs = await sync_to_async(_list)()
+                for kb in kbs:
+                    b = kb['index_size_bytes']
+                    for unit in ('B', 'KB', 'MB', 'GB'):
+                        if b < 1024:
+                            kb['size_human'] = f'{b:.1f} {unit}'
+                            break
+                        b /= 1024
+                    else:
+                        kb['size_human'] = f'{b:.1f} TB'
+                return json.dumps({"knowledge_bases": kbs, "count": len(kbs)})
+            except Exception as e:
+                return json.dumps({"error": f"Failed to list KBs: {e}"})
+
         elif func_name == "knowledge_base_search":
+            import json
             query = args.get("query", "")
             if not query:
                 return "Error: Missing search query"
             top_k = min(int(args.get("top_k", 5)), 20)
+            kb_id = args.get("kb_id")
+            user_id = context.get("user_id")
+            if not user_id:
+                return json.dumps({"error": "No user context for knowledge base search."})
             try:
-                from inference.engine import get_user_knowledge_base
-                user_id = context.get("user_id")
-                if not user_id:
-                    return "Error: No user context for knowledge base search."
-                kb = get_user_knowledge_base(user_id)
-                results = await kb.search(query, top_k=top_k)
+                from inference.engine import get_hnsw_kb, get_kb_for_user
+
+                if kb_id:
+                    from inference.models import KnowledgeBase
+                    from asgiref.sync import sync_to_async
+                    kb_model = await sync_to_async(
+                        lambda: KnowledgeBase.objects.filter(id=kb_id, user_id=user_id).first()
+                    )()
+                    if not kb_model:
+                        return json.dumps({"error": f"KB {kb_id} not found or not owned by user."})
+                    hnsw = get_hnsw_kb(kb_model.id, kb_model.s3_index_key or f'indices/kb_{kb_model.id}')
+                    await hnsw.initialize()
+                else:
+                    _, hnsw = await get_kb_for_user(user_id)
+
+                results = await hnsw.search(query, top_k=top_k)
                 if not results:
-                    import json
-                    return json.dumps({"status": "no_results", "message": "No relevant documents found in your knowledge base. Upload files first."})
-                import json
-                items = []
-                for r in results:
-                    items.append({
+                    return json.dumps({"status": "no_results", "message": "No relevant documents found. Try a different query or check that documents are indexed."})
+
+                items = [
+                    {
                         "document_id": r.document_id,
                         "score": round(r.score, 4),
                         "content": r.content[:2000],
                         "metadata": r.metadata,
-                    })
+                        "is_image": r.is_image,
+                    }
+                    for r in results
+                ]
                 return json.dumps({"status": "success", "results": items, "count": len(items)})
             except Exception as e:
                 return f"Error: Knowledge base search failed: {str(e)}"

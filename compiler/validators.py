@@ -1,612 +1,434 @@
 """
-Workflow Validators
+Workflow validators.
 
-DAG validation, credential checking, and type compatibility.
+Each function takes the raw ReactFlow-style node/edge lists and returns a list
+of CompileError objects (possibly empty). The compiler aggregates these and
+decides which are blocking vs. warnings.
+
+Public API (consumed by orchestrator/views.py):
+    - validate_dag
+    - validate_credentials
+    - validate_node_configs
+    - validate_type_compatibility
+    - topological_sort (consumed by compiler.py)
 """
+from __future__ import annotations
+
+import re
+from collections import defaultdict, deque
 from typing import Any
-from collections import defaultdict
 
+from .config_access import get_credential_ref, get_node_config, get_node_data
+from .node_types import LOOP_NODE_TYPES, TRIGGER_NODE_TYPES
 from .schemas import CompileError
-
-
 from .utils import get_node_type
+
 
 def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:
     """
-    Validate the workflow is a valid DAG.
-    
+    Validate the workflow is a valid DAG, with one allowed exception: cycles
+    that close back on a loop-type node are permitted (they model iteration).
+
     Checks:
-    - No cycles exist
-    - No orphan nodes (unreachable from triggers)
-    - All edge references are valid
-    
-    Args:
-        nodes: List of node definitions with 'id' and 'type'
-        edges: List of edge definitions with 'source' and 'target'
-    
-    Returns:
-        List of CompileError if validation fails
+        - Non-empty node set
+        - All edge endpoints reference known nodes
+        - No cycles except those whose back-edge target is a loop node
+        - At least one trigger (zero in-degree) node exists
+        - All nodes are reachable from some trigger
     """
-    errors = []
-    
+    errors: list[CompileError] = []
+
     if not nodes:
         errors.append(CompileError(
             error_type="empty_workflow",
-            message="Workflow has no nodes"
+            message="Workflow has no nodes",
         ))
         return errors
-    
-    # Build node lookup and adjacency list
-    node_ids = [node['id'] for node in nodes]  # preserve order
-    
-    # Get actual node handler type - check nodeType, data.nodeType, then fallback to type
-    node_types = {
-        node['id']: get_node_type(node)
-        for node in nodes
-    }
-    
-    # Adjacency list: node_id -> list of downstream node_ids
+
+    node_ids = [n["id"] for n in nodes]
+    node_id_set = set(node_ids)
+    node_types = {n["id"]: get_node_type(n) for n in nodes}
+
     adjacency: dict[str, list[str]] = defaultdict(list)
-    in_degree: dict[str, int] = {nid: 0 for nid in node_ids}
-    
-    # Validate edges and build graph
+    in_degree: dict[str, int] = dict.fromkeys(node_ids, 0)
+
+    # 1. Validate edge endpoints and build adjacency.
+    edge_errors_exist = False
     for edge in edges:
-        source = edge.get('source')
-        target = edge.get('target')
-        
-        if source not in node_ids:
+        src, tgt = edge.get("source"), edge.get("target")
+        if src not in node_id_set:
             errors.append(CompileError(
-                node_id=source,
-                error_type="invalid_edge",
-                message=f"Edge source '{source}' does not exist"
+                node_id=src, error_type="invalid_edge",
+                message=f"Edge source '{src}' does not exist",
             ))
+            edge_errors_exist = True
             continue
-        
-        if target not in node_ids:
+        if tgt not in node_id_set:
             errors.append(CompileError(
-                node_id=target,
-                error_type="invalid_edge",
-                message=f"Edge target '{target}' does not exist"
+                node_id=tgt, error_type="invalid_edge",
+                message=f"Edge target '{tgt}' does not exist",
             ))
+            edge_errors_exist = True
             continue
-        
-        adjacency[source].append(target)
-        in_degree[target] += 1
-    
+        adjacency[src].append(tgt)
+        in_degree[tgt] += 1
+
+    # Structural edge issues invalidate downstream cycle/orphan checks.
+    if edge_errors_exist:
+        return errors
+
+    # 2. Detect illegal cycles (cycles not closed on a loop node).
+    errors.extend(_find_illegal_cycles(node_ids, adjacency, node_types))
     if errors:
         return errors
-    
-    # Detect cycles using DFS, but allow cycles if they involve a loop node
-    # Loop nodes are allowed to be part of a cycle (back-edges)
-    LOOP_NODE_TYPES = {'split_in_batches', 'loop'}
-    
-    visited = set()
-    rec_stack = set()
-    path_nodes = [] # Track path to identify nodes in the current recursion stack
-    cycle_detected = False
-    
-    def has_bad_cycle(node_id: str) -> bool:
-        visited.add(node_id)
-        rec_stack.add(node_id)
-        path_nodes.append(node_id)
-        
-        for neighbor in sorted(adjacency[node_id]):
-            if neighbor not in visited:
-                if has_bad_cycle(neighbor):
-                    return True
-            elif neighbor in rec_stack:
-                # Back-edge found — cycle detected.
-                # A cycle is only valid when the back-edge target IS a loop node
-                # (i.e. the loop node is the entry point that closes the cycle).
-                # A cycle with a loop node somewhere in the middle is still infinite.
-                if node_types.get(neighbor) not in LOOP_NODE_TYPES:
-                    try:
-                        start_index = path_nodes.index(neighbor)
-                        cycle_path = path_nodes[start_index:]
-                    except ValueError:
-                        cycle_path = [neighbor]
-                    errors.append(CompileError(
-                        node_id=neighbor,
-                        error_type="dag_cycle",
-                        message=f"Infinite cycle detected involving nodes: {', '.join(cycle_path)}"
-                    ))
-                    return True  # Bad cycle — stop DFS
-        
-        rec_stack.remove(node_id)
-        path_nodes.pop()
-        return False
-    
-    for node_id in node_ids:
-        if node_id not in visited:
-            if has_bad_cycle(node_id):
-                return errors  # Stop at first bad cycle
-    
-    # Find trigger nodes (no incoming edges)
-    trigger_types = {'manual_trigger', 'webhook_trigger', 'schedule_trigger', 'webhook'}
+
+    # 3. Trigger presence — at least one zero-in-degree node.
     triggers = [nid for nid in node_ids if in_degree[nid] == 0]
-    
     if not triggers:
         errors.append(CompileError(
             error_type="no_trigger",
-            message="Workflow has no trigger node (entry point)"
+            message="Workflow has no trigger node (entry point)",
         ))
-    
-    # Check for orphan nodes (not reachable from any trigger)
-    # Note: For orphan checking, we still traverse. Valid loops make everything reachable.
-    reachable = set()
-    
-    def mark_reachable(node_id: str):
-        if node_id in reachable:
-            return
-        reachable.add(node_id)
-        for neighbor in adjacency[node_id]:
-            mark_reachable(neighbor)
-    
-    for trigger in triggers:
-        mark_reachable(trigger)
-    
-    orphans = set(node_ids) - reachable
-    for orphan in orphans:
+
+    # 4. Orphan check — all nodes must be reachable from some zero-in-degree node.
+    reachable: set[str] = set()
+    stack = list(triggers)
+    while stack:
+        nid = stack.pop()
+        if nid in reachable:
+            continue
+        reachable.add(nid)
+        stack.extend(adjacency[nid])
+
+    for orphan in sorted(set(node_ids) - reachable):
         errors.append(CompileError(
-            node_id=orphan,
-            error_type="orphan_node",
-            message=f"Node '{orphan}' is not reachable from any trigger"
+            node_id=orphan, error_type="orphan_node",
+            message=f"Node '{orphan}' is not reachable from any trigger",
         ))
-    
+
+    return errors
+
+
+def _find_illegal_cycles(
+    node_ids: list[str],
+    adjacency: dict[str, list[str]],
+    node_types: dict[str, str],
+) -> list[CompileError]:
+    """
+    DFS-based cycle detection. A cycle is legal iff the back-edge target
+    is a loop-type node (the loop node is the cycle's header).
+    """
+    errors: list[CompileError] = []
+    visited: set[str] = set()
+    on_stack: set[str] = set()
+    path: list[str] = []
+
+    def dfs(start: str) -> bool:
+        # Iterative DFS to avoid Python recursion limits on deep graphs.
+        # We push (node, iterator-over-neighbors) frames.
+        frame_stack: list[tuple[str, iter]] = [(start, iter(sorted(adjacency[start])))]
+        visited.add(start)
+        on_stack.add(start)
+        path.append(start)
+
+        while frame_stack:
+            node, it = frame_stack[-1]
+            neighbor = next(it, None)
+
+            if neighbor is None:
+                on_stack.discard(node)
+                path.pop()
+                frame_stack.pop()
+                continue
+
+            if neighbor in on_stack:
+                # Back-edge. Legal only if neighbor is a loop-header.
+                if node_types.get(neighbor) not in LOOP_NODE_TYPES:
+                    try:
+                        cycle_path = path[path.index(neighbor):]
+                    except ValueError:
+                        cycle_path = [neighbor]
+                    errors.append(CompileError(
+                        node_id=neighbor, error_type="dag_cycle",
+                        message=f"Infinite cycle detected involving nodes: {', '.join(cycle_path)}",
+                    ))
+                    return True
+                continue
+
+            if neighbor not in visited:
+                visited.add(neighbor)
+                on_stack.add(neighbor)
+                path.append(neighbor)
+                frame_stack.append((neighbor, iter(sorted(adjacency[neighbor]))))
+
+        return False
+
+    for nid in node_ids:
+        if nid not in visited:
+            if dfs(nid):
+                return errors
+
     return errors
 
 
 def validate_credentials(
-    nodes: list[dict],
-    user_credentials: set[str]
-    ) -> list[CompileError]:
+    nodes: list[dict], user_credentials: set[str],
+) -> list[CompileError]:
     """
-    Validate user has required credentials for all nodes.
-    
-    Args:
-        nodes: List of node definitions
-        user_credentials: Set of credential IDs (as strings) the user has
-    
-    Returns:
-        List of CompileError for missing credentials
+    For each node that references a credential, verify the user owns it.
+
+    Accepts credential references under any of: credential_id, credentialId,
+    credential — see config_access.get_credential_ref.
     """
-    errors = []
-    
+    errors: list[CompileError] = []
     for node in nodes:
-        node_id = node.get('id', '')
-        config = node.get('data', {}).get('config', {})
-        
-        # Check if node uses a credential field
-        credential_id = config.get('credential')
-        if credential_id and credential_id not in user_credentials:
+        cfg = get_node_config(node)
+        cred_id = get_credential_ref(cfg)
+        if cred_id and cred_id not in user_credentials:
             errors.append(CompileError(
-                node_id=node_id,
+                node_id=node.get("id", ""),
                 error_type="missing_credential",
-                message=f"Credential '{credential_id}' not found for node"
+                message=f"Credential '{cred_id}' not found for node",
             ))
-    
     return errors
+
+
+# Loop iteration ceilings. Below _MIN_LOOP treated as misconfiguration; above
+# _MAX_LOOP treated as a footgun (runaway bills / executions).
+_MIN_LOOP_COUNT = 1
+_MAX_LOOP_COUNT = 1000
 
 
 def validate_node_configs(nodes: list[dict]) -> list[CompileError]:
     """
-    Validate node configurations are complete.
-    
-    Args:
-        nodes: List of node definitions
-    
-    Returns:
-        List of CompileError for invalid configs
+    Validate node configs against handler requirements and type-specific rules.
     """
     from nodes.handlers.registry import get_registry
-    
-    errors = []
+
+    errors: list[CompileError] = []
     registry = get_registry()
-    
+
     for node in nodes:
-        node_id = node.get('id', '')
+        node_id = node.get("id", "")
         node_type = get_node_type(node)
-        config = node.get('data', {}).get('config', {})
-        
+        cfg = get_node_config(node)
+
         if not registry.has_handler(node_type):
             errors.append(CompileError(
-                node_id=node_id,
-                error_type="unknown_node_type",
-                message=f"Unknown node type: '{node_type}'"
+                node_id=node_id, error_type="unknown_node_type",
+                message=f"Unknown node type: '{node_type}'",
             ))
             continue
-        
-        # SPECIAL VALIDATION: Loop Nodes must have max_loop_count
-        if node_type in ['loop', 'split_in_batches']:
-            max_loop = config.get('max_loop_count')
-            if max_loop is None:
-                errors.append(CompileError(
-                    node_id=node_id,
-                    error_type="missing_config",
-                    message="Loop nodes must have 'max_loop_count' defined"
-                ))
-            elif not isinstance(max_loop, int) or max_loop <= 0:
-                errors.append(CompileError(
-                    node_id=node_id,
-                    error_type="invalid_config",
-                    message="'max_loop_count' must be a positive integer"
-                ))
-            elif max_loop > 1000: # Safe upper bound
-                errors.append(CompileError(
-                    node_id=node_id,
-                    error_type="invalid_config",
-                    message="'max_loop_count' cannot exceed 1000"
-                ))
-        
-        # Validate config against handler's fields
+
+        if node_type in LOOP_NODE_TYPES:
+            errors.extend(_validate_loop_config(node_id, cfg))
+
         handler = registry.get_handler(node_type)
-        config_errors = handler.validate_config(config)
-        
-        for error_msg in config_errors:
+        for msg in handler.validate_config(cfg):
             errors.append(CompileError(
-                node_id=node_id,
-                error_type="invalid_config",
-                message=error_msg
+                node_id=node_id, error_type="invalid_config", message=msg,
             ))
 
-        # Expression Validation
-        expression_errors = validate_expressions(node, nodes)
-        errors.extend(expression_errors)
-    
+        errors.extend(_validate_expressions(node))
+
     return errors
 
 
-def validate_expressions(node: dict, all_nodes: list[dict]) -> list[CompileError]:
-    """
-    Validate expressions in node config for unresolvable node references.
-    """
-    import re
-    
-    errors = []
-    node_id = node.get('id', '')
-    node_label = node.get('data', {}).get('label', '')
-    config = node.get('data', {}).get('config', {})
-    
-    node_labels = {n.get('data', {}).get('label') for n in all_nodes if n.get('data', {}).get('label')}
-    
-    def check_value(val, path=""):
-        if isinstance(val, str):
-            # Regex for $node['Label'] or $node["Label"]
-            matches = re.finditer(r"\{\{\s*\$node\[['\"]([^'\"]+)['\"]\]\.(.*?)\s*\}\}", val)
-            for match in matches:
-                ref_label = match.group(1)
-                # Suppression: The compiler will no longer error or warn about output nodes that are only known at runtime.
-                """
-                if ref_label not in node_labels:
-                    errors.append(CompileError(
-                        node_id=node_id,
-                        error_type="expression_missing_node",
-                        type="warning",
-                        message=f"Expression in node '{node_label}' refers to non-existent node '{ref_label}'",
-                        field=path
-                    ))
-                """
-        elif isinstance(val, dict):
-            for k, v in val.items():
-                check_value(v, f"{path}.{k}" if path else k)
-        elif isinstance(val, list):
-            for i, v in enumerate(val):
-                check_value(v, f"{path}[{i}]" if path else str(i))
+def _validate_loop_config(node_id: str, cfg: dict) -> list[CompileError]:
+    out: list[CompileError] = []
+    max_loop = cfg.get("max_loop_count")
+    if max_loop is None:
+        out.append(CompileError(
+            node_id=node_id, error_type="missing_config",
+            message="Loop nodes must have 'max_loop_count' defined",
+        ))
+    elif not isinstance(max_loop, int) or max_loop < _MIN_LOOP_COUNT:
+        out.append(CompileError(
+            node_id=node_id, error_type="invalid_config",
+            message="'max_loop_count' must be a positive integer",
+        ))
+    elif max_loop > _MAX_LOOP_COUNT:
+        out.append(CompileError(
+            node_id=node_id, error_type="invalid_config",
+            message=f"'max_loop_count' cannot exceed {_MAX_LOOP_COUNT}",
+        ))
+    return out
 
-    check_value(config)
-    return errors
+
+# Matches {{ $node['label'].path }} / {{ $node["label"].path }} usage.
+_NODE_EXPR_RE = re.compile(r"\{\{\s*\$node\[['\"]([^'\"]+)['\"]\]\.(.*?)\s*\}\}")
+
+
+def _validate_expressions(node: dict) -> list[CompileError]:
+    """
+    Scan node config for expression syntax. Currently a no-op: historically
+    this emitted warnings for references to non-existent nodes, but runtime
+    semantics (variables, event payloads) make that unreliable — the check
+    produced false positives and was intentionally suppressed upstream.
+
+    Kept as an extension point; reinstating proper expression validation is
+    a larger task (would require a proper expression parser).
+    """
+    # The regex is retained so future checks can re-enable scanning without
+    # reworking the traversal. Touch it to keep the import meaningful.
+    _ = _NODE_EXPR_RE
+    return []
 
 
 def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
     """
-    Return nodes in strictly deterministic execution order.
-    
-    1. Preserves input order where possible.
-    2. Sorts zero-in-degree queues for determinism.
-    3. Breaks cycles at loop nodes.
+    Return nodes in a stable, deterministic execution order.
+
+    Rules:
+        1. Among zero-in-degree candidates, prefer input order.
+        2. When a node is dequeued, newly-zero-in-degree nodes are enqueued
+           in input order.
+        3. If cycles remain (allowed loop-back edges), unprocessed nodes are
+           appended at the end in input order.
     """
-    # 1. Preserve input order for stability
-    node_ids = [node['id'] for node in nodes]
-    node_indices = {nid: i for i, nid in enumerate(node_ids)}
-    
-    node_types = {
-        node['id']: get_node_type(node)
-        for node in nodes
-    }
-    LOOP_NODE_TYPES = {'split_in_batches', 'loop'}
-    
-    in_degree: dict[str, int] = {nid: 0 for nid in node_ids}
+    node_ids = [n["id"] for n in nodes]
+    idx = {nid: i for i, nid in enumerate(node_ids)}
+    node_id_set = set(node_ids)
+
     adjacency: dict[str, list[str]] = defaultdict(list)
-    
-    # Process edges - sort for determinism
-    # Sort by indices to allow stable processing relative to input order
-    sorted_edges = sorted(
-        edges, 
-        key=lambda e: (node_indices.get(e.get('source', ''), -1), node_indices.get(e.get('target', ''), -1))
-    )
-    
-    for edge in sorted_edges:
-        source = edge.get('source')
-        target = edge.get('target')
-        
-        if source in node_ids and target in node_ids:
-            adjacency[source].append(target)
-            in_degree[target] += 1
-            
-    # Sort adjacency lists by input order of children
+    in_degree: dict[str, int] = dict.fromkeys(node_ids, 0)
+
+    for edge in edges:
+        s, t = edge.get("source"), edge.get("target")
+        if s in node_id_set and t in node_id_set:
+            adjacency[s].append(t)
+            in_degree[t] += 1
+
     for nid in adjacency:
-        adjacency[nid].sort(key=lambda x: node_indices.get(x, -1))
-            
-    # Start with nodes that have no dependencies
-    # Sort by input index to preserve original order
-    queue = sorted([nid for nid in node_ids if in_degree[nid] == 0], key=lambda x: node_indices[x])
-    result = []
-    
-    processed_count = 0
-    while queue:
-        # Lexicographical sort for strict determinism in case of parallel branches?
-        # User prompt says "Preserve node ordering from the input list".
-        # But also "Sort all zero-in-degree queues".
-        # Input order IS a deterministic sort.
-        # But if we have parallel branches A and B, and A comes before B in list, A should be processed first.
-        # Queue is already sorted by index.
-        
-        # However, to be extra safe against list reordering upstream, we can sort by (index, id).
-        # We already sorted by index.
-        
-        node_id = queue.pop(0)
-        
+        adjacency[nid].sort(key=lambda x: idx[x])
+
+    ready = deque(sorted([n for n in node_ids if in_degree[n] == 0], key=idx.get))
+    result: list[str] = []
+
+    while ready:
+        # Maintain input-order priority across newly-added items.
+        if len(ready) > 1:
+            items = sorted(ready, key=idx.get)
+            ready = deque(items)
+        node_id = ready.popleft()
         result.append(node_id)
-        processed_count += 1
-        
-        for neighbor in adjacency[node_id]:
-            in_degree[neighbor] -= 1
-            if in_degree[neighbor] == 0:
-                queue.append(neighbor)
-        
-        # Re-sort queue to maintain input order priority for newly added nodes
-        # Use simple sort by index
-        queue.sort(key=lambda x: node_indices[x])
-                
-    # Handle Cycles (Deterministically)
-    if processed_count < len(node_ids):
-        # Find remaining nodes
-        remaining = [nid for nid in node_ids if nid not in result]
-        # Sort by index
-        remaining.sort(key=lambda x: node_indices.get(x, -1))
-        
-        # In a cycle, we might want to just append them. 
-        # The executor handles flow, so order might not strictly matter if they are in a loop 
-        # provided entry to loop is correct.
+
+        for nbr in adjacency[node_id]:
+            in_degree[nbr] -= 1
+            if in_degree[nbr] == 0:
+                ready.append(nbr)
+
+    if len(result) < len(node_ids):
+        remaining = [nid for nid in node_ids if nid not in set(result)]
+        remaining.sort(key=idx.get)
         result.extend(remaining)
-    
+
     return result
 
 
-# Output type hints for nodes (what type of data they produce)
-NODE_OUTPUT_TYPES = {
-    # Triggers produce generic data
-    'manual_trigger': {'main': 'any'},
-    'webhook_trigger': {'main': 'json'},
-    'schedule_trigger': {'main': 'datetime'},
-    'webhook': {'main': 'json'},
-    
-    # Core nodes
-    'http_request': {'output-0': 'json'},
-    'code': {'output-0': 'any'},
-    'set': {'output': 'json'},
-    'if': {'true': 'passthrough', 'false': 'passthrough'},
-    'switch': {'output-0': 'passthrough', 'output-1': 'passthrough', 'output-2': 'passthrough', 'output-3': 'passthrough'},
-    'merge': {'output': 'any'},
-    
-    # Flow Control
-    'split_in_batches': {'loop': 'any', 'done': 'any'},
-    'loop': {'loop': 'any', 'done': 'any'},
-    
-    # LLM nodes produce text
-    'openai': {'output-0': 'text'},
-    'gemini': {'output-0': 'text'},
-    'ollama': {'output-0': 'text'},
-    'perplexity': {'output-0': 'text'},
-    'openrouter': {'output-0': 'text'},
-    
-    # Integration nodes
-    'gmail': {'output-0': 'json'},
-    'slack': {'output-0': 'json'},
-    'google_sheets': {'output-0': 'json'},
-    'notion': {'output-0': 'json'},
-    'postgres': {'output-0': 'json'},
-    'mysql': {'output-0': 'json'},
-    'mongodb': {'output-0': 'json'},
-    'redis': {'output-0': 'json'},
-    'airtable': {'output-0': 'json'},
-    'telegram': {'output-0': 'json'},
-    'trello': {'output-0': 'json'},
-    'github': {'output-0': 'json'},
-    'discord': {'output-0': 'json'},
-    'subworkflow': {'output-0': 'any'},
+# ---------------------------------------------------------------------------
+# Type-compatibility validation.
+#
+# This is a best-effort static check. The table below covers common node types;
+# unknown types fall through as "accept any", so the check never false-fails
+# on a new handler.
+# ---------------------------------------------------------------------------
+
+NODE_OUTPUT_TYPES: dict[str, dict[str, str]] = {
+    # Triggers
+    "manual_trigger": {"main": "any"},
+    "webhook_trigger": {"main": "json"},
+    "schedule_trigger": {"main": "datetime"},
+    "webhook": {"main": "json"},
+    # Core
+    "http_request": {"output-0": "json"},
+    "code": {"output-0": "any"},
+    "set": {"output": "json"},
+    "if": {"true": "passthrough", "false": "passthrough"},
+    "switch": {f"output-{i}": "passthrough" for i in range(4)},
+    "merge": {"output": "any"},
+    # Flow control
+    "split_in_batches": {"loop": "any", "done": "any"},
+    "loop": {"loop": "any", "done": "any"},
+    # LLMs
+    "openai": {"output-0": "text"},
+    "gemini": {"output-0": "text"},
+    "ollama": {"output-0": "text"},
+    "perplexity": {"output-0": "text"},
+    "openrouter": {"output-0": "text"},
+    # Integrations
+    "gmail": {"output-0": "json"},
+    "slack": {"output-0": "json"},
+    "google_sheets": {"output-0": "json"},
+    "notion": {"output-0": "json"},
+    "postgres": {"output-0": "json"},
+    "mysql": {"output-0": "json"},
+    "mongodb": {"output-0": "json"},
+    "redis": {"output-0": "json"},
+    "airtable": {"output-0": "json"},
+    "telegram": {"output-0": "json"},
+    "trello": {"output-0": "json"},
+    "github": {"output-0": "json"},
+    "discord": {"output-0": "json"},
+    "subworkflow": {"output-0": "any"},
 }
 
-# Input type expectations (what types a node can accept)
-NODE_INPUT_TYPES = {
-    'http_request': ['json', 'any', 'text', 'passthrough'],
-    'code': ['json', 'any', 'text', 'passthrough'],
-    'set': ['json', 'any', 'text', 'passthrough'],
-    'if': ['json', 'any', 'text', 'passthrough'],
-    'switch': ['json', 'any', 'text', 'passthrough'],
-    'merge': ['json', 'any', 'text', 'passthrough'],
-    'split_in_batches': ['json', 'any', 'list', 'passthrough'],
-    'loop': ['json', 'any', 'list', 'passthrough'],
-    
-    'openai': ['json', 'any', 'text', 'passthrough'],
-    'gemini': ['json', 'any', 'text', 'passthrough'],
-    'ollama': ['json', 'any', 'text', 'passthrough'],
-    'gmail': ['json', 'any', 'text', 'passthrough'],
-    'slack': ['json', 'any', 'text', 'passthrough'],
-    'google_sheets': ['json', 'any', 'passthrough'],
-    'subworkflow': ['json', 'any', 'passthrough'],
+_ANY_INPUT = ["json", "any", "text", "passthrough"]
+NODE_INPUT_TYPES: dict[str, list[str]] = {
+    "http_request": _ANY_INPUT,
+    "code": _ANY_INPUT,
+    "set": _ANY_INPUT,
+    "if": _ANY_INPUT,
+    "switch": _ANY_INPUT,
+    "merge": _ANY_INPUT,
+    "split_in_batches": ["json", "any", "list", "passthrough"],
+    "loop": ["json", "any", "list", "passthrough"],
+    "openai": _ANY_INPUT,
+    "gemini": _ANY_INPUT,
+    "ollama": _ANY_INPUT,
+    "gmail": _ANY_INPUT,
+    "slack": _ANY_INPUT,
+    "google_sheets": ["json", "any", "passthrough"],
+    "subworkflow": ["json", "any", "passthrough"],
 }
 
 
 def validate_type_compatibility(
-    nodes: list[dict],
-    edges: list[dict]
-    ) -> list[CompileError]:
+    nodes: list[dict], edges: list[dict],
+) -> list[CompileError]:
     """
-    Validate type compatibility between connected nodes.
-    
-    Checks that the output type of a source node is compatible with
-    the expected input type of the target node.
-    
-    Args:
-        nodes: List of node definitions
-        edges: List of edge definitions
-        
-    Returns:
-        List of CompileError for type mismatches
+    Static type-compat check on each edge. Unknown node types pass.
     """
-    errors = []
-    
-    node_types = {
-        node['id']: get_node_type(node)
-        for node in nodes
-    }
-    
+    errors: list[CompileError] = []
+    node_types = {n["id"]: get_node_type(n) for n in nodes}
+
     for edge in edges:
-        source_id = edge.get('source')
-        target_id = edge.get('target')
-        source_handle = edge.get('sourceHandle', 'output')
-        
-        source_type = node_types.get(source_id, '')
-        target_type = node_types.get(target_id, '')
-        
-        # Get output type from source node
-        source_outputs = NODE_OUTPUT_TYPES.get(source_type, {'output': 'any'})
-        output_type = source_outputs.get(source_handle, 'any')
-        
-        # Get acceptable input types for target node
-        acceptable_inputs = NODE_INPUT_TYPES.get(target_type, ['any'])
-        
-        # Check compatibility
-        if output_type == 'error':
-            # Error outputs can only connect to error handlers or nodes that accept errors
-            if 'error' not in acceptable_inputs and 'any' not in acceptable_inputs:
+        src_id = edge.get("source")
+        tgt_id = edge.get("target")
+        src_handle = edge.get("sourceHandle", "output")
+
+        src_type = node_types.get(src_id, "")
+        tgt_type = node_types.get(tgt_id, "")
+
+        src_outputs = NODE_OUTPUT_TYPES.get(src_type, {"output": "any"})
+        out_type = src_outputs.get(src_handle, "any")
+
+        accepted = NODE_INPUT_TYPES.get(tgt_type, ["any"])
+
+        if out_type == "error":
+            if "error" not in accepted and "any" not in accepted:
                 errors.append(CompileError(
-                    node_id=target_id,
-                    error_type='type_mismatch',
-                    message=f"Node '{target_id}' cannot accept error output from '{source_id}'"
+                    node_id=tgt_id, error_type="type_mismatch",
+                    message=f"Node '{tgt_id}' cannot accept error output from '{src_id}'",
                 ))
-        elif output_type not in ['any', 'passthrough']:
-            # Check if output type is in acceptable inputs
-            if output_type not in acceptable_inputs and 'any' not in acceptable_inputs:
+        elif out_type not in ("any", "passthrough"):
+            if out_type not in accepted and "any" not in accepted:
                 errors.append(CompileError(
-                    node_id=target_id,
-                    error_type='type_mismatch',
-                    message=f"Type mismatch: '{source_type}' outputs '{output_type}' but '{target_type}' expects {acceptable_inputs}"
+                    node_id=tgt_id, error_type="type_mismatch",
+                    message=(
+                        f"Type mismatch: '{src_type}' outputs '{out_type}' "
+                        f"but '{tgt_type}' expects {accepted}"
+                    ),
                 ))
-    
+
     return errors
-
-
-def validate_nesting_depth(
-    nodes: list[dict],
-    user_id: int,
-    visited: set[str] = None,
-    depth: int = 0,
-    max_depth: int = 3  
-    ) -> list[CompileError]:
-    """
-    Recursively check that no workflow nesting exceeds max_depth.
-    Also detects circular dependencies across workflow boundaries.
-    """
-    from orchestrator.models import Workflow
-    
-    errors = []
-    if visited is None:
-        visited = set()
-        
-    if depth > max_depth:
-        # We can't easily attribute this to a specific node without context, 
-        # so we return a generic error or attach to the first subworkflow node found
-        return [CompileError(
-            error_type="max_depth_exceeded",
-            message=f"Workflow nesting exceeds maximum depth of {max_depth}"
-        )]
-        
-    for node in nodes:
-        node_type = get_node_type(node)
-        if node_type == 'subworkflow':
-            config = node.get('data', {}).get('config', {})
-            child_id = config.get('workflow_id')
-            node_id = node.get('id')
-            
-            if not child_id:
-                # Missing config handled by validate_node_configs, but we can't recurse
-                continue
-                
-            if child_id in visited:
-                 errors.append(CompileError(
-                    node_id=node_id,
-                    error_type="circular_dependency",
-                    message=f"Circular dependency detected: Workflow {child_id} is already in the chain"
-                ))
-                 continue
-                 
-            # Fetch child workflow
-            try:
-                # Validate access and existence
-                child_wf = Workflow.objects.get(id=child_id)
-                # Check permissions? Assuming if you can see it you can run it?
-                # Or validate user has access.
-                if child_wf.user_id != user_id: 
-                    # Depending on sharing model. For now strict ownership.
-                    # Or check for public templates.
-                    pass 
-                
-                # Recurse
-                new_visited = visited.copy()
-                new_visited.add(child_id) # Should be parent ID? 
-                # visited should track the chain of workflows.
-                # If we are validating current workflow, we add IT to visited before calling this?
-                # The validator is called for a workflow definition.
-                
-                # IMPORTANT: We need to know the ID of the CURRENT workflow to add to visited 
-                # before recursing, but we only have 'nodes'. 
-                # So we assume the caller handles the top-level ID.
-                
-                child_errors = validate_nesting_depth(
-                    child_wf.nodes,
-                    user_id,
-                    new_visited,
-                    depth + 1,
-                    max_depth
-                )
-                errors.extend(child_errors)
-                
-            except Workflow.DoesNotExist:
-                errors.append(CompileError(
-                    node_id=node_id,
-                    error_type="invalid_reference",
-                    message=f"Referenced workflow {child_id} does not exist"
-                ))
-            except Exception as e:
-                errors.append(CompileError(
-                    node_id=node_id,
-                    error_type="validation_error",
-                    message=f"Error validating subworkflow: {str(e)}"
-                ))
-                
-    return errors
-
-
-def validate_timeout_budget(
-    nodes: list[dict],
-    parent_timeout_ms: int = 300000
-    ) -> list[CompileError]:
-    """
-    Validate that total timeout budget for subworkflows doesn't exceed parent.
-    """
-    # This is a soft check, maybe return warnings?
-    # CompileError is hard error.
-    # For now, we skip implementation or keep it simple.
-    return []

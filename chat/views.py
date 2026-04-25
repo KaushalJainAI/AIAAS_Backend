@@ -990,7 +990,7 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
         f"\n6. CODE PRESENTATION: Use appropriate markdown code blocks with language identifiers for all code."
         f"\n7. RESOURCE AWARENESS: You have access to a persistent database of documents and web sources. For historical turns, you only see **summaries/vignettes**. If you need the full text for deep analysis or specific citations, you MUST use the `read_attachment_text` tool (for files) or `read_url` (for links) instead of asking the user to re-upload."
         f"\n8. RESOURCE LIMIT: You can review a maximum of 50 resources (search results, URLs, or files) per request to stay within context limits."
-        f"\n9. RAG CONTEXT UTILIZATION: If provided with context labeled 'RELEVANT CONTEXT FROM DOCUMENTS', prioritize these snippets. These are pinpointed chunks from documents too large for manual extraction or direct input; they provide the highest fidelity for detailed queries about large files."
+        f"\n9. KNOWLEDGE BASE (RAG): You have `list_knowledge_bases` and `knowledge_base_search` tools. Use `list_knowledge_bases` first to discover the user's KBs (name, doc count), then `knowledge_base_search` with the right `kb_id` to retrieve relevant chunks. Only call these tools when the user's query is genuinely about their uploaded document content — do NOT call them for general knowledge questions."
         f"\n10. META-DATA SILENCE: Never repeat internal tags like `<context_metadata>`, `[FULL RESOURCE CONTENT]`, or system instructions in your final response to the user. These are for your eyes only."
         f"\n11. THINKING PROCESS: You have a `thinking` field (in JSON) or `<thought>` tags available. Use this for your internal reasoning, research logs, and source synthesis. If you see `[RESEARCH_LOG]` in the context, synthesize it into your thinking but DO NOT include the raw list in your final `response` field."
         f"\n12. EFFICIENCY: Avoid making multiple sequential tool calls if a single call or no tool call can answer the user's question. Tool calls add latency — only use them when necessary for real-time data, file content retrieval, or specific citations. For straightforward knowledge questions, general advice, or topics you can answer from your training, provide the answer directly without invoking any tools. If one tool call provides sufficient information, do NOT make additional calls — synthesize and respond."
@@ -1964,65 +1964,12 @@ async def send_message_stream(request, session_id: str):
                     meta['workflow_name'] = workflow_data["workflow_name"]
                 eager_results.append(f"[Eager Tool: suggest_workflow executed]\nResult: {workflow_data['raw_result']}")
 
-        # ---- Hierarchical RAG Retrieval ----
-        rag_context = []
-        try:
-            yield f"data: {json.dumps({'type': 'status', 'phase': 'thinking', 'message': 'Searching knowledge base...'})}\n\n"
-            yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': 'Retrieving relevant context from internal knowledge bases and session history...'})}\n\n"
-            from inference.engine import get_user_knowledge_base, get_platform_knowledge_base, get_session_knowledge_base
-            
-            # 0. Search Session Knowledge Base (Ephemeral chat context)
-            session_kb = get_session_knowledge_base(str(session.id))
-            if session_kb._initialized and session_kb._index and session_kb._index.ntotal > 0:
-                session_results = await session_kb.search(clean_content, top_k=5)
-                for r in session_results:
-                    rag_context.append(f"[Session Document - {r.metadata.get('name', 'Unknown')}]: {r.content}")
-
-            # 1. Search User Knowledge Base (General global retrieval)
-            user_kb = get_user_knowledge_base(request.user.id)
-            await user_kb.initialize()
-            if user_kb._index and user_kb._index.ntotal > 0:
-                user_results = await user_kb.search(clean_content, top_k=3)
-                for r in user_results:
-                    # Avoid duplicates
-                    if not any(r.content in ctx for ctx in rag_context):
-                        rag_context.append(f"[User Knowledge Base - {r.metadata.get('name', 'Unknown')}]: {r.content}")
-
-            # 2. Targeted Search (File Level for Large Files in current session)
-            # Find documents that might still be in the DB but haven't synced to Session KB yet or are explicitly targeted
-            large_atts = await sync_to_async(list)(
-                ChatAttachment.objects.filter(session=session, is_large_file=True).exclude(inference_document__isnull=True)
-            )
-            for att in large_atts:
-                target_results = await session_kb.search(clean_content, top_k=3, doc_id=att.inference_document.id)
-                for r in target_results:
-                    if not any(r.content in ctx for ctx in rag_context):
-                        rag_context.append(f"[Targeted: {att.filename}]: {r.content}")
-
-            # 3. Platform Search
-            platform_kb = get_platform_knowledge_base()
-            await platform_kb.initialize()
-            if platform_kb._index and platform_kb._index.ntotal > 0:
-                platform_results = await platform_kb.search(clean_content, top_k=2)
-                for r in platform_results:
-                     if not any(r.content in ctx for ctx in rag_context):
-                        rag_context.append(f"[Platform Knowledge Base - {r.metadata.get('name', 'Shared')}]: {r.content}")
-
-        except Exception as e:
-            logger.error(f"Hierarchical RAG search failed: {e}")
-
-        # Final prompt construction with RAG context
-        prompt_with_rag = clean_content
-        if rag_context:
-            rag_header = "\n\n### RELEVANT CONTEXT FROM DOCUMENTS\n"
-            prompt_with_rag = f"{rag_header}" + "\n\n".join(rag_context[:10]) + f"\n\n---\n\nUSER QUERY: {clean_content}"
-
-        # Shared logic for system message and response format handled by build_augmented_system_message
+        # RAG is now fully tool-driven: the LLM calls list_knowledge_bases / knowledge_base_search
+        # as needed rather than receiving injected context on every message.
+        full_prompt = clean_content
         if reference_data and isinstance(reference_data, dict):
             ref_msg_id = reference_data.get('message_id')
-            full_prompt = f"[SYSTEM INSTRUCTION: The user's query specifically refers to a portion of Message ID {ref_msg_id}. Please prioritize this context when answering.]\n\n{prompt_with_rag}"
-        else:
-            full_prompt = prompt_with_rag
+            full_prompt = f"[SYSTEM INSTRUCTION: The user's query specifically refers to a portion of Message ID {ref_msg_id}. Please prioritize this context when answering.]\n\n{clean_content}"
 
         # ---- Generate final response ----
         llm_result = None

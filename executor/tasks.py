@@ -154,8 +154,12 @@ def execute_scheduled_workflow(workflow_id: int, user_id: int):
 @shared_task(bind=True)
 def poll_workflow_trigger(self, workflow_id: int, node_id: str):
     """
-    Poll a specific trigger node for new items.
-    Used for Email, RSS, Sheets, etc.
+    Poll a specific trigger node for new items (Email, RSS, Sheets, ...).
+
+    Acquires a short Redis lock so concurrent beat-workers on different
+    hosts don't double-poll. All async work runs under a single
+    asyncio.run — previously each async call created and tore down its
+    own loop, which broke any cross-call state.
     """
     import asyncio
     import redis
@@ -163,74 +167,69 @@ def poll_workflow_trigger(self, workflow_id: int, node_id: str):
     from orchestrator.models import Workflow, TriggerState
     from nodes.registry import get_registry
     from compiler.schemas import ExecutionContext
+    from compiler.config_access import get_credential_ref, get_node_config
+    from compiler.utils import get_node_type
     from credentials.manager import get_credential_manager
-    
-    # 1. Acquire Distributed Lock (for horizontal scalability)
+    from uuid import uuid4
+
     r = redis.from_url(settings.CELERY_BROKER_URL)
-    lock_key = f"lock:poll:{workflow_id}:{node_id}"
-    # 5 minute lock, with non-blocking check
-    lock = r.lock(lock_key, timeout=300, blocking_timeout=0)
-    
+    lock = r.lock(f"lock:poll:{workflow_id}:{node_id}", timeout=300, blocking_timeout=0)
+
     if not lock.acquire(blocking=False):
         logger.warning(f"Poll task for {workflow_id}:{node_id} already running elsewhere.")
         return {"status": "skipped", "reason": "lock_active"}
 
     try:
-        # 2. Fetch Workflow and Node Config
         try:
             workflow = Workflow.objects.get(id=workflow_id)
         except Workflow.DoesNotExist:
             return {"error": "Workflow not found"}
 
-        node = next((n for n in workflow.nodes if n['id'] == node_id), None)
+        node = next((n for n in workflow.nodes if n["id"] == node_id), None)
         if not node:
             return {"error": f"Node {node_id} not found in workflow {workflow_id}"}
-            
-        node_type = node.get('data', {}).get('nodeType')
-        config = node.get('data', {}).get('config', {})
-        
-        # 3. Load Handler
+
+        node_type = get_node_type(node)
+        config = get_node_config(node)
+
         registry = get_registry()
         handler = registry.get_handler(node_type)
         if not handler:
             return {"error": f"Handler for {node_type} not found"}
 
-        # 4. Get Current State (Cursor)
         trigger_state_obj, _ = TriggerState.objects.get_or_create(
-            workflow=workflow,
-            node_id=node_id
+            workflow=workflow, node_id=node_id,
         )
-        
-        # 5. Build Context (needed for credentials/poll)
+
         cred_manager = get_credential_manager()
-        # In a real environment, we'd fetch all relevant credentials for this workflow
-        # For poll, we usually only need the one specified in config
-        credentials = {}
-        target_cred_name = config.get("credential")
-        if target_cred_name:
-            creds = asyncio.run(cred_manager.get_workflow_credentials(workflow))
-            credentials = {c['name']: c['data'] for c in creds}
+        needs_creds = get_credential_ref(config) is not None
 
-        context = ExecutionContext(
-            workflow_id=str(workflow_id),
-            execution_id=f"poll_{workflow_id}_{node_id}",
-            credentials=credentials
-        )
+        async def _poll():
+            credentials: dict = {}
+            if needs_creds:
+                creds = await cred_manager.get_workflow_credentials(workflow)
+                credentials = {c["name"]: c["data"] for c in creds}
 
-        # 6. Execute Poll
-        new_items, updated_state = asyncio.run(handler.poll(config, trigger_state_obj.state, context))
+            context = ExecutionContext(
+                # ExecutionContext enforces typed identity fields: UUID + int.
+                # Previously strings were passed, which raised at runtime.
+                workflow_id=workflow_id,
+                execution_id=uuid4(),
+                user_id=workflow.user_id,
+                credentials=credentials,
+            )
+            return await handler.poll(config, trigger_state_obj.state, context)
 
-        # 7. Dispatch Executions
+        new_items, updated_state = asyncio.run(_poll())
+
         if new_items:
             logger.info(f"Poll for {node_type} found {len(new_items)} new items")
             for item in new_items:
                 execute_workflow_async.delay(
                     workflow_id=workflow_id,
                     user_id=workflow.user_id,
-                    input_data=item # This will be passed to Node.execute as input_data
+                    input_data=item,
                 )
-            
-            # 8. Save Updated State
             trigger_state_obj.state = updated_state
             trigger_state_obj.save()
 
@@ -240,7 +239,11 @@ def poll_workflow_trigger(self, workflow_id: int, node_id: str):
         logger.exception(f"Polling failed for {workflow_id}:{node_id}: {e}")
         return {"status": "error", "message": str(e)}
     finally:
-        lock.release()
+        try:
+            lock.release()
+        except Exception:
+            # Lock may have expired while we held it; nothing to do.
+            pass
 
 
 # ======================== Document Processing Tasks ========================

@@ -1,527 +1,685 @@
 """
-Inference Engine - RAG Query Pipeline and Knowledge Base
+Inference Engine — Persistent HNSW Knowledge Base
 
-Implements:
-- Knowledge base with FAISS/Chroma vector storage
-- Document chunking and embedding
-- RAG query pipeline for context-aware LLM responses
+Key design decisions:
+- Embedding model: Qwen/Qwen3-Embedding-0.6B (0.6B params, text-only, 1024-dim)
+- Quantization: PyTorch dynamic int8 on CPU — no CUDA required, ~4x memory reduction
+- Index type: FAISS IndexHNSWFlat (approx NN, much faster search than flat for large corpora)
+- Persistence: each KB saves a .faiss index + .pkl document map locally, then syncs to S3
+- Embeddings are stored in the pickle so deletion never requires re-encoding
+- S3 sync is best-effort: if AWS is not configured, local-only mode is used silently
 """
-import logging
 import asyncio
-import numpy as np
-from typing import Any, List, Dict, Optional
+import logging
+import pickle
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import numpy as np
 from asgiref.sync import sync_to_async
-from workflow_backend.thresholds import CHUNK_SIZE, CHUNK_OVERLAP, SEARCH_TOP_K, SEARCH_MIN_SCORE
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-# Global embedder variables for singleton pattern
+# ---------------------------------------------------------------------------
+# Global embedder singleton
+# Model : Qwen/Qwen3-Embedding-0.6B  (0.6B params, text-only)
+# Quant : PyTorch dynamic int8 on CPU (torch.quantization.quantize_dynamic)
+# Dim   : 1024
+# ---------------------------------------------------------------------------
+
 _global_embedder = None
 _embedder_lock = asyncio.Lock()
+EMBEDDING_DIM = 1024
+EMBEDDING_MODEL = 'Qwen/Qwen3-Embedding-0.6B'
+
+
+class QwenEmbedder:
+    """
+    Wraps Qwen3-Embedding-0.6B with PyTorch dynamic int8 quantization on CPU.
+    Exposes encode(texts) returning list of normalised numpy arrays (N, 1024).
+    """
+
+    def __init__(self, model, tokenizer):
+        self._model = model
+        self._tokenizer = tokenizer
+
+    def _last_token_pool(self, last_hidden_state, attention_mask):
+        import torch
+        seq_len = attention_mask.sum(dim=1) - 1
+        batch_idx = torch.arange(last_hidden_state.size(0))
+        return last_hidden_state[batch_idx, seq_len]
+
+    def _normalise(self, vec: np.ndarray) -> np.ndarray:
+        norm = np.linalg.norm(vec)
+        return vec / norm if norm > 0 else vec
+
+    def encode(self, texts: list[str]) -> list:
+        import torch
+        inputs = self._tokenizer(
+            texts,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=512,
+        )
+        with torch.no_grad():
+            out = self._model(**inputs)
+            pooled = self._last_token_pool(out.last_hidden_state, inputs['attention_mask'])
+        arr = pooled.float().numpy()  # (B, 1024)
+        return [self._normalise(row) for row in arr]
+
+
+def _load_qwen_embedder() -> QwenEmbedder:
+    import torch
+    from transformers import AutoTokenizer, AutoModel
+
+    logger.info(f"[Embedder] Loading {EMBEDDING_MODEL} | device=cpu | quant=int8")
+
+    tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL, trust_remote_code=True)
+    model = AutoModel.from_pretrained(
+        EMBEDDING_MODEL,
+        torch_dtype=torch.float32,
+        trust_remote_code=True,
+    )
+    model.eval()
+
+    # Dynamic int8 quantization — all Linear layers quantized at inference time, CPU only
+    model = torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
+
+    logger.info(f"[Embedder] {EMBEDDING_MODEL} ready (int8, cpu).")
+    return QwenEmbedder(model, tokenizer)
 
 
 def _preload_embedder():
-    """Pre-load the SentenceTransformer model in a background thread on server start.
-    This eliminates cold-start latency on the first RAG search."""
+    """Called from InferenceConfig.ready() after all Django modules are loaded."""
     global _global_embedder
     if _global_embedder is not None:
         return
     try:
-        from sentence_transformers import SentenceTransformer
-        logger.info("[Background] Pre-loading SentenceTransformer model: all-MiniLM-L6-v2 on CPU...")
-        _global_embedder = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-        logger.info("[Background] SentenceTransformer model loaded and ready.")
+        _global_embedder = _load_qwen_embedder()
     except Exception as e:
-        logger.warning(f"[Background] Embedder preload failed (will retry on first use): {e}")
+        logger.warning(f"[Embedder] Preload failed (will retry on first use): {e}")
 
 
-# Fire-and-forget: start warming up the embedder as soon as this module loads
-import threading
-threading.Thread(target=_preload_embedder, daemon=True).start()
-
-
-async def get_global_embedder():
-    """Get the global embedder. If already pre-loaded, returns instantly."""
+async def get_global_embedder() -> QwenEmbedder:
     global _global_embedder
-    
     if _global_embedder is not None:
         return _global_embedder
-        
     async with _embedder_lock:
         if _global_embedder is not None:
             return _global_embedder
-            
-        def load_model():
-            logger.info("Loading SentenceTransformer model: all-MiniLM-L6-v2 on CPU (fallback)")
-            from sentence_transformers import SentenceTransformer
-            return SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-            
-        _global_embedder = await asyncio.to_thread(load_model)
+        _global_embedder = await asyncio.to_thread(_load_qwen_embedder)
         return _global_embedder
 
 
+# ---------------------------------------------------------------------------
+# S3 helpers (best-effort, silent if AWS not configured)
+# ---------------------------------------------------------------------------
+
+def _s3_configured() -> bool:
+    return bool(
+        getattr(settings, 'AWS_ACCESS_KEY_ID', '') and
+        getattr(settings, 'AWS_STORAGE_BUCKET_NAME', '')
+    )
+
+
+def _get_s3_client():
+    import boto3
+    return boto3.client(
+        's3',
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=getattr(settings, 'AWS_S3_REGION_NAME', 'us-east-1'),
+        endpoint_url=getattr(settings, 'AWS_S3_ENDPOINT_URL', None) or None,
+    )
+
+
+def _upload_to_s3(local_path: Path, s3_key: str) -> bool:
+    if not _s3_configured():
+        return False
+    try:
+        client = _get_s3_client()
+        client.upload_file(
+            str(local_path),
+            settings.AWS_STORAGE_BUCKET_NAME,
+            s3_key,
+            ExtraArgs={'ACL': 'private'},
+        )
+        logger.info(f"Uploaded {local_path.name} to s3://{settings.AWS_STORAGE_BUCKET_NAME}/{s3_key}")
+        return True
+    except Exception as e:
+        logger.error(f"S3 upload failed for {s3_key}: {e}")
+        return False
+
+
+def _download_from_s3(s3_key: str, local_path: Path) -> bool:
+    if not _s3_configured():
+        return False
+    try:
+        client = _get_s3_client()
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        client.download_file(settings.AWS_STORAGE_BUCKET_NAME, s3_key, str(local_path))
+        logger.info(f"Downloaded s3://{settings.AWS_STORAGE_BUCKET_NAME}/{s3_key} → {local_path}")
+        return True
+    except Exception as e:
+        logger.debug(f"S3 download skipped for {s3_key}: {e}")
+        return False
+
+
+def _delete_from_s3(s3_key: str) -> bool:
+    if not _s3_configured():
+        return False
+    try:
+        client = _get_s3_client()
+        client.delete_object(Bucket=settings.AWS_STORAGE_BUCKET_NAME, Key=s3_key)
+        return True
+    except Exception as e:
+        logger.error(f"S3 delete failed for {s3_key}: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Search result
+# ---------------------------------------------------------------------------
+
 @dataclass
 class SearchResult:
-    """Result from a knowledge base search."""
     document_id: int
     chunk_id: str
     content: str
-    score: float
+    score: float        # cosine similarity in [0, 1]
     metadata: dict
+    is_image: bool = False
 
 
-class KnowledgeBase:
+# ---------------------------------------------------------------------------
+# HNSWKnowledgeBase — one instance per KnowledgeBase DB row
+# ---------------------------------------------------------------------------
+
+class HNSWKnowledgeBase:
     """
-    Vector-based knowledge base for RAG.
-    
-    Uses FAISS for local vector storage with sentence-transformer embeddings.
-    
-    Usage:
-        kb = KnowledgeBase()
-        await kb.initialize()
-        await kb.add_document(doc_id=1, content="...", metadata={})
-        results = await kb.search("query", top_k=5)
+    Persistent HNSW-based vector store for a single named KB.
+
+    Index format: FAISS IndexHNSWFlat (L2, normalized vectors → cosine similarity).
+    Persistence: .faiss file (index graph) + .pkl file (document/embedding map).
+    Both files are saved locally and uploaded to S3 on every write.
     """
-    
-    def __init__(self):
+
+    HNSW_M = 32              # connections per node — higher = better recall, more memory
+    HNSW_EF_CONSTRUCTION = 200
+    HNSW_EF_SEARCH = 64
+    MIN_SCORE = 0.25          # cosine similarity threshold (lower = more permissive)
+
+    def __init__(self, kb_id: int, s3_key_prefix: str = ''):
+        self.kb_id = kb_id
+        self._s3_prefix = s3_key_prefix or f'indices/kb_{kb_id}'
         self._index = None
-        self._documents = {}  # chunk_id -> (doc_id, content, metadata)
+        # int_idx → {'doc_id': int, 'content': str, 'metadata': dict, 'embedding': np.ndarray, 'is_image': bool}
+        self._documents: Dict[int, dict] = {}
         self._embedder = None
         self._initialized = False
         self._lock = asyncio.Lock()
-    
+
+    # ---- Initialization / persistence ----------------------------------------
+
+    @property
+    def _local_index_path(self) -> Path:
+        return settings.FAISS_INDEX_DIR / f'kb_{self.kb_id}.faiss'
+
+    @property
+    def _local_docs_path(self) -> Path:
+        return settings.FAISS_INDEX_DIR / f'kb_{self.kb_id}_docs.pkl'
+
+    @property
+    def _s3_index_key(self) -> str:
+        return f'{self._s3_prefix}.faiss'
+
+    @property
+    def _s3_docs_key(self) -> str:
+        return f'{self._s3_prefix}_docs.pkl'
+
+    def _create_fresh_index(self):
+        import faiss
+        index = faiss.IndexHNSWFlat(EMBEDDING_DIM, self.HNSW_M)
+        index.hnsw.efConstruction = self.HNSW_EF_CONSTRUCTION
+        index.hnsw.efSearch = self.HNSW_EF_SEARCH
+        return index
+
+    def _save_local(self):
+        try:
+            import faiss
+            settings.FAISS_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+            faiss.write_index(self._index, str(self._local_index_path))
+            with open(self._local_docs_path, 'wb') as f:
+                pickle.dump(self._documents, f)
+        except Exception as e:
+            logger.error(f"[KB {self.kb_id}] Local save failed: {e}")
+
+    def _load_local(self) -> bool:
+        try:
+            if not self._local_index_path.exists() or not self._local_docs_path.exists():
+                return False
+            import faiss
+            self._index = faiss.read_index(str(self._local_index_path))
+            self._index.hnsw.efSearch = self.HNSW_EF_SEARCH
+            with open(self._local_docs_path, 'rb') as f:
+                self._documents = pickle.load(f)
+            logger.info(f"[KB {self.kb_id}] Loaded from local disk ({self._index.ntotal} vectors)")
+            return True
+        except Exception as e:
+            logger.warning(f"[KB {self.kb_id}] Local load failed: {e}")
+            return False
+
+    def _sync_to_s3(self):
+        """Upload both files to S3 (sync, run in thread for async callers)."""
+        _upload_to_s3(self._local_index_path, self._s3_index_key)
+        _upload_to_s3(self._local_docs_path, self._s3_docs_key)
+
+    def _fetch_from_s3(self) -> bool:
+        idx_ok = _download_from_s3(self._s3_index_key, self._local_index_path)
+        docs_ok = _download_from_s3(self._s3_docs_key, self._local_docs_path)
+        return idx_ok and docs_ok
+
     async def initialize(self):
-        """Initialize the vector store and embedder."""
         if self._initialized:
             return
-        
         async with self._lock:
             if self._initialized:
                 return
-            
             try:
-                import faiss
-                
-                # Fetch the global embedder instance instead of creating a new one
                 self._embedder = await get_global_embedder()
-                
-                # Create FAISS index (384 dimensions for MiniLM)
-                self._index = faiss.IndexFlatIP(384)  # Inner product for cosine similarity
+                # 1. Try local disk
+                if not self._load_local():
+                    # 2. Try S3 fallback
+                    fetched = await asyncio.to_thread(self._fetch_from_s3)
+                    if fetched:
+                        self._load_local()
+                    else:
+                        # 3. Fresh index
+                        self._index = self._create_fresh_index()
+                        self._documents = {}
                 self._initialized = True
-                
-                logger.info("Knowledge base initialized with FAISS and MiniLM embedder")
-                
-            except ImportError as e:
-                logger.warning(f"FAISS or sentence-transformers not installed: {e}")
-                self._initialized = False
+            except Exception as e:
+                logger.error(f"[KB {self.kb_id}] Initialization failed: {e}")
 
-    async def has_document(self, doc_id: int) -> bool:
-        """Check if document already exists in the knowledge base."""
-        # Simple linear scan. For production, maintain a separate set of doc_ids.
-        for _, (existing_id, _, _) in self._documents.items():
-            if existing_id == doc_id:
-                return True
-        return False
+    # ---- Embedding helpers ---------------------------------------------------
+
+    async def _embed_text(self, text: str) -> np.ndarray:
+        results = await asyncio.to_thread(self._embedder.encode, [text])
+        return results[0]
+
+    # ---- Public write API ---------------------------------------------------
 
     async def add_document(
         self,
         doc_id: int,
         content: str,
         metadata: dict | None = None,
-        chunk_size: int = CHUNK_SIZE,
-        chunk_overlap: int = CHUNK_OVERLAP
+        chunk_size: int = None,
+        chunk_overlap: int = None,
     ) -> List[str]:
-        """
-        Add a document to the knowledge base.
-        """
+        from workflow_backend.thresholds import CHUNK_SIZE, CHUNK_OVERLAP
         if not self._initialized:
             await self.initialize()
-            if not self._initialized:
-                return []
-        
-        # Chunk the document
-        chunks = self._chunk_text(content, chunk_size, chunk_overlap)
+
+        chunk_size = chunk_size or CHUNK_SIZE
+        chunk_overlap = chunk_overlap or CHUNK_OVERLAP
+        chunks = _chunk_text(content, chunk_size, chunk_overlap)
         chunk_ids = []
-        
-        for i, chunk in enumerate(chunks):
-            chunk_id = f"doc_{doc_id}_chunk_{i}"
-            
-            # Generate embedding using to_thread
-            embeddings = await asyncio.to_thread(self._embedder.encode, [chunk])
-            embedding = embeddings[0]
-            embedding = embedding / np.linalg.norm(embedding)  # Normalize
-            
-            # Add to index
-            self._index.add(np.array([embedding], dtype='float32'))
-            
-            # Store document data
-            self._documents[len(self._documents)] = (doc_id, chunk, metadata or {})
-            chunk_ids.append(chunk_id)
-        
-        logger.info(f"Added document {doc_id} with {len(chunks)} chunks")
+
+        # Embed outside the lock (CPU-bound, slow) — the lock only guards the
+        # index-mutation phase so concurrent adds can't corrupt index/document map.
+        embeddings = []
+        for chunk in chunks:
+            embeddings.append(await self._embed_text(chunk))
+
+        async with self._lock:
+            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                int_idx = len(self._documents)
+                self._index.add(np.array([embedding], dtype='float32'))
+                self._documents[int_idx] = {
+                    'doc_id': doc_id,
+                    'content': chunk,
+                    'metadata': metadata or {},
+                    'embedding': embedding,
+                    'is_image': False,
+                }
+                chunk_ids.append(f'doc_{doc_id}_chunk_{i}')
+
+            await asyncio.to_thread(self._save_local)
+            await asyncio.to_thread(self._sync_to_s3)
+        logger.info(f"[KB {self.kb_id}] Added doc {doc_id}: {len(chunks)} chunks")
         return chunk_ids
-    
+
+    async def delete_document(self, doc_id: int) -> bool:
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._lock:
+            remaining = {
+                k: v for k, v in self._documents.items() if v['doc_id'] != doc_id
+            }
+            if len(remaining) == len(self._documents):
+                return False
+
+            # Rebuild index from stored embeddings (no re-encoding needed)
+            self._index = self._create_fresh_index()
+            new_docs = {}
+            for new_idx, item in enumerate(remaining.values()):
+                self._index.add(np.array([item['embedding']], dtype='float32'))
+                new_docs[new_idx] = item
+            self._documents = new_docs
+
+            await asyncio.to_thread(self._save_local)
+            await asyncio.to_thread(self._sync_to_s3)
+            logger.info(f"[KB {self.kb_id}] Deleted doc {doc_id}, {len(new_docs)} chunks remain")
+            return True
+
+    async def has_document(self, doc_id: int) -> bool:
+        return any(v['doc_id'] == doc_id for v in self._documents.values())
+
+    # ---- Public read API ----------------------------------------------------
+
     async def search(
         self,
         query: str,
-        top_k: int = SEARCH_TOP_K,
-        min_score: float = SEARCH_MIN_SCORE,
-        doc_id: int | None = None
+        top_k: int = 5,
+        min_score: float = None,
+        doc_id: int | None = None,
     ) -> List[SearchResult]:
-        """
-        Search the knowledge base.
-        """
+        from workflow_backend.thresholds import SEARCH_TOP_K, SEARCH_MIN_SCORE
         if not self._initialized:
             await self.initialize()
-            
-        if not self._initialized or self._index.ntotal == 0:
+        if not self._initialized or self._index is None or self._index.ntotal == 0:
             return []
-        
-        # Generate query embedding using to_thread
-        query_embeddings = await asyncio.to_thread(self._embedder.encode, [query])
-        query_embedding = query_embeddings[0]
-        query_embedding = query_embedding / np.linalg.norm(query_embedding)
-        
-        # Search
-        scores, indices = self._index.search(
-            np.array([query_embedding], dtype='float32'),
-            min(top_k, self._index.ntotal)
+
+        min_score = min_score if min_score is not None else SEARCH_MIN_SCORE
+        top_k = top_k or SEARCH_TOP_K
+
+        query_emb = await self._embed_text(query)
+        search_k = min(top_k * 3, self._index.ntotal)
+        distances, indices = self._index.search(
+            np.array([query_emb], dtype='float32'), search_k
         )
-        
+
         results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or score < min_score:
+        for dist, idx in zip(distances[0], indices[0]):
+            if idx < 0:
                 continue
-            
-            existing_doc_id, content, metadata = self._documents.get(idx, (None, "", {}))
-            
-            # Apply doc_id filter if provided
-            if doc_id is not None and existing_doc_id != doc_id:
+            # Convert L2 distance → cosine similarity (for unit vectors: cos = 1 - d²/2)
+            cosine = float(1.0 - (dist ** 2) / 2.0)
+            if cosine < min_score:
                 continue
 
-            if existing_doc_id is not None:
-                results.append(SearchResult(
-                    document_id=existing_doc_id,
-                    chunk_id=f"chunk_{idx}",
-                    content=content,
-                    score=float(score),
-                    metadata=metadata
-                ))
-        
+            item = self._documents.get(int(idx))
+            if item is None:
+                continue
+            if doc_id is not None and item['doc_id'] != doc_id:
+                continue
+
+            results.append(SearchResult(
+                document_id=item['doc_id'],
+                chunk_id=f'chunk_{idx}',
+                content=item['content'],
+                score=cosine,
+                metadata=item['metadata'],
+                is_image=item.get('is_image', False),
+            ))
+            if len(results) >= top_k:
+                break
+
         return results
-    
-    async def embed_text(self, text: str) -> Any:
-        """
-        Generate embedding for a text string.
-        """
-        if not self._initialized:
-            await self.initialize()
-            if not self._initialized:
-                return None
-        
-        # Use to_thread for CPU-bound encoding
-        embeddings = await asyncio.to_thread(self._embedder.encode, [text])
-        return embeddings[0]
-    
-    def _chunk_text(
-        self,
-        text: str,
-        chunk_size: int,
-        overlap: int
-    ) -> List[str]:
-        """Split text into overlapping chunks."""
-        chunks = []
-        start = 0
-        
-        while start < len(text):
-            end = start + chunk_size
-            chunk = text[start:end]
-            
-            # Try to break at sentence or paragraph
-            if end < len(text):
-                for sep in ['\n\n', '\n', '. ', ', ', ' ']:
-                    last_sep = chunk.rfind(sep)
-                    if last_sep > chunk_size // 2:
-                        chunk = chunk[:last_sep + len(sep)]
-                        end = start + len(chunk)
-                        break
-            
-            chunks.append(chunk.strip())
-            start = end - overlap
-        
-        return [c for c in chunks if c]
-    
-    async def delete_document(self, doc_id: int) -> bool:
-        """
-        Remove a document from the knowledge base.
-        Since FAISS IndexFlatIP doesn't support easy deletion by ID,
-        we rebuild the index from the remaining chunks.
-        """
-        if not self._initialized:
-            await self.initialize()
-        
-        async with self._lock:
-            # 1. Identify chunks to keep
-            remaining_docs = {}
-            temp_chunks = []
-            
-            found = False
-            for idx, (existing_id, content, metadata) in self._documents.items():
-                if existing_id == doc_id:
-                    found = True
-                    continue
-                remaining_docs[len(temp_chunks)] = (existing_id, content, metadata)
-                temp_chunks.append(content)
-            
-            if not found:
-                return False
-                
-            # 2. Re-embed and rebuild index if there are chunks left
-            self._index.reset()
-            self._documents = remaining_docs
-            
-            if temp_chunks:
-                # Re-embedding is expensive, but necessary if we don't store 
-                # the original embeddings. For now, we re-embed.
-                embeddings = await asyncio.to_thread(self._embedder.encode, temp_chunks)
-                
-                # Normalize and add to index
-                normalized_embeddings = []
-                for emb in embeddings:
-                    normalized_embeddings.append(emb / np.linalg.norm(emb))
-                
-                self._index.add(np.array(normalized_embeddings, dtype='float32'))
-            
-            logger.info(f"Deleted document {doc_id} and rebuilt index with {len(temp_chunks)} chunks")
-            return True
+
+    def destroy_local(self):
+        """Remove local index files (e.g. when KB is deleted)."""
+        for path in [self._local_index_path, self._local_docs_path]:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    @property
+    def ntotal(self) -> int:
+        return self._index.ntotal if self._index else 0
+
+    @property
+    def index_size_bytes(self) -> int:
+        try:
+            return self._local_index_path.stat().st_size + self._local_docs_path.stat().st_size
+        except Exception:
+            return 0
 
     def clear(self):
-        """Clear all documents from the knowledge base."""
         if self._index:
             self._index.reset()
         self._documents.clear()
-        logger.info("Knowledge base cleared")
 
+
+# ---------------------------------------------------------------------------
+# KnowledgeBaseManager — process-level cache of loaded KB instances
+# ---------------------------------------------------------------------------
+
+class KnowledgeBaseManager:
+    """Maps KB db-id → in-memory HNSWKnowledgeBase, lazy-loaded."""
+
+    _instance: 'KnowledgeBaseManager | None' = None
+
+    def __init__(self):
+        self._kbs: Dict[int, HNSWKnowledgeBase] = {}
+
+    def get(self, kb_id: int, s3_key_prefix: str = '') -> HNSWKnowledgeBase:
+        if kb_id not in self._kbs:
+            self._kbs[kb_id] = HNSWKnowledgeBase(kb_id, s3_key_prefix)
+        return self._kbs[kb_id]
+
+    def evict(self, kb_id: int):
+        self._kbs.pop(kb_id, None)
+
+
+_kb_manager: KnowledgeBaseManager | None = None
+
+
+def get_kb_manager() -> KnowledgeBaseManager:
+    global _kb_manager
+    if _kb_manager is None:
+        _kb_manager = KnowledgeBaseManager()
+    return _kb_manager
+
+
+# ---------------------------------------------------------------------------
+# High-level helpers used by tasks.py, views.py, chat/tools.py
+# ---------------------------------------------------------------------------
+
+async def get_or_create_default_kb(user) -> 'Any':
+    """
+    Get (or lazily create) the user's Default KB DB record.
+    Returns the KnowledgeBase ORM instance.
+    """
+    from .models import KnowledgeBase
+
+    def _db_op():
+        kb, _ = KnowledgeBase.objects.get_or_create(
+            user=user,
+            is_default=True,
+            defaults={'name': 'Default', 'description': 'Auto-created default knowledge base'},
+        )
+        return kb
+
+    return await sync_to_async(_db_op)()
+
+
+def get_hnsw_kb(kb_db_id: int, s3_key_prefix: str = '') -> HNSWKnowledgeBase:
+    """Get the in-memory HNSW instance for a KB DB id."""
+    return get_kb_manager().get(kb_db_id, s3_key_prefix)
+
+
+async def get_kb_for_user(user_id: int, kb_id: int | None = None) -> 'tuple[Any, HNSWKnowledgeBase]':
+    """
+    Return (KBModel, HNSWKnowledgeBase) for the given user.
+    If kb_id is None, uses the user's default KB.
+    """
+    from .models import KnowledgeBase
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+
+    def _get():
+        user = User.objects.get(id=user_id)
+        if kb_id is not None:
+            return KnowledgeBase.objects.get(id=kb_id, user=user), user
+        kb, _ = KnowledgeBase.objects.get_or_create(
+            user=user,
+            is_default=True,
+            defaults={'name': 'Default', 'description': 'Auto-created default knowledge base'},
+        )
+        return kb, user
+
+    kb_model, _ = await sync_to_async(_get)()
+    hnsw = get_hnsw_kb(kb_model.id, kb_model.s3_index_key or f'indices/kb_{kb_model.id}')
+    await hnsw.initialize()
+    return kb_model, hnsw
+
+
+async def update_kb_stats(kb_model_id: int, hnsw: HNSWKnowledgeBase):
+    """Sync doc_count / vector_count / index_size_bytes back to the DB."""
+    from .models import KnowledgeBase, Document
+
+    def _update():
+        doc_count = Document.objects.filter(knowledge_base_id=kb_model_id).count()
+        KnowledgeBase.objects.filter(id=kb_model_id).update(
+            doc_count=doc_count,
+            vector_count=hnsw.ntotal,
+            index_size_bytes=hnsw.index_size_bytes,
+        )
+
+    await sync_to_async(_update)()
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat shims (referenced by old chat/tools.py paths)
+# These search the user's default KB so existing callers keep working.
+# ---------------------------------------------------------------------------
+
+def get_user_knowledge_base(user_id: int) -> HNSWKnowledgeBase:
+    """Sync shim — returns the in-memory HNSW KB for the user's default KB.
+    The caller must still call .initialize() before use."""
+    from .models import KnowledgeBase
+    try:
+        kb = KnowledgeBase.objects.filter(user_id=user_id, is_default=True).first()
+        if kb:
+            return get_hnsw_kb(kb.id)
+    except Exception:
+        pass
+    # Fallback: create a transient HNSW KB at a predictable id
+    return get_hnsw_kb(-(user_id))
+
+
+def get_platform_knowledge_base() -> HNSWKnowledgeBase:
+    """Returns the shared platform KB (id=-1 by convention)."""
+    return get_hnsw_kb(-1, 'indices/platform')
+
+
+def get_session_knowledge_base(session_id: str) -> HNSWKnowledgeBase:
+    """Ephemeral per-session KB stored at a negative synthetic id derived from session hash."""
+    synthetic_id = -(abs(hash(session_id)) % 10_000_000 + 10_000_000)
+    return get_hnsw_kb(synthetic_id, '')
+
+
+def get_session_kb_manager():
+    """Compat shim — session KBs are now just HNSWKnowledgeBase instances in the manager."""
+    class _Compat:
+        def clear_session_kb(self, session_id: str):
+            hnsw = get_session_knowledge_base(session_id)
+            hnsw.clear()
+            hnsw.destroy_local()
+    return _Compat()
+
+
+def get_rag_pipeline(user_id: int | None = None) -> 'RAGPipeline':
+    kb = get_user_knowledge_base(user_id) if user_id else get_platform_knowledge_base()
+    return RAGPipeline(kb)
+
+
+# ---------------------------------------------------------------------------
+# RAGPipeline (kept for backward compat with rag_query view)
+# ---------------------------------------------------------------------------
 
 class RAGPipeline:
-    """
-    Retrieval-Augmented Generation pipeline.
-    """
-    
-    def __init__(self, knowledge_base: KnowledgeBase):
-        self.kb = knowledge_base
-    
-    async def query(
-        self,
-        question: str,
-        user_id: int,
-        llm_type: str = "openai",
-        top_k: int = SEARCH_TOP_K,
-        credential_id: str | None = None,
-        context: Any = None
-    ) -> Dict:
-        """
-        Run a RAG query.
-        """
-        # Search knowledge base(s)
+    def __init__(self, kb: HNSWKnowledgeBase):
+        self.kb = kb
+
+    async def query(self, question: str, user_id: int, llm_type: str = 'openai',
+                    top_k: int = 5, credential_id=None, context=None) -> Dict:
         results = await self.kb.search(question, top_k=top_k)
-        
-        # In Hybrid RAG, we also check the session KB if a session_id is given
-        session_id = None
-        if isinstance(context, dict):
-            session_id = context.get('session_id')
-        elif hasattr(context, 'session_id'):
-            session_id = context.session_id
-            
-        if session_id:
-            session_kb = get_session_knowledge_base(str(session_id))
-            if session_kb._initialized and session_kb._index and session_kb._index.ntotal > 0:
-                session_results = await session_kb.search(question, top_k=top_k)
-                # Merge and sort by score
-                results.extend(session_results)
-                results.sort(key=lambda x: x.score, reverse=True)
-                # Take top_k overall
-                results = results[:top_k]
-                
         if not results:
-            return {
-                "answer": "I couldn't find relevant information in the knowledge base.",
-                "sources": [],
-                "no_context": True
-            }
-        
-        # Build context from search results
-        context_text = "\n\n---\n\n".join([
-            f"Source {i+1} (score: {r.score:.2f}):\n{r.content}"
-            for i, r in enumerate(results)
-        ])
-        
-        # Build prompt
-        prompt = f"""Based on the following context, answer the user's question.
-    If the answer cannot be found in the context, say so.
+            return {'answer': 'No relevant information found.', 'sources': [], 'no_context': True}
 
-    Context:
-    {context_text}
+        context_text = '\n\n---\n\n'.join(
+            f'Source {i+1} (score: {r.score:.2f}):\n{r.content}' for i, r in enumerate(results)
+        )
+        prompt = (
+            f'Based on the following context, answer the user\'s question.\n'
+            f'Context:\n{context_text}\n\nQuestion: {question}\n\nAnswer:'
+        )
 
-    Question: {question}
-
-    Answer:"""
-        
-        # Get LLM response
         from nodes.handlers.registry import get_registry
         registry = get_registry()
-        
         if not registry.has_handler(llm_type):
-            return {
-                "answer": f"LLM type '{llm_type}' not available",
-                "sources": [{"id": r.document_id, "score": r.score} for r in results],
-                "error": True
-            }
-        
+            return {'answer': f"LLM type '{llm_type}' not available", 'sources': [], 'error': True}
+
         handler = registry.get_handler(llm_type)
-        
-        # Build minimal execution context if not provided
         if context is None:
             from compiler.schemas import ExecutionContext
             from uuid import uuid4
-            context = ExecutionContext(
-                execution_id=uuid4(),
-                user_id=user_id,
-                workflow_id=0
-            )
-        
-        # Execute LLM node
+            context = ExecutionContext(execution_id=uuid4(), user_id=user_id, workflow_id=0)
+
         config = {
-            "prompt": prompt,
-            "credential": credential_id,
-            "model": "gpt-4o-mini" if llm_type == "openai" else "gemini-1.5-flash",
-            "temperature": 0.3,
+            'prompt': prompt,
+            'credential': credential_id,
+            'model': 'gpt-4o-mini' if llm_type == 'openai' else 'gemini-1.5-flash',
+            'temperature': 0.3,
         }
-        
         try:
             result = await handler.execute({}, config, context)
-            
             if result.success:
+                # NodeExecutionResult now exposes items — use get_data() to pull the first json payload.
+                data = result.get_data() if hasattr(result, 'get_data') else (result.data or {})
                 return {
-                    "answer": result.data.get("content", ""),
-                    "sources": [
-                        {"document_id": r.document_id, "score": r.score, "preview": r.content[:100]}
-                        for r in results
-                    ],
-                    "tokens_used": result.data.get("usage", {}).get("total_tokens", 0)
+                    'answer': data.get('content', ''),
+                    'sources': [{'document_id': r.document_id, 'score': r.score} for r in results],
                 }
-            else:
-                return {
-                    "answer": "Failed to generate response",
-                    "error": result.error,
-                    "sources": [{"document_id": r.document_id, "score": r.score} for r in results]
-                }
-                
+            return {'answer': 'Failed to generate response', 'error': result.error, 'sources': []}
         except Exception as e:
-            logger.exception(f"RAG query failed: {e}")
-            return {
-                "answer": f"Error: {str(e)}",
-                "sources": [],
-                "error": True
-            }
+            logger.exception(f'RAG query failed: {e}')
+            return {'answer': f'Error: {e}', 'sources': [], 'error': True}
 
 
-class UserKnowledgeBaseManager:
-    """
-    Manages per-user knowledge bases for data isolation.
-    """
-    
-    def __init__(self):
-        self._user_kbs: Dict[int, KnowledgeBase] = {}
-        self._platform_kb: KnowledgeBase | None = None
-    
-    def get_user_kb(self, user_id: int) -> KnowledgeBase:
-        if user_id not in self._user_kbs:
-            logger.info(f"Creating new knowledge base for user {user_id} (lazy-loaded)")
-            self._user_kbs[user_id] = KnowledgeBase()
-        return self._user_kbs[user_id]
-    
-    def get_platform_kb(self) -> KnowledgeBase:
-        if self._platform_kb is None:
-            logger.info("Creating platform knowledge base (lazy-loaded)")
-            self._platform_kb = KnowledgeBase()
-        return self._platform_kb
-    
-    def clear_user_kb(self, user_id: int) -> bool:
-        if user_id in self._user_kbs:
-            self._user_kbs[user_id].clear()
-            del self._user_kbs[user_id]
-            logger.info(f"Cleared knowledge base for user {user_id}")
-            return True
-        return False
-    
-    def get_stats(self) -> Dict:
-        return {
-            'user_count': len(self._user_kbs),
-            'user_ids': list(self._user_kbs.keys()),
-            'platform_kb_exists': self._platform_kb is not None,
-        }
+# ---------------------------------------------------------------------------
+# Text chunking utility
+# ---------------------------------------------------------------------------
 
-class SessionKnowledgeBaseManager:
-    """
-    Manages ephemeral per-session knowledge bases for the Hybrid RAG architecture.
-    """
-    
-    def __init__(self):
-        self._session_kbs: Dict[str, KnowledgeBase] = {}
-        
-    def get_session_kb(self, session_id: str) -> KnowledgeBase:
-        if session_id not in self._session_kbs:
-            logger.info(f"Creating new ephemeral knowledge base for session {session_id} (lazy-loaded)")
-            self._session_kbs[session_id] = KnowledgeBase()
-        return self._session_kbs[session_id]
-        
-    def clear_session_kb(self, session_id: str) -> bool:
-        if session_id in self._session_kbs:
-            self._session_kbs[session_id].clear()
-            del self._session_kbs[session_id]
-            logger.info(f"Cleared ephemeral knowledge base for session {session_id}")
-            return True
-        return False
-
-# Global manager instances
-_user_kb_manager: UserKnowledgeBaseManager | None = None
-_session_kb_manager: SessionKnowledgeBaseManager | None = None
-
-
-def get_kb_manager() -> UserKnowledgeBaseManager:
-    global _user_kb_manager
-    if _user_kb_manager is None:
-        _user_kb_manager = UserKnowledgeBaseManager()
-    return _user_kb_manager
-
-def get_session_kb_manager() -> SessionKnowledgeBaseManager:
-    global _session_kb_manager
-    if _session_kb_manager is None:
-        _session_kb_manager = SessionKnowledgeBaseManager()
-    return _session_kb_manager
-
-
-def get_user_knowledge_base(user_id: int) -> KnowledgeBase:
-    return get_kb_manager().get_user_kb(user_id)
-
-def get_session_knowledge_base(session_id: str) -> KnowledgeBase:
-    return get_session_kb_manager().get_session_kb(session_id)
-
-
-def get_platform_knowledge_base() -> KnowledgeBase:
-    return get_kb_manager().get_platform_kb()
-
-
-def get_knowledge_base() -> KnowledgeBase:
-    logger.warning("get_knowledge_base() is deprecated. Use get_user_knowledge_base(user_id) instead.")
-    return get_kb_manager().get_user_kb(0)
-
-
-def get_rag_pipeline(user_id: int | None = None) -> RAGPipeline:
-    if user_id is not None:
-        kb = get_user_knowledge_base(user_id)
-    else:
-        kb = get_platform_knowledge_base()
-    return RAGPipeline(kb)
+def _chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+    # Clamp overlap so the loop always advances.
+    if overlap >= chunk_size:
+        overlap = max(0, chunk_size // 2)
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        if end < len(text):
+            for sep in ['\n\n', '\n', '. ', ', ', ' ']:
+                last_sep = chunk.rfind(sep)
+                if last_sep > chunk_size // 2:
+                    chunk = chunk[:last_sep + len(sep)]
+                    end = start + len(chunk)
+                    break
+        chunks.append(chunk.strip())
+        next_start = end - overlap
+        # Guarantee progress even in pathological cases (avoid infinite loop).
+        if next_start <= start:
+            next_start = start + 1
+        start = next_start
+    return [c for c in chunks if c]

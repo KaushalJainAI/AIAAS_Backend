@@ -13,6 +13,9 @@ python-dotenv>=1.0
 channels>=4.0
 channels-redis>=4.2
 daphne>=4.0
+twisted[http2,tls]>=22.10.0
+pyopenssl>=23.2.0
+service_identity>=23.1.0
 
 # Task Queue
 celery>=5.3
@@ -28,9 +31,9 @@ langchain-community>=0.0.20
 mcp>=0.1.0
 
 # Vector Store (for Inference Engine)
-chromadb>=0.4
 sentence-transformers>=2.2
-faiss-cpu>=1.7  
+faiss-cpu>=1.7
+boto3>=1.34             # S3 index sync
 
 # HTTP & API
 httpx>=0.26
@@ -54,6 +57,7 @@ RestrictedPython>=7.0
 wasmtime>=12.0.0
 
 adrf
+Pillow>=10.0
 bleach>=6.1
 python-magic-bin>=0.4.14; sys_platform == "win32"
 python-magic>=0.4.27; sys_platform != "win32"

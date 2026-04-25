@@ -313,15 +313,21 @@ class Credential(models.Model):
                     locked_cred.save(update_fields=[
                         'access_token', 'token_expires_at', 'is_verified', 'last_error'
                     ])
-                    
-                    # Log audit
+
+            # Audit log OUTSIDE the atomic block — if logging fails we must NOT
+            # roll back the newly-persisted token. Only log when refresh
+            # actually succeeded.
+            if new_access:
+                try:
                     CredentialAuditLog.objects.create(
-                        credential=locked_cred,
-                        user=locked_cred.user,
-                        action='updated', # Refreshed
+                        credential=self,
+                        user=self.user,
+                        action='updated',  # Refreshed
                         user_agent='System/AutoRefresh'
                     )
-                    return new_access
+                except Exception as audit_err:
+                    logger.error(f"Audit log failed post-refresh for credential {self.id}: {audit_err}")
+                return new_access
                 
         except Exception as e:
             logger.error(f"Token refresh error: {e}")
