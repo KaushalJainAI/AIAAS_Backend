@@ -21,7 +21,22 @@ from typing import Any
 from .config_access import get_credential_ref, get_node_config, get_node_data
 from .node_types import LOOP_NODE_TYPES, TRIGGER_NODE_TYPES
 from .schemas import CompileError
-from .utils import get_node_type
+
+
+def get_node_type(node: dict[str, Any]) -> str:
+    """
+    Extract node type from node definition, prioritizing frontend conventions.
+
+    Priority:
+    1. node['nodeType'] (Direct camelCase)
+    2. node['data']['nodeType'] (Frontend data payload)
+    3. node['type'] (ReactFlow generic type, fallback)
+    """
+    return (
+        node.get('nodeType') or
+        node.get('data', {}).get('nodeType') or
+        node.get('type', '')
+    )
 
 
 def validate_dag(nodes: list[dict], edges: list[dict]) -> list[CompileError]:

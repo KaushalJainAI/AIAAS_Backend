@@ -68,6 +68,8 @@ Users can upload files natively. This follows the "Inference App" pattern.
 - `execute_python_code`: Secure code execution.
 - `get_current_time`: Host system clock awareness.
 - `get_chat_message_full_text`: Retrieve full content of summarized history messages.
+- `call_internal_api`: Generic caller to simulate and execute internal backend Django REST APIs securely on the user's behalf.
+- `dispatch_ui_actions`: Send real-time commands via WebSocket to the user's frontend to navigate, show toasts, or manipulate the visual ReactFlow canvas.
 
 ### I. Agentic Tool Loop & Stabilization
 The chat engine features a robust iterative loop (`send_message_stream`) that allows the AI to use multiple tools in sequence.

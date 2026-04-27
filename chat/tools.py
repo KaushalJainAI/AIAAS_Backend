@@ -149,7 +149,68 @@ class ToolExecutor:
                 "parameters": {
                     "type": "object",
                     "properties": {},
-                    "required": [],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "dispatch_ui_actions",
+                "description": "Dispatch one or multiple actions to the user's frontend. Use this to navigate pages, show toasts, or manipulate the ReactFlow canvas (add_node, connect_nodes).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "actions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "action_type": {
+                                        "type": "string",
+                                        "enum": ["navigate", "show_toast", "open_modal", "add_node", "update_node", "remove_node", "connect_nodes", "disconnect_nodes", "clear_canvas", "replace_canvas"]
+                                    },
+                                    "payload": {
+                                        "type": "object",
+                                        "description": "The payload specific to the action_type."
+                                    }
+                                },
+                                "required": ["action_type", "payload"]
+                            }
+                        }
+                    },
+                    "required": ["actions"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "call_internal_api",
+                "description": "Call any internal REST API endpoint in the platform (e.g., /api/workflows/, /api/credentials/). Returns the JSON response from the server.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": { 
+                            "type": "string", 
+                            "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+                            "description": "The HTTP method to use." 
+                        },
+                        "path": { 
+                            "type": "string", 
+                            "description": "The URL path (e.g., /api/workflows/, /api/credentials/1/)" 
+                        },
+                        "data": { 
+                            "type": "object", 
+                            "description": "JSON payload for POST/PUT/PATCH requests." 
+                        },
+                        "query_params": { 
+                            "type": "object", 
+                            "description": "Query parameters for GET requests." 
+                        }
+                    },
+                    "required": ["method", "path"],
                     "additionalProperties": False
                 }
             }
@@ -838,6 +899,92 @@ class ToolExecutor:
         except Exception as e:
             return f"Error: Failed to execute {func_name}: {str(e)}"
 
+    @staticmethod
+    async def _call_internal_api(args: Dict, context: Dict) -> str:
+        from asgiref.sync import sync_to_async
+        from django.urls import resolve, Resolver404
+        from rest_framework.test import APIRequestFactory
+        from django.contrib.auth import get_user_model
+        import json
+
+        User = get_user_model()
+        user_id = context.get("user_id")
+        if not user_id:
+            return json.dumps({"error": "No user_id found in context"})
+
+        method = args.get("method", "GET").upper()
+        path = args.get("path", "")
+        data = args.get("data", {})
+        query_params = args.get("query_params", {})
+
+        if not path:
+            return json.dumps({"error": "Path is required"})
+            
+        if not path.startswith("/"):
+            path = "/" + path
+            
+        def _execute_request():
+            try:
+                user = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                return {"error": f"User {user_id} not found"}
+
+            try:
+                match = resolve(path)
+            except Resolver404:
+                return {"error": f"Endpoint not found: {path}", "status": 404}
+
+            factory = APIRequestFactory()
+            
+            # Build full path with query params if any
+            full_path = path
+            if query_params:
+                from urllib.parse import urlencode
+                full_path = f"{path}?{urlencode(query_params)}"
+
+            if method == "GET":
+                request = factory.get(full_path)
+            elif method == "POST":
+                request = factory.post(full_path, data, format='json')
+            elif method == "PUT":
+                request = factory.put(full_path, data, format='json')
+            elif method == "PATCH":
+                request = factory.patch(full_path, data, format='json')
+            elif method == "DELETE":
+                request = factory.delete(full_path)
+            else:
+                return {"error": f"Unsupported method: {method}"}
+
+            request.user = user
+
+            try:
+                # Need to manually apply DRF's authentication wrapper if force_authenticate isn't used directly on the view
+                # Since we're calling the view directly, we pass the request object
+                response = match.func(request, *match.args, **match.kwargs)
+                
+                # Check if it has a render method (DRF Response)
+                if hasattr(response, 'render'):
+                    response.render()
+                    
+                try:
+                    # Attempt to parse as JSON first
+                    content = json.loads(response.content.decode('utf-8'))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # Fallback to string if not JSON
+                    content = response.content.decode('utf-8', errors='replace')
+                    
+                return {
+                    "status_code": response.status_code,
+                    "data": content
+                }
+            except Exception as e:
+                logger.exception(f"Internal API error on {method} {path}: {e}")
+                return {"error": f"Internal server error: {str(e)}", "status": 500}
+
+        # Run synchronously to avoid breaking Django ORM limits in async context
+        result = await sync_to_async(_execute_request)()
+        return json.dumps(result)
+
     @classmethod
     async def execute(cls, func_name: str, args: Dict[str, Any], context: Dict[str, Any]) -> str:
         """Execute a tool dynamically and return the string response."""
@@ -856,6 +1003,8 @@ class ToolExecutor:
                 "video_search": cls._video_search,
                 "suggest_workflow": cls._suggest_workflow,
                 "get_current_time": cls._get_current_time,
+                "dispatch_ui_actions": cls._dispatch_ui_actions,
+                "call_internal_api": cls._call_internal_api,
                 "read_url": cls._read_url,
                 "read_attachment_text": cls._read_attachment_text,
                 "get_chat_message_full_text": cls._get_chat_message_full_text,
@@ -865,6 +1014,27 @@ class ToolExecutor:
                 "scrape_webpage": cls._scrape_webpage,
                 "list_workflows": cls._list_workflows,
                 "run_workflow": cls._run_workflow,
+            }
+
+            if func_name in dispatch:
+                return await dispatch[func_name](args, context)
+
+            if func_name in ("frontend_click", "frontend_fill", "frontend_navigate"):
+                return await cls._frontend_action(func_name, args, context)
+
+            return f"Error: Tool '{func_name}' is not recognized."
+
+        except Exception as e:
+            logger.error(f"Error executing tool {func_name}: {e}")
+            return f"Error executing tool {func_name}: {str(e)}"
+
+
+# Module-level aliases for backward compatibility
+AVAILABLE_TOOLS = ToolExecutor.AVAILABLE_TOOLS
+validate_url_for_ssrf = SSRFValidator.validate
+get_available_tools = ToolExecutor.get_available_tools
+execute_tool = ToolExecutor.execute
+w,
             }
 
             if func_name in dispatch:

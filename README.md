@@ -8,41 +8,35 @@ This repository runs the core logic for the visual workflow editor (Better n8n),
 
 The backend is built around a **Supervisor-Worker** paradigm rather than a traditional linear script execution model. It employs a strict "Glass Box" execution pipeline, meaning every step, decision, and payload is visible, logged, and controllable.
 
-To understand how this system truly operates, we have prepared detailed, step-by-step documentation located in the `docs/archive/` directory. If you want to understand *how* AIAAS executes a workflow, start here:
+To understand how this system truly operates, we have prepared detailed, step-by-step documentation located in the `docs/` directory. If you want to understand *how* AIAAS executes a workflow, start here:
 
-### 1. The Core Lifecycle: A Full System Dry Run
-*   **[DRY_RUN.md](./docs/archive/DRY_RUN.md)**
-    *   **Read this first.** 
-    *   This document follows a concrete "User Verification" workflow from when the user clicks "Execute" to when it finishes.
-    *   It details the exact JSON payloads, database insertions (`ExecutionLog`), and how the deterministic worker loops through the graph.
-    *   **Supervision**: Explains how the LLM supervisor injects itself into the loop via "Hooks" to safely **Pause/Resume** execution for Human-In-The-Loop (HITL) approvals.
-    *   **Cleanup**: Explains the memory management and `Zombicide` cleanup background tasks.
-
-### 2. Deep Dive: Inside a Node's Execution
-*   **[NODE_EXECUTION.md](./docs/archive/NODE_EXECUTION.md)**
-    *   Explains what happens *inside* the execution sandbox for a single node.
-    *   Details how `{{ $input.xyz }}` expressions are resolved dynamically.
-    *   Explains how isolated Python code executes safely inside a Custom Code node.
-
-### 3. The Compilation Engine
-*   **[COMPILATION_PROCESS.md](./docs/archive/COMPILATION_PROCESS.md)**
+### 1. The Compilation Engine
+*   **[COMPILATION_PROCESS.md](./docs/COMPILATION_PROCESS.md)**
     *   Details the strict, single-pass compilation process found in `compiler/compiler.py`.
-    *   Explains how visual layout JSON is converted directly into an executable `LangGraph StateGraph` in under 80 milliseconds.
+    *   Explains how visual layout JSON is converted into an executable **LangGraph StateGraph** in under 80 milliseconds.
+    *   Covers the multi-layered validation (DAG, Credentials, Schema, Types).
 
-### 4. Deployment Rules
-*   **[WORKFLOW_DEPLOYMENT.md](./docs/WORKFLOW_DEPLOYMENT.md)**
-    *   Details the strict criteria (Static Validation + Proof of Success) required before a workflow can be activated for automated running.
+### 2. The Execution Engine
+*   **[EXECUTION_ENGINE.md](./docs/EXECUTION_ENGINE.md)**
+    *   Details the runtime execution of workflows within LangGraph.
+    *   Covers state management, deterministic node loops, and heartbeat monitoring.
+    *   Explains the **Supervisor-Worker** paradigm where the AI (King) injects supervision hooks.
 
-### 5. AI Chat Agent Architecture
+### 3. Security & Credentials
+*   **[CREDENTIALS_AND_SECURITY.md](./docs/CREDENTIALS_AND_SECURITY.md)**
+    *   Deep dive into the **AES-256 Symmetric Encryption** for API keys and secrets.
+    *   Details the ownership validation logic that prevents cross-account credential leakage.
+    *   Covers OAuth2 lifecycle management and automatic token refreshing.
+
+### 4. AI Chat, Buddy & RAG
 *   **[CHAT_AGENT.md](./docs/CHAT_AGENT.md)**
-    *   Details the "Perplexity-style" conversational AI engine.
-    *   Covers the agentic tool loop, web search, deep research, and Python sandbox execution.
-    *   Explains the two-tiered context/memory strategy for RAG and history.
-
-### 6. Advanced RAG Strategy
+    *   Details the agentic tool loop, web search, deep research, and Python sandbox execution.
+*   **[BUDDY_ASSISTANT.md](./docs/BUDDY_ASSISTANT.md)**
+    *   Technical dive into the **BrowserOS integration**, heuristic command parsing, and multi-modal context capture.
+*   **[MCP_INTEGRATION.md](./docs/MCP_INTEGRATION.md)**
+    *   Details the **Model Context Protocol** client, connection pooling, and secure credential injection.
 *   **[RAG_STRATEGY.md](./docs/RAG_STRATEGY.md)**
     *   Explains the Hierarchical RAG (File, User, Platform level) used in the chat system.
-    *   Details the automatic indexing of documents and the multi-tier retrieval logic.
 
 ---
 

@@ -70,6 +70,9 @@ urlpatterns = [
 
     # BrowserOS
     path('api/browseros/', include('browserOS.urls')),
+
+    # Canvas Agent
+    path('api/canvas-agent/', include('canvas_agent.urls')),
 ]
 
 

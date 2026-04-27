@@ -36,9 +36,10 @@ media/
 staticfiles/
 
 # Environment variables
-.env
-.env.local
-.env.*.local
+.env*
+!.env.example
+!example.env
+!*.example
 
 # IDE
 .idea/
@@ -93,3 +94,6 @@ pg_dump.sql
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+
+# AI Models
+static/model_cache/

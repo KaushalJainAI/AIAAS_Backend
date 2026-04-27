@@ -28,7 +28,6 @@ from .schemas import (
     NodeExecutionPlan,  # Re-exported for back-compat with external callers.
     ExecutionContext,
 )
-from .utils import get_node_type
 from .config_access import get_node_config, get_node_data
 from .node_types import CONDITIONAL_NODE_TYPES, LOOP_NODE_TYPES
 from .validators import (
@@ -37,6 +36,7 @@ from .validators import (
     validate_node_configs,
     validate_type_compatibility,
     topological_sort,
+    get_node_type,
 )
 from nodes.handlers.registry import get_registry
 from logs.logger import get_execution_logger

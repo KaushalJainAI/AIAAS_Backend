@@ -6,6 +6,7 @@ Defines WebSocket URL patterns for real-time features.
 from django.urls import re_path
 from . import consumers
 from buddy.consumers import BuddyConsumer
+from canvas_agent.consumers import CanvasAgentConsumer
 
 websocket_urlpatterns = [
     # Execution updates and HITL (per-execution)
@@ -24,5 +25,11 @@ websocket_urlpatterns = [
     re_path(
         r'ws/buddy/$',
         BuddyConsumer.as_asgi()
+    ),
+    
+    # Canvas Agent
+    re_path(
+        r'ws/canvas-agent/$',
+        CanvasAgentConsumer.as_asgi()
     ),
 ]

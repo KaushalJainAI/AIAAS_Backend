@@ -971,7 +971,7 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
     
     # Inject Buddy Screen Context
     from django.core.cache import cache
-    buddy_context = cache.get(f"buddy_context_{session.user.id}")
+    buddy_context = cache.get(f"buddy_context_{session.user_id}")
     if buddy_context:
         context_block += f"\n\n### SCREEN CONTEXT (BUDDY MODE) ###\n"
         context_block += f"The user is currently looking at: {buddy_context.get('title', 'Unknown Page')} (URL: {buddy_context.get('url', '')})\n"
