@@ -76,6 +76,9 @@ urlpatterns = [
 
     # Notifications
     path('api/notifications/', include('notifications.urls')),
+    
+    # Imagine (Image/Video/Audio Generation)
+    path('api/imagine/', include('imagine.urls')),
 ]
 
 

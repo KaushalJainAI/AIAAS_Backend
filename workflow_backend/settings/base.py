@@ -127,6 +127,7 @@ INSTALLED_APPS = [
     'buddy',
     'canvas_agent',
     'notifications',
+    'imagine',
 ]
 
 SITE_ID = 1

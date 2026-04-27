@@ -1307,24 +1307,3 @@ AVAILABLE_TOOLS = ToolExecutor.AVAILABLE_TOOLS
 validate_url_for_ssrf = SSRFValidator.validate
 get_available_tools = ToolExecutor.get_available_tools
 execute_tool = ToolExecutor.execute
-w,
-            }
-
-            if func_name in dispatch:
-                return await dispatch[func_name](args, context)
-
-            if func_name in ("frontend_click", "frontend_fill", "frontend_navigate"):
-                return await cls._frontend_action(func_name, args, context)
-
-            return f"Error: Tool '{func_name}' is not recognized."
-
-        except Exception as e:
-            logger.error(f"Error executing tool {func_name}: {e}")
-            return f"Error executing tool {func_name}: {str(e)}"
-
-
-# Module-level aliases for backward compatibility
-AVAILABLE_TOOLS = ToolExecutor.AVAILABLE_TOOLS
-validate_url_for_ssrf = SSRFValidator.validate
-get_available_tools = ToolExecutor.get_available_tools
-execute_tool = ToolExecutor.execute
