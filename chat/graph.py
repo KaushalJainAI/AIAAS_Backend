@@ -15,6 +15,8 @@ from langchain_core.messages import (
 )
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ class ChatAgentState(TypedDict):
     model: str
     system_message: str
     user_id: int
+    thread_id: str
     response_format: str
     clean_content: str
     intent: str
@@ -313,6 +316,43 @@ async def tools_node(state: ChatAgentState) -> dict:
         args = dict(tc.get("args", {}))
         call_id = tc.get("id", f"call_{fn}")
 
+        # --- HITL CHECK ---
+        if fn in shared_tools.SENSITIVE_TOOLS:
+            # Check if this specific call_id has already been approved in metadata
+            approved_calls = metadata.get("approved_tool_calls", [])
+            if call_id not in approved_calls:
+                logger.info(f"[Tools Node] Interrupting for sensitive tool: {fn}")
+                
+                # Create Notification
+                try:
+                    from notifications.utils import create_notification
+                    from core.models import User
+                    from asgiref.sync import sync_to_async
+                    
+                    @sync_to_async
+                    def send_hitl_notification():
+                        user = User.objects.get(id=state["user_id"])
+                        create_notification(
+                            user=user,
+                            type='hitl_request',
+                            title='Permission Required',
+                            message=f'The AI agent requires your permission to run the tool: {fn}',
+                            data={'tool': fn, 'args': args, 'thread_id': state.get("thread_id")}
+                        )
+                    import asyncio
+                    # We are in an async function, so we can just fire and forget or await
+                    asyncio.create_task(send_hitl_notification())
+                except Exception as e:
+                    logger.error(f"Failed to create HITL notification: {e}")
+
+                if callback:
+                    await callback("ask_permission", {
+                        "tool": fn,
+                        "args": args,
+                        "call_id": call_id,
+                    })
+                interrupt(f"Permission required for {fn}")
+
         args = _sanitize_tool_args(args)
         if fn == "web_search" and not args.get("query"):
             args["query"] = clean_content
@@ -407,6 +447,27 @@ async def tools_node(state: ChatAgentState) -> dict:
             elif fn == "generate_image":
                 parsed = json.loads(res)
                 if parsed.get("status") == "success" and parsed.get("image_url"):
+                    # Create Notification
+                    try:
+                        from notifications.utils import create_notification
+                        from core.models import User
+                        from asgiref.sync import sync_to_async
+                        
+                        @sync_to_async
+                        def send_image_notification():
+                            user = User.objects.get(id=state["user_id"])
+                            create_notification(
+                                user=user,
+                                type='image_ready',
+                                title='Image Generated',
+                                message=f'Your requested image has been generated and is ready for viewing.',
+                                data={'image_url': parsed["image_url"]}
+                            )
+                        import asyncio
+                        asyncio.create_task(send_image_notification())
+                    except Exception as e:
+                        logger.error(f"Failed to create image notification: {e}")
+
                     imgs = metadata.get("images", [])
                     imgs.append({
                         "title": "AI Generated Image",
@@ -473,7 +534,10 @@ def build_chat_agent_graph():
     graph.set_entry_point("agent")
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
-    return graph.compile()
+    
+    # Add memory checkpointer
+    memory = MemorySaver()
+    return graph.compile(checkpointer=memory)
 
 
 chat_agent_graph = build_chat_agent_graph()
@@ -489,6 +553,7 @@ async def run_agent_loop(
     model: str,
     system_message: str,
     user_id: int,
+    thread_id: str,
     response_format: str,
     clean_content: str,
     intent: str,
@@ -564,6 +629,7 @@ async def run_agent_loop(
         "model": model,
         "system_message": system_message,
         "user_id": user_id,
+        "thread_id": thread_id,
         "response_format": response_format,
         "clean_content": clean_content,
         "intent": intent,
@@ -573,24 +639,47 @@ async def run_agent_loop(
         "stream_callback": stream_callback,
     }
 
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": max_iterations * 2 + 10,
+    }
+
     interrupted = False
     try:
-        result = await chat_agent_graph.ainvoke(
-            initial_state,
-            config={"recursion_limit": max_iterations * 2 + 10},
-        )
+        # If there is already a state for this thread_id, we might be resuming.
+        # But if we pass initial_state, it might overwrite? 
+        # Actually ainvoke with initial_state will start fresh if no state exists,
+        # or resume if state exists AND we pass None as state?
+        # Standard pattern for resume: result = await graph.ainvoke(None, config=config)
+        
+        state_snapshot = await chat_agent_graph.aget_state(config)
+        if state_snapshot.values:
+            # Resuming
+            logger.info(f"[LangGraph] Resuming thread {thread_id}")
+            result = await chat_agent_graph.ainvoke(None, config=config)
+        else:
+            # New run
+            logger.info(f"[LangGraph] Starting new thread {thread_id}")
+            result = await chat_agent_graph.ainvoke(initial_state, config=config)
+
     except Exception as e:
-        logger.exception(f"[LangGraph] Graph execution failed: {e}")
-        # Return whatever we have
-        return {
-            "raw_content": f"Error: {str(e)}",
-            "metadata": metadata,
-            "tool_trace": [],
-            "thinking": "",
-            "total_tokens": 0,
-            "interrupted": True,
-            "accumulated_tool_context": [],
-        }
+        if "Permission required" in str(e):
+            interrupted = True
+            # Get the current state values to return partial results
+            state_snapshot = await chat_agent_graph.aget_state(config)
+            result = state_snapshot.values
+        else:
+            logger.exception(f"[LangGraph] Graph execution failed: {e}")
+            # Return whatever we have
+            return {
+                "raw_content": f"Error: {str(e)}",
+                "metadata": metadata,
+                "tool_trace": [],
+                "thinking": "",
+                "total_tokens": 0,
+                "interrupted": True,
+                "accumulated_tool_context": [],
+            }
 
     # Extract final content from last AIMessage
     raw_content = ""

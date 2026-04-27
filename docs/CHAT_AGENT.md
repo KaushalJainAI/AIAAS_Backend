@@ -65,16 +65,23 @@ Users can upload files natively. This follows the "Inference App" pattern.
 - `web_search`: DuckDuckGo text/image/video search.
 - `read_attachment_text`: Query DB for full file content.
 - `read_url`: Scrape and convert a web page to text.
-- `execute_python_code`: Secure code execution.
+- `execute_python_code`: Secure code execution (Requires HITL approval).
+- `execute_shell`: Execute shell commands securely with scrubbed env and timeouts (Requires HITL approval).
+- `list_files`, `read_file`, `write_file`, `delete_file`: Native workspace file manipulation with strict path traversal security (`write` and `delete` require HITL).
 - `get_current_time`: Host system clock awareness.
 - `get_chat_message_full_text`: Retrieve full content of summarized history messages.
-- `call_internal_api`: Generic caller to simulate and execute internal backend Django REST APIs securely on the user's behalf.
-- `dispatch_ui_actions`: Send real-time commands via WebSocket to the user's frontend to navigate, show toasts, or manipulate the visual ReactFlow canvas.
+- `call_internal_api`: Generic caller to simulate and execute internal backend Django REST APIs securely on the user's behalf (Requires HITL approval).
+- `dispatch_ui_actions`: Send real-time commands via WebSocket to the user's frontend.
 
-### I. Agentic Tool Loop & Stabilization
-The chat engine features a robust iterative loop (`send_message_stream`) that allows the AI to use multiple tools in sequence.
+### I. Agentic Tool Loop & Stabilization (LangGraph)
+The chat engine features a robust iterative loop powered by **LangGraph** (`chat_agent_graph`). It uses `MemorySaver` for state persistence across interactions, allowing the AI to use multiple tools in sequence and pause for user input.
+- **Human-In-The-Loop (HITL) Interrupts**: When the agent attempts to use a tool from the `SENSITIVE_TOOLS` registry (e.g., `execute_shell`, `write_file`), the graph execution is suspended (`interrupt()`) and an `ask_permission` event is sent to the frontend. Execution only resumes upon user approval.
+- **Security Hardening**:
+  - Direct execution of sensitive tools via API bypass is strictly blocked.
+  - Subprocess environments are scrubbed of production secrets to prevent leakage.
+  - File access is guarded by `_is_safe_path` to block reading of `.env`, `.git`, or credential files.
 - **Iteration Limits**: Dynamically bounded based on intent (e.g., higher for research).
-- **Timeouts**: LLM calls (180s) and Tool runs (120s) have strict timeouts to prevent hanging.
+- **Timeouts**: LLM calls (180s) and Tool runs (e.g., 30s hard timeout for shell/python execution) have strict bounds to prevent resource exhaustion (DoS).
 - **JSON Repair**: If the LLM returns invalid JSON or fails to follow the schema, a "Repair" pass is triggered to normalize the output.
 - **Sanitization**: Tool arguments are stripped of hallucinated XML/HTML tags before execution.
 

@@ -73,6 +73,69 @@ class UserProfile(models.Model):
         help_text='Default credential ID for King Orchestrator'
     )
 
+    # Identity
+    display_name = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text='Public display name'
+    )
+    avatar = models.ImageField(
+        upload_to='avatars/',
+        null=True,
+        blank=True,
+        help_text='Profile picture'
+    )
+    bio = models.TextField(
+        blank=True,
+        help_text='User biography'
+    )
+
+    # Environment / Localization
+    instance_name = models.CharField(
+        max_length=100,
+        default='AIAAS Instance',
+        help_text='Name of the platform instance for this user'
+    )
+    timezone = models.CharField(
+        max_length=50,
+        default='UTC',
+        help_text='User preferred timezone'
+    )
+    language = models.CharField(
+        max_length=10,
+        default='en',
+        help_text='User preferred language code (e.g. en, es)'
+    )
+
+    # AI Governance Defaults
+    default_temperature = models.FloatField(
+        default=0.7,
+        validators=[MinValueValidator(0.0), MaxValueValidator(2.0)],
+        help_text='Default temperature for AI reasoning'
+    )
+    default_max_tokens = models.IntegerField(
+        default=2048,
+        validators=[MinValueValidator(1)],
+        help_text='Default max tokens for AI responses'
+    )
+
+    # Appearance
+    THEME_CHOICES = [
+        ('light', 'Light'),
+        ('dark', 'Dark'),
+        ('system', 'System'),
+    ]
+    theme_preference = models.CharField(
+        max_length=10,
+        choices=THEME_CHOICES,
+        default='system'
+    )
+    accent_color = models.CharField(
+        max_length=20,
+        default='blue',
+        help_text='Preferred accent color (e.g. blue, magenta)'
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

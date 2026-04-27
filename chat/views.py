@@ -1731,13 +1731,39 @@ async def send_message_stream(request, session_id: str):
         else:
             intent, clean_content = classify_intent(content)
 
+        # thread_id for LangGraph persistence
+        thread_id = str(session.id)
+        
+        # Handle Tool Approvals (HITL)
+        approve_call_id = req_data.get('approve_tool_call')
+        if approve_call_id:
+            from chat.graph import chat_agent_graph
+            config = {"configurable": {"thread_id": thread_id}}
+            state_snapshot = await chat_agent_graph.aget_state(config)
+            if state_snapshot.values:
+                meta_to_update = state_snapshot.values.get("metadata", {})
+                approved = meta_to_update.get("approved_tool_calls", [])
+                if approve_call_id not in approved:
+                    approved.append(approve_call_id)
+                meta_to_update["approved_tool_calls"] = approved
+                await chat_agent_graph.aupdate_state(config, {"metadata": meta_to_update})
+                logger.info(f"[HITL] Approved tool call {approve_call_id} for thread {thread_id}")
+
         yield f"data: {json.dumps({'type': 'status', 'phase': 'planning', 'message': 'Initializing agent core...'})}\n\n"
         yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': 'Analyzing user request and preparing reasoning engine...'})}\n\n"
 
-        # Save the user's message
-        user_msg = await ChatMessage.objects.acreate(
-            session=session, role='user', content=clean_content, message_type='chat',
-        )
+        # Save the user's message (unless it's just an approval)
+        if approve_call_id:
+            # Try to find the last user message or create a placeholder
+            user_msg = await ChatMessage.objects.filter(session=session, role='user').alast()
+            if not user_msg:
+                user_msg = await ChatMessage.objects.acreate(
+                    session=session, role='user', content="[Approved Tool Call]", message_type='chat',
+                )
+        else:
+            user_msg = await ChatMessage.objects.acreate(
+                session=session, role='user', content=clean_content, message_type='chat',
+            )
 
         yield f"data: {json.dumps({'type': 'status', 'phase': 'thinking', 'message': 'Processing your message...', 'user_message_id': user_msg.id})}\n\n"
         yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': f'Intent resolved as: {intent}. Bootstrapping mental model...'})}\n\n"
@@ -2388,6 +2414,19 @@ async def send_message_stream(request, session_id: str):
             await ai_msg.asave(update_fields=['metadata'])
             logger.info(f"Generated smart friendly preview for message {ai_msg.id} ({word_count} words)")
 
+        # Create Notification for new message
+        try:
+            from notifications.utils import create_notification
+            create_notification(
+                user=request.user,
+                type='new_message',
+                title='New AI Response',
+                message=f'Assistant replied in "{session.title}"',
+                data={'session_id': str(session.id), 'message_id': ai_msg.id}
+            )
+        except Exception as e:
+            logger.error(f"Failed to create message notification: {e}")
+
         yield f"data: {json.dumps({'type': 'done', 'user_message': await serialize_message(user_msg), 'ai_response': await serialize_message(ai_msg)})}\n\n"
 
     response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
@@ -3012,3 +3051,47 @@ async def run_workflow_from_chat(request, session_id: str):
         'execution_id': str(handle.execution_id),
         'workflow_name': workflow.name,
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def execute_tool_view(request):
+    """
+    Direct tool execution endpoint.
+    Crucial Security Guardrail: This endpoint must block SENSITIVE_TOOLS
+    to prevent HITL bypass via direct API calls.
+    """
+    from chat.tools import execute_tool, SENSITIVE_TOOLS
+    tool_name = request.data.get('tool')
+    args = request.data.get('args', {})
+    
+    if not tool_name:
+        return Response({"error": "Tool name is required."}, status=400)
+        
+    # Guardrail: Prevent HITL bypass
+    if tool_name in SENSITIVE_TOOLS:
+        return Response({
+            "error": "Access Denied: This tool requires Human-In-The-Loop approval and cannot be executed directly.",
+            "status": "blocked"
+        }, status=403)
+        
+    context = {"user_id": request.user.id}
+    
+    import asyncio
+    try:
+        # Run tool asynchronously via loop
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        result = loop.run_until_complete(execute_tool(tool_name, args, context))
+        import json
+        try:
+            return Response(json.loads(result))
+        except json.JSONDecodeError:
+            return Response({"result": result})
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+

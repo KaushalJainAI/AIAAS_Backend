@@ -25,20 +25,42 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    """User profile with tier and limits"""
+    """User profile with tier, limits, and preferences"""
     user = UserSerializer(read_only=True)
+    email = serializers.EmailField(source='user.email', read_only=True)
+    username = serializers.CharField(source='user.username', read_only=True)
     
     class Meta:
         model = UserProfile
         fields = [
-            'user', 'tier', 'compile_limit', 'execute_limit',
+            'user', 'email', 'username', 'display_name', 'avatar', 'bio',
+            'instance_name', 'timezone', 'language',
+            'tier', 'compile_limit', 'execute_limit',
             'stream_connections', 'credits_remaining', 'credits_used_total',
+            'llm_provider', 'llm_model', 'llm_credential_id',
+            'default_temperature', 'default_max_tokens',
+            'theme_preference', 'accent_color',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
             'tier', 'compile_limit', 'execute_limit', 'stream_connections',
             'credits_used_total', 'created_at', 'updated_at'
         ]
+
+    def update(self, instance, validated_data):
+        # Handle nested user updates if provided in request data
+        user_data = self.context['request'].data.get('user')
+        if user_data:
+            user = instance.user
+            if 'first_name' in user_data:
+                user.first_name = user_data['first_name']
+            if 'last_name' in user_data:
+                user.last_name = user_data['last_name']
+            if 'email' in user_data:
+                user.email = user_data['email']
+            user.save()
+            
+        return super().update(instance, validated_data)
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -176,3 +198,14 @@ class UsageTrackingSerializer(serializers.ModelSerializer):
             'tokens_used', 'credits_used', 'estimated_cost'
         ]
         read_only_fields = '__all__'
+
+
+class UsageInsightSerializer(serializers.Serializer):
+    """Aggregated usage insights for the dashboard"""
+    total_executions = serializers.IntegerField()
+    total_cost = serializers.DecimalField(max_digits=10, decimal_places=4)
+    success_rate = serializers.FloatField()
+    hours_saved = serializers.FloatField()
+    daily_stats = UsageTrackingSerializer(many=True)
+    tier = serializers.CharField()
+    credits_remaining = serializers.IntegerField()

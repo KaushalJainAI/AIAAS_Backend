@@ -126,6 +126,7 @@ INSTALLED_APPS = [
     'django_celery_beat',
     'buddy',
     'canvas_agent',
+    'notifications',
 ]
 
 SITE_ID = 1

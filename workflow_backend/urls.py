@@ -73,6 +73,9 @@ urlpatterns = [
 
     # Canvas Agent
     path('api/canvas-agent/', include('canvas_agent.urls')),
+
+    # Notifications
+    path('api/notifications/', include('notifications.urls')),
 ]
 
 

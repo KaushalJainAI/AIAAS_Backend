@@ -5,12 +5,29 @@ import ipaddress
 import json
 import logging
 import socket
+import os
+import asyncio
+from pathlib import Path
 from typing import Any, Dict, List
 from django.db.models import Q as models_Q
+from django.conf import settings
 from urllib.parse import urlparse
 from workflow_backend.thresholds import READ_URL_CHAR_LIMIT
 
 logger = logging.getLogger(__name__)
+
+# Tools that require Human-In-The-Loop approval before execution
+SENSITIVE_TOOLS = [
+    "write_file",
+    "delete_file",
+    "execute_python_code",
+    "execute_shell",
+    "run_workflow",
+    "frontend_click",
+    "frontend_fill",
+    "frontend_navigate",
+    "call_internal_api"
+]
 
 
 class SSRFValidator:
@@ -68,7 +85,110 @@ class SSRFValidator:
 
 
 class ToolExecutor:
+    @staticmethod
+    def _is_safe_path(target_path: Path) -> bool:
+        """Check if path contains sensitive directories or files."""
+        sensitive_names = {'.env', '.git', '.ssh', '.aws', 'secrets', 'credentials.json', 'db.sqlite3'}
+        for part in target_path.parts:
+            if part in sensitive_names or part.endswith('.pem') or part.endswith('.key'):
+                return False
+        return True
+
     AVAILABLE_TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_shell",
+                "description": "Execute a shell command on the server. Use this for system tasks, installing packages, or running scripts. Requires user approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute."
+                        }
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List files and directories in a given path within the workspace. Use this to explore the project structure.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The directory path to list (relative to workspace root). Use '.' for root."
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read the complete content of a file. Use this to examine code or configuration.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The file path to read (relative to workspace root)."
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Create a new file or overwrite an existing one with new content. This tool requires user approval before execution.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The file path to write to (relative to workspace root)."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The full content to write to the file."
+                        }
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_file",
+                "description": "Delete a file from the workspace. This tool requires user approval before execution.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The file path to delete (relative to workspace root)."
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False
+                }
+            }
+        },
         {
             "type": "function",
             "function": {
@@ -545,6 +665,101 @@ class ToolExecutor:
         })
 
     @staticmethod
+    async def _list_files(args: Dict, context: Dict) -> str:
+        path_str = args.get("path", ".")
+        try:
+            # Ensure path is within workspace (simple check)
+            root = Path(settings.BASE_DIR).parent # Assuming Backend is in AIAAS/Backend
+            target = (root / path_str).resolve()
+            if not str(target).startswith(str(root)):
+                return f"Error: Access denied. Path '{path_str}' is outside the workspace."
+            if not ToolExecutor._is_safe_path(target):
+                return f"Error: Access denied. Path '{path_str}' contains sensitive or blocked files."
+            
+            if not target.exists():
+                return f"Error: Path '{path_str}' does not exist."
+            
+            items = []
+            for item in target.iterdir():
+                # Filter out sensitive files from listing
+                if ToolExecutor._is_safe_path(item):
+                    items.append({
+                        "name": item.name,
+                        "type": "directory" if item.is_dir() else "file",
+                        "size": item.stat().st_size if item.is_file() else None
+                    })
+            return json.dumps({"path": path_str, "items": items})
+        except Exception as e:
+            return f"Error listing files: {str(e)}"
+
+    @staticmethod
+    async def _read_file(args: Dict, context: Dict) -> str:
+        path_str = args.get("path", "")
+        if not path_str:
+            return "Error: Missing path"
+        try:
+            root = Path(settings.BASE_DIR).parent
+            target = (root / path_str).resolve()
+            if not str(target).startswith(str(root)):
+                return f"Error: Access denied. Path '{path_str}' is outside the workspace."
+            if not ToolExecutor._is_safe_path(target):
+                return f"Error: Access denied. Path '{path_str}' is blocked for security reasons."
+            
+            if not target.is_file():
+                return f"Error: '{path_str}' is not a file or does not exist."
+            
+            content = target.read_text(encoding='utf-8', errors='replace')
+            return json.dumps({"path": path_str, "content": content})
+        except Exception as e:
+            return f"Error reading file: {str(e)}"
+
+    @staticmethod
+    async def _write_file(args: Dict, context: Dict) -> str:
+        path_str = args.get("path", "")
+        content = args.get("content", "")
+        if not path_str:
+            return "Error: Missing path"
+        try:
+            root = Path(settings.BASE_DIR).parent
+            target = (root / path_str).resolve()
+            if not str(target).startswith(str(root)):
+                return f"Error: Access denied. Path '{path_str}' is outside the workspace."
+            if not ToolExecutor._is_safe_path(target):
+                return f"Error: Access denied. Path '{path_str}' is blocked for security reasons."
+            
+            # Ensure parent directory exists
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding='utf-8')
+            return json.dumps({"status": "success", "path": path_str, "message": "File written successfully."})
+        except Exception as e:
+            return f"Error writing file: {str(e)}"
+
+    @staticmethod
+    async def _delete_file(args: Dict, context: Dict) -> str:
+        path_str = args.get("path", "")
+        if not path_str:
+            return "Error: Missing path"
+        try:
+            root = Path(settings.BASE_DIR).parent
+            target = (root / path_str).resolve()
+            if not str(target).startswith(str(root)):
+                return f"Error: Access denied. Path '{path_str}' is outside the workspace."
+            if not ToolExecutor._is_safe_path(target):
+                return f"Error: Access denied. Path '{path_str}' is blocked for security reasons."
+            
+            if not target.exists():
+                return f"Error: File '{path_str}' does not exist."
+            
+            if target.is_dir():
+                import shutil
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            return json.dumps({"status": "success", "path": path_str, "message": "Deleted successfully."})
+        except Exception as e:
+            return f"Error deleting: {str(e)}"
+
+    @staticmethod
     async def _suggest_workflow(args: Dict, context: Dict) -> str:
         from .views import suggest_workflow
         intent = args.get("intent", "")
@@ -637,6 +852,47 @@ class ToolExecutor:
             return f"Error: Failed to read message from database: {str(e)}"
 
     @staticmethod
+    async def _execute_shell(args: Dict, context: Dict) -> str:
+        import asyncio
+        command = args.get("command", "")
+        if not command:
+            return "Error: Missing command"
+        try:
+            # Secure environment to prevent leakage of secrets (e.g. AWS_SECRET_ACCESS_KEY, DATABASE_URL)
+            safe_env = {
+                "PATH": os.environ.get("PATH", ""),
+                "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+                "HOME": os.environ.get("HOME", "/tmp")
+            }
+            # We run this in a shell. For safety in a real prod app, 
+            # we would restrict the commands allowed.
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=safe_env
+            )
+            # Enforce resource quota (timeout) to prevent DoS (e.g. fork bombs, infinite loops)
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30.0)
+            except asyncio.TimeoutError:
+                process.kill()
+                return json.dumps({
+                    "status": "error",
+                    "error": "Execution timed out after 30 seconds.",
+                    "stderr": ""
+                })
+            
+            return json.dumps({
+                "status": "success" if process.returncode == 0 else "error",
+                "exit_code": process.returncode,
+                "stdout": stdout.decode(errors='replace'),
+                "stderr": stderr.decode(errors='replace')
+            })
+        except Exception as e:
+            return f"Error executing shell command: {str(e)}"
+
+    @staticmethod
     async def _execute_python_code(args: Dict, context: Dict) -> str:
         import asyncio
         from executor.sandbox.safe_execution import safe_execute
@@ -645,7 +901,19 @@ class ToolExecutor:
         if not code:
             return "Error: Missing code"
         try:
-            exec_res = await asyncio.to_thread(safe_execute, code, None, engine)
+            # Enforce resource quota (timeout)
+            try:
+                exec_res = await asyncio.wait_for(
+                    asyncio.to_thread(safe_execute, code, None, engine),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                return json.dumps({
+                    "status": "error",
+                    "error": "Python execution timed out after 30 seconds.",
+                    "stderr": ""
+                })
+
             if not exec_res.get("success"):
                 return json.dumps({
                     "status": "error",
@@ -998,6 +1266,11 @@ class ToolExecutor:
 
         try:
             dispatch = {
+                "execute_shell": cls._execute_shell,
+                "list_files": cls._list_files,
+                "read_file": cls._read_file,
+                "write_file": cls._write_file,
+                "delete_file": cls._delete_file,
                 "web_search": cls._web_search,
                 "image_search": cls._image_search,
                 "video_search": cls._video_search,

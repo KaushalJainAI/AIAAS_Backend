@@ -10,6 +10,10 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.views import TokenObtainPairView
 
+from django.db.models import Sum, Count, Q
+from django.utils import timezone as django_timezone
+from decimal import Decimal
+
 from .models import UserProfile, APIKey, UsageTracking
 from .serializers import (
     UserSerializer,
@@ -20,8 +24,10 @@ from .serializers import (
     APIKeySerializer,
     APIKeyCreateSerializer,
     UsageTrackingSerializer,
+    UsageInsightSerializer,
     GoogleLoginSerializer,
 )
+from logs.models import ExecutionLog
 from .permissions import IsOwner
 
 
@@ -274,6 +280,78 @@ class APIKeyRotateView(APIView):
             'old_prefix': old_prefix,
             'message': 'API key rotated. Save this key - it will not be shown again.'
         }, status=status.HTTP_200_OK)
+
+
+class AvatarUploadView(APIView):
+    """Upload or update user profile avatar"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        if 'avatar' not in request.FILES:
+            return Response({'error': 'No avatar file provided'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        profile, _ = UserProfile.objects.get_or_create(user=request.user)
+        profile.avatar = request.FILES['avatar']
+        profile.save()
+        
+        return Response({
+            'avatar_url': request.build_absolute_uri(profile.avatar.url) if profile.avatar else None,
+            'message': 'Avatar uploaded successfully'
+        })
+
+
+class UsageInsightsView(APIView):
+    """
+    Get aggregated usage insights for the current user.
+    Calculates total executions, costs, success rates, and ROI.
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        user = request.user
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        
+        # Aggregate daily stats from UsageTracking
+        usage_qs = UsageTracking.objects.filter(user=user).order_by('-date')
+        daily_stats = usage_qs[:30]  # Last 30 days
+        
+        totals = usage_qs.aggregate(
+            total_exec=Sum('execute_count'),
+            total_cost=Sum('estimated_cost'),
+            total_compile=Sum('compile_count'),
+            total_chat=Sum('chat_count')
+        )
+        
+        total_executions = totals['total_exec'] or 0
+        total_cost = totals['total_cost'] or Decimal('0.0000')
+        
+        # Calculate Success Rate from ExecutionLog
+        exec_logs = ExecutionLog.objects.filter(user=user)
+        total_finished = exec_logs.filter(
+            status__in=['completed', 'failed', 'timeout', 'cancelled']
+        ).count()
+        
+        if total_finished > 0:
+            completed = exec_logs.filter(status='completed').count()
+            success_rate = (completed / total_finished) * 100
+        else:
+            success_rate = 100.0  # Default if no executions yet
+            
+        # ROI: Estimate hours saved (avg 2 mins per execution)
+        hours_saved = (total_executions * 2.0) / 60.0
+        
+        data = {
+            'total_executions': total_executions,
+            'total_cost': total_cost,
+            'success_rate': success_rate,
+            'hours_saved': hours_saved,
+            'daily_stats': daily_stats,
+            'tier': profile.tier,
+            'credits_remaining': profile.credits_remaining
+        }
+        
+        serializer = UsageInsightSerializer(data)
+        return Response(serializer.data)
 
 
 # ==================== Usage Views ====================

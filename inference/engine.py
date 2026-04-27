@@ -8,6 +8,8 @@ Key design decisions:
 - Persistence: each KB saves a .faiss index + .pkl document map locally, then syncs to S3
 - Embeddings are stored in the pickle so deletion never requires re-encoding
 - S3 sync is best-effort: if AWS is not configured, local-only mode is used silently
+- Version tracking: each index stores the model name that created it; on model
+  change the index is automatically rebuilt from stored text content.
 """
 import asyncio
 import logging
@@ -27,12 +29,20 @@ logger = logging.getLogger(__name__)
 # Model : Qwen/Qwen3-Embedding-0.6B  (0.6B params, text-only)
 # Quant : PyTorch dynamic int8 on CPU (torch.quantization.quantize_dynamic)
 # Dim   : 1024
+#
+# To switch models, update EMBEDDING_MODEL and EMBEDDING_DIM below.
+# On the next startup every KB whose stored version differs will be
+# automatically re-indexed in the background (see _maybe_reindex).
 # ---------------------------------------------------------------------------
 
 _global_embedder = None
 _embedder_lock = asyncio.Lock()
 EMBEDDING_DIM = 1024
 EMBEDDING_MODEL = 'Qwen/Qwen3-Embedding-0.6B'
+
+# Bump this whenever the model weights, tokenizer, or pooling strategy change
+# in a way that makes old embeddings incompatible with new ones.
+EMBEDDER_VERSION = f'{EMBEDDING_MODEL}:{EMBEDDING_DIM}'
 
 
 class QwenEmbedder:
@@ -55,20 +65,30 @@ class QwenEmbedder:
         norm = np.linalg.norm(vec)
         return vec / norm if norm > 0 else vec
 
-    def encode(self, texts: list[str]) -> list:
+    def encode(self, texts: list[str], batch_size: int = 32) -> list:
+        """
+        Encode *texts* into normalised numpy arrays (N, EMBEDDING_DIM).
+
+        For large lists the input is processed in batches of *batch_size* to
+        keep peak memory bounded while still being faster than one-at-a-time.
+        """
         import torch
-        inputs = self._tokenizer(
-            texts,
-            return_tensors='pt',
-            padding=True,
-            truncation=True,
-            max_length=512,
-        )
-        with torch.no_grad():
-            out = self._model(**inputs)
-            pooled = self._last_token_pool(out.last_hidden_state, inputs['attention_mask'])
-        arr = pooled.float().numpy()  # (B, 1024)
-        return [self._normalise(row) for row in arr]
+        all_vecs: list[np.ndarray] = []
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start:start + batch_size]
+            inputs = self._tokenizer(
+                batch,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=512,
+            )
+            with torch.no_grad():
+                out = self._model(**inputs)
+                pooled = self._last_token_pool(out.last_hidden_state, inputs['attention_mask'])
+            arr = pooled.float().numpy()  # (B, dim)
+            all_vecs.extend(self._normalise(row) for row in arr)
+        return all_vecs
 
 
 def _load_qwen_embedder() -> QwenEmbedder:
@@ -226,7 +246,10 @@ class HNSWKnowledgeBase:
         self._documents: Dict[int, dict] = {}
         self._embedder = None
         self._initialized = False
+        self._reindexing = False
         self._lock = asyncio.Lock()
+        # The version string of the embedder that generated _documents
+        self._stored_version: str | None = None
 
     # ---- Initialization / persistence ----------------------------------------
 
@@ -258,8 +281,13 @@ class HNSWKnowledgeBase:
             import faiss
             settings.FAISS_INDEX_DIR.mkdir(parents=True, exist_ok=True)
             faiss.write_index(self._index, str(self._local_index_path))
+            # Persist documents AND version in a single bundle
+            bundle = {
+                '_version': EMBEDDER_VERSION,
+                'documents': self._documents,
+            }
             with open(self._local_docs_path, 'wb') as f:
-                pickle.dump(self._documents, f)
+                pickle.dump(bundle, f)
         except Exception as e:
             logger.error(f"[KB {self.kb_id}] Local save failed: {e}")
 
@@ -271,8 +299,21 @@ class HNSWKnowledgeBase:
             self._index = faiss.read_index(str(self._local_index_path))
             self._index.hnsw.efSearch = self.HNSW_EF_SEARCH
             with open(self._local_docs_path, 'rb') as f:
-                self._documents = pickle.load(f)
-            logger.info(f"[KB {self.kb_id}] Loaded from local disk ({self._index.ntotal} vectors)")
+                raw = pickle.load(f)
+
+            # Supports both old format (plain dict) and new versioned bundle
+            if isinstance(raw, dict) and '_version' in raw:
+                self._stored_version = raw['_version']
+                self._documents = raw['documents']
+            else:
+                # Legacy index — no version tag, treat as "unknown"
+                self._stored_version = None
+                self._documents = raw
+
+            logger.info(
+                f"[KB {self.kb_id}] Loaded from local disk "
+                f"({self._index.ntotal} vectors, version={self._stored_version or 'legacy'})"
+            )
             return True
         except Exception as e:
             logger.warning(f"[KB {self.kb_id}] Local load failed: {e}")
@@ -306,7 +347,19 @@ class HNSWKnowledgeBase:
                         # 3. Fresh index
                         self._index = self._create_fresh_index()
                         self._documents = {}
+                        self._stored_version = EMBEDDER_VERSION
                 self._initialized = True
+
+                # Check if the stored index was built with a different model
+                if self._documents and self._stored_version != EMBEDDER_VERSION:
+                    logger.warning(
+                        f"[KB {self.kb_id}] Embedder version mismatch: "
+                        f"stored={self._stored_version}, current={EMBEDDER_VERSION}. "
+                        f"Scheduling background re-index."
+                    )
+                    # Fire-and-forget background re-index
+                    asyncio.ensure_future(self._background_reindex())
+
             except Exception as e:
                 logger.error(f"[KB {self.kb_id}] Initialization failed: {e}")
 
@@ -315,6 +368,68 @@ class HNSWKnowledgeBase:
     async def _embed_text(self, text: str) -> np.ndarray:
         results = await asyncio.to_thread(self._embedder.encode, [text])
         return results[0]
+
+    async def _embed_texts(self, texts: list[str], batch_size: int = 32) -> list[np.ndarray]:
+        """Batch-embed a list of texts (runs encoding in a worker thread)."""
+        return await asyncio.to_thread(self._embedder.encode, texts, batch_size)
+
+    # ---- Re-indexing ---------------------------------------------------------
+
+    async def rebuild_index(self):
+        """
+        Re-embed every document stored in this KB using the current embedder
+        and rebuild the FAISS HNSW index from scratch.
+
+        This is safe to call while the KB is live — searches against the *old*
+        index continue to work until the rebuild completes, at which point the
+        new index is swapped in atomically under the write lock.
+        """
+        if not self._documents:
+            logger.info(f"[KB {self.kb_id}] Nothing to re-index (empty).")
+            self._stored_version = EMBEDDER_VERSION
+            await asyncio.to_thread(self._save_local)
+            return
+
+        total = len(self._documents)
+        logger.info(f"[KB {self.kb_id}] Re-indexing {total} chunks with {EMBEDDER_VERSION}…")
+
+        # Collect all content texts, preserving order by int_idx
+        sorted_items = sorted(self._documents.items(), key=lambda kv: kv[0])
+        texts = [item['content'] for _, item in sorted_items]
+
+        # Batch-embed outside the lock
+        new_embeddings = await self._embed_texts(texts)
+
+        # Swap in the new index under the write lock
+        async with self._lock:
+            new_index = self._create_fresh_index()
+            new_docs: Dict[int, dict] = {}
+            for new_idx, ((_, item), emb) in enumerate(zip(sorted_items, new_embeddings)):
+                new_index.add(np.array([emb], dtype='float32'))
+                new_docs[new_idx] = {
+                    **item,
+                    'embedding': emb,
+                }
+            self._index = new_index
+            self._documents = new_docs
+            self._stored_version = EMBEDDER_VERSION
+
+            await asyncio.to_thread(self._save_local)
+            await asyncio.to_thread(self._sync_to_s3)
+
+        logger.info(f"[KB {self.kb_id}] Re-index complete — {total} chunks, version={EMBEDDER_VERSION}")
+
+    async def _background_reindex(self):
+        """Fire-and-forget wrapper that catches all errors."""
+        if self._reindexing:
+            return
+        self._reindexing = True
+        try:
+            await self.rebuild_index()
+        except Exception as e:
+            logger.error(f"[KB {self.kb_id}] Background re-index failed: {e}", exc_info=True)
+        finally:
+            self._reindexing = False
 
     # ---- Public write API ---------------------------------------------------
 
