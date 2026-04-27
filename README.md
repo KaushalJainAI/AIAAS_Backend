@@ -33,6 +33,9 @@ To understand how this system truly operates, we have prepared detailed, step-by
     *   Details the agentic tool loop, web search, deep research, and Python sandbox execution.
 *   **[BUDDY_ASSISTANT.md](./docs/BUDDY_ASSISTANT.md)**
     *   Technical dive into the **BrowserOS integration**, heuristic command parsing, and multi-modal context capture.
+*   **[NOTIFICATION_SERVICE.md](./docs/NOTIFICATION_SERVICE.md)**
+    *   Details the **Real-time WebSocket notifications** and persistent alert system.
+    *   Explains the **Human-In-The-Loop (HITL)** flow for agentic supervision.
 *   **[MCP_INTEGRATION.md](./docs/MCP_INTEGRATION.md)**
     *   Details the **Model Context Protocol** client, connection pooling, and secure credential injection.
 *   **[RAG_STRATEGY.md](./docs/RAG_STRATEGY.md)**
