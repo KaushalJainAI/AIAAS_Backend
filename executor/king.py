@@ -1346,6 +1346,7 @@ Output ONLY the JSON object, no other text."""
                 workflow_chain=workflow_chain,
                 timeout_budget_ms=timeout_budget_ms,
                 supervision=supervision,
+                skills=handle.skills_data,
             )
             logger.info(f"King Agent offloaded workflow {workflow_id} to Celery worker (exec_id={execution_id})")
         else:

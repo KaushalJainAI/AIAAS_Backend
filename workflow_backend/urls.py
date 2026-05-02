@@ -5,6 +5,8 @@ from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
 from orchestrator.views import receive_webhook
+from rest_framework.permissions import AllowAny
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
 
 def health_check(request):
@@ -24,6 +26,11 @@ urlpatterns = [
     
     # Health check
     path('api/health/', health_check, name='health-check'),
+
+    # API Schema & Docs (public, read-only)
+    path('api/schema/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema'),
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny]), name='swagger-ui'),
+    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny]), name='redoc'),
     
     # Core (auth, users, API keys)
     path('api/', include('core.urls')),

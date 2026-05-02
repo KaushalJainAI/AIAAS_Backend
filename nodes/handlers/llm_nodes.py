@@ -3,6 +3,7 @@ LLM Node Handlers
 
 AI/LLM nodes for OpenAI, Google Gemini, and local Ollama integration.
 """
+import asyncio
 import logging
 import httpx
 from typing import Any, TYPE_CHECKING
@@ -2160,97 +2161,141 @@ class OpenRouterNode(BaseNodeHandler):
 
         api_key = api_key.strip()
         
-        try:
-            all_skills = await resolve_node_skills(config, context)
-            async with httpx.AsyncClient(timeout=120) as client:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://aiaas.com",
-                    "X-Title": "AIAAS",
-                }
-                
-                messages = [{"role": "system", "content": f"{system_message}{format_skills_as_context(all_skills)}"}]
-                history = config.get("history", [])
-                if history: messages.extend(history)
-                messages.append({"role": "user", "content": prompt})
+        MAX_RETRIES = 5
+        retry_count = 0
+        in_thinking = False
 
-                tools_payload: list | None = list(config.get("tools") or [])
-                enable_tools_ui = config.get("enable_tools", False)
-                if enable_tools_ui:
-                    from chat.tools import get_available_tools as _get_tools
-                    tools_payload = await _get_tools(context.user_id)
+        while retry_count < MAX_RETRIES:
+            try:
+                all_skills = await resolve_node_skills(config, context)
+                async with httpx.AsyncClient(timeout=120) as client:
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://aiaas.com",
+                        "X-Title": "AIAAS",
+                    }
+                    
+                    messages = [{"role": "system", "content": f"{system_message}{format_skills_as_context(all_skills)}"}]
+                    history = config.get("history", [])
+                    if history: messages.extend(history)
+                    messages.append({"role": "user", "content": prompt})
 
-                payload = {
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": True
-                }
-                if tools_payload:
-                    payload["tools"] = tools_payload
+                    tools_payload: list | None = list(config.get("tools") or [])
+                    enable_tools_ui = config.get("enable_tools", False)
+                    if enable_tools_ui:
+                        from chat.tools import get_available_tools as _get_tools
+                        tools_payload = await _get_tools(context.user_id)
 
-                in_thinking = False
-                async with client.stream(
-                    "POST", 
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload
-                ) as response:
-                    if response.status_code != 200:
-                        yield {"type": "error", "message": f"OpenRouter API error: {response.status_code}"}
-                        return
+                    payload = {
+                        "model": model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": True
+                    }
+                    if tools_payload:
+                        payload["tools"] = tools_payload
 
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "): continue
-                        data_str = line[6:].strip()
-                        if not data_str or data_str == "[DONE]": continue
-                        
-                        try:
-                            import json
-                            chunk = json.loads(data_str)
-                            choice = chunk.get("choices", [{}])[0]
-                            delta = choice.get("delta", {})
+                    async with client.stream(
+                        "POST", 
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers=headers,
+                        json=payload
+                    ) as response:
+                        if response.status_code == 429:
+                            retry_count += 1
+                            if retry_count < MAX_RETRIES:
+                                delay = (2 ** retry_count) + (0.1 * retry_count)
+                                logger.warning(f"OpenRouter 429 (Rate Limit). Retrying stream {retry_count}/{MAX_RETRIES} in {delay:.1f}s...")
+                                await asyncio.sleep(delay)
+                                continue
+                            yield {"type": "error", "message": "OpenRouter Rate Limit (429) exceeded after 5 retries."}
+                            return
+                        elif response.status_code >= 500:
+                            retry_count += 1
+                            if retry_count < MAX_RETRIES:
+                                delay = 1 * retry_count
+                                logger.warning(f"OpenRouter {response.status_code} Error. Retrying stream {retry_count}/{MAX_RETRIES} in {delay}s...")
+                                await asyncio.sleep(delay)
+                                continue
+                            yield {"type": "error", "message": f"OpenRouter API error: {response.status_code} after {MAX_RETRIES} retries"}
+                            return
+                        elif response.status_code != 200:
+                            yield {"type": "error", "message": f"OpenRouter API error: {response.status_code}"}
+                            return
+
+                        async for line in response.aiter_lines():
+                            if not line:
+                                continue
+                            line = line.strip()
+                            if not line.startswith("data: ") and not line.startswith("{"):
+                                continue
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                            else:
+                                data_str = line
+                            if not data_str or data_str == "[DONE]": continue
                             
-                            if "reasoning" in delta and delta["reasoning"]:
-                                yield {"type": "thinking", "content": delta["reasoning"]}
-                                continue
-                            
-                            if "reasoning_content" in delta and delta["reasoning_content"]:
-                                yield {"type": "thinking", "content": delta["reasoning_content"]}
-                                continue
-
-                            if "tool_calls" in delta:
-                                yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
-                                continue
-
-                            if "content" in delta and delta["content"]:
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
+                            try:
+                                import json
+                                chunk = json.loads(data_str)
+                                choice = chunk.get("choices", [{}])[0]
+                                delta = choice.get("delta", {})
                                 
-                                if in_thinking:
-                                    if "</think>" in text:
-                                        parts = text.split("</think>", 1)
-                                        yield {"type": "thinking", "content": parts[0]}
-                                        in_thinking = False
-                                        if parts[1]: yield {"type": "content", "content": parts[1]}
+                                if not delta:
+                                    msg = choice.get("message", {})
+                                    if msg.get("content"):
+                                        delta = {"content": msg["content"]}
+                                
+                                if "reasoning" in delta and delta["reasoning"]:
+                                    yield {"type": "thinking", "content": delta["reasoning"]}
+                                    continue
+                                
+                                if "reasoning_content" in delta and delta["reasoning_content"]:
+                                    yield {"type": "thinking", "content": delta["reasoning_content"]}
+                                    continue
+
+                                if "tool_calls" in delta:
+                                    yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
+                                    continue
+
+                                if "content" in delta and delta["content"]:
+                                    text = delta["content"]
+                                    if "<think>" in text:
+                                        in_thinking = True
+                                        parts = text.split("<think>", 1)
+                                        if parts[0]: yield {"type": "content", "content": parts[0]}
+                                        text = parts[1]
+                                    
+                                    if in_thinking:
+                                        if "</think>" in text:
+                                            parts = text.split("</think>", 1)
+                                            yield {"type": "thinking", "content": parts[0]}
+                                            in_thinking = False
+                                            if parts[1]: yield {"type": "content", "content": parts[1]}
+                                        else:
+                                            yield {"type": "thinking", "content": text}
                                     else:
-                                        yield {"type": "thinking", "content": text}
-                                else:
-                                    yield {"type": "content", "content": text}
+                                        yield {"type": "content", "content": text}
 
-                            if chunk.get("usage"):
-                                yield {"type": "metadata", "usage": chunk["usage"]}
+                                if chunk.get("usage"):
+                                    yield {"type": "metadata", "usage": chunk["usage"]}
 
-                        except: continue
-
-        except Exception as e:
-            yield {"type": "error", "message": str(e)}
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"[OpenRouter] JSON parse error: {e}, line: {data_str[:100]}")
+                                continue
+                            except Exception as e:
+                                logger.warning(f"[OpenRouter] Chunk parse error: {e}")
+                                continue
+                        return # Success
+            except Exception as e:
+                retry_count += 1
+                if retry_count < MAX_RETRIES:
+                    await asyncio.sleep(1 * retry_count)
+                    continue
+                yield {"type": "error", "message": str(e)}
+                return
     name = "OpenRouter"
     category = NodeCategory.AI.value
     description = "Access 100+ AI models through OpenRouter (GPT-4, Claude, Llama, Mistral, etc.)"
@@ -2579,7 +2624,7 @@ class OpenRouterNode(BaseNodeHandler):
             }
 
             # ── API Call (with 404 auto-fallback and 5xx retries) ─────────────────────────────
-            MAX_RETRIES = 3
+            MAX_RETRIES = 5
             retry_count = 0
             actual_model = model
             used_fallback = False
@@ -2608,12 +2653,13 @@ class OpenRouterNode(BaseNodeHandler):
                                 del body["response_format"]
                                 continue
 
-                        # If 5xx, retry
-                        if 500 <= response.status_code < 600:
+                        # If 5xx or 429, retry
+                        if (500 <= response.status_code < 600) or response.status_code == 429:
                             retry_count += 1
                             if retry_count < MAX_RETRIES:
-                                logger.warning(f"OpenRouter 5xx error ({response.status_code}). Retrying {retry_count}/{MAX_RETRIES}...")
-                                await asyncio.sleep(1 * retry_count) # Exponential backoff
+                                delay = (2 ** retry_count) if response.status_code == 429 else 1 * retry_count
+                                logger.warning(f"OpenRouter error ({response.status_code}). Retrying {retry_count}/{MAX_RETRIES} in {delay}s...")
+                                await asyncio.sleep(delay)
                                 continue
 
                         # If we reach here, either 200 or an error we don't retry (4xx other than 404)

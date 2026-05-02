@@ -228,8 +228,8 @@ async def document_list(request):
         ), kb.id
 
     doc, resolved_kb_id = await sync_to_async(_create)()
-    threading.Thread(target=__import__('inference.tasks', fromlist=['process_document']).process_document,
-                     args=(doc.id, resolved_kb_id)).start()
+    from .tasks import process_document_task
+    process_document_task.delay(doc.id, resolved_kb_id)
 
     return Response(DocumentSerializer(doc).data, status=201)
 
@@ -264,8 +264,8 @@ async def document_share(request, document_id: int):
         doc.sharing_mode = 'shared_read'
         doc.is_shared = True
         doc.shared_at = timezone.now()
-        from .tasks import share_document
-        threading.Thread(target=share_document, args=(doc.id, request.user.id)).start()
+        from .tasks import share_document_task
+        share_document_task.delay(doc.id, request.user.id)
     else:
         return Response({
             **DocumentSerializer(doc).data,

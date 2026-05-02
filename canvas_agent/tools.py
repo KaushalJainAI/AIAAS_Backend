@@ -61,7 +61,7 @@ class ToolExecutor:
                 from orchestrator.models import Workflow
                 # Fetch user's workflows
                 workflows = []
-                async for wf in Workflow.objects.filter(owner=user).all():
+                async for wf in Workflow.objects.filter(user=user).all():
                     workflows.append({"id": wf.id, "name": wf.name, "status": wf.status})
                 return json.dumps({"workflows": workflows})
                 

@@ -373,6 +373,13 @@ class HNSWKnowledgeBase:
         """Batch-embed a list of texts (runs encoding in a worker thread)."""
         return await asyncio.to_thread(self._embedder.encode, texts, batch_size)
 
+    # Public aliases for compatibility
+    async def embed_text(self, text: str) -> np.ndarray:
+        return await self._embed_text(text)
+
+    async def embed_texts(self, texts: list[str], batch_size: int = 32) -> list[np.ndarray]:
+        return await self._embed_texts(texts, batch_size)
+
     # ---- Re-indexing ---------------------------------------------------------
 
     async def rebuild_index(self):

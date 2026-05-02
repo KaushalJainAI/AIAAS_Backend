@@ -1168,6 +1168,35 @@ class ToolExecutor:
             return f"Error: Failed to execute {func_name}: {str(e)}"
 
     @staticmethod
+    async def _dispatch_ui_actions(args: Dict, context: Dict) -> str:
+        from channels.layers import get_channel_layer
+        user_id = context.get("user_id")
+        if not user_id:
+            return "Error: Missing user context."
+        try:
+            channel_layer = get_channel_layer()
+            if not channel_layer:
+                return "Error: Channel layer is not configured."
+            
+            actions = args.get("actions", [])
+            if not actions:
+                return "Error: No actions provided."
+
+            await channel_layer.group_send(
+                f"buddy_{user_id}",
+                {
+                    "type": "trigger_multiple_actions",
+                    "actions": actions,
+                }
+            )
+            return json.dumps({
+                "status": "success",
+                "message": f"Dispatched {len(actions)} UI actions successfully."
+            })
+        except Exception as e:
+            return f"Error: Failed to dispatch UI actions: {str(e)}"
+
+    @staticmethod
     async def _call_internal_api(args: Dict, context: Dict) -> str:
         from asgiref.sync import sync_to_async
         from django.urls import resolve, Resolver404

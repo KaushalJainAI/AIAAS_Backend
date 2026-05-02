@@ -2000,6 +2000,9 @@ async def send_message_stream(request, session_id: str):
         # ---- Generate final response ----
         llm_result = None
         interrupted = False  # Track if loop was interrupted due to timeout/limits
+        iteration = 0
+        actual_max_iterations = resolve_agent_iteration_limit(intent)
+
         if eager_results:
             yield f"data: {json.dumps({'type': 'status', 'phase': 'generating', 'message': 'Generating response...'})}\n\n"
             yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': 'Synthesizing all research findings and tool outputs into a final response...'})}\n\n"
@@ -2233,7 +2236,8 @@ async def send_message_stream(request, session_id: str):
                     history_list=history_list,
                     attachments=[],
                     stream_callback=_stream_cb,
-                    max_iterations=resolve_agent_iteration_limit(intent),
+                    max_iterations=actual_max_iterations,
+                    thread_id=thread_id,
                 )
 
             _graph_task = _aio.create_task(_run_graph())
@@ -2259,6 +2263,7 @@ async def send_message_stream(request, session_id: str):
             raw_content = graph_result["raw_content"]
             meta = graph_result["metadata"]
             tool_trace = graph_result["tool_trace"]
+            iteration = len(tool_trace)
             thinking = graph_result["thinking"]
             total_tokens += graph_result["total_tokens"]
             accumulated_tool_context = graph_result["accumulated_tool_context"]
@@ -2417,7 +2422,8 @@ async def send_message_stream(request, session_id: str):
         # Create Notification for new message
         try:
             from notifications.utils import create_notification
-            create_notification(
+            from asgiref.sync import sync_to_async
+            await sync_to_async(create_notification)(
                 user=request.user,
                 type='new_message',
                 title='New AI Response',

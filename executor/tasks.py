@@ -24,7 +24,7 @@ def run_engine_worker_task(self, execution_id_str: str, workflow_id: int, user_i
                     workflow_json: dict, input_data: dict, credentials: dict,
                     parent_execution_id_str: str = None, nesting_depth: int = 0,
                     workflow_chain: list = None, timeout_budget_ms: int = None,
-                    supervision: str = "full"):
+                    supervision: str = "full", skills: list[dict] = None):
     """
     Background worker that runs the ExecutionEngine for a pre-started execution.
     This is what allows horizontal scaling of workflow runs.
@@ -60,6 +60,7 @@ def run_engine_worker_task(self, execution_id_str: str, workflow_id: int, user_i
         workflow_chain=workflow_chain,
         timeout_budget_ms=timeout_budget_ms,
         supervision_level=supervision,
+        skills=skills,
     ))
     
     logger.info(f"Celery worker completed execution {execution_id} with state {result_state}")
@@ -258,7 +259,7 @@ def index_document_async(self, document_id: int):
     """
     import asyncio
     from inference.models import Document
-    from inference.engine import get_knowledge_base
+    from inference.engine import get_platform_knowledge_base as get_knowledge_base
     
     try:
         doc = Document.objects.get(id=document_id)

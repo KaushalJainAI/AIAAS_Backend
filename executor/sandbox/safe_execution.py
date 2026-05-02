@@ -152,6 +152,9 @@ class SafeCodeValidator(ast.NodeVisitor):
             '__mro__', '__globals__', '__code__', '__builtins__',
             '__dict__', '__init__', '__new__', '__getattr__', '__setattr__',
             '__import__', '__loader__', '__spec__',
+            '__self__', '__func__', '__closure__', '__module__',
+            '__name__', '__qualname__', '__annotations__',
+            '__kwdefaults__', '__defaults__', '__getattribute__',
         }
         
         if node.attr in dangerous_attrs:

@@ -17,6 +17,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
+from langchain_core.runnables import RunnableConfig
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +53,7 @@ class ChatAgentState(TypedDict):
     clean_content: str
     intent: str
     history_list: list
-    attachments: list
     max_iterations: int
-    stream_callback: Optional[Any]
 
 
 # ─────────────── Helpers ───────────────
@@ -108,13 +107,15 @@ async def _is_vision_enabled_model(model_value: str, provider_slug: str) -> bool
 
 # ─────────────── Agent Node ───────────────
 
-async def agent_node(state: ChatAgentState) -> dict:
+async def agent_node(state: ChatAgentState, config: RunnableConfig) -> dict:
     """Call the LLM. Returns AIMessage (with or without tool_calls)."""
     from chat.views import execute_llm
     from chat.extraction import extract_tool_calls
     import chat.tools as shared_tools
 
-    callback = state.get("stream_callback")
+    conf = config or {}
+    callback = conf.get("configurable", {}).get("stream_callback")
+    attachments = conf.get("configurable", {}).get("attachments", [])
     provider = state["provider"]
     model = state["model"]
     iteration = _count_ai_messages(state["messages"])
@@ -199,7 +200,7 @@ async def agent_node(state: ChatAgentState) -> dict:
                 tools=tools_payload,
                 history=state.get("history_list", []),
                 response_format=state["response_format"],
-                attachments=state.get("attachments", []),
+                attachments=attachments,
                 stream=True,
             )
             async with asyncio.timeout(LLM_CALL_TIMEOUT):
@@ -249,7 +250,7 @@ async def agent_node(state: ChatAgentState) -> dict:
                     tools=tools_payload,
                     history=state.get("history_list", []),
                     response_format=state["response_format"],
-                    attachments=state.get("attachments", []),
+                    attachments=attachments,
                     stream=False,
                 ),
                 timeout=LLM_CALL_TIMEOUT,
@@ -293,7 +294,7 @@ async def agent_node(state: ChatAgentState) -> dict:
 
 # ─────────────── Tools Node ───────────────
 
-async def tools_node(state: ChatAgentState) -> dict:
+async def tools_node(state: ChatAgentState, config: RunnableConfig) -> dict:
     """Execute tool calls from the last AIMessage."""
     import chat.tools as shared_tools
     from chat.views import perform_image_search, _sanitize_tool_args
@@ -302,7 +303,8 @@ async def tools_node(state: ChatAgentState) -> dict:
     if not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
         return {"messages": []}
 
-    callback = state.get("stream_callback")
+    conf = config or {}
+    callback = conf.get("configurable", {}).get("stream_callback")
     metadata = dict(state.get("metadata", {}))
     tool_trace = list(state.get("tool_trace", []))
     clean_content = state.get("clean_content", "")
@@ -339,7 +341,6 @@ async def tools_node(state: ChatAgentState) -> dict:
                             message=f'The AI agent requires your permission to run the tool: {fn}',
                             data={'tool': fn, 'args': args, 'thread_id': state.get("thread_id")}
                         )
-                    import asyncio
                     # We are in an async function, so we can just fire and forget or await
                     asyncio.create_task(send_hitl_notification())
                 except Exception as e:
@@ -463,7 +464,6 @@ async def tools_node(state: ChatAgentState) -> dict:
                                 message=f'Your requested image has been generated and is ready for viewing.',
                                 data={'image_url': parsed["image_url"]}
                             )
-                        import asyncio
                         asyncio.create_task(send_image_notification())
                     except Exception as e:
                         logger.error(f"Failed to create image notification: {e}")
@@ -634,13 +634,15 @@ async def run_agent_loop(
         "clean_content": clean_content,
         "intent": intent,
         "history_list": history_list,
-        "attachments": processed_attachments, # Only send multimodal-compatible ones
         "max_iterations": max_iterations,
-        "stream_callback": stream_callback,
     }
 
     config = {
-        "configurable": {"thread_id": thread_id},
+        "configurable": {
+            "thread_id": thread_id,
+            "stream_callback": stream_callback,
+            "attachments": processed_attachments,
+        },
         "recursion_limit": max_iterations * 2 + 10,
     }
 
