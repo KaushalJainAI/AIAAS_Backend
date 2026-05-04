@@ -197,7 +197,10 @@ class UsageTrackingSerializer(serializers.ModelSerializer):
             'date', 'compile_count', 'execute_count', 'chat_count',
             'tokens_used', 'credits_used', 'estimated_cost'
         ]
-        read_only_fields = '__all__'
+        read_only_fields = [
+            'date', 'compile_count', 'execute_count', 'chat_count',
+            'tokens_used', 'credits_used', 'estimated_cost'
+        ]
 
 
 class UsageInsightSerializer(serializers.Serializer):

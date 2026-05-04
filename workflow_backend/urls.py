@@ -29,8 +29,15 @@ urlpatterns = [
 
     # API Schema & Docs (public, read-only)
     path('api/schema/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema'),
+    path('api/schema/json/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema-json'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny]), name='swagger-ui'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny]), name='redoc'),
+    
+    # Aliases for common paths
+    path('swagger.json', SpectacularAPIView.as_view(permission_classes=[AllowAny])),
+    path('openapi.json', SpectacularAPIView.as_view(permission_classes=[AllowAny])),
+    path('redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny])),
+    path('docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny])),
     
     # Core (auth, users, API keys)
     path('api/', include('core.urls')),
