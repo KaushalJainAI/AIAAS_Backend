@@ -109,22 +109,15 @@ class MCPClientManager:
         return await CredentialInjector.resolve(server, self.user)
 
     @asynccontextmanager
-    async def connect(self):
+    async def _session(self, server: "MCPServer", resolved: "ResolvedCredentials"):
         """
-        Async context manager yielding an initialised `ClientSession`.
-
-        Sessions are pooled per (server_id, user_id) with SESSION_TTL expiry.
-        The entry's asyncio.Lock is held for the duration of the `async with`
-        block so concurrent callers are serialised (MCP sessions are not
-        concurrency-safe).  If the session raises during use it is evicted
-        so the next caller gets a fresh connection.
+        Core pool acquisition. Callers must supply already-resolved server
+        config and credentials so resolution never happens more than once per
+        public method call.
         """
-        server = await self.get_server_config()
-        resolved = await self._resolve_credentials(server)
         user_id = _coerce_user_id(self.user)
         key: _PoolKey = (self.server_id, user_id)
 
-        # Ensure a session exists (or replace an expired one)
         async with _creation_lock(key):
             entry = _pool.get(key)
             if entry is None or entry.expired():
@@ -152,9 +145,7 @@ class MCPClientManager:
                     await stack.aclose()
                     raise
 
-        # Serialise access: hold the entry lock for the entire call
         async with entry.lock:
-            # Re-check expiry — another coroutine may have evicted while we waited
             if key not in _pool or _pool[key] is not entry:
                 raise RuntimeError("MCP session was evicted; please retry")
             try:
@@ -163,6 +154,18 @@ class MCPClientManager:
             except Exception:
                 await _evict(key)
                 raise
+
+    @asynccontextmanager
+    async def connect(self):
+        """
+        Public async context manager yielding an initialised `ClientSession`.
+        Resolves server config and credentials exactly once, then delegates to
+        the pool via `_session`.
+        """
+        server = await self.get_server_config()
+        resolved = await self._resolve_credentials(server)
+        async with self._session(server, resolved) as session:
+            yield session
 
     @asynccontextmanager
     async def _connect_stdio(self, server: MCPServer, resolved: ResolvedCredentials):
@@ -220,9 +223,11 @@ class MCPClientManager:
         Cached (Redis) by default with a short TTL; pass `use_cache=False`
         to force a live fetch (used by the tool-cache invalidation path
         and by debug endpoints).
+
+        Server config and credentials are resolved exactly once regardless of
+        whether the cache is warm or cold.
         """
         server = await self.get_server_config()
-        resolved = await self._resolve_credentials(server)
         user_id = _coerce_user_id(self.user)
 
         if use_cache:
@@ -230,7 +235,8 @@ class MCPClientManager:
             if cached is not None:
                 return cached
 
-        async with self.connect() as session:
+        resolved = await self._resolve_credentials(server)
+        async with self._session(server, resolved) as session:
             result = await session.list_tools()
             tools = [
                 {
@@ -246,7 +252,9 @@ class MCPClientManager:
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Execute a single tool and return a JSON-friendly payload."""
-        async with self.connect() as session:
+        server = await self.get_server_config()
+        resolved = await self._resolve_credentials(server)
+        async with self._session(server, resolved) as session:
             result: CallToolResult = await session.call_tool(tool_name, arguments or {})
 
         if result.isError:

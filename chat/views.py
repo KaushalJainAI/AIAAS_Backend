@@ -264,11 +264,30 @@ def looks_like_intermediate_action_text(text: str) -> bool:
         return False
     return bool(
         _re_module.search(
-            r"\b(i(?:'| )?ll|i will|let me)\s+(search|look up|use|fetch|check|call|find|try|review|think|double check|verify)\b",
+            r"\b(i(?:'| )?ll|i will|let me)\s+(search|look up|use|fetch|check|call|find|try|review|think|double check|verify|scrape|browse|navigate|open|query|retrieve|read|access|scan|crawl|pull|grab|download)\b",
             lowered,
             _re_module.IGNORECASE,
         )
     )
+
+
+def strip_internal_tags(text: str) -> str:
+    """
+    Remove internal system tags that should never appear in user-facing responses.
+    Catches: [RESEARCH_LOG ...], <context_metadata ...>, [FULL RESOURCE CONTENT],
+    [SYSTEM NOTE: ...], and similar patterns.
+    """
+    if not isinstance(text, str):
+        return text
+    # Strip [RESEARCH_LOG ...] blocks (greedy within brackets)
+    text = _re_module.sub(r'\[RESEARCH_LOG[^\]]*\].*?(?=\[/RESEARCH_LOG\]|\n\n|$)', '', text, flags=_re_module.DOTALL | _re_module.IGNORECASE).strip()
+    # Strip <context_metadata ...> ... </context_metadata> blocks
+    text = _re_module.sub(r'<context_metadata[^>]*>.*?</context_metadata>', '', text, flags=_re_module.DOTALL | _re_module.IGNORECASE).strip()
+    # Strip [FULL RESOURCE CONTENT] markers
+    text = _re_module.sub(r'\[FULL RESOURCE CONTENT\]', '', text, flags=_re_module.IGNORECASE).strip()
+    # Strip [SYSTEM NOTE: ...] blocks
+    text = _re_module.sub(r'\[SYSTEM NOTE:[^\]]*\]', '', text, flags=_re_module.IGNORECASE).strip()
+    return text
 
 @sync_to_async
 def serialize_message(msg):
@@ -993,6 +1012,7 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
         "\n11. THINKING PROCESS: You have a `thinking` field (in JSON) or `<thought>` tags available. Use this for your internal reasoning, research logs, and source synthesis. If you see `[RESEARCH_LOG]` in the context, synthesize it into your thinking but DO NOT include the raw list in your final `response` field."
         "\n12. EFFICIENCY: Avoid making multiple sequential tool calls if a single call or no tool call can answer the user's question. Tool calls add latency — only use them when necessary for real-time data, file content retrieval, or specific citations. For straightforward knowledge questions, general advice, or topics you can answer from your training, provide the answer directly without invoking any tools. If one tool call provides sufficient information, do NOT make additional calls — synthesize and respond."
         "\n13. EFFICIENCY & TIMEOUTS: Respect the user's time. Avoid excessive or repetitive internal reasoning (overthinking) that leads to long wait times or timeouts. If the answer is straightforward, provide it quickly. Only use deep reasoning or multiple tool calls when the complexity strictly requires it."
+        "\n14. STRUCTURED DATA: When a user asks for tables, leaderboards, or specific structured data (like sports scores), the initial web_search snippets are rarely sufficient. You MUST use the `scrape_webpage` tool on a relevant search result to extract the complete table."
     )
     
     # Add optimization hint if previous interruptions occurred
@@ -2559,6 +2579,8 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str, str]:
         # Proactively strip any lingering tool calls from the content field
         if content:
             content = strip_tool_calls(content)
+            # Safety net: remove internal system tags that should never be user-visible
+            content = strip_internal_tags(content)
             
         return content, follow_ups, thinking, summary
 
@@ -2674,7 +2696,7 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str, str]:
         if mixed_tool_calls:
             cleaned_text = strip_tool_calls(clean_raw).strip()
             pending_action_phrases = _re_module.search(
-                r"\b(i(?:'| )?ll|i will|let me)\s+(search|look up|use|fetch|check|call)\b",
+                r"\b(i(?:'| )?ll|i will|let me)\s+(search|look up|use|fetch|check|call|find|try|review|think|verify|scrape|browse|navigate|open|query|retrieve|read|access|scan|crawl|pull|grab|download)\b",
                 cleaned_text,
                 _re_module.IGNORECASE,
             )

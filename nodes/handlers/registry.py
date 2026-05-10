@@ -208,7 +208,7 @@ def get_registry() -> NodeRegistry:
         registry.register(FirecrawlScrapeNode)
         
         # Register AI / LLM Nodes
-        from nodes.handlers.llm_nodes import OpenAINode, GeminiNode, OllamaNode, PerplexityNode, OpenRouterNode, HuggingFaceNode, XAINode
+        from nodes.handlers.llm_nodes import OpenAINode, GeminiNode, OllamaNode, PerplexityNode, OpenRouterNode, HuggingFaceNode, XAINode, NvidiaNode
         registry.register(OpenAINode)
         registry.register(GeminiNode)
         registry.register(OllamaNode)
@@ -216,6 +216,7 @@ def get_registry() -> NodeRegistry:
         registry.register(OpenRouterNode)
         registry.register(HuggingFaceNode)
         registry.register(XAINode)
+        registry.register(NvidiaNode)
         
         # Register Triggers
         registry.register(ManualTriggerNode)

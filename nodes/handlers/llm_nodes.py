@@ -3564,3 +3564,272 @@ class XAINode(BaseNodeHandler):
                 
         except Exception as e:
             return NodeExecutionResult(success=False, error=f"xAI error: {str(e)}", output_handle="output-0")
+
+
+class NvidiaNode(BaseNodeHandler):
+    """
+    Call NVIDIA NIM API for text generation.
+    OpenAI-compatible endpoint at integrate.api.nvidia.com/v1.
+    """
+
+    node_type = "nvidia"
+    name = "NVIDIA NIM"
+    category = NodeCategory.AI.value
+    description = "Generate text using NVIDIA NIM optimized models"
+    icon = "⚙️"
+    color = "#76b900"
+    static_output_fields = ["content", "model"]
+
+    fields = [
+        FieldConfig(
+            name="credential",
+            label="NVIDIA API Key",
+            field_type=FieldType.CREDENTIAL,
+            credential_type="nvidia",
+            description="Select your NVIDIA NIM credential"
+        ),
+        FieldConfig(
+            name="model",
+            label="Model",
+            field_type=FieldType.SELECT,
+            options=[],  # Dynamic
+            default="nvidia/llama-3.3-nemotron-super-49b-v1",
+            description="Select an NVIDIA NIM model"
+        ),
+        FieldConfig(
+            name="prompt",
+            label="Prompt",
+            field_type=FieldType.STRING,
+            placeholder="Enter your prompt...",
+            description="The prompt to send to the model"
+        ),
+        FieldConfig(
+            name="system_message",
+            label="System Message",
+            field_type=FieldType.STRING,
+            required=False,
+            description="Optional system instructions"
+        ),
+        FieldConfig(
+            name="temperature",
+            label="Temperature",
+            field_type=FieldType.NUMBER,
+            default=0.6,
+            required=False,
+            description="Creativity (0-1)"
+        ),
+        FieldConfig(
+            name="max_tokens",
+            label="Max Tokens",
+            field_type=FieldType.NUMBER,
+            default=4096,
+            required=False,
+            description="Maximum tokens to generate"
+        ),
+        FieldConfig(
+            name="thinking",
+            label="Show Reasoning (Thinking)",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="Capture internal reasoning for reasoning models."
+        ),
+    ]
+
+    outputs = [
+        HandleDef(id="output-0", label="Output"),
+    ]
+
+    _NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        try:
+            from nodes.models import AIModel
+            models = AIModel.objects.filter(provider__slug="nvidia", is_active=True).values_list('value', flat=True)
+            options = list(models)
+            default = "nvidia/llama-3.3-nemotron-super-49b-v1"
+            return {
+                "model": {
+                    "options": options,
+                    "defaultValue": default if default in options else (options[0] if options else default)
+                }
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch dynamic models for NVIDIA: {e}")
+            return {}
+
+    async def stream_execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ):
+        model = config.get("model", "nvidia/llama-3.3-nemotron-super-49b-v1")
+        prompt = config.get("prompt", "")
+        system_message = config.get("system_message", "")
+        temperature = float(config.get("temperature", 0.6))
+        max_tokens = int(config.get("max_tokens", 4096))
+        show_thinking = config.get("thinking", False)
+        credential_id = config.get("credential")
+
+        if not prompt:
+            yield {"type": "error", "message": "Prompt is required"}
+            return
+
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
+
+        if not api_key:
+            yield {"type": "error", "message": "NVIDIA API key not configured"}
+            return
+
+        try:
+            messages = []
+            history = config.get("history", [])
+            if history:
+                messages.extend(history)
+            if system_message:
+                messages = [{"role": "system", "content": system_message}] + messages
+
+            payload = {
+                "model": model,
+                "messages": messages + [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                in_thinking = False
+                async with client.stream(
+                    "POST",
+                    f"{self._NVIDIA_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                ) as response:
+                    if response.status_code != 200:
+                        yield {"type": "error", "message": f"NVIDIA API error: {response.status_code}"}
+                        return
+
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            import json
+                            chunk = json.loads(data_str)
+                            choice = chunk.get("choices", [{}])[0]
+                            delta = choice.get("delta", {})
+
+                            if show_thinking and "reasoning_content" in delta and delta["reasoning_content"]:
+                                yield {"type": "thinking", "content": delta["reasoning_content"]}
+                                continue
+
+                            if "content" in delta and delta["content"]:
+                                text = delta["content"]
+                                if "<think>" in text:
+                                    in_thinking = True
+                                    parts = text.split("<think>", 1)
+                                    if parts[0]:
+                                        yield {"type": "content", "content": parts[0]}
+                                    text = parts[1]
+
+                                if in_thinking:
+                                    if "</think>" in text:
+                                        parts = text.split("</think>", 1)
+                                        if show_thinking:
+                                            yield {"type": "thinking", "content": parts[0]}
+                                        in_thinking = False
+                                        if parts[1]:
+                                            yield {"type": "content", "content": parts[1]}
+                                    else:
+                                        if show_thinking:
+                                            yield {"type": "thinking", "content": text}
+                                else:
+                                    yield {"type": "content", "content": text}
+                        except Exception:
+                            continue
+
+        except Exception as e:
+            yield {"type": "error", "message": str(e)}
+
+    async def execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> NodeExecutionResult:
+        model = config.get("model", "nvidia/llama-3.3-nemotron-super-49b-v1")
+        prompt = config.get("prompt", "")
+        system_message = config.get("system_message", "")
+        temperature = float(config.get("temperature", 0.6))
+        max_tokens = int(config.get("max_tokens", 4096))
+        show_thinking = config.get("thinking", False)
+        credential_id = config.get("credential")
+
+        if not prompt:
+            return NodeExecutionResult(success=False, error="Prompt is required", output_handle="output-0")
+
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
+
+        if not api_key:
+            return NodeExecutionResult(success=False, error="NVIDIA API key not configured", output_handle="output-0")
+
+        try:
+            messages = []
+            history = config.get("history", [])
+            if history:
+                messages.extend(history)
+            if system_message:
+                messages = [{"role": "system", "content": system_message}] + messages
+
+            payload = {
+                "model": model,
+                "messages": messages + [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    f"{self._NVIDIA_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+
+                if response.status_code != 200:
+                    return NodeExecutionResult(
+                        success=False,
+                        error=f"NVIDIA API error: {response.text}",
+                        output_handle="output-0"
+                    )
+
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+                result_data = {"content": content, "model": model}
+
+                if show_thinking:
+                    import re
+                    match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                    if match:
+                        result_data["thinking"] = match.group(1).strip()
+                        result_data["content"] = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+                return NodeExecutionResult(
+                    success=True,
+                    items=[NodeItem(json=result_data)],
+                    output_handle="output-0"
+                )
+
+        except Exception as e:
+            return NodeExecutionResult(success=False, error=f"NVIDIA error: {str(e)}", output_handle="output-0")

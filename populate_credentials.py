@@ -273,6 +273,14 @@ def populate_types():
             'icon': 'Globe',
             'auth_method': 'api_key',
             'fields_schema': standard_api_key_schema
+        },
+        {
+            'name': 'NVIDIA NIM API',
+            'slug': 'nvidia',
+            'description': 'API Key for NVIDIA NIM inference platform',
+            'icon': '⚙️',
+            'auth_method': 'api_key',
+            'fields_schema': standard_api_key_schema
         }
     ]
 

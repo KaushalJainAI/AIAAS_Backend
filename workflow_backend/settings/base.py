@@ -233,6 +233,8 @@ REST_FRAMEWORK = {
         'execute': '5/minute',
         'chat': '20/hour',
         'stream': '20/minute',
+        'password_reset': '10/day',
+        'password_change': '10/hour',
     },
 }
 
@@ -336,6 +338,18 @@ REST_AUTH = {
 ACCOUNT_LOGIN_METHODS = {'email'}
 ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
 ACCOUNT_EMAIL_VERIFICATION = 'none'
+
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'no-reply@aiaas.local')
+
+NOTIFICATIONS_EMAIL_ENABLED = os.environ.get('NOTIFICATIONS_EMAIL_ENABLED', 'True') == 'True'
+NOTIFICATIONS_EMAIL_TYPES = _split_env_list(os.environ.get('NOTIFICATIONS_EMAIL_TYPES', ''))
+NOTIFICATIONS_EMAIL_SUBJECT_PREFIX = os.environ.get('NOTIFICATIONS_EMAIL_SUBJECT_PREFIX', '[AIAAS]')
 
 SOCIALACCOUNT_PROVIDERS = {
     'google': {

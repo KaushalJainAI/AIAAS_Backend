@@ -1,5 +1,7 @@
 from django.db import models
 from django.conf import settings
+from django.contrib.auth.hashers import check_password, make_password
+from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 import secrets
 
@@ -304,3 +306,51 @@ class UsageTracking(models.Model):
     def total_requests(self):
         """Total number of API requests for this day"""
         return self.compile_count + self.execute_count + self.chat_count
+
+
+class PasswordOTP(models.Model):
+    """One-time email verification code for password reset/change flows."""
+
+    PURPOSE_PASSWORD_RESET = 'password_reset'
+    PURPOSE_PASSWORD_CHANGE = 'password_change'
+    PURPOSE_CHOICES = [
+        (PURPOSE_PASSWORD_RESET, 'Password Reset'),
+        (PURPOSE_PASSWORD_CHANGE, 'Password Change'),
+    ]
+    MAX_FAILED_ATTEMPTS = 5
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='password_otps'
+    )
+    purpose = models.CharField(max_length=32, choices=PURPOSE_CHOICES)
+    otp_code = models.CharField(max_length=255)
+    verification_token = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+    failed_attempts = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'purpose', 'is_used', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.purpose}"
+
+    def set_otp(self, raw_otp):
+        self.otp_code = make_password(raw_otp)
+
+    def check_otp(self, raw_otp):
+        return check_password(raw_otp, self.otp_code)
+
+    @property
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_locked(self):
+        return self.failed_attempts >= self.MAX_FAILED_ATTEMPTS

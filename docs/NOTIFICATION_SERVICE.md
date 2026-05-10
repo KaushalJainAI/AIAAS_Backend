@@ -39,6 +39,34 @@ create_notification(
 )
 ```
 
+### Email Delivery
+Persistent notifications can also be delivered by email through Django's email backend.
+
+Environment settings:
+- `NOTIFICATIONS_EMAIL_ENABLED=True` enables email fan-out.
+- `NOTIFICATIONS_EMAIL_TYPES=` optionally limits email delivery to a comma-separated list of notification types, such as `workflow_failed,hitl_request,image_ready`.
+- `NOTIFICATIONS_EMAIL_SUBJECT_PREFIX=[AIAAS]` prefixes outbound email subjects.
+- `EMAIL_BACKEND`, `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS`, and `DEFAULT_FROM_EMAIL` configure SMTP delivery.
+
+Per-notification overrides:
+```python
+create_notification(
+    user=user_instance,
+    type='system',
+    title='Maintenance Notice',
+    message='The system will restart tonight.',
+    send_email=True,  # force email for this notification
+)
+
+create_notification(
+    user=user_instance,
+    type='new_message',
+    title='New Message',
+    message='You have a new chat response.',
+    data={'send_email': False},  # keep this one in-app only
+)
+```
+
 ---
 
 ## 3. Real-time WebSocket Streams

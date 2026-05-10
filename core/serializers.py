@@ -149,17 +149,49 @@ class GoogleLoginSerializer(serializers.Serializer):
 class ChangePasswordSerializer(serializers.Serializer):
     """Password change validation"""
     old_password = serializers.CharField(required=True, write_only=True)
+    verification_token = serializers.CharField(required=True, write_only=True)
     new_password = serializers.CharField(
         required=True,
         write_only=True,
         validators=[validate_password]
     )
+    confirm_password = serializers.CharField(required=False, write_only=True)
     
     def validate_old_password(self, value):
         user = self.context['request'].user
         if not user.check_password(value):
             raise serializers.ValidationError('Old password is incorrect')
         return value
+
+    def validate(self, attrs):
+        confirm_password = attrs.get('confirm_password')
+        if confirm_password is not None and attrs['new_password'] != confirm_password:
+            raise serializers.ValidationError({'new_password': 'Passwords do not match.'})
+        return attrs
+
+
+class PasswordOTPRequestSerializer(serializers.Serializer):
+    """Request an email OTP by email address."""
+    email = serializers.EmailField()
+
+
+class PasswordOTPVerifySerializer(serializers.Serializer):
+    """Verify a 6-digit OTP and exchange it for a short verification token."""
+    email = serializers.EmailField(required=False)
+    otp_code = serializers.CharField(max_length=6, min_length=6)
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """Reset a forgotten password after OTP verification."""
+    email = serializers.EmailField()
+    verification_token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
+    confirm_password = serializers.CharField(write_only=True, required=True)
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['confirm_password']:
+            raise serializers.ValidationError({'new_password': 'Passwords do not match.'})
+        return attrs
 
 
 # ==================== API Key Serializers ====================
