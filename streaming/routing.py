@@ -7,6 +7,7 @@ from django.urls import re_path
 from . import consumers
 from buddy.consumers import BuddyConsumer
 from canvas_agent.consumers import CanvasAgentConsumer
+from imagine.consumers import ImagineAgentConsumer
 
 websocket_urlpatterns = [
     # Execution updates and HITL (per-execution)
@@ -31,5 +32,11 @@ websocket_urlpatterns = [
     re_path(
         r'ws/canvas-agent/$',
         CanvasAgentConsumer.as_asgi()
+    ),
+
+    # Imagine Media Agent
+    re_path(
+        r'ws/imagine-agent/$',
+        ImagineAgentConsumer.as_asgi()
     ),
 ]

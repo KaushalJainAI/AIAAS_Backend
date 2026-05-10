@@ -52,3 +52,57 @@ class Generation(models.Model):
 
     def __str__(self):
         return f"{self.type} - {self.prompt[:30]}..."
+
+
+class ImagineConversation(models.Model):
+    STATUS_CHOICES = [
+        ('idle', 'Idle'),
+        ('awaiting_hitl', 'Awaiting HITL'),
+        ('generating', 'Generating'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='imagine_conversations',
+    )
+    title = models.CharField(max_length=120, blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='idle')
+    pending_intent = models.JSONField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return self.title or f"Conversation {self.id}"
+
+
+class ImagineMessage(models.Model):
+    ROLE_CHOICES = [
+        ('user', 'User'),
+        ('assistant', 'Assistant'),
+        ('system', 'System'),
+    ]
+
+    conversation = models.ForeignKey(
+        ImagineConversation,
+        on_delete=models.CASCADE,
+        related_name='messages',
+    )
+    role = models.CharField(max_length=12, choices=ROLE_CHOICES)
+    content = models.TextField(blank=True, default='')
+    intent = models.JSONField(blank=True, null=True)
+    generation = models.ForeignKey(
+        Generation,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='messages',
+    )
+    requires_hitl = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']

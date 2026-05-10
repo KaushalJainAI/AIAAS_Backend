@@ -384,3 +384,7 @@ LOGGING = {
 }
 
 CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'openai/gpt-4o-mini')
+
+OPEN_ROUTER_KEY = os.environ.get('OPEN_ROUTER_KEY', '')
+IMAGINE_AGENT_MODEL = os.environ.get('IMAGINE_AGENT_MODEL', 'openrouter/openai/gpt-4o-mini')
+IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD', '0.10'))
