@@ -1,6 +1,15 @@
+import re
+
 from rest_framework import serializers
+
 from .models import Workflow, WorkflowVersion, HITLRequest, ConversationMessage
 from credentials.models import Credential
+
+
+SUSPICIOUS_WORKFLOW_NAME_RE = re.compile(
+    r"(\.\./|[;|`<>]|--|/\*|\*/|\$\(|\b(drop|union|select|insert|delete|update|exec|whoami|passwd)\b)",
+    re.IGNORECASE,
+)
 
 class WorkflowSerializer(serializers.ModelSerializer):
     """Serializer for the Workflow model."""
@@ -22,6 +31,14 @@ class WorkflowSerializer(serializers.ModelSerializer):
             'node_count'
         ]
         read_only_fields = ['id', 'slug', 'created_at', 'updated_at', 'execution_count', 'last_executed_at']
+
+    def validate_name(self, value):
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Workflow name cannot be blank.")
+        if SUSPICIOUS_WORKFLOW_NAME_RE.search(name):
+            raise serializers.ValidationError("Workflow name contains unsupported characters or terms.")
+        return name
 
 class WorkflowVersionSerializer(serializers.ModelSerializer):
     """Serializer for WorkflowVersion snapshots."""

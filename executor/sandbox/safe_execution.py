@@ -41,6 +41,9 @@ SAFE_BUILTINS = {
     
     # Misc safe operations
     'print', 'input',  # Note: input disabled in sandbox
+
+    # Exceptions users commonly raise in code nodes
+    'Exception', 'ValueError', 'TypeError', 'KeyError', 'RuntimeError',
 }
 
 # Explicitly blocked builtins

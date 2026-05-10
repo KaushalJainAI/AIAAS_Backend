@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from compiler.config_access import get_node_config
-from compiler.utils import get_node_type
+from compiler.validators import get_node_type
 from orchestrator.models import Workflow
 
 logger = logging.getLogger(__name__)

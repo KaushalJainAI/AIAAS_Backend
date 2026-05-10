@@ -746,7 +746,6 @@ Output ONLY the JSON object, no other text."""
         node_id: str | None = None
     ) -> str:
         """Call LLM to generate response. Uses configured llm_type and llm_model."""
-        from compiler.schemas import ExecutionContext
         from orchestrator.chat_context import get_thought_history
         from logs.logger import get_execution_logger
         

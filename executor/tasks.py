@@ -169,7 +169,7 @@ def poll_workflow_trigger(self, workflow_id: int, node_id: str):
     from nodes.registry import get_registry
     from compiler.schemas import ExecutionContext
     from compiler.config_access import get_credential_ref, get_node_config
-    from compiler.utils import get_node_type
+    from compiler.validators import get_node_type
     from credentials.manager import get_credential_manager
     from uuid import uuid4
 

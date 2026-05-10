@@ -1,5 +1,4 @@
 import re
-from typing import Optional, List
 from .schemas import ModelMetadata, ModelVersion, IntentMetadata, OrchestrationState, PolicyMetadata
 
 

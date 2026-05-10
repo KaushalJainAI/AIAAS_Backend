@@ -13,7 +13,6 @@ variety of (mis-)formats, so the extractor MUST be robust to:
 """
 from __future__ import annotations
 
-import json
 
 from django.test import SimpleTestCase
 

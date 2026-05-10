@@ -3,6 +3,7 @@ Orchestrator App API Views
 
 Workflow CRUD, execution control, and HITL endpoints.
 """
+import asyncio
 import logging
 from uuid import UUID
 
@@ -926,7 +927,7 @@ async def modify_workflow(request, workflow_id: int):
         orchestrator.update_settings(llm_type=provider, llm_model=model)
     
     result = await orchestrator.modify_workflow(
-        workflow=current_workflow,
+        workflow=workflow,
         modification=modification,
         credential_id=credential_id,
     )
@@ -1051,16 +1052,30 @@ async def context_aware_chat(request):
     
     if not message:
         return Response({'error': 'Message is required'}, status=400)
+
+    if workflow_id in ("", None):
+        workflow_id = None
+    elif not str(workflow_id).isdigit():
+        return Response({'error': 'workflow_id must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        workflow_id = int(workflow_id)
     
     chat = ContextAwareChat(user_id=request.user.id, llm_type=provider or 'openrouter')
     
-    result = await chat.send_message(
-        message=message,
-        workflow_id=workflow_id,
-        node_id=node_id,
-        conversation_id=conversation_id,
-        credential_id=credential_id,
-    )
+    try:
+        result = await chat.send_message(
+            message=message,
+            workflow_id=workflow_id,
+            node_id=node_id,
+            conversation_id=conversation_id,
+            credential_id=credential_id,
+        )
+    except Exception as exc:
+        logger.exception("Context-aware chat failed")
+        return Response(
+            {'error': 'Context-aware chat failed', 'detail': str(exc)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     
     return Response(result)
 
@@ -1221,7 +1236,15 @@ async def execute_partial(request, workflow_id: int = None):
         
         if result.success:
             # Return items array in n8n-compatible format
-            items = [item.model_dump() for item in result.items]
+            items = [item.model_dump(by_alias=True) for item in result.items]
+            for item in items:
+                item_json = item.get('json', {})
+                if isinstance(item_json, dict) and item_json.get('success') is False and item_json.get('error'):
+                    error_msg = item_json['error']
+                    if node_type == 'code':
+                        error_msg = f"Code execution failed: {error_msg}"
+                    logger.warning(f"Partial execution item returned error: {error_msg}")
+                    return Response({'detail': error_msg}, status=400)
             return Response({'items': items})
         else:
             error_msg = result.error or "Unknown node execution error"
@@ -1390,7 +1413,6 @@ def export_workflow_zip(request, workflow_id):
 import json as _json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from executor.trigger_manager import get_trigger_manager
 from executor.tasks import execute_workflow_async
 
 import logging as _logging

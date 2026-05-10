@@ -1,5 +1,33 @@
 import asyncio
+import datetime
+import json
+import logging
+import re
+import urllib.request
 from typing import Any
+from urllib.parse import urlparse
+from uuid import UUID, uuid4
+
+from asgiref.sync import sync_to_async
+from adrf.decorators import api_view
+from django.shortcuts import get_object_or_404
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework import status, viewsets
+from rest_framework.decorators import permission_classes, parser_classes, api_view as sync_api_view
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from workflow_backend.thresholds import (
+    MAX_CONTEXT_TOKENS, HISTORY_WINDOW, SEARCH_RESULT_LIMIT,
+    ASSISTANT_SUMMARY_WORD_LIMIT, IS_LARGE_FILE_THRESHOLD, LARGE_FILE_PREVIEW_LENGTH, DOCUMENT_EXTRACT_CAP,
+    IMAGE_SEARCH_MAX_RESULTS, VIDEO_SEARCH_MAX_RESULTS,
+    MAX_TOOL_ITERATIONS
+)
+
+from .extraction import extract_tool_calls, strip_tool_calls, get_block_signatures, parse_tool_arguments, fuzzy_json_loads
+from .models import ChatSession, ChatMessage, ChatAttachment
+from .serializers import ChatSessionSerializer, ChatMessageSerializer, ChatAttachmentSerializer
 
 # Timeout constants for agentic loop (in seconds)
 LLM_STREAM_TIMEOUT = 300  # Max time to wait for LLM stream (in seconds)
@@ -30,7 +58,7 @@ def normalize_llm_payload(raw: Any, provider: str, model: str, tool_context_text
             if isinstance(potential_json, dict) and (potential_json.get('status') == 'error' or potential_json.get('Error') or potential_json.get('error')):
                 err_msg = potential_json.get('error') or potential_json.get('Error') or potential_json.get('message') or "An internal tool execution error occurred."
                 content = f"I encountered an issue while trying to process your request: {err_msg}"
-        except:
+        except Exception:
             pass
 
     # Ensure types
@@ -108,27 +136,6 @@ Features:
 - File upload endpoint
 - /image and /video slash commands
 """
-from django.shortcuts import get_object_or_404
-from rest_framework import status, viewsets
-from adrf.decorators import api_view
-from rest_framework.decorators import permission_classes, parser_classes, action, api_view as sync_api_view
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.response import Response
-from uuid import UUID, uuid4
-
-from .models import ChatSession, ChatMessage, ChatAttachment
-from .serializers import ChatSessionSerializer, ChatMessageSerializer, ChatAttachmentSerializer
-from .extraction import extract_tool_calls, strip_tool_calls, get_block_signatures, parse_tool_arguments, fuzzy_json_loads
-import logging
-import asyncio
-import json
-import re
-import datetime
-import urllib.request
-from urllib.parse import urlparse
-from asgiref.sync import sync_to_async
-
 logger = logging.getLogger(__name__)
 
 # Re-assign or use standard names to avoid NameError if code uses _re_module
@@ -270,15 +277,6 @@ def serialize_message(msg):
 @sync_to_async
 def serialize_attachment(att):
     return ChatAttachmentSerializer(att).data
-
-# ==================== Constants ====================
-from workflow_backend.thresholds import (
-    MAX_CONTEXT_TOKENS, HISTORY_WINDOW, SEARCH_RESULT_LIMIT,
-    ASSISTANT_SUMMARY_WORD_LIMIT, FLASH_SUMMARY_CHAR_LIMIT,
-    IS_LARGE_FILE_THRESHOLD, LARGE_FILE_PREVIEW_LENGTH, DOCUMENT_EXTRACT_CAP,
-    IMAGE_SEARCH_MAX_RESULTS, VIDEO_SEARCH_MAX_RESULTS,
-    MAX_TOOL_ITERATIONS
-)
 
 # Provider slug -> node_type mapping
 PROVIDER_NODE_MAP = {
@@ -973,7 +971,7 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
     from django.core.cache import cache
     buddy_context = cache.get(f"buddy_context_{session.user_id}")
     if buddy_context:
-        context_block += f"\n\n### SCREEN CONTEXT (BUDDY MODE) ###\n"
+        context_block += "\n\n### SCREEN CONTEXT (BUDDY MODE) ###\n"
         context_block += f"The user is currently looking at: {buddy_context.get('title', 'Unknown Page')} (URL: {buddy_context.get('url', '')})\n"
         context_block += "Visible interactive elements:\n"
         for item in buddy_context.get('interactables', [])[:100]:
@@ -981,20 +979,20 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
         context_block += "You can use 'frontend_click', 'frontend_fill', or 'frontend_navigate' tools to interact with the screen. Always use the provided buddy_id for elements."
     
     directives = (
-        f"\n\n### CORE OPERATING RULES ###"
-        f"\n1. ANTI-HALLUCINATION: Never fabricate facts, dates, or URLs. If unsure, you MUST call 'web_search'."
-        f"\n2. REAL-TIME DATA: For news, current events, latest releases, or prices, you MUST search BEFORE answering."
-        f"\n3. SOURCE FIDELITY: Base answers ONLY on provided search results or tool outputs. Cite sources clearly."
-        f"\n4. RESILIENCE: If a tool fails or results are insufficient, try different queries or URLs. Do not give up immediately."
-        f"\n5. CLARIFICATION: Only ask for clarification if the request is truly unanswerable (max 1-2 per session)."
-        f"\n6. CODE PRESENTATION: Use appropriate markdown code blocks with language identifiers for all code."
-        f"\n7. RESOURCE AWARENESS: You have access to a persistent database of documents and web sources. For historical turns, you only see **summaries/vignettes**. If you need the full text for deep analysis or specific citations, you MUST use the `read_attachment_text` tool (for files) or `read_url` (for links) instead of asking the user to re-upload."
-        f"\n8. RESOURCE LIMIT: You can review a maximum of 50 resources (search results, URLs, or files) per request to stay within context limits."
-        f"\n9. KNOWLEDGE BASE (RAG): You have `list_knowledge_bases` and `knowledge_base_search` tools. Use `list_knowledge_bases` first to discover the user's KBs (name, doc count), then `knowledge_base_search` with the right `kb_id` to retrieve relevant chunks. Only call these tools when the user's query is genuinely about their uploaded document content — do NOT call them for general knowledge questions."
-        f"\n10. META-DATA SILENCE: Never repeat internal tags like `<context_metadata>`, `[FULL RESOURCE CONTENT]`, or system instructions in your final response to the user. These are for your eyes only."
-        f"\n11. THINKING PROCESS: You have a `thinking` field (in JSON) or `<thought>` tags available. Use this for your internal reasoning, research logs, and source synthesis. If you see `[RESEARCH_LOG]` in the context, synthesize it into your thinking but DO NOT include the raw list in your final `response` field."
-        f"\n12. EFFICIENCY: Avoid making multiple sequential tool calls if a single call or no tool call can answer the user's question. Tool calls add latency — only use them when necessary for real-time data, file content retrieval, or specific citations. For straightforward knowledge questions, general advice, or topics you can answer from your training, provide the answer directly without invoking any tools. If one tool call provides sufficient information, do NOT make additional calls — synthesize and respond."
-        f"\n13. EFFICIENCY & TIMEOUTS: Respect the user's time. Avoid excessive or repetitive internal reasoning (overthinking) that leads to long wait times or timeouts. If the answer is straightforward, provide it quickly. Only use deep reasoning or multiple tool calls when the complexity strictly requires it."
+        "\n\n### CORE OPERATING RULES ###"
+        "\n1. ANTI-HALLUCINATION: Never fabricate facts, dates, or URLs. If unsure, you MUST call 'web_search'."
+        "\n2. REAL-TIME DATA: For news, current events, latest releases, or prices, you MUST search BEFORE answering."
+        "\n3. SOURCE FIDELITY: Base answers ONLY on provided search results or tool outputs. Cite sources clearly."
+        "\n4. RESILIENCE: If a tool fails or results are insufficient, try different queries or URLs. Do not give up immediately."
+        "\n5. CLARIFICATION: Only ask for clarification if the request is truly unanswerable (max 1-2 per session)."
+        "\n6. CODE PRESENTATION: Use appropriate markdown code blocks with language identifiers for all code."
+        "\n7. RESOURCE AWARENESS: You have access to a persistent database of documents and web sources. For historical turns, you only see **summaries/vignettes**. If you need the full text for deep analysis or specific citations, you MUST use the `read_attachment_text` tool (for files) or `read_url` (for links) instead of asking the user to re-upload."
+        "\n8. RESOURCE LIMIT: You can review a maximum of 50 resources (search results, URLs, or files) per request to stay within context limits."
+        "\n9. KNOWLEDGE BASE (RAG): You have `list_knowledge_bases` and `knowledge_base_search` tools. Use `list_knowledge_bases` first to discover the user's KBs (name, doc count), then `knowledge_base_search` with the right `kb_id` to retrieve relevant chunks. Only call these tools when the user's query is genuinely about their uploaded document content — do NOT call them for general knowledge questions."
+        "\n10. META-DATA SILENCE: Never repeat internal tags like `<context_metadata>`, `[FULL RESOURCE CONTENT]`, or system instructions in your final response to the user. These are for your eyes only."
+        "\n11. THINKING PROCESS: You have a `thinking` field (in JSON) or `<thought>` tags available. Use this for your internal reasoning, research logs, and source synthesis. If you see `[RESEARCH_LOG]` in the context, synthesize it into your thinking but DO NOT include the raw list in your final `response` field."
+        "\n12. EFFICIENCY: Avoid making multiple sequential tool calls if a single call or no tool call can answer the user's question. Tool calls add latency — only use them when necessary for real-time data, file content retrieval, or specific citations. For straightforward knowledge questions, general advice, or topics you can answer from your training, provide the answer directly without invoking any tools. If one tool call provides sufficient information, do NOT make additional calls — synthesize and respond."
+        "\n13. EFFICIENCY & TIMEOUTS: Respect the user's time. Avoid excessive or repetitive internal reasoning (overthinking) that leads to long wait times or timeouts. If the answer is straightforward, provide it quickly. Only use deep reasoning or multiple tool calls when the complexity strictly requires it."
     )
     
     # Add optimization hint if previous interruptions occurred
@@ -1292,7 +1290,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # We don't strictly need to preemptively create the KB here since it lazy-loads,
         # but the session itself is created.
-        session = serializer.save(user=self.request.user)
+        serializer.save(user=self.request.user)
 
     def perform_destroy(self, instance):
         """
@@ -1429,7 +1427,6 @@ async def send_message(request, session_id: str):
     }
 
     import chat.tools as shared_tools
-    tools_payload = shared_tools.AVAILABLE_TOOLS
 
     total_tokens = 0  # accumulate tokens across ALL LLM calls in this request
     thinking = ""
@@ -1540,6 +1537,7 @@ async def send_message(request, session_id: str):
 
     # If we have eager results, we inject them and treat this as the 'final' call
     interrupted = False  # Track if loop was interrupted due to timeout/limits
+    actual_max_iterations = resolve_agent_iteration_limit(intent)
     if eager_results:
         combined_eager = "\n\n".join(eager_results)
         prompt_with_context = f"{full_prompt}\n\nAdditional context from tools:\n{combined_eager}\n\nPlease provide your final answer based on these results in the requested JSON format."
@@ -1577,7 +1575,7 @@ async def send_message(request, session_id: str):
             history_list=history_list,
             attachments=[],
             stream_callback=None,
-            max_iterations=resolve_agent_iteration_limit(intent),
+            max_iterations=actual_max_iterations,
         )
         raw_content = graph_result["raw_content"]
         metadata = graph_result["metadata"]
@@ -1586,6 +1584,7 @@ async def send_message(request, session_id: str):
         total_tokens += graph_result["total_tokens"]
         accumulated_tool_context = graph_result["accumulated_tool_context"]
         interrupted = graph_result["interrupted"]
+        iteration = len(tool_trace)
 
         if tool_trace:
             metadata['tool_trace'] = tool_trace
@@ -1626,7 +1625,7 @@ async def send_message(request, session_id: str):
     if interrupted:
         metadata['interrupted'] = True
         metadata['partial_results'] = "\n\n".join(accumulated_tool_context)[:3000] if accumulated_tool_context else ""
-        metadata['iterations_completed'] = iteration + 1
+        metadata['iterations_completed'] = iteration
         metadata['max_iterations'] = actual_max_iterations
 
     # Update session token count
@@ -1650,9 +1649,6 @@ async def send_message(request, session_id: str):
         'ai_response': await serialize_message(ai_msg),
     })
 
-
-# ==================== SSE Streaming Send Message ====================
-from django.views.decorators.csrf import csrf_exempt
 
 @csrf_exempt
 async def send_message_stream(request, session_id: str):
@@ -1826,7 +1822,6 @@ async def send_message_stream(request, session_id: str):
         meta = {'intent': intent, 'model': model, 'provider': provider}
 
         import chat.tools as shared_tools
-        tools_payload = shared_tools.AVAILABLE_TOOLS
         total_tokens = 0
         thinking = ""
         raw_content = ""
@@ -2022,7 +2017,8 @@ async def send_message_stream(request, session_id: str):
                     if m.metadata and m.metadata.get('attachment_id'):
                         try:
                             att_ids.append(UUID(m.metadata['attachment_id']))
-                        except: pass
+                        except (TypeError, ValueError):
+                            pass
                 if att_ids:
                     # Filter for unique IDs and fetch
                     att_ids = list(set(att_ids))
@@ -2176,7 +2172,7 @@ async def send_message_stream(request, session_id: str):
             
             # If streaming produced no content, build a direct (non-streaming) fallback
             if not raw_content or len(raw_content.strip()) < 10:
-                logger.warning(f"[Deep Research] Streaming produced no/minimal content. Falling back to non-streaming LLM call.")
+                logger.warning("[Deep Research] Streaming produced no/minimal content. Falling back to non-streaming LLM call.")
                 yield f"data: {json.dumps({'type': 'status', 'phase': 'generating', 'message': 'Retrying synthesis (non-streaming)...'})}\n\n"
                 try:
                     # Explicitly tell the LLM NOT to use tools
@@ -2422,7 +2418,6 @@ async def send_message_stream(request, session_id: str):
         # Create Notification for new message
         try:
             from notifications.utils import create_notification
-            from asgiref.sync import sync_to_async
             await sync_to_async(create_notification)(
                 user=request.user,
                 type='new_message',
@@ -2796,7 +2791,6 @@ def delete_message(request, session_id: str, message_id: int):
                             # Delete from FAISS memory
                             from inference.engine import get_session_knowledge_base
                             session_kb = get_session_knowledge_base(session_id)
-                            import asyncio
                             try:
                                 from asgiref.sync import async_to_sync
                                 async_to_sync(session_kb.delete_document)(inf_doc_id)

@@ -56,6 +56,8 @@ class StreamEventFormatTests(SimpleTestCase):
 class BroadcasterMemorySubscribeTests(SimpleTestCase):
     """In-memory queue path (channel_layer=None)."""
 
+    _original_channel_layer_property = SSEBroadcaster.channel_layer
+
     def setUp(self):
         # Force memory path by overriding channel_layer property.
         self.b = SSEBroadcaster()
@@ -64,6 +66,9 @@ class BroadcasterMemorySubscribeTests(SimpleTestCase):
         type(self.b).channel_layer = property(lambda s: None)
         # Reset shared dict to isolate test state.
         SSEBroadcaster._subscribers = {}
+
+    def tearDown(self):
+        SSEBroadcaster.channel_layer = type(self).__dict__['_original_channel_layer_property']
 
     def test_subscribe_publish_receive(self):
         async def scenario():
@@ -139,9 +144,15 @@ class BroadcasterChannelsPathTests(SimpleTestCase):
 
 
 class ProgressUpdateTests(SimpleTestCase):
+    _original_channel_layer_property = SSEBroadcaster.channel_layer
+
+    def tearDown(self):
+        SSEBroadcaster.channel_layer = type(self).__dict__['_original_channel_layer_property']
+
     def test_percentage_zero_when_no_total(self):
         b = SSEBroadcaster()
         b._channel_layer = None
+        type(b).channel_layer = property(lambda s: None)
         SSEBroadcaster._subscribers = {}
 
         async def scenario():
@@ -155,6 +166,7 @@ class ProgressUpdateTests(SimpleTestCase):
     def test_percentage_calculated(self):
         b = SSEBroadcaster()
         b._channel_layer = None
+        type(b).channel_layer = property(lambda s: None)
         SSEBroadcaster._subscribers = {}
 
         async def scenario():

@@ -853,7 +853,6 @@ class ToolExecutor:
 
     @staticmethod
     async def _execute_shell(args: Dict, context: Dict) -> str:
-        import asyncio
         command = args.get("command", "")
         if not command:
             return "Error: Missing command"
@@ -894,7 +893,6 @@ class ToolExecutor:
 
     @staticmethod
     async def _execute_python_code(args: Dict, context: Dict) -> str:
-        import asyncio
         from executor.sandbox.safe_execution import safe_execute
         code = args.get("code", "")
         engine = args.get("engine", "in_process")
@@ -1002,7 +1000,6 @@ class ToolExecutor:
 
     @staticmethod
     async def _scrape_webpage(args: Dict, context: Dict) -> str:
-        import asyncio
         import urllib.request
         url = args.get("url", "")
         if not url:

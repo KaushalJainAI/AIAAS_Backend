@@ -8,7 +8,7 @@ recursion limits and structured message threading.
 import asyncio
 import json
 import logging
-from typing import Any, TypedDict, Annotated, Optional
+from typing import TypedDict, Annotated
 
 from langchain_core.messages import (
     BaseMessage, HumanMessage, AIMessage, ToolMessage,
@@ -235,7 +235,7 @@ async def agent_node(state: ChatAgentState, config: RunnableConfig) -> dict:
                         content = f"LLM Error: {chunk.get('message', 'Unknown')}"
                         break
         except asyncio.TimeoutError:
-            logger.warning(f"[Agent Node] LLM stream timed out")
+            logger.warning("[Agent Node] LLM stream timed out")
             if not content:
                 content = "Response timed out. Please try again."
     else:
@@ -461,7 +461,7 @@ async def tools_node(state: ChatAgentState, config: RunnableConfig) -> dict:
                                 user=user,
                                 type='image_ready',
                                 title='Image Generated',
-                                message=f'Your requested image has been generated and is ready for viewing.',
+                                message='Your requested image has been generated and is ready for viewing.',
                                 data={'image_url': parsed["image_url"]}
                             )
                         asyncio.create_task(send_image_notification())
