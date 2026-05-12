@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -25,7 +25,6 @@ LOGIN_URL = "/api/auth/login/"
 PROFILE_URL = "/api/auth/profile/"
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class AuthHappyPath(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -53,7 +52,6 @@ class AuthHappyPath(TestCase):
         self.assertEqual(r.status_code, 200, r.content)
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class AuthSadPath(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -86,7 +84,6 @@ class AuthSadPath(TestCase):
         self.assertEqual(r.status_code, 400)
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class AuthAngryPath(TestCase):
     """Hostile inputs — proves the auth surface doesn't crash or leak."""
 

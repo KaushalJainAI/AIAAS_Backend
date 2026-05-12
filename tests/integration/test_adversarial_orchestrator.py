@@ -15,7 +15,6 @@ from orchestrator.models import Workflow
 User = get_user_model()
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class WorkflowModelAngry(TestCase):
     """Direct model-level adversarial tests (no HTTP)."""
 
@@ -41,7 +40,6 @@ class WorkflowModelAngry(TestCase):
             self.assertFalse(Workflow.objects.filter(name="big").exists())
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class WebhookAngry(TestCase):
     """The public webhook endpoint is the highest-risk attack surface."""
 
@@ -69,7 +67,6 @@ class WebhookAngry(TestCase):
         self.assertLess(r.status_code, 500)
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class HealthCheckTests(TestCase):
     """Tiny smoke + adversarial checks on /api/health/."""
 

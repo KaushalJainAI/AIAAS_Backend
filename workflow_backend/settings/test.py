@@ -51,3 +51,11 @@ CHANNEL_LAYERS = {
         'BACKEND': 'channels.layers.InMemoryChannelLayer',
     }
 }
+
+REST_FRAMEWORK = {
+    **REST_FRAMEWORK,
+    'DEFAULT_THROTTLE_CLASSES': [],
+    'DEFAULT_THROTTLE_RATES': {
+        k: '100000/second' for k in REST_FRAMEWORK.get('DEFAULT_THROTTLE_RATES', {})
+    },
+}

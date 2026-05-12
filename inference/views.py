@@ -12,6 +12,9 @@ from asgiref.sync import sync_to_async
 
 from adrf.decorators import api_view
 from rest_framework.decorators import permission_classes
+from drf_spectacular.utils import extend_schema, inline_serializer
+from drf_spectacular.types import OpenApiTypes
+from rest_framework import serializers as drf_serializers
 
 from .models import Document, KnowledgeBase
 from .engine import get_hnsw_kb, get_kb_manager, get_rag_pipeline
@@ -29,6 +32,15 @@ logger = logging.getLogger(__name__)
 # Knowledge Base CRUD
 # =============================================================================
 
+@extend_schema(
+    methods=['GET'],
+    responses={200: KnowledgeBaseSerializer(many=True)},
+)
+@extend_schema(
+    methods=['POST'],
+    request=KnowledgeBaseSerializer,
+    responses={201: KnowledgeBaseSerializer, 400: OpenApiTypes.OBJECT},
+)
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 async def kb_list(request):
@@ -171,6 +183,20 @@ async def kb_remove_document(request, kb_id: int, document_id: int):
 # Documents
 # =============================================================================
 
+@extend_schema(
+    methods=['GET'],
+    responses={200: inline_serializer(
+        name="DocumentListResponse",
+        fields={
+            "my_documents": DocumentSerializer(many=True),
+            "public_documents": DocumentSerializer(many=True),
+        },
+    )},
+)
+@extend_schema(
+    methods=['POST'],
+    responses={201: DocumentSerializer, 400: OpenApiTypes.OBJECT},
+)
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 async def document_list(request):

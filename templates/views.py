@@ -5,6 +5,8 @@ from adrf.decorators import api_view
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
+from rest_framework import serializers as drf_serializers
+from drf_spectacular.utils import extend_schema, inline_serializer
 
 from .models import WorkflowTemplate, WorkflowRating, WorkflowBookmark, TemplateComment
 from asgiref.sync import sync_to_async
@@ -24,6 +26,15 @@ class TemplatePagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 50
 
+@extend_schema(responses={200: inline_serializer(
+    name="PaginatedTemplateList",
+    fields={
+        "count": drf_serializers.IntegerField(),
+        "next": drf_serializers.URLField(allow_null=True),
+        "previous": drf_serializers.URLField(allow_null=True),
+        "results": TemplateListItemSerializer(many=True),
+    },
+)})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def template_list(request):

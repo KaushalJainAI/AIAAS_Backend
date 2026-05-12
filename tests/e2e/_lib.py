@@ -83,3 +83,76 @@ def login(base: str, email: str, password: str) -> str:
 
 def auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def load_env_file(path: str = None) -> None:
+    """Load Backend/.env into os.environ if not already set. No deps."""
+    if path is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.normpath(os.path.join(here, "..", "..", ".env"))
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            os.environ.setdefault(k, v)
+
+
+def create_credential(base: str, token: str, slug: str, api_key: str, name: str) -> int:
+    """Create an API-key credential of the given type. Returns credential id."""
+    r = requests.post(
+        f"{base}/api/credentials/",
+        headers={**auth_headers(token), "Content-Type": "application/json"},
+        json={
+            "name": name,
+            "credential_type": slug,
+            "data": {"api_key": api_key},
+        },
+        timeout=15,
+    )
+    assert r.status_code in (200, 201), f"credential create failed: {r.status_code} {r.text[:200]}"
+    return r.json()["id"]
+
+
+def create_nvidia_credential(base: str, token: str, api_key: str, name: str = "e2e-nvidia") -> int:
+    return create_credential(base, token, "nvidia", api_key, name)
+
+
+def minimal_nvidia_workflow(credential_id: int) -> dict:
+    """Trivial manual_trigger → nvidia workflow that asks for one word."""
+    return {
+        "name": "e2e-min-nvidia",
+        "description": "auto",
+        "status": "draft",
+        "nodes": [
+            {
+                "id": "trig1",
+                "type": "manual_trigger",
+                "data": {"nodeType": "manual_trigger", "config": {}},
+                "position": {"x": 0, "y": 0},
+            },
+            {
+                "id": "nv1",
+                "type": "nvidia",
+                "data": {
+                    "nodeType": "nvidia",
+                    "config": {
+                        "credential": credential_id,
+                        "credential_id": credential_id,
+                        "model": "nvidia/llama-3.3-nemotron-super-49b-v1",
+                        "prompt": "Reply with exactly: pong",
+                        "temperature": 0.0,
+                        "max_tokens": 16,
+                    },
+                },
+                "position": {"x": 200, "y": 0},
+            },
+        ],
+        "edges": [
+            {"id": "e1", "source": "trig1", "target": "nv1"},
+        ],
+    }

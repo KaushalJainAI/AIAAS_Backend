@@ -8,6 +8,8 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
+from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer, OpenApiResponse
+
 from .client import MCPClientManager
 from .credential_injector import (
     CredentialInjector,
@@ -21,6 +23,17 @@ from .tool_cache import MCPToolCache
 logger = logging.getLogger(__name__)
 
 
+@extend_schema_view(
+    list=extend_schema(
+        responses={200: OpenApiResponse(response={
+            "type": "object",
+            "required": ["servers"],
+            "properties": {
+                "servers": {"type": "array", "items": {"$ref": "#/components/schemas/MCPServer"}},
+            },
+        })},
+    ),
+)
 class MCPServerViewSet(viewsets.ModelViewSet):
     """
     CRUD for MCP servers + tool discovery.
@@ -31,6 +44,7 @@ class MCPServerViewSet(viewsets.ModelViewSet):
     """
     serializer_class = MCPServerSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
     queryset = MCPServer.objects.all()  # for DRF router introspection
 
     def get_queryset(self):

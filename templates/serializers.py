@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
 from .models import WorkflowTemplate, WorkflowRating, WorkflowBookmark, TemplateComment
 
 class WorkflowRatingSerializer(serializers.ModelSerializer):
@@ -44,12 +45,14 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
             'average_rating', 'rating_count', 'created_at'
         ]
 
+    @extend_schema_field(serializers.BooleanField())
     def get_is_bookmarked(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             return WorkflowBookmark.objects.filter(template=obj, user=request.user).exists()
         return False
 
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_user_rating(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
@@ -60,7 +63,7 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
 
 class TemplateListItemSerializer(serializers.ModelSerializer):
     is_bookmarked = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = WorkflowTemplate
         fields = [
@@ -69,6 +72,7 @@ class TemplateListItemSerializer(serializers.ModelSerializer):
             'average_rating', 'rating_count', 'is_featured', 'is_bookmarked'
         ]
 
+    @extend_schema_field(serializers.BooleanField())
     def get_is_bookmarked(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:

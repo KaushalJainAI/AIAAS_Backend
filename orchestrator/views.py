@@ -15,12 +15,35 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from asgiref.sync import sync_to_async
 
+from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
+from rest_framework import serializers as drf_serializers
+
 from .models import Workflow, WorkflowVersion, HITLRequest, ConversationMessage
 from .serializers import (
-    WorkflowSerializer, 
-    WorkflowVersionSerializer, 
-    HITLRequestSerializer, 
+    WorkflowSerializer,
+    WorkflowVersionSerializer,
+    HITLRequestSerializer,
     ConversationMessageSerializer
+)
+
+
+_ExecutionStartedResponse = inline_serializer(
+    name="ExecutionStartedResponse",
+    fields={
+        "execution_id": drf_serializers.CharField(),
+        "workflow_id": drf_serializers.IntegerField(),
+        "state": drf_serializers.CharField(),
+        "started_at": drf_serializers.DateTimeField(allow_null=True),
+    },
+)
+
+_ErrorResponse = inline_serializer(
+    name="OrchestratorErrorResponse",
+    fields={
+        "error": drf_serializers.CharField(),
+        "message": drf_serializers.CharField(required=False),
+    },
 )
 from compiler.validators import (
     validate_dag,
@@ -79,6 +102,15 @@ def is_functionally_identical(nodes1, edges1, nodes2, edges2):
 
 # ======================== Workflow CRUD API ========================
 
+@extend_schema(
+    methods=['GET'],
+    responses={200: WorkflowSerializer(many=True)},
+)
+@extend_schema(
+    methods=['POST'],
+    request=WorkflowSerializer,
+    responses={201: WorkflowSerializer},
+)
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def workflow_list(request):
@@ -114,6 +146,22 @@ def workflow_list(request):
         return Response(WorkflowSerializer(workflow).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    methods=['GET'],
+    responses={200: WorkflowSerializer},
+)
+@extend_schema(
+    methods=['PUT', 'PATCH'],
+    request=WorkflowSerializer,
+    responses={
+        200: WorkflowSerializer,
+        400: _ErrorResponse,
+    },
+)
+@extend_schema(
+    methods=['DELETE'],
+    responses={204: OpenApiResponse(description="Workflow deleted")},
+)
 @api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def workflow_detail(request, workflow_id: int):
@@ -347,6 +395,13 @@ async def undeploy_workflow(request, workflow_id: int):
 
 # ======================== Execution Control API ========================
 
+@extend_schema(
+    responses={
+        200: _ExecutionStartedResponse,
+        400: _ErrorResponse,
+        404: _ErrorResponse,
+    },
+)
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 async def execute_workflow(request, workflow_id: int):
@@ -626,6 +681,50 @@ async def respond_to_hitl(request, request_id: str):
 
 # ======================== AI Chat API ========================
 
+@extend_schema(
+    methods=['GET'],
+    responses={
+        200: inline_serializer(
+            name="ConversationListOrMessages",
+            fields={
+                "conversations": drf_serializers.ListField(child=drf_serializers.DictField(), required=False),
+                "messages": ConversationMessageSerializer(many=True, required=False),
+            },
+        ),
+    },
+)
+@extend_schema(
+    methods=['POST'],
+    request=inline_serializer(
+        name="ConversationPostRequest",
+        fields={
+            "content": drf_serializers.CharField(),
+            "workflow_id": drf_serializers.IntegerField(required=False, allow_null=True),
+        },
+    ),
+    responses={
+        202: inline_serializer(
+            name="ConversationPostResponse",
+            fields={
+                "conversation_id": drf_serializers.CharField(),
+                "user_message": drf_serializers.DictField(),
+                "detail": drf_serializers.CharField(),
+            },
+        ),
+    },
+)
+@extend_schema(
+    methods=['DELETE'],
+    responses={
+        200: inline_serializer(
+            name="ConversationDeleteResponse",
+            fields={"deleted": drf_serializers.IntegerField(required=False),
+                    "status": drf_serializers.CharField(required=False)},
+        ),
+        400: _ErrorResponse,
+        404: _ErrorResponse,
+    },
+)
 @api_view(['GET', 'POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def conversation_messages(request, conversation_id: str = None, message_id: int = None):

@@ -33,7 +33,6 @@ def _wf_payload(**overrides):
     return base
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class WorkflowHappyPath(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("alice", "alice@example.com", "Sup3r$ecret!")
@@ -69,7 +68,6 @@ class WorkflowHappyPath(TestCase):
         self.assertIn(r.status_code, (200, 202, 204))
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class WorkflowSadPath(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("alice", "alice@example.com", "x" * 12)
@@ -94,7 +92,6 @@ class WorkflowSadPath(TestCase):
         self.assertIn(r.status_code, (404, 403))
 
 
-@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {}})
 class WorkflowAngryPath(TestCase):
     def setUp(self):
         self.alice = User.objects.create_user("alice", "alice@example.com", "x" * 12)

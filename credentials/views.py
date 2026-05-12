@@ -1,8 +1,9 @@
-from rest_framework import status
+from rest_framework import status, serializers as drf_serializers
 from adrf import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer, OpenApiResponse
 from django.conf import settings as django_settings
 from django.core import signing
 from urllib.parse import urlparse
@@ -32,6 +33,17 @@ try:
 except Exception:
     pass
 
+@extend_schema_view(
+    list=extend_schema(
+        responses={200: OpenApiResponse(response={
+            "type": "object",
+            "required": ["types"],
+            "properties": {
+                "types": {"type": "array", "items": {"$ref": "#/components/schemas/CredentialType"}},
+            },
+        })},
+    ),
+)
 class CredentialTypeViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for Credential Types.
@@ -40,6 +52,7 @@ class CredentialTypeViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = CredentialType.objects.filter(is_active=True)
     serializer_class = CredentialTypeSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
 
     def list(self, request, *args, **kwargs):
         """Override to return wrapped response matching frontend expectations."""
@@ -48,12 +61,24 @@ class CredentialTypeViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({'types': serializer.data})
 
 
+@extend_schema_view(
+    list=extend_schema(
+        responses={200: OpenApiResponse(response={
+            "type": "object",
+            "required": ["credentials"],
+            "properties": {
+                "credentials": {"type": "array", "items": {"$ref": "#/components/schemas/Credential"}},
+            },
+        })},
+    ),
+)
 class CredentialViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing user credentials.
     """
     serializer_class = CredentialSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
         # Users can only see their own credentials
