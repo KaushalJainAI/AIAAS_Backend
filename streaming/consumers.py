@@ -9,7 +9,7 @@ Django Channels consumers for:
 Usage:
     # In frontend
     ws = new WebSocket('ws://localhost:8000/ws/execution/<execution_id>/');
-    ws.onmessage = (e) => console.log(JSON.parse(e.data));
+    ws.onmessage = (event) => handleExecutionEvent(JSON.parse(event.data));
     
     # Respond to HITL
     ws.send(JSON.stringify({type: 'hitl_response', request_id: '...', response: {...}}));

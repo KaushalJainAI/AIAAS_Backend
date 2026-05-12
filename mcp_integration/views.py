@@ -1,4 +1,5 @@
 import logging
+import asyncio
 
 from asgiref.sync import async_to_sync
 from django.db.models import Q
@@ -73,7 +74,10 @@ class MCPServerViewSet(viewsets.ModelViewSet):
         server = self.get_object()
         try:
             manager = MCPClientManager(server.id, user=request.user)
-            tools = async_to_sync(manager.list_tools)()
+            async def list_with_timeout():
+                return await asyncio.wait_for(manager.list_tools(), timeout=5)
+
+            tools = async_to_sync(list_with_timeout)()
         except CredentialMissingError as e:
             return Response({"error": str(e), "code": "credential_missing"}, status=status.HTTP_400_BAD_REQUEST)
         except CredentialInvalidError as e:

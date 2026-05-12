@@ -491,7 +491,12 @@ def process_context(request):
     Endpoint for the help assistant to receive current frontend context.
     The payload should include what is currently on the screen.
     """
-    context_data = request.data.get("context", {})
+    context_data = request.data.get("context")
+    if not isinstance(context_data, dict) or not context_data:
+        return Response(
+            {"status": "error", "message": "context is required and must be a non-empty object"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     workspace = _get_workspace(request.user)
 
     theme_preferences = dict(workspace.theme_preferences or {})

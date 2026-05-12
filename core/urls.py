@@ -20,10 +20,10 @@ from .views import (
     PasswordResetConfirmView,
     APIKeyViewSet,
     APIKeyRotateView,
+    GoogleLoginView,
     UsageTrackingView,
     UsageInsightsView,
 )
-from .auth_views import GoogleLogin
 
 
 # Router for viewsets
@@ -35,7 +35,7 @@ urlpatterns = [
     # Authentication
     path('auth/register/', UserRegistrationView.as_view(), name='register'),
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='login'),
-    path('auth/google/', GoogleLogin.as_view(), name='google_login'),
+    path('auth/google/', GoogleLoginView.as_view(), name='google_login'),
     path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('auth/profile/', UserProfileView.as_view(), name='profile'),
     path('auth/profile/avatar/', AvatarUploadView.as_view(), name='avatar-upload'),

@@ -212,7 +212,7 @@ class PushNotificationBackend:
     """
     Push notification backend.
     
-    Placeholder for Firebase/OneSignal/etc integration.
+    Disabled until a push provider is configured.
     """
     
     async def send(
@@ -223,8 +223,7 @@ class PushNotificationBackend:
         data: dict | None = None,
     ) -> bool:
         """Send push notification."""
-        # TODO: Implement with Firebase/OneSignal
-        logger.info(f"Push notification (not implemented): user={user_id}, title={title}")
+        logger.info("Push notification skipped: user=%s, title=%s", user_id, title)
         return False
 
 

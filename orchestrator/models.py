@@ -19,6 +19,7 @@ class Workflow(models.Model):
     SUPERVISION_CHOICES = [
         ('error_only', 'Error Only (Recommended)'),
         ('full', 'Full Supervision'),
+        ('failsafe', 'Failsafe Supervision'),
         ('none', 'No Supervision'),
     ]
     

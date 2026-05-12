@@ -85,8 +85,8 @@ async def template_search(request):
     service = TemplateService()
     results = await service.hybrid_search(
         query=params['query'],
-        category=params['category'],
-        min_rating=params['min_rating'],
+        category=params.get('category'),
+        min_rating=params.get('min_rating'),
         sort=params['sort'],
         page=params['page'],
         page_size=params['page_size']

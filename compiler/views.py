@@ -127,9 +127,10 @@ class AdHocValidateWorkflowView(APIView):
         settings = serializer.validated_data.get("settings", {})
 
         ok, errors = await _compile(nodes, edges, settings, request.user)
+        http_status = status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST
         return Response({
             "is_valid": ok,
             "errors": errors,
             "warnings": [],
             "info": [],
-        })
+        }, status=http_status)

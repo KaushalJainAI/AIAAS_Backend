@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions
+from rest_framework import serializers, viewsets, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from .models import OSWorkspace, OSAppWindow, OSNotification
@@ -12,6 +12,8 @@ class OSWorkspaceViewSet(viewsets.ModelViewSet):
         return OSWorkspace.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
+        if OSWorkspace.objects.filter(user=self.request.user).exists():
+            raise serializers.ValidationError("A workspace already exists for this user.")
         serializer.save(user=self.request.user)
         
     @action(detail=False, methods=['get'])

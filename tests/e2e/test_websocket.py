@@ -21,7 +21,10 @@ except ImportError:
     print("FAIL: install `websockets` (pip install websockets)")
     sys.exit(1)
 
-from _lib import auth_headers, login, parse_base, register, unique_user
+try:
+    from ._lib import auth_headers, login, parse_base, register, unique_user
+except ImportError:  # pragma: no cover - supports direct script execution
+    from _lib import auth_headers, login, parse_base, register, unique_user
 import requests
 
 

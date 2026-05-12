@@ -233,7 +233,7 @@ REST_FRAMEWORK = {
         'execute': '5/minute',
         'chat': '20/hour',
         'stream': '20/minute',
-        'password_reset': '10/day',
+        'password_reset': '10/hour',
         'password_change': '10/hour',
     },
 }

@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SESSION_TTL: float = 300.0  # seconds a session stays alive without activity
+LIST_TOOLS_TIMEOUT: float = 5.0
 
 _PoolKey = tuple[int, int | None]  # (server_id, user_id)
 
@@ -347,15 +348,26 @@ async def get_all_tools_from_all_servers(user) -> list[dict[str, Any]]:
     """Aggregate tools from every server visible to `user`, with origin tags."""
     servers = await get_servers_for_user(user)
     tools: list[dict[str, Any]] = []
-    for server in servers:
+
+    async def collect_server_tools(server: MCPServer) -> list[dict[str, Any]]:
         try:
             manager = MCPClientManager(server.id, user=user)
-            for t in await manager.list_tools():
-                tools.append({
+            server_tools = await asyncio.wait_for(manager.list_tools(), timeout=LIST_TOOLS_TIMEOUT)
+            return [
+                {
                     **t,
                     "server_id": server.id,
                     "server_name": server.name,
-                })
+                }
+                for t in server_tools
+            ]
+        except asyncio.TimeoutError:
+            logger.warning("Timed out listing tools for MCP server %s", server.name)
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not list tools for MCP server %s: %s", server.name, e)
+        return []
+
+    results = await asyncio.gather(*(collect_server_tools(server) for server in servers))
+    for server_tools in results:
+        tools.extend(server_tools)
     return tools

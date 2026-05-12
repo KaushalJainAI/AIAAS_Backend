@@ -40,6 +40,22 @@ class WorkflowSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Workflow name contains unsupported characters or terms.")
         return name
 
+    def validate_nodes(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("nodes must be a list.")
+        for index, node in enumerate(value):
+            if not isinstance(node, dict):
+                raise serializers.ValidationError(f"nodes[{index}] must be an object.")
+        return value
+
+    def validate_edges(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("edges must be a list.")
+        for index, edge in enumerate(value):
+            if not isinstance(edge, dict):
+                raise serializers.ValidationError(f"edges[{index}] must be an object.")
+        return value
+
 class WorkflowVersionSerializer(serializers.ModelSerializer):
     """Serializer for WorkflowVersion snapshots."""
     class Meta:

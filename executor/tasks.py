@@ -417,16 +417,16 @@ def send_hitl_notification(user_id: int, request_id: str, channel: str = 'websoc
         'options': request.options,
     }
     
+    sent = False
     if channel == 'websocket':
         asyncio.run(send_hitl_request_to_user(user_id, request_data))
+        sent = True
     elif channel == 'email':
-        # TODO: Implement email notification
-        pass
+        return {"sent": False, "channel": channel, "error": "Email HITL notifications are not configured"}
     elif channel == 'push':
-        # TODO: Implement push notification
-        pass
+        return {"sent": False, "channel": channel, "error": "Push HITL notifications are not configured"}
     
-    return {"sent": True, "channel": channel}
+    return {"sent": sent, "channel": channel}
 
 
 # ======================== Testing & Metrics ========================

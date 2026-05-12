@@ -19,6 +19,7 @@ class ChatMessageSerializer(serializers.ModelSerializer):
 
 class ChatSessionSerializer(serializers.ModelSerializer):
     messages = ChatMessageSerializer(many=True, read_only=True)
+    title = serializers.CharField(required=True, allow_blank=False, trim_whitespace=True)
     
     class Meta:
         model = ChatSession
@@ -28,3 +29,9 @@ class ChatSessionSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at', 'messages'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'messages', 'total_tokens_used']
+
+    def validate_title(self, value):
+        title = value.strip()
+        if not title:
+            raise serializers.ValidationError("Title is required and cannot be blank.")
+        return title

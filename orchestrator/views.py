@@ -114,12 +114,12 @@ def workflow_list(request):
         return Response(WorkflowSerializer(workflow).data, status=status.HTTP_201_CREATED)
 
 
-@api_view(['GET', 'PUT', 'DELETE'])
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def workflow_detail(request, workflow_id: int):
     """
     GET: Get workflow details
-    PUT: Update workflow
+    PUT/PATCH: Update workflow
     DELETE: Delete workflow
     """
     workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
@@ -127,7 +127,7 @@ def workflow_detail(request, workflow_id: int):
     if request.method == 'GET':
         return Response(WorkflowSerializer(workflow).data)
     
-    elif request.method == 'PUT':
+    elif request.method in ('PUT', 'PATCH'):
         # Use serializer for update validation
         serializer = WorkflowSerializer(workflow, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -670,26 +670,12 @@ def conversation_messages(request, conversation_id: str = None, message_id: int 
             role='user',
             content=content,
         )
-        
-        # TODO: Call AI for response (integrate with LLM nodes)
-        # For now, return a placeholder
-        ai_response = "I understand you're asking about your workflow. This feature is coming soon!"
-        
-        # Save AI response
-        ai_msg = ConversationMessage.objects.create(
-            user=request.user,
-            conversation_id=conv_id,
-            workflow_id=workflow_id,
-            role='assistant',
-            content=ai_response,
-            metadata={'model': 'placeholder'},
-        )
-        
+
         return Response({
             'conversation_id': conv_id,
             'user_message': {'id': user_msg.id, 'content': content, 'created_at': user_msg.created_at},
-            'ai_response': {'id': ai_msg.id, 'content': ai_response, 'created_at': ai_msg.created_at},
-        })
+            'detail': 'Workflow chat response generation is not configured.',
+        }, status=202)
     
     elif request.method == 'DELETE':
         if not conversation_id:

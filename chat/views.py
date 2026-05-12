@@ -1399,7 +1399,7 @@ async def send_message(request, session_id: str):
         ai_msg = await ChatMessage.objects.acreate(
             session=session,
             role='assistant',
-            content="🎬 **Video generation is coming soon!**\n\nThis feature is currently under development. Stay tuned for updates!",
+            content="Video generation is not configured yet.",
             message_type='video',
             metadata={'intent': 'video'},
         )
@@ -1410,11 +1410,10 @@ async def send_message(request, session_id: str):
 
     # ---- Handle /image ----
     if intent == 'image':
-        # TODO: Route to DALL-E or other T2I service
         ai_msg = await ChatMessage.objects.acreate(
             session=session,
             role='assistant',
-            content=f"🎨 **Image generation request received:**\n\n*\"{clean_content}\"*\n\nImage generation via DALL-E/Stable Diffusion is being integrated. Coming soon!",
+            content="Image generation is available from the Imagine workspace.",
             message_type='image',
             metadata={'intent': 'image', 'prompt': clean_content},
         )
@@ -3085,10 +3084,14 @@ def execute_tool_view(request):
     """
     from chat.tools import execute_tool, SENSITIVE_TOOLS
     tool_name = request.data.get('tool')
-    args = request.data.get('args', {})
+    args = request.data.get('args')
     
     if not tool_name:
         return Response({"error": "Tool name is required."}, status=400)
+    if args is None:
+        return Response({"error": "Tool args are required."}, status=400)
+    if not isinstance(args, dict):
+        return Response({"error": "Tool args must be an object."}, status=400)
         
     # Guardrail: Prevent HITL bypass
     if tool_name in SENSITIVE_TOOLS:

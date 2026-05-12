@@ -14,13 +14,10 @@ def health_check(request):
     return JsonResponse({'status': 'healthy', 'service': 'workflow-backend'})
 
 
-from core.auth_views import GoogleLogin
-
 urlpatterns = [
     path('admin/', admin.site.urls),
-    
-    # Authentication
-    path('api/auth/google/', GoogleLogin.as_view(), name='google_login'),
+
+    # Third-party auth package endpoints. Project auth endpoints live in core.urls.
     path('api/auth/', include('dj_rest_auth.urls')),
     path('api/auth/registration/', include('dj_rest_auth.registration.urls')),
     
@@ -63,7 +60,6 @@ urlpatterns = [
     # Credentials
     path('api/credentials/', include('credentials.urls')),
     
-    # Templates
     # Templates
     path('api/orchestrator/templates/', include('templates.urls')),
     
