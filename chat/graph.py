@@ -8,13 +8,16 @@ recursion limits and structured message threading.
 import asyncio
 import json
 import logging
-from typing import Any, TypedDict, Annotated, Optional
+from typing import TypedDict, Annotated
 
 from langchain_core.messages import (
     BaseMessage, HumanMessage, AIMessage, ToolMessage,
 )
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt
+from langchain_core.runnables import RunnableConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +48,12 @@ class ChatAgentState(TypedDict):
     model: str
     system_message: str
     user_id: int
+    thread_id: str
     response_format: str
     clean_content: str
     intent: str
     history_list: list
-    attachments: list
     max_iterations: int
-    stream_callback: Optional[Any]
 
 
 # ─────────────── Helpers ───────────────
@@ -80,15 +82,40 @@ def _count_ai_messages(messages: list) -> int:
     return sum(1 for m in messages if isinstance(m, AIMessage))
 
 
+async def _is_vision_enabled_model(model_value: str, provider_slug: str) -> bool:
+    """Check the database to see if this model supports image input (vision)."""
+    try:
+        from nodes.models import AIModel
+        
+        # Look up by model technical value (e.g. 'gpt-4o', 'gemini-1.5-pro')
+        model_obj = await AIModel.objects.filter(value=model_value, provider__slug=provider_slug).afirst()
+        if model_obj:
+            return model_obj.supports_image_input
+            
+        # Fallback to keyword matching for models not in the registry (e.g. new OpenRouter models)
+        m = model_value.lower()
+        vision_keywords = [
+            "vision", "gpt-4o", "gpt-4-turbo", "gemini", "claude-3", 
+            "pixtral", "llama-3.2", "qwen-vl", "lava", "moondream", "llava"
+        ]
+        if any(k in m for k in vision_keywords) and "gpt-3.5" not in m:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 # ─────────────── Agent Node ───────────────
 
-async def agent_node(state: ChatAgentState) -> dict:
+async def agent_node(state: ChatAgentState, config: RunnableConfig) -> dict:
     """Call the LLM. Returns AIMessage (with or without tool_calls)."""
     from chat.views import execute_llm
     from chat.extraction import extract_tool_calls
     import chat.tools as shared_tools
 
-    callback = state.get("stream_callback")
+    conf = config or {}
+    callback = conf.get("configurable", {}).get("stream_callback")
+    attachments = conf.get("configurable", {}).get("attachments", [])
     provider = state["provider"]
     model = state["model"]
     iteration = _count_ai_messages(state["messages"])
@@ -173,7 +200,7 @@ async def agent_node(state: ChatAgentState) -> dict:
                 tools=tools_payload,
                 history=state.get("history_list", []),
                 response_format=state["response_format"],
-                attachments=state.get("attachments", []),
+                attachments=attachments,
                 stream=True,
             )
             async with asyncio.timeout(LLM_CALL_TIMEOUT):
@@ -208,7 +235,7 @@ async def agent_node(state: ChatAgentState) -> dict:
                         content = f"LLM Error: {chunk.get('message', 'Unknown')}"
                         break
         except asyncio.TimeoutError:
-            logger.warning(f"[Agent Node] LLM stream timed out")
+            logger.warning("[Agent Node] LLM stream timed out")
             if not content:
                 content = "Response timed out. Please try again."
     else:
@@ -223,7 +250,7 @@ async def agent_node(state: ChatAgentState) -> dict:
                     tools=tools_payload,
                     history=state.get("history_list", []),
                     response_format=state["response_format"],
-                    attachments=state.get("attachments", []),
+                    attachments=attachments,
                     stream=False,
                 ),
                 timeout=LLM_CALL_TIMEOUT,
@@ -267,7 +294,7 @@ async def agent_node(state: ChatAgentState) -> dict:
 
 # ─────────────── Tools Node ───────────────
 
-async def tools_node(state: ChatAgentState) -> dict:
+async def tools_node(state: ChatAgentState, config: RunnableConfig) -> dict:
     """Execute tool calls from the last AIMessage."""
     import chat.tools as shared_tools
     from chat.views import perform_image_search, _sanitize_tool_args
@@ -276,7 +303,8 @@ async def tools_node(state: ChatAgentState) -> dict:
     if not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
         return {"messages": []}
 
-    callback = state.get("stream_callback")
+    conf = config or {}
+    callback = conf.get("configurable", {}).get("stream_callback")
     metadata = dict(state.get("metadata", {}))
     tool_trace = list(state.get("tool_trace", []))
     clean_content = state.get("clean_content", "")
@@ -289,6 +317,42 @@ async def tools_node(state: ChatAgentState) -> dict:
         fn = tc["name"]
         args = dict(tc.get("args", {}))
         call_id = tc.get("id", f"call_{fn}")
+
+        # --- HITL CHECK ---
+        if fn in shared_tools.SENSITIVE_TOOLS:
+            # Check if this specific call_id has already been approved in metadata
+            approved_calls = metadata.get("approved_tool_calls", [])
+            if call_id not in approved_calls:
+                logger.info(f"[Tools Node] Interrupting for sensitive tool: {fn}")
+                
+                # Create Notification
+                try:
+                    from notifications.utils import create_notification
+                    from core.models import User
+                    from asgiref.sync import sync_to_async
+                    
+                    @sync_to_async
+                    def send_hitl_notification():
+                        user = User.objects.get(id=state["user_id"])
+                        create_notification(
+                            user=user,
+                            type='hitl_request',
+                            title='Permission Required',
+                            message=f'The AI agent requires your permission to run the tool: {fn}',
+                            data={'tool': fn, 'args': args, 'thread_id': state.get("thread_id")}
+                        )
+                    # We are in an async function, so we can just fire and forget or await
+                    asyncio.create_task(send_hitl_notification())
+                except Exception as e:
+                    logger.error(f"Failed to create HITL notification: {e}")
+
+                if callback:
+                    await callback("ask_permission", {
+                        "tool": fn,
+                        "args": args,
+                        "call_id": call_id,
+                    })
+                interrupt(f"Permission required for {fn}")
 
         args = _sanitize_tool_args(args)
         if fn == "web_search" and not args.get("query"):
@@ -381,6 +445,65 @@ async def tools_node(state: ChatAgentState) -> dict:
                 metadata["has_code_execution"] = True
                 if callback:
                     await callback("code_execution", {"code": args.get("code", ""), "output": parsed.get("output", ""), "result": parsed.get("result", ""), "error": parsed.get("error", "") if parsed.get("status") == "error" else ""})
+            elif fn == "generate_image":
+                parsed = json.loads(res)
+                if parsed.get("status") == "success" and parsed.get("image_url"):
+                    # Create Notification
+                    try:
+                        from notifications.utils import create_notification
+                        from core.models import User
+                        from asgiref.sync import sync_to_async
+                        
+                        @sync_to_async
+                        def send_image_notification():
+                            user = User.objects.get(id=state["user_id"])
+                            create_notification(
+                                user=user,
+                                type='image_ready',
+                                title='Image Generated',
+                                message='Your requested image has been generated and is ready for viewing.',
+                                data={'image_url': parsed["image_url"]}
+                            )
+                        asyncio.create_task(send_image_notification())
+                    except Exception as e:
+                        logger.error(f"Failed to create image notification: {e}")
+
+                    imgs = metadata.get("images", [])
+                    imgs.append({
+                        "title": "AI Generated Image",
+                        "image": parsed["image_url"],
+                        "url": parsed["image_url"],
+                        "source": "DALL-E 3",
+                    })
+                    metadata["images"] = imgs
+                    metadata["has_generated_image"] = True
+                    if callback:
+                        await callback("images_update", {"images": imgs})
+            elif fn == "knowledge_base_search":
+                parsed = json.loads(res)
+                if parsed.get("status") == "success":
+                    metadata["kb_search_results"] = parsed.get("results", [])
+                    if callback:
+                        await callback("status", {"phase": "rag_results", "message": f"Found {parsed.get('count', 0)} relevant document chunks."})
+            elif fn == "scrape_webpage":
+                parsed = json.loads(res)
+                if parsed.get("status") == "success":
+                    if callback:
+                        await callback("status", {"phase": "page_scraped", "message": f"Scraped {parsed.get('url', 'page')} successfully."})
+            elif fn == "run_workflow":
+                parsed = json.loads(res)
+                if parsed.get("status") in ("success", "queued"):
+                    metadata["workflow_execution"] = {
+                        "workflow_id": parsed.get("workflow_id"),
+                        "workflow_name": parsed.get("workflow_name"),
+                        "status": parsed.get("status"),
+                    }
+                    if callback:
+                        await callback("status", {"phase": "workflow_triggered", "message": f"Workflow '{parsed.get('workflow_name')}' {parsed.get('status')}."})
+            elif fn == "list_workflows":
+                parsed = json.loads(res)
+                if parsed.get("status") == "success":
+                    metadata["available_workflows"] = parsed.get("workflows", [])
         except (json.JSONDecodeError, TypeError, AttributeError):
             pass
 
@@ -411,7 +534,10 @@ def build_chat_agent_graph():
     graph.set_entry_point("agent")
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
-    return graph.compile()
+    
+    # Add memory checkpointer
+    memory = MemorySaver()
+    return graph.compile(checkpointer=memory)
 
 
 chat_agent_graph = build_chat_agent_graph()
@@ -427,6 +553,7 @@ async def run_agent_loop(
     model: str,
     system_message: str,
     user_id: int,
+    thread_id: str,
     response_format: str,
     clean_content: str,
     intent: str,
@@ -447,6 +574,51 @@ async def run_agent_loop(
     if max_iterations <= 0:
         max_iterations = resolve_agent_iteration_limit(intent)
 
+    # ── Handle Text-Only models ──
+    # If the model doesn't support vision, we pre-extract text from attachments
+    # and inject it into the prompt context so the agent doesn't need to 'see' them.
+    vision_enabled = await _is_vision_enabled_model(model, provider)
+    processed_attachments = []
+    attachment_context = []
+    
+    if attachments:
+        for att in attachments:
+            if vision_enabled:
+                processed_attachments.append(att)
+            else:
+                # Text-only model: extract content if possible
+                try:
+                    from inference.utils import extract_text_from_file
+                    file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                    # Only extract if it's a document/text. Media gets a placeholder.
+                    if att.file_type in ('image', 'video'):
+                        attachment_context.append(f"### Attachment: {att.filename} ({att.file_type.capitalize()})\n[Note: This model does not support visual input. You cannot see this {att.file_type} directly.]")
+                    else:
+                        # Use pre-extracted text if available, otherwise extract now
+                        text = getattr(att, 'extracted_text', "")
+                        if not text:
+                            try:
+                                from inference.utils import extract_text_from_file
+                                file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                                text = await asyncio.to_thread(extract_text_from_file, file_path, att.file_type)
+                            except Exception as e:
+                                logger.warning(f"Failed to extract text from {att.filename}: {e}")
+                        
+                        if text:
+                            # Cap to avoid context overflow (20k chars is usually enough for a preview)
+                            preview = text[:20000]
+                            attachment_context.append(f"### Attachment: {att.filename}\n{preview}")
+                        else:
+                            attachment_context.append(f"### Attachment: {att.filename}\n[Content could not be extracted directly.]")
+                except Exception as e:
+                    logger.warning(f"Failed to pre-extract text from attachment {att.filename}: {e}")
+                    attachment_context.append(f"### Attachment: {att.filename}\n[Error during text extraction.]")
+
+    # Inject attachment context if any was extracted
+    if attachment_context:
+        context_block = "\n\n## Uploaded Files Context\n" + "\n\n".join(attachment_context)
+        full_prompt += context_block
+
     initial_state: ChatAgentState = {
         "messages": [HumanMessage(content=full_prompt)],
         "metadata": dict(metadata),
@@ -457,33 +629,59 @@ async def run_agent_loop(
         "model": model,
         "system_message": system_message,
         "user_id": user_id,
+        "thread_id": thread_id,
         "response_format": response_format,
         "clean_content": clean_content,
         "intent": intent,
         "history_list": history_list,
-        "attachments": attachments or [],
         "max_iterations": max_iterations,
-        "stream_callback": stream_callback,
+    }
+
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "stream_callback": stream_callback,
+            "attachments": processed_attachments,
+        },
+        "recursion_limit": max_iterations * 2 + 10,
     }
 
     interrupted = False
     try:
-        result = await chat_agent_graph.ainvoke(
-            initial_state,
-            config={"recursion_limit": max_iterations * 2 + 10},
-        )
+        # If there is already a state for this thread_id, we might be resuming.
+        # But if we pass initial_state, it might overwrite? 
+        # Actually ainvoke with initial_state will start fresh if no state exists,
+        # or resume if state exists AND we pass None as state?
+        # Standard pattern for resume: result = await graph.ainvoke(None, config=config)
+        
+        state_snapshot = await chat_agent_graph.aget_state(config)
+        if state_snapshot.values:
+            # Resuming
+            logger.info(f"[LangGraph] Resuming thread {thread_id}")
+            result = await chat_agent_graph.ainvoke(None, config=config)
+        else:
+            # New run
+            logger.info(f"[LangGraph] Starting new thread {thread_id}")
+            result = await chat_agent_graph.ainvoke(initial_state, config=config)
+
     except Exception as e:
-        logger.exception(f"[LangGraph] Graph execution failed: {e}")
-        # Return whatever we have
-        return {
-            "raw_content": f"Error: {str(e)}",
-            "metadata": metadata,
-            "tool_trace": [],
-            "thinking": "",
-            "total_tokens": 0,
-            "interrupted": True,
-            "accumulated_tool_context": [],
-        }
+        if "Permission required" in str(e):
+            interrupted = True
+            # Get the current state values to return partial results
+            state_snapshot = await chat_agent_graph.aget_state(config)
+            result = state_snapshot.values
+        else:
+            logger.exception(f"[LangGraph] Graph execution failed: {e}")
+            # Return whatever we have
+            return {
+                "raw_content": f"Error: {str(e)}",
+                "metadata": metadata,
+                "tool_trace": [],
+                "thinking": "",
+                "total_tokens": 0,
+                "interrupted": True,
+                "accumulated_tool_context": [],
+            }
 
     # Extract final content from last AIMessage
     raw_content = ""

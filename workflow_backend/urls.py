@@ -5,6 +5,8 @@ from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
 from orchestrator.views import receive_webhook
+from rest_framework.permissions import AllowAny
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
 
 def health_check(request):
@@ -14,9 +16,25 @@ def health_check(request):
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    # Third-party auth package endpoints. Project auth endpoints live in core.urls.
+    path('api/auth/', include('dj_rest_auth.urls')),
+    path('api/auth/registration/', include('dj_rest_auth.registration.urls')),
     
     # Health check
     path('api/health/', health_check, name='health-check'),
+
+    # API Schema & Docs (public, read-only)
+    path('api/schema/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema'),
+    path('api/schema/json/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema-json'),
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny]), name='swagger-ui'),
+    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny]), name='redoc'),
+    
+    # Aliases for common paths
+    path('swagger.json', SpectacularAPIView.as_view(permission_classes=[AllowAny])),
+    path('openapi.json', SpectacularAPIView.as_view(permission_classes=[AllowAny])),
+    path('redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny])),
+    path('docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny])),
     
     # Core (auth, users, API keys)
     path('api/', include('core.urls')),
@@ -43,7 +61,6 @@ urlpatterns = [
     path('api/credentials/', include('credentials.urls')),
     
     # Templates
-    # Templates
     path('api/orchestrator/templates/', include('templates.urls')),
     
     # Webhooks (Public)
@@ -57,6 +74,21 @@ urlpatterns = [
     
     # Standalone Chat
     path('api/chat/', include('chat.urls')),
+    
+    # Buddy (Help Assistant)
+    path('api/buddy/', include('buddy.urls')),
+
+    # BrowserOS
+    path('api/browseros/', include('browserOS.urls')),
+
+    # Canvas Agent
+    path('api/canvas-agent/', include('canvas_agent.urls')),
+
+    # Notifications
+    path('api/notifications/', include('notifications.urls')),
+    
+    # Imagine (Image/Video/Audio Generation)
+    path('api/imagine/', include('imagine.urls')),
 ]
 
 

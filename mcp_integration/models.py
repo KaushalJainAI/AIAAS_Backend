@@ -21,7 +21,7 @@ class MCPServer(models.Model):
         ('sse', 'Server-Sent Events (HTTP)'),
     )
 
-    name = models.CharField(max_length=255, unique=True, help_text="Human-readable name for this server")
+    name = models.CharField(max_length=255, help_text="Human-readable name for this server")
     type = models.CharField(max_length=10, choices=SERVER_TYPES, default='stdio')
 
     # Stdio Config
@@ -61,6 +61,7 @@ class MCPServer(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True)
 
     class Meta:
+        unique_together = [('name', 'user')]
         indexes = [
             models.Index(fields=['enabled', 'user']),
         ]

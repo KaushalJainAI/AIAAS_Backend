@@ -11,6 +11,7 @@ from .base import (
     FieldType,
     HandleDef,
     NodeExecutionResult,
+    NodeItem,
 )
 
 if TYPE_CHECKING:
@@ -315,6 +316,30 @@ class IfNode(BaseNodeHandler):
         HandleDef(id="false", label="False", handle_type="default"),
     ]
     
+    @staticmethod
+    def _eval_condition(field_value: Any, operator: str, compare_value: str) -> bool:
+        if operator == "equals":
+            return str(field_value) == str(compare_value)
+        elif operator == "not_equals":
+            return str(field_value) != str(compare_value)
+        elif operator == "contains":
+            return str(compare_value) in str(field_value)
+        elif operator == "greater_than":
+            try:
+                return float(field_value) > float(compare_value)
+            except (ValueError, TypeError):
+                return False
+        elif operator == "less_than":
+            try:
+                return float(field_value) < float(compare_value)
+            except (ValueError, TypeError):
+                return False
+        elif operator == "is_empty":
+            return field_value is None or field_value == "" or field_value == []
+        elif operator == "is_not_empty":
+            return field_value is not None and field_value != "" and field_value != []
+        return False
+
     async def execute(
         self,
         input_data: dict[str, Any],
@@ -324,7 +349,7 @@ class IfNode(BaseNodeHandler):
         field_path = config.get("field", "")
         operator = config.get("operator", "equals")
         compare_value = config.get("value", "")
-        
+
         # Normalize input to items format
         if isinstance(input_data, list):
             items = input_data
@@ -332,57 +357,34 @@ class IfNode(BaseNodeHandler):
             items = [input_data]
         else:
             items = [{"json": input_data}]
-        
-        output_items = []
+
+        true_items: list[NodeItem] = []
+        false_items: list[NodeItem] = []
+
         for idx, item in enumerate(items):
             item_data = item.get("json", item) if isinstance(item, dict) else {}
-            
-            from .base import NodeItem
-            output_items.append(NodeItem(
-                json=item_data,
-                pairedItem={"item": idx}
-            ))
-        
-        # For IF node, all items go to the same output based on first item's condition
-        # (n8n behavior - can be enhanced for per-item routing later)
-        first_item = items[0] if items else {"json": {}}
-        first_data = first_item.get("json", first_item) if isinstance(first_item, dict) else {}
-        
-        field_value = first_data
-        try:
-            for key in field_path.split("."):
-                field_value = field_value[key]
-        except (KeyError, TypeError):
-            field_value = None
-        
-        # Evaluate for routing decision
-        route_result = False
-        if operator == "equals":
-            route_result = str(field_value) == str(compare_value)
-        elif operator == "not_equals":
-            route_result = str(field_value) != str(compare_value)
-        elif operator == "contains":
-            route_result = str(compare_value) in str(field_value)
-        elif operator == "greater_than":
+
+            # Resolve field value via dot-notation path
+            field_value: Any = item_data
             try:
-                route_result = float(field_value) > float(compare_value)
-            except (ValueError, TypeError):
-                route_result = False
-        elif operator == "less_than":
-            try:
-                route_result = float(field_value) < float(compare_value)
-            except (ValueError, TypeError):
-                route_result = False
-        elif operator == "is_empty":
-            route_result = field_value is None or field_value == "" or field_value == []
-        elif operator == "is_not_empty":
-            route_result = field_value is not None and field_value != "" and field_value != []
-        
-        return NodeExecutionResult(
-            success=True,
-            items=output_items,
-            output_handle="true" if route_result else "false"
-        )
+                for key in field_path.split("."):
+                    if key:
+                        field_value = field_value[key]
+            except (KeyError, TypeError):
+                field_value = None
+
+            node_item = NodeItem(json=item_data, pairedItem={"item": idx})
+            if self._eval_condition(field_value, operator, compare_value):
+                true_items.append(node_item)
+            else:
+                false_items.append(node_item)
+
+        # Route true-matching items to "true"; fall back to "false" only when no true items exist.
+        # Note: items routed to the non-chosen branch are not forwarded in this execution cycle
+        # because NodeExecutionResult supports a single output_handle per call.
+        if true_items:
+            return NodeExecutionResult(success=True, items=true_items, output_handle="true")
+        return NodeExecutionResult(success=True, items=false_items, output_handle="false")
 
 
 class StopNode(BaseNodeHandler):

@@ -25,20 +25,42 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    """User profile with tier and limits"""
+    """User profile with tier, limits, and preferences"""
     user = UserSerializer(read_only=True)
+    email = serializers.EmailField(source='user.email', read_only=True)
+    username = serializers.CharField(source='user.username', read_only=True)
     
     class Meta:
         model = UserProfile
         fields = [
-            'user', 'tier', 'compile_limit', 'execute_limit',
+            'user', 'email', 'username', 'display_name', 'avatar', 'bio',
+            'instance_name', 'timezone', 'language',
+            'tier', 'compile_limit', 'execute_limit',
             'stream_connections', 'credits_remaining', 'credits_used_total',
+            'llm_provider', 'llm_model', 'llm_credential_id',
+            'default_temperature', 'default_max_tokens',
+            'theme_preference', 'accent_color',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
             'tier', 'compile_limit', 'execute_limit', 'stream_connections',
             'credits_used_total', 'created_at', 'updated_at'
         ]
+
+    def update(self, instance, validated_data):
+        # Handle nested user updates if provided in request data
+        user_data = self.context['request'].data.get('user')
+        if user_data:
+            user = instance.user
+            if 'first_name' in user_data:
+                user.first_name = user_data['first_name']
+            if 'last_name' in user_data:
+                user.last_name = user_data['last_name']
+            if 'email' in user_data:
+                user.email = user_data['email']
+            user.save()
+            
+        return super().update(instance, validated_data)
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -127,17 +149,49 @@ class GoogleLoginSerializer(serializers.Serializer):
 class ChangePasswordSerializer(serializers.Serializer):
     """Password change validation"""
     old_password = serializers.CharField(required=True, write_only=True)
+    verification_token = serializers.CharField(required=True, write_only=True)
     new_password = serializers.CharField(
         required=True,
         write_only=True,
         validators=[validate_password]
     )
+    confirm_password = serializers.CharField(required=False, write_only=True)
     
     def validate_old_password(self, value):
         user = self.context['request'].user
         if not user.check_password(value):
             raise serializers.ValidationError('Old password is incorrect')
         return value
+
+    def validate(self, attrs):
+        confirm_password = attrs.get('confirm_password')
+        if confirm_password is not None and attrs['new_password'] != confirm_password:
+            raise serializers.ValidationError({'new_password': 'Passwords do not match.'})
+        return attrs
+
+
+class PasswordOTPRequestSerializer(serializers.Serializer):
+    """Request an email OTP by email address."""
+    email = serializers.EmailField()
+
+
+class PasswordOTPVerifySerializer(serializers.Serializer):
+    """Verify a 6-digit OTP and exchange it for a short verification token."""
+    email = serializers.EmailField(required=False)
+    otp_code = serializers.CharField(max_length=6, min_length=6)
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """Reset a forgotten password after OTP verification."""
+    email = serializers.EmailField()
+    verification_token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
+    confirm_password = serializers.CharField(write_only=True, required=True)
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['confirm_password']:
+            raise serializers.ValidationError({'new_password': 'Passwords do not match.'})
+        return attrs
 
 
 # ==================== API Key Serializers ====================
@@ -175,4 +229,18 @@ class UsageTrackingSerializer(serializers.ModelSerializer):
             'date', 'compile_count', 'execute_count', 'chat_count',
             'tokens_used', 'credits_used', 'estimated_cost'
         ]
-        read_only_fields = '__all__'
+        read_only_fields = [
+            'date', 'compile_count', 'execute_count', 'chat_count',
+            'tokens_used', 'credits_used', 'estimated_cost'
+        ]
+
+
+class UsageInsightSerializer(serializers.Serializer):
+    """Aggregated usage insights for the dashboard"""
+    total_executions = serializers.IntegerField()
+    total_cost = serializers.DecimalField(max_digits=10, decimal_places=4)
+    success_rate = serializers.FloatField()
+    hours_saved = serializers.FloatField()
+    daily_stats = UsageTrackingSerializer(many=True)
+    tier = serializers.CharField()
+    credits_remaining = serializers.IntegerField()

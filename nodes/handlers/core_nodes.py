@@ -95,7 +95,7 @@ class CodeNode(BaseNodeHandler):
             user_fn = exec_res["locals"].get("main")
         else:
             # Body-only mode (legacy/simple)
-            wrapped_code = "def wrapped_user_fn(item, context, config):\n"
+            wrapped_code = "def wrapped_user_fn(data, context, config):\n    item = data\n"
             wrapped_code += "\n".join(f"    {line}" for line in user_code.splitlines())
             
             exec_res = sandbox.execute(

@@ -314,6 +314,10 @@ class Command(BaseCommand):
         # ── runtime/utils.py (copy as-is) ──
         shutil.copy2(backend_dir / 'compiler' / 'utils.py', runtime_dir / 'utils.py')
 
+        # ── runtime/node_types.py + config_access.py (copied as-is; no Django deps) ──
+        shutil.copy2(backend_dir / 'compiler' / 'node_types.py', runtime_dir / 'node_types.py')
+        shutil.copy2(backend_dir / 'compiler' / 'config_access.py', runtime_dir / 'config_access.py')
+
         # ── runtime/schemas.py (patched imports) ──
         self._copy_and_patch(
             backend_dir / 'compiler' / 'schemas.py',
@@ -351,44 +355,30 @@ class Command(BaseCommand):
         (runtime_dir / 'logger.py').write_text(LOGGER_STUB, encoding='utf-8')
 
         # ── runtime/compiler.py (patched) ──
+        #
+        # Import rewrites are regex-based so the export stays robust against
+        # cosmetic changes (comments, whitespace, import-line rearrangement).
         compiler_src = (backend_dir / 'compiler' / 'compiler.py').read_text(encoding='utf-8')
-        compiler_src = compiler_src.replace(
-            'from .schemas import (\n    NodeExecutionPlan, # Keeping struct for internal use if needed, or we can use dicts\n    ExecutionContext,\n)',
-            'from runtime.schemas import ExecutionContext'
+
+        # Rewrite every `from .X import ...` (compiler-local) to runtime.X.
+        compiler_src = re.sub(
+            r'^from \.([A-Za-z_][A-Za-z0-9_]*) import',
+            r'from runtime.\1 import',
+            compiler_src,
+            flags=re.MULTILINE,
         )
-        # Handle Windows line endings variant
-        compiler_src = compiler_src.replace(
-            'from .schemas import (\r\n    NodeExecutionPlan, # Keeping struct for internal use if needed, or we can use dicts\r\n    ExecutionContext,\r\n)',
-            'from runtime.schemas import ExecutionContext'
-        )
-        compiler_src = compiler_src.replace(
-            'from .utils import get_node_type',
-            'from runtime.utils import get_node_type'
-        )
-        compiler_src = compiler_src.replace(
-            'from .validators import (\n    validate_dag,\n    validate_credentials,\n    validate_node_configs,\n    validate_type_compatibility,\n    topological_sort,\n)',
-            'from runtime.validators import (\n    validate_dag,\n    validate_credentials,\n    validate_node_configs,\n    validate_type_compatibility,\n    topological_sort,\n)'
-        )
-        compiler_src = compiler_src.replace(
-            'from .validators import (\r\n    validate_dag,\r\n    validate_credentials,\r\n    validate_node_configs,\r\n    validate_type_compatibility,\r\n    topological_sort,\r\n)',
-            'from runtime.validators import (\n    validate_dag,\n    validate_credentials,\n    validate_node_configs,\n    validate_type_compatibility,\n    topological_sort,\n)'
-        )
-        compiler_src = compiler_src.replace(
-            'from nodes.handlers.registry import get_registry',
-            'from nodes.registry import get_registry'
-        )
-        compiler_src = compiler_src.replace(
-            'from logs.logger import get_execution_logger',
-            'from runtime.logger import get_execution_logger'
-        )
-        compiler_src = compiler_src.replace(
-            'from orchestrator.interface import AbortDecision, PauseDecision',
-            'from runtime.interface_stubs import AbortDecision, PauseDecision'
-        )
-        compiler_src = compiler_src.replace(
-            'from orchestrator.interface import SupervisionLevel',
-            'from runtime.interface_stubs import SupervisionLevel'
-        )
+        # Rewrite cross-app imports whose runtime equivalent differs.
+        _CROSS_APP_REWRITES = [
+            (r'^from nodes\.handlers\.registry import get_registry',
+             'from nodes.registry import get_registry'),
+            (r'^from logs\.logger import get_execution_logger',
+             'from runtime.logger import get_execution_logger'),
+            (r'^from orchestrator\.interface import',
+             'from runtime.interface_stubs import'),
+        ]
+        for pat, repl in _CROSS_APP_REWRITES:
+            compiler_src = re.sub(pat, repl, compiler_src, flags=re.MULTILINE)
+
         (runtime_dir / 'compiler.py').write_text(compiler_src, encoding='utf-8')
 
         # ── nodes/__init__.py ──

@@ -1,4 +1,5 @@
 import logging
+import asyncio
 
 from asgiref.sync import async_to_sync
 from django.db.models import Q
@@ -6,6 +7,8 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
+
+from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer, OpenApiResponse
 
 from .client import MCPClientManager
 from .credential_injector import (
@@ -20,6 +23,17 @@ from .tool_cache import MCPToolCache
 logger = logging.getLogger(__name__)
 
 
+@extend_schema_view(
+    list=extend_schema(
+        responses={200: OpenApiResponse(response={
+            "type": "object",
+            "required": ["servers"],
+            "properties": {
+                "servers": {"type": "array", "items": {"$ref": "#/components/schemas/MCPServer"}},
+            },
+        })},
+    ),
+)
 class MCPServerViewSet(viewsets.ModelViewSet):
     """
     CRUD for MCP servers + tool discovery.
@@ -30,6 +44,7 @@ class MCPServerViewSet(viewsets.ModelViewSet):
     """
     serializer_class = MCPServerSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
     queryset = MCPServer.objects.all()  # for DRF router introspection
 
     def get_queryset(self):
@@ -73,7 +88,10 @@ class MCPServerViewSet(viewsets.ModelViewSet):
         server = self.get_object()
         try:
             manager = MCPClientManager(server.id, user=request.user)
-            tools = async_to_sync(manager.list_tools)()
+            async def list_with_timeout():
+                return await asyncio.wait_for(manager.list_tools(), timeout=5)
+
+            tools = async_to_sync(list_with_timeout)()
         except CredentialMissingError as e:
             return Response({"error": str(e), "code": "credential_missing"}, status=status.HTTP_400_BAD_REQUEST)
         except CredentialInvalidError as e:

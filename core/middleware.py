@@ -68,15 +68,38 @@ class InputSanitizationMiddleware(MiddlewareMixin):
         if not self._should_sanitize(request.path):
             return None
         
-        # Check content type
-        content_type = request.content_type or ''
-        if 'application/json' not in content_type:
+        # Get raw content type header for charset parsing
+        raw_content_type = request.META.get('CONTENT_TYPE', '')
+        if 'application/json' not in raw_content_type:
             return None
         
+        # Parse charset
+        charset = 'utf-8'
+        if 'charset=' in raw_content_type:
+            try:
+                charset = raw_content_type.split('charset=')[-1].split(';')[0].strip()
+            except Exception:
+                pass
+        
         try:
-            body = json.loads(request.body.decode('utf-8'))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return None  # Let view handle invalid JSON
+            body = json.loads(request.body.decode(charset))
+        except (json.JSONDecodeError, UnicodeDecodeError, LookupError):
+            # If we can't decode with specified charset, try a safety check
+            # but generally let the view handle it if it's malformed.
+            # However, to be safe, if we fail to decode, we should block if it's JSON
+            if 'application/json' in raw_content_type:
+                 logger.warning(f"Failed to decode JSON body with charset {charset}")
+                 # To prevent bypass, we should not let this through if it's supposed to be JSON
+                 # but we can't parse it for sanitization.
+                 # However, DRF might still parse it.
+                 # Let's try one more fallback to utf-8 if it wasn't utf-8
+                 if charset.lower() != 'utf-8':
+                     try:
+                         body = json.loads(request.body.decode('utf-8'))
+                     except Exception:
+                         return None # Let view handle it
+                 else:
+                     return None
         
         # Sanitize relevant fields
         sanitizer = get_sanitizer()

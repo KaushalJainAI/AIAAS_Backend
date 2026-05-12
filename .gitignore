@@ -36,9 +36,10 @@ media/
 staticfiles/
 
 # Environment variables
-.env
-.env.local
-.env.*.local
+.env*
+!.env.example
+!example.env
+!*.example
 
 # IDE
 .idea/
@@ -55,6 +56,7 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+.ruff_cache/
 .tox/
 
 # Celery
@@ -67,6 +69,11 @@ chroma_data/
 
 # WebAssembly binaries
 executor/sandbox/wasm/
+
+# Local scratch / generated notes
+scratch/
+status.txt
+diff.txt
 
 # Data dumps & database backups
 *.sql
@@ -93,3 +100,6 @@ pg_dump.sql
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+
+# AI Models
+static/model_cache/

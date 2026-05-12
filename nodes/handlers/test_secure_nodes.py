@@ -31,9 +31,9 @@ async def test_sandbox_security():
         config={"code": "f = open('test.txt', 'w')\nreturn {'res': 'success'}"},
         context=context
     )
-    # This should fail during execution call to user_fn
-    if not res.items[0].json.get('success', True) == False:
-         print(f"✅ Blocked open: {res.items[0].json.get('error')}")
+    # This may fail during validation or during execution.
+    if not res.success or (res.items and res.items[0].json.get('success', True) == False):
+         print(f"✅ Blocked open: {res.error or res.items[0].json.get('error')}")
     else:
         print("❌ FAILED: open() was not blocked")
 
@@ -44,8 +44,8 @@ async def test_sandbox_security():
         config={"code": "classes = ().__class__.__base__.__subclasses__()\nreturn {'classes': str(classes[:1])}"},
         context=context
     )
-    if not res.items[0].json.get('success', True) == False:
-        print(f"✅ Blocked traversal: {res.items[0].json.get('error')}")
+    if not res.success or (res.items and res.items[0].json.get('success', True) == False):
+        print(f"✅ Blocked traversal: {res.error or res.items[0].json.get('error')}")
     else:
         print("❌ FAILED: Attribute traversal was not blocked")
 
@@ -56,8 +56,8 @@ async def test_sandbox_security():
         config={"code": "print('hello')\nreturn {'res': 'success'}"},
         context=context
     )
-    if not res.items[0].json.get('success', True) == False:
-        print(f"✅ Blocked print: {res.items[0].json.get('error')}")
+    if not res.success or (res.items and res.items[0].json.get('success', True) == False):
+        print(f"✅ Blocked print: {res.error or res.items[0].json.get('error')}")
     else:
         print("❌ FAILED: print() was not blocked")
 

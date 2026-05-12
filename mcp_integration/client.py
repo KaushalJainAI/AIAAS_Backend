@@ -1,19 +1,33 @@
 """
-MCPClientManager — opens ephemeral connections to an MCP server and exposes
+MCPClientManager — opens (and pools) connections to an MCP server, exposing
 `list_tools` / `call_tool`.
 
-Credential injection (env vars for stdio, headers for SSE) is handled by
-`CredentialInjector`. Tool listing is cached via `MCPToolCache`. Neither
-concern lives in this module.
+Connection pooling
+------------------
+Opening a fresh connection on every tool call is expensive:
+  * stdio  — spawns a new subprocess + MCP handshake (~100–500 ms)
+  * SSE    — TCP connect + HTTP upgrade + MCP handshake
+
+The module-level `_pool` keeps one live `ClientSession` per
+(server_id, user_id) pair for up to SESSION_TTL seconds.  An asyncio.Lock
+per pool-entry serialises concurrent callers so the session is never used
+by two coroutines simultaneously (MCP sessions are not concurrency-safe).
+
+If a session errors mid-call it is evicted so the next call gets a fresh one.
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 import logging
 import os
 import shutil
+import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
+
+import asyncio
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import PermissionDenied
@@ -28,6 +42,51 @@ from .models import MCPServer
 from .tool_cache import MCPToolCache
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Connection pool
+# ---------------------------------------------------------------------------
+
+SESSION_TTL: float = 300.0  # seconds a session stays alive without activity
+LIST_TOOLS_TIMEOUT: float = 5.0
+
+_PoolKey = tuple[int, int | None]  # (server_id, user_id)
+
+
+@dataclass
+class _PoolEntry:
+    stack: contextlib.AsyncExitStack
+    session: ClientSession
+    expires_at: float
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self.expires_at
+
+    def refresh(self) -> None:
+        self.expires_at = time.monotonic() + SESSION_TTL
+
+
+# Keyed by (server_id, user_id).  Entries are created lazily.
+_pool: dict[_PoolKey, _PoolEntry] = {}
+# One lock per key so only one coroutine creates/evicts an entry at a time.
+_creation_locks: dict[_PoolKey, asyncio.Lock] = {}
+
+
+def _creation_lock(key: _PoolKey) -> asyncio.Lock:
+    if key not in _creation_locks:
+        _creation_locks[key] = asyncio.Lock()
+    return _creation_locks[key]
+
+
+async def _evict(key: _PoolKey) -> None:
+    """Close and remove a pool entry; safe to call when it doesn't exist."""
+    entry = _pool.pop(key, None)
+    if entry is not None:
+        try:
+            await entry.stack.aclose()
+        except Exception:
+            pass
 
 
 class MCPClientManager:
@@ -51,19 +110,63 @@ class MCPClientManager:
         return await CredentialInjector.resolve(server, self.user)
 
     @asynccontextmanager
+    async def _session(self, server: "MCPServer", resolved: "ResolvedCredentials"):
+        """
+        Core pool acquisition. Callers must supply already-resolved server
+        config and credentials so resolution never happens more than once per
+        public method call.
+        """
+        user_id = _coerce_user_id(self.user)
+        key: _PoolKey = (self.server_id, user_id)
+
+        async with _creation_lock(key):
+            entry = _pool.get(key)
+            if entry is None or entry.expired():
+                await _evict(key)
+                stack = contextlib.AsyncExitStack()
+                try:
+                    if server.type == "stdio":
+                        session = await stack.enter_async_context(
+                            self._connect_stdio(server, resolved)
+                        )
+                    elif server.type == "sse":
+                        session = await stack.enter_async_context(
+                            self._connect_sse(server, resolved)
+                        )
+                    else:
+                        await stack.aclose()
+                        raise ValueError(f"Unsupported MCP server type: {server.type}")
+                    entry = _PoolEntry(
+                        stack=stack,
+                        session=session,
+                        expires_at=time.monotonic() + SESSION_TTL,
+                    )
+                    _pool[key] = entry
+                except Exception:
+                    await stack.aclose()
+                    raise
+
+        async with entry.lock:
+            if key not in _pool or _pool[key] is not entry:
+                raise RuntimeError("MCP session was evicted; please retry")
+            try:
+                entry.refresh()
+                yield entry.session
+            except Exception:
+                await _evict(key)
+                raise
+
+    @asynccontextmanager
     async def connect(self):
-        """Async context manager yielding an initialised `ClientSession`."""
+        """
+        Public async context manager yielding an initialised `ClientSession`.
+        Resolves server config and credentials exactly once, then delegates to
+        the pool via `_session`.
+        """
         server = await self.get_server_config()
         resolved = await self._resolve_credentials(server)
-
-        if server.type == "stdio":
-            async with self._connect_stdio(server, resolved) as session:
-                yield session
-        elif server.type == "sse":
-            async with self._connect_sse(server, resolved) as session:
-                yield session
-        else:
-            raise ValueError(f"Unsupported MCP server type: {server.type}")
+        async with self._session(server, resolved) as session:
+            yield session
 
     @asynccontextmanager
     async def _connect_stdio(self, server: MCPServer, resolved: ResolvedCredentials):
@@ -121,9 +224,11 @@ class MCPClientManager:
         Cached (Redis) by default with a short TTL; pass `use_cache=False`
         to force a live fetch (used by the tool-cache invalidation path
         and by debug endpoints).
+
+        Server config and credentials are resolved exactly once regardless of
+        whether the cache is warm or cold.
         """
         server = await self.get_server_config()
-        resolved = await self._resolve_credentials(server)
         user_id = _coerce_user_id(self.user)
 
         if use_cache:
@@ -131,7 +236,8 @@ class MCPClientManager:
             if cached is not None:
                 return cached
 
-        async with self._connect_resolved(server, resolved) as session:
+        resolved = await self._resolve_credentials(server)
+        async with self._session(server, resolved) as session:
             result = await session.list_tools()
             tools = [
                 {
@@ -147,7 +253,9 @@ class MCPClientManager:
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Execute a single tool and return a JSON-friendly payload."""
-        async with self.connect() as session:
+        server = await self.get_server_config()
+        resolved = await self._resolve_credentials(server)
+        async with self._session(server, resolved) as session:
             result: CallToolResult = await session.call_tool(tool_name, arguments or {})
 
         if result.isError:
@@ -155,16 +263,6 @@ class MCPClientManager:
 
         return _serialise_tool_result(result)
 
-    @asynccontextmanager
-    async def _connect_resolved(self, server: MCPServer, resolved: ResolvedCredentials):
-        if server.type == "stdio":
-            async with self._connect_stdio(server, resolved) as session:
-                yield session
-        elif server.type == "sse":
-            async with self._connect_sse(server, resolved) as session:
-                yield session
-        else:
-            raise ValueError(f"Unsupported MCP server type: {server.type}")
 
 
 def _serialise_tool_result(result: CallToolResult) -> Any:
@@ -194,6 +292,19 @@ def _serialise_tool_result(result: CallToolResult) -> Any:
     if len(parts) == 1:
         return parts[0]
     return parts
+
+
+async def drain_pool() -> None:
+    """
+    Close all pooled sessions and clear the pool.
+
+    Call this on process shutdown (e.g. Django AppConfig.ready teardown or
+    a test fixture) to cleanly terminate stdio subprocesses and SSE streams.
+    """
+    keys = list(_pool.keys())
+    for key in keys:
+        await _evict(key)
+    _creation_locks.clear()
 
 
 def _visible_servers_queryset(user_id: int | None, enabled_only: bool = True):
@@ -237,15 +348,26 @@ async def get_all_tools_from_all_servers(user) -> list[dict[str, Any]]:
     """Aggregate tools from every server visible to `user`, with origin tags."""
     servers = await get_servers_for_user(user)
     tools: list[dict[str, Any]] = []
-    for server in servers:
+
+    async def collect_server_tools(server: MCPServer) -> list[dict[str, Any]]:
         try:
             manager = MCPClientManager(server.id, user=user)
-            for t in await manager.list_tools():
-                tools.append({
+            server_tools = await asyncio.wait_for(manager.list_tools(), timeout=LIST_TOOLS_TIMEOUT)
+            return [
+                {
                     **t,
                     "server_id": server.id,
                     "server_name": server.name,
-                })
+                }
+                for t in server_tools
+            ]
+        except asyncio.TimeoutError:
+            logger.warning("Timed out listing tools for MCP server %s", server.name)
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not list tools for MCP server %s: %s", server.name, e)
+        return []
+
+    results = await asyncio.gather(*(collect_server_tools(server) for server in servers))
+    for server_tools in results:
+        tools.extend(server_tools)
     return tools

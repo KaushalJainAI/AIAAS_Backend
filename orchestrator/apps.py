@@ -23,17 +23,18 @@ class OrchestratorConfig(AppConfig):
         if os.environ.get('RUN_MAIN') != 'true' and os.environ.get('DJANGO_SETTINGS_MODULE'):
             return
 
-        try:
-            from orchestrator.models import Workflow
-            from executor.trigger_manager import get_trigger_manager
-            
-            mgr = get_trigger_manager()
-            # Note: Using .all() here might be heavy if there are thousands of workflows.
-            # But for initial project scale, it is fine.
-            active_workflows = Workflow.objects.filter(status='active')
-            
-            for workflow in active_workflows:
-                mgr.register_triggers(workflow)
-        except Exception:
-            # We don't want startup to fail because of trigger registration issues
-            pass
+        import threading
+
+        def _register():
+            try:
+                from orchestrator.models import Workflow
+                from executor.trigger_manager import get_trigger_manager
+
+                mgr = get_trigger_manager()
+                active_workflows = Workflow.objects.filter(status='active')
+                for workflow in active_workflows:
+                    mgr.register_triggers(workflow)
+            except Exception:
+                pass
+
+        threading.Thread(target=_register, daemon=True).start()

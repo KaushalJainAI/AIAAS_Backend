@@ -9,7 +9,10 @@ Tests for:
 from django.test import TestCase, RequestFactory
 from django.contrib.auth.models import User
 from unittest.mock import Mock, patch
+from django.urls import reverse
+from rest_framework.test import APIClient
 
+from core.models import PasswordOTP
 from core.security import InputSanitizer, SanitizationResult, ContentPolicyEnforcer
 from core.throttling import (
     CompileThrottle, ExecuteThrottle, StreamThrottle, ChatThrottle
@@ -197,3 +200,86 @@ class TestTierBasedThrottling(TestCase):
         
         StreamThrottle.decrement_connection(1)
         mock_cache.decr.assert_called_once()
+
+
+class TestPasswordOTPFlows(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='otpuser',
+            email='otp@example.com',
+            password='oldpass12345'
+        )
+
+    @patch('core.views._send_password_otp_email')
+    def test_forgot_password_otp_flow(self, _mock_send_email):
+        response = self.client.post(reverse('password-reset-request'), {'email': self.user.email}, format='json')
+        self.assertEqual(response.status_code, 200)
+
+        otp = PasswordOTP.objects.get(user=self.user, purpose=PasswordOTP.PURPOSE_PASSWORD_RESET)
+        response = self.client.post(
+            reverse('password-reset-verify'),
+            {'email': self.user.email, 'otp_code': '000000'},
+            format='json'
+        )
+        self.assertEqual(response.status_code, 400)
+
+        otp.set_otp('123456')
+        otp.failed_attempts = 0
+        otp.save()
+        response = self.client.post(
+            reverse('password-reset-verify'),
+            {'email': self.user.email, 'otp_code': '123456'},
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        token = response.data['verification_token']
+
+        response = self.client.post(
+            reverse('password-reset-confirm'),
+            {
+                'email': self.user.email,
+                'verification_token': token,
+                'new_password': 'newpass12345',
+                'confirm_password': 'newpass12345',
+            },
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('newpass12345'))
+
+    @patch('core.views._send_password_otp_email')
+    def test_change_password_requires_verified_otp_token(self, _mock_send_email):
+        self.client.force_authenticate(self.user)
+        response = self.client.post(
+            reverse('change-password-request-otp'),
+            {'old_password': 'oldpass12345'},
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+
+        otp = PasswordOTP.objects.get(user=self.user, purpose=PasswordOTP.PURPOSE_PASSWORD_CHANGE)
+        otp.set_otp('654321')
+        otp.save()
+
+        response = self.client.post(
+            reverse('change-password-verify-otp'),
+            {'otp_code': '654321'},
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+
+        response = self.client.post(
+            reverse('change-password'),
+            {
+                'old_password': 'oldpass12345',
+                'verification_token': response.data['verification_token'],
+                'new_password': 'changedpass12345',
+                'confirm_password': 'changedpass12345',
+            },
+            format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('changedpass12345'))

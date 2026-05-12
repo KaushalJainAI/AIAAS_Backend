@@ -19,7 +19,23 @@ class CredentialTypeSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'slug', 'service_identifier', 'description', 'icon', 'auth_method', 'fields_schema', 'oauth_config']
 
 
+class CredentialTypeRelatedField(serializers.PrimaryKeyRelatedField):
+    """Accept credential type by integer primary key or slug."""
+
+    def to_internal_value(self, data):
+        queryset = self.get_queryset()
+        if isinstance(data, str) and not data.isdigit():
+            try:
+                return queryset.get(slug=data)
+            except CredentialType.DoesNotExist:
+                self.fail('does_not_exist', pk_value=data)
+        return super().to_internal_value(data)
+
+
 class CredentialSerializer(serializers.ModelSerializer):
+    credential_type = CredentialTypeRelatedField(
+        queryset=CredentialType.objects.all(),
+    )
     credential_type_display = serializers.CharField(source='credential_type.name', read_only=True)
     # The 'data' field is virtual - it's decrypted on read, and encrypted on write via set_credential_data
     data = serializers.DictField(write_only=True, required=False)

@@ -16,6 +16,9 @@ from .models import Credential, CredentialType
 
 logger = logging.getLogger(__name__)
 
+# Maximum number of entries in the credential cache to prevent unbounded memory growth
+MAX_CACHE_SIZE = 1000
+
 
 class CredentialManager:
     """
@@ -36,6 +39,24 @@ class CredentialManager:
         self._cache: dict[str, tuple[dict, datetime]] = {}
         self._cache_ttl = timedelta(minutes=5)
     
+    def _evict_cache(self) -> None:
+        """Evict expired entries and enforce max cache size."""
+        now = timezone.now()
+        # Remove expired entries first
+        expired_keys = [
+            k for k, (_, cached_at) in self._cache.items()
+            if now - cached_at >= self._cache_ttl
+        ]
+        for k in expired_keys:
+            del self._cache[k]
+        
+        # If still over limit, evict oldest entries (LRU-style)
+        if len(self._cache) >= MAX_CACHE_SIZE:
+            sorted_keys = sorted(self._cache.keys(), key=lambda k: self._cache[k][1])
+            excess_count = len(self._cache) - MAX_CACHE_SIZE + 1
+            for k in sorted_keys[:excess_count]:
+                del self._cache[k]
+
     async def get_credential(
         self,
         credential_id: str | int,
@@ -62,6 +83,9 @@ class CredentialManager:
             data, cached_at = self._cache[cache_key]
             if timezone.now() - cached_at < self._cache_ttl:
                 return data
+            else:
+                # Expired — remove from cache
+                del self._cache[cache_key]
         
         # Fetch from database
         try:
@@ -89,14 +113,17 @@ class CredentialManager:
                 logger.warning(f"Credential '{credential_id}' not found for user {user_id}")
                 return None
         
-        # Check if OAuth token refresh needed
+        # Check if OAuth token refresh needed (5-minute buffer to avoid
+        # returning a token that expires mid-request).
         if (
             refresh_if_expired
             and credential.credential_type.auth_method == 'oauth2'
             and credential.token_expires_at
-            and credential.token_expires_at <= timezone.now()
+            and credential.token_expires_at - timedelta(minutes=5) <= timezone.now()
         ):
             await self.refresh_oauth_token(credential)
+            # Bust cache for this credential so we don't return the stale token below.
+            self._cache.pop(cache_key, None)
         
         # Decrypt and return
         try:
@@ -113,7 +140,19 @@ class CredentialManager:
             credential.last_used_at = timezone.now()
             await sync_to_async(credential.save)(update_fields=['last_used_at'])
             
-            # Cache the result
+            # Audit logging: always log credential access
+            try:
+                from .models import CredentialAuditLog
+                await sync_to_async(CredentialAuditLog.objects.create)(
+                    credential=credential,
+                    user_id=user_id,
+                    action='accessed',
+                )
+            except Exception as e:
+                logger.error(f"Failed to create audit log for credential {credential_id}: {e}")
+            
+            # Cache the result (with size limit)
+            self._evict_cache()
             self._cache[cache_key] = (data, timezone.now())
             
             logger.info(f"Credential {credential_id} accessed by user {user_id}")
@@ -179,7 +218,13 @@ class CredentialManager:
                 new_access_token = data.get('access_token')
                 new_refresh_token = data.get('refresh_token', refresh_token)
                 expires_in = data.get('expires_in', 3600)
-                
+
+                if not new_access_token:
+                    logger.error(f"OAuth refresh for credential {credential.id} returned no access_token")
+                    credential.last_error = "Refresh response missing access_token"
+                    await sync_to_async(credential.save)(update_fields=['last_error'])
+                    return False
+
                 credential.access_token = fernet.encrypt(new_access_token.encode())
                 credential.refresh_token = fernet.encrypt(new_refresh_token.encode())
                 credential.token_expires_at = timezone.now() + timedelta(seconds=expires_in)

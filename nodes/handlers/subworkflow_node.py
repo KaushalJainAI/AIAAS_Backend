@@ -88,38 +88,75 @@ class SubworkflowNodeHandler(BaseNodeHandler):
         
         # 4. Execute Subworkflow
         try:
-            # Dynamic import to break cycle
-            from executor.orchestrator import WorkflowOrchestrator
-            orch = WorkflowOrchestrator.get_instance()
-            
-            # Execute subworkflow using orchestrator
-            # Note: We need to ensure execute_subworkflow exists on Orchestrator
-            result = await orch.execute_subworkflow(context, config, sub_input)
-            
-            if not result.success:
-                 return NodeExecutionResult(
+            import uuid
+            from asgiref.sync import sync_to_async
+            from executor.engine import ExecutionEngine
+            from orchestrator.interface import SupervisionLevel
+            from .base import NodeItem
+
+            # Fetch target workflow definition from DB
+            @sync_to_async
+            def fetch_workflow(wf_id):
+                from orchestrator.models import Workflow
+                return Workflow.objects.get(id=wf_id)
+
+            try:
+                target_workflow = await fetch_workflow(workflow_id)
+            except Exception:
+                return NodeExecutionResult(
                     success=False,
-                    error=result.error or "Subworkflow failed",
+                    error=f"Workflow {workflow_id} not found",
                     output_handle="error"
                 )
-                
+
+            sub_execution_id = uuid.uuid4()
+            child_chain = list(getattr(context, 'workflow_chain', [])) + [context.workflow_id]
+
+            engine = ExecutionEngine(orchestrator=None)
+            state = await engine.run_workflow(
+                execution_id=sub_execution_id,
+                workflow_id=int(workflow_id),
+                user_id=context.user_id,
+                workflow_json=target_workflow.workflow_json,
+                input_data=sub_input,
+                credentials=context.credentials,
+                parent_execution_id=context.execution_id,
+                nesting_depth=nesting_depth + 1,
+                workflow_chain=child_chain,
+                supervision_level=SupervisionLevel.NONE,
+                skills=list(context.skills) if context.skills else [],
+            )
+
+            from orchestrator.interface import ExecutionState
+            if state != ExecutionState.COMPLETED:
+                return NodeExecutionResult(
+                    success=False,
+                    error=f"Subworkflow {workflow_id} finished with state: {state}",
+                    output_handle="error"
+                )
+
+            # Retrieve last node outputs from the sub-execution log
+            @sync_to_async
+            def fetch_last_output(exec_id):
+                from logs.models import ExecutionLog
+                try:
+                    log = ExecutionLog.objects.get(execution_id=exec_id)
+                    return log.result_data or {}
+                except ExecutionLog.DoesNotExist:
+                    return {}
+
+            sub_output = await fetch_last_output(sub_execution_id)
+
             # 5. Output Mapping
             output_mapping = config.get("output_mapping", {})
-            final_output = self._transform_state(result.get_data(), output_mapping)
-            
-            from .base import NodeItem
+            final_output = self._transform_state(sub_output, output_mapping)
+
             return NodeExecutionResult(
                 success=True,
                 items=[NodeItem(json=final_output)],
                 output_handle="success"
             )
-            
-        except ImportError:
-            return NodeExecutionResult(
-                success=False, 
-                error="Subworkflow executor not implemented (ImportError)",
-                output_handle="error"
-            )
+
         except Exception as e:
             return NodeExecutionResult(
                 success=False,

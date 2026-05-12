@@ -53,6 +53,25 @@ DEFAULT_CAPS = {
     "embedding_generation": False,
 }
 
+CHAT_CAPS = {"structured_output": True, "tool_calling": True}
+VISION_CAPS = {**CHAT_CAPS, "image_input": True}
+MULTIMODAL_CAPS = {
+    **VISION_CAPS,
+    "audio_input": True,
+    "video_input": True,
+    "document_input": True,
+}
+REASONING_CAPS = {**CHAT_CAPS, "numeric_input": True, "numeric_generation": True}
+
+
+def m(name, value, is_free=False, caps=None):
+    return {
+        "name": name,
+        "value": value,
+        "is_free": is_free,
+        "caps": caps or {},
+    }
+
 
 def build_model_defaults(item):
     caps = {**DEFAULT_CAPS, **item.get("caps", {})}
@@ -70,759 +89,252 @@ def build_model_defaults(item):
 
 
 def populate():
+    # Catalog reviewed on 2026-05-10. Rule: keep the latest per tier; legacy only if
+    # widely deployed. Same-provider same-tier: newer wins, older removed.
     providers = [
         {
             "name": "OpenRouter",
             "slug": "openrouter",
-            "description": "Unified AI Gateway. Access 600+ models with a single API key.",
-            "icon": "🌐",
+            "description": "Unified AI gateway for routing across hosted model providers.",
+            "icon": "OR",
             "models": [
-                # --- General Routers ---
-                {
-                    "name": "💰 Auto Router",
-                    "value": "openrouter/auto",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "🆓 Free Models Router",
-                    "value": "openrouter/free",
-                    "is_free": True,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-
-                # --- Kilo Code Specific Auto-Routers ---
-                {
-                    "name": "💰 Kilo Auto Frontier (Opus/Sonnet)",
-                    "value": "kilo-auto/frontier",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Kilo Auto Balanced (Kimi/MiniMax)",
-                    "value": "kilo-auto/balanced",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "🆓 Kilo Auto Free (MiMo/Nemotron)",
-                    "value": "kilo-auto/free",
-                    "is_free": True,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                
-                # --- Free Tier Agentic Coding Models ---
-                {
-                    "name": "🆓 Qwen3 Coder Next (Free)",
-                    "value": "qwen/qwen3-coder-next:free",
-                    "is_free": True,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "🆓 Xiaomi MiMo-V2-Pro (Free)",
-                    "value": "xiaomi/mimo-v2-pro:free",
-                    "is_free": True,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "🆓 Pony Alpha (Free)",
-                    "value": "openrouter/pony-alpha:free",
-                    "is_free": True,
-                    "caps": {"structured_output": True, "tool_calling": True, "document_input": True},
-                },
-                {
-                    "name": "🆓 NVIDIA Nemotron 3 Super 120B",
-                    "value": "nvidia/nemotron-3-super-120b-a12b:free",
-                    "is_free": True,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "🆓 Arcee Trinity Large Preview",
-                    "value": "arcee-ai/trinity-large-preview:free",
-                    "is_free": True,
-                    "caps": {"structured_output": True},
-                },
-                {
-                    "name": "🆓 MiniMax M2.5",
-                    "value": "minimax/minimax-m2.5:free",
-                    "is_free": True,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "🆓 DeepSeek V4 Lite",
-                    "value": "deepseek/deepseek-v4-lite:free",
-                    "is_free": True,
-                    "caps": {"image_input": True, "numeric_input": True, "structured_output": True},
-                },
-
-                # --- Paid Agentic & Major Lab Models ---
-                {
-                    "name": "💰 Anthropic Claude Opus 4.6",
-                    "value": "anthropic/claude-opus-4.6",
-                    "is_free": False,
-                    "caps": {"image_input": True, "document_input": True, "numeric_input": True, "structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Anthropic Claude Sonnet 4.6",
-                    "value": "anthropic/claude-sonnet-4.6",
-                    "is_free": False,
-                    "caps": {"image_input": True, "document_input": True, "structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Anthropic Claude Haiku 4.5",
-                    "value": "anthropic/claude-haiku-4.5",
-                    "is_free": False,
-                    "caps": {"image_input": True, "document_input": True, "structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 OpenAI GPT-5.4",
-                    "value": "openai/gpt-5.4",
-                    "is_free": False,
-                    "caps": {"image_input": True, "numeric_input": True, "numeric_generation": True, "structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 OpenAI GPT-5.3-Codex",
-                    "value": "openai/gpt-5.3-codex",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Google Gemini 3.1 Pro Preview",
-                    "value": "google/gemini-3.1-pro-preview",
-                    "is_free": False,
-                    "caps": {"image_input": True, "video_input": True, "document_input": True, "structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Google Gemini 3 Flash Preview",
-                    "value": "google/gemini-3-flash-preview",
-                    "is_free": False,
-                    "caps": {"image_input": True, "video_input": True, "structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Xiaomi MiMo-V2-Pro",
-                    "value": "xiaomi/mimo-v2-pro",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Xiaomi MiMo-V2-Omni",
-                    "value": "xiaomi/mimo-v2-omni",
-                    "is_free": False,
-                    "caps": {"image_input": True, "audio_input": True, "video_input": True, "structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 MiniMax M2.7",
-                    "value": "minimax/minimax-m2.7",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Z.ai GLM 5",
-                    "value": "z-ai/glm-5",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Mistral Small 4 (2603)",
-                    "value": "mistralai/mistral-small-2603",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Mistral Devstral 2 (2512)",
-                    "value": "mistralai/devstral-2512",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 xAI Grok Code Fast 1",
-                    "value": "x-ai/grok-code-fast-1",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
-                {
-                    "name": "💰 Inception Mercury 2",
-                    "value": "inception/mercury-2",
-                    "is_free": False,
-                    "caps": {"structured_output": True, "tool_calling": True},
-                },
+                # --- OpenRouter routing ---
+                m("Auto Router", "openrouter/auto", caps=CHAT_CAPS),
+                m("Free Models Router", "openrouter/free", True, CHAT_CAPS),
+                m("Pareto Code Router", "openrouter/pareto-code", caps=CHAT_CAPS),
+                m("Kilo Auto Frontier", "kilo-auto/frontier", caps=CHAT_CAPS),
+                m("Kilo Auto Balanced", "kilo-auto/balanced", caps=CHAT_CAPS),
+                m("Kilo Auto Free", "kilo-auto/free", True, CHAT_CAPS),
+                # --- OpenAI via OpenRouter ---
+                m("OpenAI GPT-5.5", "openai/gpt-5.5", caps={**VISION_CAPS, "document_input": True}),
+                m("OpenAI GPT-5.4 Mini", "openai/gpt-5.4-mini", caps={**VISION_CAPS, "document_input": True}),
+                m("OpenAI GPT-4o", "openai/gpt-4o", caps=VISION_CAPS),
+                m("OpenAI GPT-4o Mini", "openai/gpt-4o-mini", caps=VISION_CAPS),
+                # --- Anthropic via OpenRouter (one model per tier) ---
+                m("Anthropic Claude Opus 4.7", "anthropic/claude-opus-4.7", caps=VISION_CAPS),
+                m("Anthropic Claude Sonnet 4.6", "anthropic/claude-sonnet-4.6", caps=VISION_CAPS),
+                m("Anthropic Claude Haiku 4.5", "anthropic/claude-haiku-4.5", caps=VISION_CAPS),
+                # --- Google via OpenRouter ---
+                m("Google Gemini 3.1 Pro Preview", "google/gemini-3.1-pro-preview", caps=MULTIMODAL_CAPS),
+                m("Google Gemini 2.5 Flash", "google/gemini-2.5-flash", True, MULTIMODAL_CAPS),
+                # --- DeepSeek via OpenRouter ---
+                m("DeepSeek V4 Pro", "deepseek/deepseek-v4-pro", caps=REASONING_CAPS),
+                m("DeepSeek R1", "deepseek/deepseek-r1", caps=REASONING_CAPS),
+                m("DeepSeek V3 (Legacy)", "deepseek/deepseek-chat", caps=CHAT_CAPS),
+                # --- xAI via OpenRouter ---
+                m("xAI Grok 4.20", "x-ai/grok-4.20", caps={**VISION_CAPS, "document_input": True}),
+                # --- Meta via OpenRouter ---
+                m("Meta Llama 4 Maverick", "meta-llama/llama-4-maverick", caps=VISION_CAPS),
+                m("Meta Llama 4 Scout", "meta-llama/llama-4-scout", caps=VISION_CAPS),
+                # --- Qwen via OpenRouter (3.6 Plus flagship; keep 32B as mid-size) ---
+                m("Qwen3.6 Plus", "qwen/qwen3.6-plus", caps={**VISION_CAPS, "video_input": True}),
+                m("Qwen3 32B", "qwen/qwen3-32b", caps=CHAT_CAPS),
+                m("Qwen3 Coder Next Free", "qwen/qwen3-coder-next:free", True, CHAT_CAPS),
+                # --- Mistral via OpenRouter ---
+                m("Mistral Small 4", "mistralai/mistral-small-2603", caps=VISION_CAPS),
+                # --- Google Open via OpenRouter (Gemma 4 supersedes all Gemma 3) ---
+                m("Google Gemma 4 31B Free", "google/gemma-4-31b-it:free", True, CHAT_CAPS),
+                # --- NVIDIA via OpenRouter ---
+                m("NVIDIA Nemotron 3 Super 120B Free", "nvidia/nemotron-3-super-120b-a12b:free", True, CHAT_CAPS),
+                # --- Notable independents ---
+                m("Moonshot Kimi K2.6", "moonshotai/kimi-k2.6", caps=VISION_CAPS),
+                m("Inception Mercury 2", "inception/mercury-2", caps=CHAT_CAPS),
             ],
         },
         {
             "name": "Ollama (Local)",
             "slug": "ollama",
-            "description": "Run private, local AI models on your own hardware.",
-            "icon": "🦙",
+            "description": "Run private local AI models on your own hardware.",
+            "icon": "OL",
             "models": [
-                {
-                    "name": "🆓 DeepSeek R1 8B (Recommended)",
-                    "value": "deepseek-r1:8b",
-                    "is_free": True,
-                    "caps": {
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                    },
-                },
-                {
-                    "name": "🆓 DeepSeek R1 32B",
-                    "value": "deepseek-r1:32b",
-                    "is_free": True,
-                    "caps": {
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                    },
-                },
-                {
-                    "name": "🆓 DeepSeek R1 1.5B (Edge)",
-                    "value": "deepseek-r1:1.5b",
-                    "is_free": True,
-                    "caps": {
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                    },
-                },
-                {
-                    "name": "🆓 DeepSeek V3",
-                    "value": "deepseek-v3:latest",
-                    "is_free": True,
-                    "caps": {
-                        "numeric_input": True,
-                    },
-                },
-                {
-                    "name": "🆓 Llama 4 Scout",
-                    "value": "llama4:scout",
-                    "is_free": True,
-                    "caps": {
-                        "image_input": True,
-                    },
-                },
-                {
-                    "name": "🆓 Llama 4 Maverick",
-                    "value": "llama4:maverick",
-                    "is_free": True,
-                    "caps": {
-                        "image_input": True,
-                    },
-                },
-                {
-                    "name": "🆓 Qwen 2.5 Coder 32B",
-                    "value": "qwen2.5-coder:32b",
-                    "is_free": True,
-                    "caps": {
-                        "numeric_input": True,
-                        "structured_output": True,
-                    },
-                },
-                {
-                    "name": "🆓 Qwen 2.5 7B",
-                    "value": "qwen2.5:latest",
-                    "is_free": True,
-                    "caps": {
-                        "numeric_input": True,
-                    },
-                },
-                {
-                    "name": "🆓 Gemma 3 27B",
-                    "value": "gemma3:27b",
-                    "is_free": True,
-                    "caps": {
-                        "image_input": True,
-                    },
-                },
-                {
-                    "name": "🆓 Mistral Nemo 12B",
-                    "value": "mistral-nemo:latest",
-                    "is_free": True,
-                    "caps": {},
-                },
-                {
-                    "name": "🆓 Phi-4 (Microsoft)",
-                    "value": "phi4:latest",
-                    "is_free": True,
-                    "caps": {
-                        "numeric_input": True,
-                    },
-                },
+                # DeepSeek R1 in three sizes for different hardware tiers
+                m("DeepSeek R1 1.5B", "deepseek-r1:1.5b", True, REASONING_CAPS),
+                m("DeepSeek R1 8B", "deepseek-r1:8b", True, REASONING_CAPS),
+                m("DeepSeek R1 32B", "deepseek-r1:32b", True, REASONING_CAPS),
+                m("DeepSeek V3", "deepseek-v3:latest", True, CHAT_CAPS),
+                # Llama 4 Scout only — Maverick requires 200GB+ RAM, impractical locally
+                m("Llama 4 Scout", "llama4:scout", True, VISION_CAPS),
+                # Qwen 3.6 flagship; 7B for low-RAM machines; Coder 32B best-in-class for code
+                m("Qwen 3.6", "qwen3.6:latest", True, VISION_CAPS),
+                m("Qwen 3 8B", "qwen3:8b", True, CHAT_CAPS),
+                m("Qwen 2.5 Coder 32B", "qwen2.5-coder:32b", True, CHAT_CAPS),
+                # Gemma 4 supersedes Gemma 3; 4B covers ultra-low-RAM use
+                m("Gemma 4", "gemma4:latest", True, VISION_CAPS),
+                m("Gemma 4 4B", "gemma4:4b", True, VISION_CAPS),
+                m("Phi 4", "phi4:latest", True, REASONING_CAPS),
+                # Mistral 7B — lean, fast, excellent for constrained hardware
+                m("Mistral 7B", "mistral:7b", True, CHAT_CAPS),
             ],
         },
         {
             "name": "OpenAI",
             "slug": "openai",
-            "description": "Direct connection to OpenAI API.",
-            "icon": "🤖",
+            "description": "Direct connection to the OpenAI API.",
+            "icon": "OA",
             "models": [
-                {
-                    "name": "💰 GPT-5.4 (Latest Frontier)",
-                    "value": "gpt-5.4",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 GPT-5.4 Thinking (Reasoning)",
-                    "value": "gpt-5.4-thinking",
-                    "is_free": False,
-                    "caps": {
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 GPT-5.4 Pro",
-                    "value": "gpt-5.4-pro",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 o1",
-                    "value": "o1",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 o3-mini",
-                    "value": "o3-mini",
-                    "is_free": False,
-                    "caps": {
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 gpt-4o",
-                    "value": "gpt-4o",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 gpt-4o-mini",
-                    "value": "gpt-4o-mini",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 gpt-image-1",
-                    "value": "gpt-image-1",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "image_generation": True,
-                    },
-                },
-                {
-                    "name": "💰 gpt-audio-1.5",
-                    "value": "gpt-audio-1.5",
-                    "is_free": False,
-                    "caps": {
-                        "audio_input": True,
-                        "audio_generation": True,
-                    },
-                },
-                {
-                    "name": "💰 gpt-4-turbo (Legacy)",
-                    "value": "gpt-4-turbo",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                    },
-                },
-                {
-                    "name": "💰 GPT Image 1",
-                    "value": "gpt-image-1",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "image_generation": True,
-                    },
-                },
-                {
-                    "name": "💰 GPT Image 1 Mini",
-                    "value": "gpt-image-1-mini",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "image_generation": True,
-                    },
-                },
-                {
-                    "name": "💰 GPT Audio",
-                    "value": "gpt-audio",
-                    "is_free": False,
-                    "caps": {
-                        "audio_input": True,
-                        "audio_generation": True,
-                    },
-                },
-                {
-                    "name": "💰 GPT Audio Mini",
-                    "value": "gpt-audio-mini",
-                    "is_free": False,
-                    "caps": {
-                        "audio_input": True,
-                        "audio_generation": True,
-                    },
-                },
-                {
-                    "name": "💰 GPT-4o Mini TTS",
-                    "value": "gpt-4o-mini-tts",
-                    "is_free": False,
-                    "caps": {
-                        "audio_generation": True,
-                    },
-                },
+                # Flagship + cheaper fast variant in the GPT-5 generation
+                m("GPT-5.5", "gpt-5.5", caps={**VISION_CAPS, "document_input": True}),
+                m("GPT-5.5 Pro", "gpt-5.5-pro", caps={**VISION_CAPS, "document_input": True}),
+                m("GPT-5.4 Mini", "gpt-5.4-mini", caps={**VISION_CAPS, "document_input": True}),
+                m("GPT-5.4 Nano", "gpt-5.4-nano", caps={**VISION_CAPS, "document_input": True}),
+                # Famous legacy — massively deployed
+                m("GPT-4o", "gpt-4o", caps=VISION_CAPS),
+                m("GPT-4o Mini", "gpt-4o-mini", caps=VISION_CAPS),
+                # Reasoning — o3 flagship; o4-mini fast + cheap; o1 famous legacy
+                m("o3", "o3", caps=REASONING_CAPS),
+                m("o4-mini", "o4-mini", caps=REASONING_CAPS),
+                m("o1 (Legacy)", "o1", caps=REASONING_CAPS),
+                # Specialised modalities — latest only
+                m("GPT Image 2", "gpt-image-2", caps={"image_input": True, "image_generation": True}),
+                m("Sora 2 Pro", "sora-2-pro", caps={"video_generation": True}),
+                m("GPT Realtime 1.5", "gpt-realtime-1.5", caps={"audio_input": True, "audio_generation": True, **CHAT_CAPS}),
+                m("Text Embedding 3 Large", "text-embedding-3-large", caps={"embedding_generation": True}),
             ],
         },
         {
             "name": "Google Gemini",
             "slug": "gemini",
-            "description": "Google AI Studio models with massive context windows.",
-            "icon": "✨",
+            "description": "Google Gemini API models with multimodal input and long context.",
+            "icon": "GG",
             "models": [
-                {
-                    "name": "🆓 Gemini 3 Flash Preview (Free Tier)",
-                    "value": "gemini-3-flash-preview",
-                    "is_free": True,
-                    "caps": {
-                        "image_input": True,
-                        "audio_input": True,
-                        "video_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "🆓 Gemini 2.5 Flash (Free Tier)",
-                    "value": "gemini-2.5-flash",
-                    "is_free": True,
-                    "caps": {
-                        "image_input": True,
-                        "audio_input": True,
-                        "video_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Gemini 3.1 Pro (Latest, Best Reasoning)",
-                    "value": "gemini-3.1-pro",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "audio_input": True,
-                        "video_input": True,
-                        "document_input": True,
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Gemini 3 Pro",
-                    "value": "gemini-3-pro",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "audio_input": True,
-                        "video_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Gemini 3.1 Flash-Lite (Fastest)",
-                    "value": "gemini-3.1-flash-lite",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "audio_input": True,
-                        "video_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Gemini 2.5 Flash-Lite",
-                    "value": "gemini-2.5-flash-lite",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "audio_input": True,
-                        "video_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Gemini 2.5 Pro (Legacy)",
-                    "value": "gemini-2.5-pro",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "audio_input": True,
-                        "video_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Gemini 3.1 Flash Image (Nano Banana 2)",
-                    "value": "gemini-3.1-flash-image",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "image_generation": True,
-                    },
-                },
-                {
-                    "name": "💰 Veo 3.1 Generate Preview",
-                    "value": "veo-3.1-generate-preview",
-                    "is_free": False,
-                    "caps": {
-                        "video_generation": True,
-                    },
-                },
+                # Latest flagship — 3.1 Pro supersedes 3 Pro
+                m("Gemini 3.1 Pro Preview", "gemini-3.1-pro-preview", caps=MULTIMODAL_CAPS),
+                m("Gemini 3.1 Flash Preview", "gemini-3.1-flash-preview", True, MULTIMODAL_CAPS),
+                # Famous/widely-used — 2.5 Pro and Flash are the production workhorses
+                m("Gemini 2.5 Pro", "gemini-2.5-pro", caps=MULTIMODAL_CAPS),
+                m("Gemini 2.5 Flash", "gemini-2.5-flash", True, MULTIMODAL_CAPS),
+                # Flash Lite — faster and cheaper than Flash for high-volume tasks
+                m("Gemini 2.5 Flash Lite", "gemini-2.5-flash-lite", True, MULTIMODAL_CAPS),
+                # Legacy kept — 2.0 Flash is ubiquitous in existing integrations
+                m("Gemini 2.0 Flash (Legacy)", "gemini-2.0-flash", True, MULTIMODAL_CAPS),
+                # Embeddings — 2 supersedes 001
+                m("Gemini Embedding 2 Preview", "gemini-embedding-2-preview", caps={"embedding_generation": True}),
+                # Image gen — 3.1 Flash Image supersedes 2.5 Flash Image; Imagen 4 Ultra supersedes Imagen 4
+                m("Gemini 3.1 Flash Image Preview", "gemini-3.1-flash-image-preview", caps={"image_input": True, "image_generation": True}),
+                m("Imagen 4 Ultra", "imagen-4.0-ultra-generate-001", caps={"image_generation": True}),
+                # Video gen — Veo 3.1 supersedes Veo 3.1 Fast and Veo 3
+                m("Veo 3.1", "veo-3.1-generate-preview", caps={"image_input": True, "video_generation": True}),
             ],
         },
         {
             "name": "Anthropic",
             "slug": "anthropic",
-            "description": "Claude series by Anthropic. Best for coding agents and long tasks.",
-            "icon": "🎭",
+            "description": "Claude models by Anthropic for coding, writing, and long-running agents.",
+            "icon": "AN",
             "models": [
-                {
-                    "name": "💰 Claude Opus 4.6 (Best for Agents)",
-                    "value": "claude-opus-4-6",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "document_input": True,
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Claude Sonnet 4.6 (Latest, Best Coding)",
-                    "value": "claude-sonnet-4-6",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Claude Haiku 4.5 (Fastest)",
-                    "value": "claude-haiku-4-5",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Claude Sonnet 4.5 (Legacy)",
-                    "value": "claude-sonnet-4-5",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "document_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Claude 3.5 Sonnet (Legacy)",
-                    "value": "claude-3-5-sonnet-20241022",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
+                # Latest per tier (Opus 4.7 supersedes 4.6/4.6 Fast/Opus 4; Sonnet 4.6 supersedes 4.5/4)
+                m("Claude Opus 4.7", "claude-opus-4-7", caps=VISION_CAPS),
+                m("Claude Sonnet 4.6", "claude-sonnet-4-6", caps=VISION_CAPS),
+                m("Claude Haiku 4.5", "claude-haiku-4-5", caps=VISION_CAPS),
+                # Famous legacy — 3.7 is widely used for extended thinking; 3.5 Sonnet is iconic
+                m("Claude 3.7 Sonnet (Legacy)", "claude-3-7-sonnet-20250219", caps=VISION_CAPS),
+                m("Claude 3.5 Sonnet (Legacy)", "claude-3-5-sonnet-20241022", caps=VISION_CAPS),
             ],
         },
         {
             "name": "Perplexity",
             "slug": "perplexity",
-            "description": "Real-time web search and citation enabled AI.",
-            "icon": "🔍",
+            "description": "Search-augmented Sonar models with live web citations.",
+            "icon": "PX",
             "models": [
-                {
-                    "name": "💰 Sonar (Lightweight Search)",
-                    "value": "sonar",
-                    "is_free": False,
-                    "caps": {
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Sonar Pro (Advanced Search)",
-                    "value": "sonar-pro",
-                    "is_free": False,
-                    "caps": {
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Sonar Reasoning Pro (CoT)",
-                    "value": "sonar-reasoning-pro",
-                    "is_free": False,
-                    "caps": {
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 Sonar Deep Research (Exhaustive)",
-                    "value": "sonar-deep-research",
-                    "is_free": False,
-                    "caps": {
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
+                # Each model serves a genuinely different use case — all kept
+                m("Sonar", "sonar", caps=CHAT_CAPS),
+                m("Sonar Pro", "sonar-pro", caps=CHAT_CAPS),
+                m("Sonar Reasoning", "sonar-reasoning", caps=REASONING_CAPS),
+                m("Sonar Reasoning Pro", "sonar-reasoning-pro", caps=REASONING_CAPS),
+                m("Sonar Deep Research", "sonar-deep-research", caps=REASONING_CAPS),
             ],
         },
         {
             "name": "DeepSeek",
             "slug": "deepseek",
-            "description": "Official DeepSeek API. Best for reasoning and coding tasks.",
-            "icon": "🧠",
+            "description": "Official DeepSeek API for general chat, coding, and reasoning.",
+            "icon": "DS",
             "models": [
-                {
-                    "name": "💰 DeepSeek Chat (V3)",
-                    "value": "deepseek-chat",
-                    "is_free": False,
-                    "caps": {
-                        "numeric_input": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
-                {
-                    "name": "💰 DeepSeek Reasoner (R1)",
-                    "value": "deepseek-reasoner",
-                    "is_free": False,
-                    "caps": {
-                        "numeric_input": True,
-                        "numeric_generation": True,
-                        "structured_output": True,
-                        "tool_calling": True,
-                    },
-                },
+                # V4 Pro supersedes V4 Flash (same tier, more capable)
+                m("DeepSeek Chat V4 Pro", "deepseek-v4-pro", caps=REASONING_CAPS),
+                # V3.1 kept as the production-stable chat model
+                m("DeepSeek Chat V3.1", "deepseek-chat", caps=CHAT_CAPS),
+                # R1 — iconic open reasoning model
+                m("DeepSeek Reasoner R1", "deepseek-reasoner", caps=REASONING_CAPS),
+            ],
+        },
+        {
+            "name": "NVIDIA NIM",
+            "slug": "nvidia",
+            "description": "NVIDIA NIM API — optimized inference for NVIDIA and open-source models.",
+            "icon": "NV",
+            "models": [
+                # NVIDIA flagship reasoning models (names/values corrected)
+                m("Nemotron Ultra 253B", "nvidia/llama-3.1-nemotron-ultra-253b-v1", caps=REASONING_CAPS),
+                m("Nemotron Super 49B", "nvidia/llama-3.3-nemotron-super-49b-v1", caps=CHAT_CAPS),
+                # Top open-source models hosted on NIM
+                m("Llama 3.1 405B Instruct", "meta/llama-3.1-405b-instruct", caps=CHAT_CAPS),
+                m("Llama 3.3 70B Instruct", "meta/llama-3.3-70b-instruct", caps=CHAT_CAPS),
+                m("DeepSeek R1 671B", "deepseek-ai/deepseek-r1", caps=REASONING_CAPS),
+                m("Qwen3 235B A22B", "qwen/qwen3-235b-a22b", caps=CHAT_CAPS),
+                # Mistral Large 2 supersedes Mixtral 8x22B
+                m("Mistral Large 2", "mistralai/mistral-large-2-instruct", caps=CHAT_CAPS),
+                # Efficient edge model
+                m("Phi-4 Mini Instruct", "microsoft/phi-4-mini-instruct", caps=CHAT_CAPS),
             ],
         },
         {
             "name": "xAI",
             "slug": "xai",
-            "description": "Explorative and witty models from xAI.",
-            "icon": "𝕏",
+            "description": "Grok models from xAI.",
+            "icon": "XA",
             "models": [
-                {
-                    "name": "💰 Grok Imagine Image",
-                    "value": "grok-imagine-image",
-                    "is_free": False,
-                    "caps": {
-                        "image_generation": True,
-                    },
-                },
-                {
-                    "name": "💰 Grok Imagine Video",
-                    "value": "grok-imagine-video",
-                    "is_free": False,
-                    "caps": {
-                        "image_input": True,
-                        "video_generation": True,
-                    },
-                },
+                # Grok 4.20 supersedes Grok 4; Multi-Agent is a distinct product
+                m("Grok 4.20", "grok-4.20", caps={**VISION_CAPS, "document_input": True}),
+                m("Grok 4.20 Multi-Agent", "grok-4.20-multi-agent", caps={**VISION_CAPS, "document_input": True}),
+                m("Grok Code Fast 1", "grok-code-fast-1", caps=CHAT_CAPS),
+                # Famous legacy
+                m("Grok 3 (Legacy)", "grok-3", caps=CHAT_CAPS),
+                m("Grok 3 Mini (Legacy)", "grok-3-mini", caps=REASONING_CAPS),
             ],
         },
     ]
 
-
     providers = deepcopy(providers)
-    
+
     print("\n" + "=" * 80)
-    print("🚀 Synchronizing AI Models Database...")
+    print("Synchronizing AI Models Database...")
     print("=" * 80 + "\n")
-    
+
     synced_model_values = []
-    
+
     with transaction.atomic():
         for provider_data in providers:
             model_data = provider_data.pop("models")
-            
+
             provider, _ = AIProvider.objects.update_or_create(
                 slug=provider_data["slug"],
                 defaults=provider_data,
             )
-            
-            print(f"✅ Provider: {provider.name}")
-            
+
+            print(f"Provider: {provider.name}")
+
             for item in model_data:
                 item["provider"] = provider
                 defaults = build_model_defaults(item)
-                
+
                 AIModel.objects.update_or_create(
                     value=item["value"],
                     defaults=defaults,
                 )
-                
+
                 synced_model_values.append(item["value"])
-                badge = "🆓" if item["is_free"] else "💰"
-                print(f"   ├─ {badge} {item['name']}")
-                
-            print("   └─ Done.\n")
-            
-        AIModel.objects.exclude(value__in=synced_model_values).delete()
-        
+                badge = "free" if item["is_free"] else "paid"
+                print(f"   - [{badge}] {item['name']}")
+
+            print("   Done.\n")
+
+        # Keep manually-added and older rows. This seed script now only upserts.
+        AIModel.objects.filter(value__in=synced_model_values).update(is_active=True)
+
     print("=" * 80)
-    print("✅ Successfully synchronized all models.")
+    print("Successfully synchronized seeded models.")
     print("=" * 80)
 
 

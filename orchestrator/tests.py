@@ -53,6 +53,23 @@ class OrchestratorSerializationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['name'], 'New Valid Workflow')
 
+        normal_symbols_data = {
+            'name': 'Sales & Revenue $10k',
+            'nodes': [],
+            'edges': []
+        }
+        response = self.client.post(url, normal_symbols_data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        suspicious_data = {
+            'name': '; id',
+            'nodes': [],
+            'edges': []
+        }
+        response = self.client.post(url, suspicious_data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+
     def _test_workflow_update_validation(self):
         """Test that updating a workflow validates data (400 Bad Request)."""
         url = reverse('orchestrator:workflow_detail', args=[self.workflow.id])

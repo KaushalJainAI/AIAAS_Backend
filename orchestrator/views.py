@@ -3,6 +3,7 @@ Orchestrator App API Views
 
 Workflow CRUD, execution control, and HITL endpoints.
 """
+import asyncio
 import logging
 from uuid import UUID
 
@@ -14,12 +15,35 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from asgiref.sync import sync_to_async
 
+from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
+from rest_framework import serializers as drf_serializers
+
 from .models import Workflow, WorkflowVersion, HITLRequest, ConversationMessage
 from .serializers import (
-    WorkflowSerializer, 
-    WorkflowVersionSerializer, 
-    HITLRequestSerializer, 
+    WorkflowSerializer,
+    WorkflowVersionSerializer,
+    HITLRequestSerializer,
     ConversationMessageSerializer
+)
+
+
+_ExecutionStartedResponse = inline_serializer(
+    name="ExecutionStartedResponse",
+    fields={
+        "execution_id": drf_serializers.CharField(),
+        "workflow_id": drf_serializers.IntegerField(),
+        "state": drf_serializers.CharField(),
+        "started_at": drf_serializers.DateTimeField(allow_null=True),
+    },
+)
+
+_ErrorResponse = inline_serializer(
+    name="OrchestratorErrorResponse",
+    fields={
+        "error": drf_serializers.CharField(),
+        "message": drf_serializers.CharField(required=False),
+    },
 )
 from compiler.validators import (
     validate_dag,
@@ -78,6 +102,15 @@ def is_functionally_identical(nodes1, edges1, nodes2, edges2):
 
 # ======================== Workflow CRUD API ========================
 
+@extend_schema(
+    methods=['GET'],
+    responses={200: WorkflowSerializer(many=True)},
+)
+@extend_schema(
+    methods=['POST'],
+    request=WorkflowSerializer,
+    responses={201: WorkflowSerializer},
+)
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def workflow_list(request):
@@ -113,12 +146,28 @@ def workflow_list(request):
         return Response(WorkflowSerializer(workflow).data, status=status.HTTP_201_CREATED)
 
 
-@api_view(['GET', 'PUT', 'DELETE'])
+@extend_schema(
+    methods=['GET'],
+    responses={200: WorkflowSerializer},
+)
+@extend_schema(
+    methods=['PUT', 'PATCH'],
+    request=WorkflowSerializer,
+    responses={
+        200: WorkflowSerializer,
+        400: _ErrorResponse,
+    },
+)
+@extend_schema(
+    methods=['DELETE'],
+    responses={204: OpenApiResponse(description="Workflow deleted")},
+)
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def workflow_detail(request, workflow_id: int):
     """
     GET: Get workflow details
-    PUT: Update workflow
+    PUT/PATCH: Update workflow
     DELETE: Delete workflow
     """
     workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
@@ -126,7 +175,7 @@ def workflow_detail(request, workflow_id: int):
     if request.method == 'GET':
         return Response(WorkflowSerializer(workflow).data)
     
-    elif request.method == 'PUT':
+    elif request.method in ('PUT', 'PATCH'):
         # Use serializer for update validation
         serializer = WorkflowSerializer(workflow, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -346,6 +395,13 @@ async def undeploy_workflow(request, workflow_id: int):
 
 # ======================== Execution Control API ========================
 
+@extend_schema(
+    responses={
+        200: _ExecutionStartedResponse,
+        400: _ErrorResponse,
+        404: _ErrorResponse,
+    },
+)
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 async def execute_workflow(request, workflow_id: int):
@@ -625,6 +681,50 @@ async def respond_to_hitl(request, request_id: str):
 
 # ======================== AI Chat API ========================
 
+@extend_schema(
+    methods=['GET'],
+    responses={
+        200: inline_serializer(
+            name="ConversationListOrMessages",
+            fields={
+                "conversations": drf_serializers.ListField(child=drf_serializers.DictField(), required=False),
+                "messages": ConversationMessageSerializer(many=True, required=False),
+            },
+        ),
+    },
+)
+@extend_schema(
+    methods=['POST'],
+    request=inline_serializer(
+        name="ConversationPostRequest",
+        fields={
+            "content": drf_serializers.CharField(),
+            "workflow_id": drf_serializers.IntegerField(required=False, allow_null=True),
+        },
+    ),
+    responses={
+        202: inline_serializer(
+            name="ConversationPostResponse",
+            fields={
+                "conversation_id": drf_serializers.CharField(),
+                "user_message": drf_serializers.DictField(),
+                "detail": drf_serializers.CharField(),
+            },
+        ),
+    },
+)
+@extend_schema(
+    methods=['DELETE'],
+    responses={
+        200: inline_serializer(
+            name="ConversationDeleteResponse",
+            fields={"deleted": drf_serializers.IntegerField(required=False),
+                    "status": drf_serializers.CharField(required=False)},
+        ),
+        400: _ErrorResponse,
+        404: _ErrorResponse,
+    },
+)
 @api_view(['GET', 'POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def conversation_messages(request, conversation_id: str = None, message_id: int = None):
@@ -669,26 +769,12 @@ def conversation_messages(request, conversation_id: str = None, message_id: int 
             role='user',
             content=content,
         )
-        
-        # TODO: Call AI for response (integrate with LLM nodes)
-        # For now, return a placeholder
-        ai_response = "I understand you're asking about your workflow. This feature is coming soon!"
-        
-        # Save AI response
-        ai_msg = ConversationMessage.objects.create(
-            user=request.user,
-            conversation_id=conv_id,
-            workflow_id=workflow_id,
-            role='assistant',
-            content=ai_response,
-            metadata={'model': 'placeholder'},
-        )
-        
+
         return Response({
             'conversation_id': conv_id,
             'user_message': {'id': user_msg.id, 'content': content, 'created_at': user_msg.created_at},
-            'ai_response': {'id': ai_msg.id, 'content': ai_response, 'created_at': ai_msg.created_at},
-        })
+            'detail': 'Workflow chat response generation is not configured.',
+        }, status=202)
     
     elif request.method == 'DELETE':
         if not conversation_id:
@@ -729,46 +815,58 @@ def conversation_messages(request, conversation_id: str = None, message_id: int 
 
 # ======================== Version History API ========================
 
+# Upper bound on stored versions per workflow. Older snapshots are dropped
+# when a new one is created.
+_MAX_WORKFLOW_VERSIONS = 10
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def workflow_versions(request, workflow_id: int):
     """
-    GET: List versions
-    POST: Create new version (snapshot)
+    GET:  List versions for a workflow.
+    POST: Snapshot the workflow's current state as a new version.
     """
     workflow = get_object_or_404(Workflow, id=workflow_id, user=request.user)
-    
+
     if request.method == 'GET':
         versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number')
         return Response({'versions': WorkflowVersionSerializer(versions, many=True).data})
-    
-        # Use serializer for validation
-        serializer = WorkflowVersionSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        # Get next version number
-        last_version = WorkflowVersion.objects.filter(workflow=workflow).order_by('-version_number').first()
-        next_version = (last_version.version_number + 1) if last_version else 1
-        
-        # Limit version history logic (redundant but kept for specific manual triggers)
-        MAX_VERSIONS = 10
-        current_versions = WorkflowVersion.objects.filter(workflow=workflow).order_by('version_number')
-        if current_versions.count() >= MAX_VERSIONS:
-            to_delete_count = current_versions.count() - MAX_VERSIONS + 1
-            if to_delete_count > 0:
-                to_delete_ids = list(current_versions.values_list('id', flat=True)[:to_delete_count])
-                WorkflowVersion.objects.filter(id__in=to_delete_ids).delete()
 
-        version = serializer.save(
-            workflow=workflow,
-            version_number=next_version,
-            nodes=workflow.nodes,
-            edges=workflow.edges,
-            workflow_settings=workflow.workflow_settings,
-            created_by=request.user
+    # POST — previously UNREACHABLE: the body was accidentally indented inside
+    # the GET branch after its `return`, so creating a version had been a no-op
+    # producing a 500.
+    serializer = WorkflowVersionSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    last_version = (
+        WorkflowVersion.objects.filter(workflow=workflow)
+        .order_by('-version_number').first()
+    )
+    next_number = (last_version.version_number + 1) if last_version else 1
+
+    # Ring-buffer behaviour: drop oldest version(s) if we're at the cap.
+    current_count = WorkflowVersion.objects.filter(workflow=workflow).count()
+    overflow = current_count - _MAX_WORKFLOW_VERSIONS + 1
+    if overflow > 0:
+        oldest_ids = list(
+            WorkflowVersion.objects.filter(workflow=workflow)
+            .order_by('version_number').values_list('id', flat=True)[:overflow]
         )
-        
-        return Response(WorkflowVersionSerializer(version).data, status=status.HTTP_201_CREATED)
+        WorkflowVersion.objects.filter(id__in=oldest_ids).delete()
+
+    version = serializer.save(
+        workflow=workflow,
+        version_number=next_number,
+        nodes=workflow.nodes,
+        edges=workflow.edges,
+        workflow_settings=workflow.workflow_settings,
+        created_by=request.user,
+    )
+    return Response(
+        WorkflowVersionSerializer(version).data,
+        status=status.HTTP_201_CREATED,
+    )
 
 
 @api_view(['POST'])
@@ -914,7 +1012,7 @@ async def modify_workflow(request, workflow_id: int):
         orchestrator.update_settings(llm_type=provider, llm_model=model)
     
     result = await orchestrator.modify_workflow(
-        workflow=current_workflow,
+        workflow=workflow,
         modification=modification,
         credential_id=credential_id,
     )
@@ -1039,16 +1137,30 @@ async def context_aware_chat(request):
     
     if not message:
         return Response({'error': 'Message is required'}, status=400)
+
+    if workflow_id in ("", None):
+        workflow_id = None
+    elif not str(workflow_id).isdigit():
+        return Response({'error': 'workflow_id must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        workflow_id = int(workflow_id)
     
     chat = ContextAwareChat(user_id=request.user.id, llm_type=provider or 'openrouter')
     
-    result = await chat.send_message(
-        message=message,
-        workflow_id=workflow_id,
-        node_id=node_id,
-        conversation_id=conversation_id,
-        credential_id=credential_id,
-    )
+    try:
+        result = await chat.send_message(
+            message=message,
+            workflow_id=workflow_id,
+            node_id=node_id,
+            conversation_id=conversation_id,
+            credential_id=credential_id,
+        )
+    except Exception as exc:
+        logger.exception("Context-aware chat failed")
+        return Response(
+            {'error': 'Context-aware chat failed', 'detail': str(exc)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     
     return Response(result)
 
@@ -1209,7 +1321,15 @@ async def execute_partial(request, workflow_id: int = None):
         
         if result.success:
             # Return items array in n8n-compatible format
-            items = [item.model_dump() for item in result.items]
+            items = [item.model_dump(by_alias=True) for item in result.items]
+            for item in items:
+                item_json = item.get('json', {})
+                if isinstance(item_json, dict) and item_json.get('success') is False and item_json.get('error'):
+                    error_msg = item_json['error']
+                    if node_type == 'code':
+                        error_msg = f"Code execution failed: {error_msg}"
+                    logger.warning(f"Partial execution item returned error: {error_msg}")
+                    return Response({'detail': error_msg}, status=400)
             return Response({'items': items})
         else:
             error_msg = result.error or "Unknown node execution error"
@@ -1378,7 +1498,6 @@ def export_workflow_zip(request, workflow_id):
 import json as _json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from executor.trigger_manager import get_trigger_manager
 from executor.tasks import execute_workflow_async
 
 import logging as _logging
@@ -1419,12 +1538,15 @@ def receive_webhook(request, user_id, webhook_path):
     # Generic Webhook Auth Check
     if auth_type != "none":
         auth_key = config.get("auth_key", "")
+        auth_value = config.get("auth_value", "")
         if auth_type == "header":
-            if auth_key not in request.headers:
-                return JsonResponse({"error": "Unauthorized - Missing Header"}, status=401)
+            incoming = request.headers.get(auth_key, "")
+            if not incoming or (auth_value and incoming != auth_value):
+                return JsonResponse({"error": "Unauthorized"}, status=401)
         elif auth_type == "query":
-            if auth_key not in request.GET:
-                return JsonResponse({"error": "Unauthorized - Missing Query Parameter"}, status=401)
+            incoming = request.GET.get(auth_key, "")
+            if not incoming or (auth_value and incoming != auth_value):
+                return JsonResponse({"error": "Unauthorized"}, status=401)
 
     # 3. Parse Body
     body_data = {}
@@ -1577,22 +1699,14 @@ async def background_tasks(request):
         'history': history_executions,
         'count': len(active_executions)
     })
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-async def thought_history(request, execution_id):
-    """
-    Get AI thought history for a specific execution.
-    """
-    from .chat_context import get_thought_history
-    
-    history = get_thought_history(str(execution_id))
-    thoughts = history.get_thoughts()
-    
-    return Response({
-        'execution_id': str(execution_id),
-        'thoughts': thoughts,
-        'summary': history.to_summary()
-    })
+
+
+# NOTE: A duplicate async `thought_history` used to live here. It shadowed the
+# sync definition at the top of the file by name, so the URL pattern
+# `views.thought_history` resolved to whichever was defined last — silently
+# making the sync version dead code. Keeping the single sync version upstream.
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def system_info(request):

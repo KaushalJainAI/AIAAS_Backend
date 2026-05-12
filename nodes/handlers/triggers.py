@@ -113,6 +113,14 @@ class WebhookTriggerNode(BaseNodeHandler):
             description="Authentication key or header name"
         ),
         FieldConfig(
+            name="auth_value",
+            label="Auth Key Value/Token",
+            field_type=FieldType.STRING,
+            required=False,
+            placeholder="my-secret-token",
+            description="Expected value for the auth header or query parameter"
+        ),
+        FieldConfig(
             name="test_data",
             label="Test Data (Mock JSON)",
             field_type=FieldType.JSON,

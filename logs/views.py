@@ -15,18 +15,29 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from asgiref.sync import sync_to_async
 
+from drf_spectacular.utils import extend_schema, inline_serializer
+from drf_spectacular.types import OpenApiTypes
+from rest_framework import serializers as drf_serializers
+
 from .models import ExecutionLog, NodeExecutionLog, AuditEntry, OrchestratorThought
 from .serializers import (
-    AnalyticsFilterSerializer, 
-    AuditFilterSerializer, 
+    AnalyticsFilterSerializer,
+    AuditFilterSerializer,
     ExecutionListFilterSerializer,
     AuditExportSerializer,
     OrchestratorThoughtSerializer
 )
 
 
+_LogsGenericObject = inline_serializer(
+    name="LogsGenericResponse",
+    fields={"results": drf_serializers.ListField(child=drf_serializers.DictField(), required=False)},
+)
+
+
 # ======================== Insights/Analytics API ========================
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def execution_statistics(request):
@@ -113,6 +124,7 @@ async def execution_statistics(request):
     return Response(stats)
 
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def workflow_metrics(request, workflow_id: int):
@@ -189,6 +201,7 @@ async def workflow_metrics(request, workflow_id: int):
     return Response(metrics)
 
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def cost_breakdown(request):
@@ -271,6 +284,7 @@ async def cost_breakdown(request):
 
 # ======================== Audit Trail API ========================
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def audit_list(request):
@@ -315,6 +329,7 @@ async def audit_list(request):
     })
 
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def audit_export(request):
@@ -379,6 +394,7 @@ async def audit_export(request):
 
 # ======================== Execution History API ========================
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def execution_list(request):
@@ -426,6 +442,7 @@ async def execution_list(request):
     })
 
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def execution_detail(request, execution_id: str):
@@ -477,6 +494,7 @@ async def execution_detail(request, execution_id: str):
     return Response(detail)
 
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def execution_activity_logs(request, execution_id: str):
@@ -496,6 +514,7 @@ async def execution_activity_logs(request, execution_id: str):
     return Response(activities)
 
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def execution_narrative(request, execution_id: str):

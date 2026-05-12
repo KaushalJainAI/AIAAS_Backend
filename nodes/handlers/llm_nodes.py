@@ -3,6 +3,7 @@ LLM Node Handlers
 
 AI/LLM nodes for OpenAI, Google Gemini, and local Ollama integration.
 """
+import asyncio
 import logging
 import httpx
 from typing import Any, TYPE_CHECKING
@@ -20,6 +21,25 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_attachment_path(file_path: str) -> bool:
+    """
+    Validate that an attachment file path is within the allowed MEDIA_ROOT.
+    Prevents path traversal attacks (e.g. ../../../etc/passwd).
+    """
+    import os
+    try:
+        from django.conf import settings
+        media_root = getattr(settings, 'MEDIA_ROOT', None)
+        if not media_root:
+            abs_path = os.path.abspath(file_path)
+            return '..' not in os.path.relpath(abs_path)
+        abs_media = os.path.abspath(media_root)
+        abs_file = os.path.abspath(file_path)
+        return abs_file.startswith(abs_media)
+    except Exception:
+        return False
 
 def format_skills_as_context(skills: list[dict]) -> str:
     """Format skill list into a context block for LLM prompts."""
@@ -242,6 +262,9 @@ class OpenAINode(BaseNodeHandler):
                         if att.file_type != 'image': continue
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}})
@@ -249,11 +272,11 @@ class OpenAINode(BaseNodeHandler):
 
                 messages.append({"role": "user", "content": user_content})
 
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 payload = {
                     "model": model,
@@ -404,12 +427,13 @@ class OpenAINode(BaseNodeHandler):
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
                 }
                 
-                # Setup tools if requested either via internal config or node UI toggle
-                tools_payload = config.get("tools")
+                # Build tools list — when enable_tools is on, include both built-in
+                # tools and every MCP tool the user has configured (already cached).
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 history = config.get("history", [])
                 
@@ -432,6 +456,10 @@ class OpenAINode(BaseNodeHandler):
                                 continue
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            # Path traversal protection
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal attempt in attachment: {att.filename}")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -440,12 +468,7 @@ class OpenAINode(BaseNodeHandler):
                                     "type": "image_url",
                                     "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}
                                 })
-                            elif att.file_type == 'video':
-                                # OpenRouter supports video_url for multimodal inputs
-                                user_msg_content.append({
-                                    "type": "video_url",
-                                    "video_url": {"url": f"data:video/mp4;base64,{b64_data}"}
-                                })
+                            # Note: video type is already filtered out by the file_type check above
                             elif att.file_type == 'pdf':
                                 # GPT-4o supports PDF as document blocks in certain regions/API versions
                                 # but usually it's better to stick to standard multimodal parts if supported
@@ -524,41 +547,81 @@ class OpenAINode(BaseNodeHandler):
                             param_name = key.replace("custom_", "")
                             payload[param_name] = value
 
-                response = await client.post(
-                    endpoint,
-                    headers=headers,
-                    json=payload,
-                )
-                
-                if response.status_code != 200:
-                    try:
-                        error_data = response.json()
-                        error_msg = error_data.get("error", {}).get("message", response.text)
-                    except:
-                        error_msg = response.text
-                    return NodeExecutionResult(
-                        success=False,
-                        error=f"OpenAI API error: {error_msg}",
-                        output_handle="output-0"
-                    )
-                
-                data = response.json()
+                # ── Agentic tool loop ──────────────────────────────────────────
+                # Keeps calling the model until it stops requesting tool calls
+                # (or we hit MAX_TOOL_TURNS as a safety cap).
+                MAX_TOOL_TURNS = int(config.get("max_tool_turns", 5))
+                tool_calls_made: list[dict] = []
                 content = ""
                 media_url = None
-                usage = {}
+                usage: dict = {}
                 finish_reason = "stop"
+                data: dict = {}
 
-                if is_gen:
-                    # Parse image generation response
-                    image_data = data.get("data", [{}])[0]
-                    media_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
-                    content = f"Generated image: {media_url}" if not image_data.get("url") else "Image generated successfully."
-                else:
-                    # Parse chat response
+                import json as _json
+                while True:
+                    response = await client.post(
+                        endpoint,
+                        headers=headers,
+                        json=payload,
+                    )
+
+                    if response.status_code != 200:
+                        try:
+                            error_data = response.json()
+                            error_msg = error_data.get("error", {}).get("message", response.text)
+                        except Exception:
+                            error_msg = response.text
+                        return NodeExecutionResult(
+                            success=False,
+                            error=f"OpenAI API error: {error_msg}",
+                            output_handle="output-0"
+                        )
+
+                    data = response.json()
+
+                    if is_gen:
+                        # Image / video generation — single call, no tool loop
+                        image_data = data.get("data", [{}])[0]
+                        media_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
+                        content = f"Generated image: {media_url}" if not image_data.get("url") else "Image generated successfully."
+                        break
+
                     choice = data["choices"][0]
-                    content = choice["message"]["content"]
                     usage = data.get("usage", {})
                     finish_reason = choice.get("finish_reason", "stop")
+
+                    if finish_reason != "tool_calls" or len(tool_calls_made) >= MAX_TOOL_TURNS:
+                        content = choice["message"].get("content") or ""
+                        break
+
+                    # Execute each requested tool, append results, then loop
+                    assistant_msg = choice["message"]
+                    messages.append(assistant_msg)
+
+                    from chat.tools import execute_tool as _chat_execute_tool
+                    tool_context = {"user_id": context.user_id}
+
+                    for tc in assistant_msg.get("tool_calls", []):
+                        tc_id = tc.get("id", "")
+                        fn = tc.get("function", {})
+                        fn_name = fn.get("name", "")
+                        try:
+                            fn_args = _json.loads(fn.get("arguments", "{}"))
+                        except Exception:
+                            fn_args = {}
+
+                        logger.info("OpenAI node tool call: %s args=%s", fn_name, fn_args)
+                        result_str = await _chat_execute_tool(fn_name, fn_args, tool_context)
+                        tool_calls_made.append({"tool": fn_name, "args": fn_args, "result": result_str})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": result_str,
+                        })
+
+                    payload["messages"] = messages
+                # ── End agentic tool loop ──────────────────────────────────────
 
                 result_data = {
                     "content": content,
@@ -566,8 +629,10 @@ class OpenAINode(BaseNodeHandler):
                     "media_url": media_url,
                     "usage": usage,
                     "finish_reason": finish_reason,
-                    "generation_id": data.get("id")
+                    "generation_id": data.get("id"),
                 }
+                if tool_calls_made:
+                    result_data["tool_calls"] = tool_calls_made
                 
                 captured_thinking = None
                 
@@ -582,9 +647,10 @@ class OpenAINode(BaseNodeHandler):
                     except:
                         pass # Fallback to raw content
 
-                if show_thinking and not captured_thinking:
-                    # Support OpenAI's specific reasoning field
-                    captured_thinking = choice["message"].get("reasoning_content")
+                if show_thinking and not captured_thinking and not is_gen:
+                    # Support OpenAI's specific reasoning field (use safe access to avoid NameError)
+                    safe_choice = data.get("choices", [{}])[0]
+                    captured_thinking = safe_choice.get("message", {}).get("reasoning_content")
                     
                     # Fallback to <think> tags for models that use them (e.g. fine-tuned)
                     if not captured_thinking:
@@ -809,6 +875,9 @@ class GeminiNode(BaseNodeHandler):
                         if att.file_type not in ('image', 'pdf', 'video'): continue
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             mime_type = "application/pdf"
@@ -824,11 +893,11 @@ class GeminiNode(BaseNodeHandler):
                     "generationConfig": generation_config,
                 }
 
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 if tools_payload:
                     gemini_tools = []
@@ -1030,6 +1099,9 @@ class GeminiNode(BaseNodeHandler):
                                 continue
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -1097,11 +1169,11 @@ class GeminiNode(BaseNodeHandler):
                     if "size" in config: payload["parameters"]["aspectRatio"] = config["size"]
 
                 # Setup tools if requested (map OpenAI schema to Gemini schema)
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 if tools_payload:
                     gemini_tools = []
@@ -1260,6 +1332,9 @@ class OllamaNode(BaseNodeHandler):
                         if att.file_type != 'image': continue
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             user_content.append({"type": "image", "image": b64_data})
@@ -1486,6 +1561,9 @@ class OllamaNode(BaseNodeHandler):
                                 continue
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -1513,11 +1591,11 @@ class OllamaNode(BaseNodeHandler):
                 }
 
                 # Setup tools if requested either via internal config or node UI toggle
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 if tools_payload:
                     req_payload["tools"] = tools_payload
@@ -1657,11 +1735,11 @@ class PerplexityNode(BaseNodeHandler):
                 if history: messages.extend(history)
                 messages.append({"role": "user", "content": prompt})
 
-                tools_payload = config.get("tools")
+                tools_payload: list | None = list(config.get("tools") or [])
                 enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+                if enable_tools_ui:
+                    from chat.tools import get_available_tools as _get_tools
+                    tools_payload = await _get_tools(context.user_id)
 
                 payload = {
                     "model": model,
@@ -2083,97 +2161,141 @@ class OpenRouterNode(BaseNodeHandler):
 
         api_key = api_key.strip()
         
-        try:
-            all_skills = await resolve_node_skills(config, context)
-            async with httpx.AsyncClient(timeout=120) as client:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://aiaas.com",
-                    "X-Title": "AIAAS",
-                }
-                
-                messages = [{"role": "system", "content": f"{system_message}{format_skills_as_context(all_skills)}"}]
-                history = config.get("history", [])
-                if history: messages.extend(history)
-                messages.append({"role": "user", "content": prompt})
+        MAX_RETRIES = 5
+        retry_count = 0
+        in_thinking = False
 
-                tools_payload = config.get("tools")
-                enable_tools_ui = config.get("enable_tools", False)
-                if not tools_payload and enable_tools_ui:
-                    import chat.tools as shared_tools
-                    tools_payload = shared_tools.AVAILABLE_TOOLS
+        while retry_count < MAX_RETRIES:
+            try:
+                all_skills = await resolve_node_skills(config, context)
+                async with httpx.AsyncClient(timeout=120) as client:
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://aiaas.com",
+                        "X-Title": "AIAAS",
+                    }
+                    
+                    messages = [{"role": "system", "content": f"{system_message}{format_skills_as_context(all_skills)}"}]
+                    history = config.get("history", [])
+                    if history: messages.extend(history)
+                    messages.append({"role": "user", "content": prompt})
 
-                payload = {
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": True
-                }
-                if tools_payload:
-                    payload["tools"] = tools_payload
+                    tools_payload: list | None = list(config.get("tools") or [])
+                    enable_tools_ui = config.get("enable_tools", False)
+                    if enable_tools_ui:
+                        from chat.tools import get_available_tools as _get_tools
+                        tools_payload = await _get_tools(context.user_id)
 
-                in_thinking = False
-                async with client.stream(
-                    "POST", 
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload
-                ) as response:
-                    if response.status_code != 200:
-                        yield {"type": "error", "message": f"OpenRouter API error: {response.status_code}"}
-                        return
+                    payload = {
+                        "model": model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": True
+                    }
+                    if tools_payload:
+                        payload["tools"] = tools_payload
 
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "): continue
-                        data_str = line[6:].strip()
-                        if not data_str or data_str == "[DONE]": continue
-                        
-                        try:
-                            import json
-                            chunk = json.loads(data_str)
-                            choice = chunk.get("choices", [{}])[0]
-                            delta = choice.get("delta", {})
+                    async with client.stream(
+                        "POST", 
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers=headers,
+                        json=payload
+                    ) as response:
+                        if response.status_code == 429:
+                            retry_count += 1
+                            if retry_count < MAX_RETRIES:
+                                delay = (2 ** retry_count) + (0.1 * retry_count)
+                                logger.warning(f"OpenRouter 429 (Rate Limit). Retrying stream {retry_count}/{MAX_RETRIES} in {delay:.1f}s...")
+                                await asyncio.sleep(delay)
+                                continue
+                            yield {"type": "error", "message": "OpenRouter Rate Limit (429) exceeded after 5 retries."}
+                            return
+                        elif response.status_code >= 500:
+                            retry_count += 1
+                            if retry_count < MAX_RETRIES:
+                                delay = 1 * retry_count
+                                logger.warning(f"OpenRouter {response.status_code} Error. Retrying stream {retry_count}/{MAX_RETRIES} in {delay}s...")
+                                await asyncio.sleep(delay)
+                                continue
+                            yield {"type": "error", "message": f"OpenRouter API error: {response.status_code} after {MAX_RETRIES} retries"}
+                            return
+                        elif response.status_code != 200:
+                            yield {"type": "error", "message": f"OpenRouter API error: {response.status_code}"}
+                            return
+
+                        async for line in response.aiter_lines():
+                            if not line:
+                                continue
+                            line = line.strip()
+                            if not line.startswith("data: ") and not line.startswith("{"):
+                                continue
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                            else:
+                                data_str = line
+                            if not data_str or data_str == "[DONE]": continue
                             
-                            if "reasoning" in delta and delta["reasoning"]:
-                                yield {"type": "thinking", "content": delta["reasoning"]}
-                                continue
-                            
-                            if "reasoning_content" in delta and delta["reasoning_content"]:
-                                yield {"type": "thinking", "content": delta["reasoning_content"]}
-                                continue
-
-                            if "tool_calls" in delta:
-                                yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
-                                continue
-
-                            if "content" in delta and delta["content"]:
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
+                            try:
+                                import json
+                                chunk = json.loads(data_str)
+                                choice = chunk.get("choices", [{}])[0]
+                                delta = choice.get("delta", {})
                                 
-                                if in_thinking:
-                                    if "</think>" in text:
-                                        parts = text.split("</think>", 1)
-                                        yield {"type": "thinking", "content": parts[0]}
-                                        in_thinking = False
-                                        if parts[1]: yield {"type": "content", "content": parts[1]}
+                                if not delta:
+                                    msg = choice.get("message", {})
+                                    if msg.get("content"):
+                                        delta = {"content": msg["content"]}
+                                
+                                if "reasoning" in delta and delta["reasoning"]:
+                                    yield {"type": "thinking", "content": delta["reasoning"]}
+                                    continue
+                                
+                                if "reasoning_content" in delta and delta["reasoning_content"]:
+                                    yield {"type": "thinking", "content": delta["reasoning_content"]}
+                                    continue
+
+                                if "tool_calls" in delta:
+                                    yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
+                                    continue
+
+                                if "content" in delta and delta["content"]:
+                                    text = delta["content"]
+                                    if "<think>" in text:
+                                        in_thinking = True
+                                        parts = text.split("<think>", 1)
+                                        if parts[0]: yield {"type": "content", "content": parts[0]}
+                                        text = parts[1]
+                                    
+                                    if in_thinking:
+                                        if "</think>" in text:
+                                            parts = text.split("</think>", 1)
+                                            yield {"type": "thinking", "content": parts[0]}
+                                            in_thinking = False
+                                            if parts[1]: yield {"type": "content", "content": parts[1]}
+                                        else:
+                                            yield {"type": "thinking", "content": text}
                                     else:
-                                        yield {"type": "thinking", "content": text}
-                                else:
-                                    yield {"type": "content", "content": text}
+                                        yield {"type": "content", "content": text}
 
-                            if chunk.get("usage"):
-                                yield {"type": "metadata", "usage": chunk["usage"]}
+                                if chunk.get("usage"):
+                                    yield {"type": "metadata", "usage": chunk["usage"]}
 
-                        except: continue
-
-        except Exception as e:
-            yield {"type": "error", "message": str(e)}
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"[OpenRouter] JSON parse error: {e}, line: {data_str[:100]}")
+                                continue
+                            except Exception as e:
+                                logger.warning(f"[OpenRouter] Chunk parse error: {e}")
+                                continue
+                        return # Success
+            except Exception as e:
+                retry_count += 1
+                if retry_count < MAX_RETRIES:
+                    await asyncio.sleep(1 * retry_count)
+                    continue
+                yield {"type": "error", "message": str(e)}
+                return
     name = "OpenRouter"
     category = NodeCategory.AI.value
     description = "Access 100+ AI models through OpenRouter (GPT-4, Claude, Llama, Mistral, etc.)"
@@ -2387,6 +2509,9 @@ class OpenRouterNode(BaseNodeHandler):
                 for att in attachments:
                     try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -2499,7 +2624,7 @@ class OpenRouterNode(BaseNodeHandler):
             }
 
             # ── API Call (with 404 auto-fallback and 5xx retries) ─────────────────────────────
-            MAX_RETRIES = 3
+            MAX_RETRIES = 5
             retry_count = 0
             actual_model = model
             used_fallback = False
@@ -2528,12 +2653,13 @@ class OpenRouterNode(BaseNodeHandler):
                                 del body["response_format"]
                                 continue
 
-                        # If 5xx, retry
-                        if 500 <= response.status_code < 600:
+                        # If 5xx or 429, retry
+                        if (500 <= response.status_code < 600) or response.status_code == 429:
                             retry_count += 1
                             if retry_count < MAX_RETRIES:
-                                logger.warning(f"OpenRouter 5xx error ({response.status_code}). Retrying {retry_count}/{MAX_RETRIES}...")
-                                await asyncio.sleep(1 * retry_count) # Exponential backoff
+                                delay = (2 ** retry_count) if response.status_code == 429 else 1 * retry_count
+                                logger.warning(f"OpenRouter error ({response.status_code}). Retrying {retry_count}/{MAX_RETRIES} in {delay}s...")
+                                await asyncio.sleep(delay)
                                 continue
 
                         # If we reach here, either 200 or an error we don't retry (4xx other than 404)
@@ -3356,6 +3482,9 @@ class XAINode(BaseNodeHandler):
                                 continue
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
+                            if not _validate_attachment_path(file_path):
+                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             
@@ -3435,3 +3564,272 @@ class XAINode(BaseNodeHandler):
                 
         except Exception as e:
             return NodeExecutionResult(success=False, error=f"xAI error: {str(e)}", output_handle="output-0")
+
+
+class NvidiaNode(BaseNodeHandler):
+    """
+    Call NVIDIA NIM API for text generation.
+    OpenAI-compatible endpoint at integrate.api.nvidia.com/v1.
+    """
+
+    node_type = "nvidia"
+    name = "NVIDIA NIM"
+    category = NodeCategory.AI.value
+    description = "Generate text using NVIDIA NIM optimized models"
+    icon = "⚙️"
+    color = "#76b900"
+    static_output_fields = ["content", "model"]
+
+    fields = [
+        FieldConfig(
+            name="credential",
+            label="NVIDIA API Key",
+            field_type=FieldType.CREDENTIAL,
+            credential_type="nvidia",
+            description="Select your NVIDIA NIM credential"
+        ),
+        FieldConfig(
+            name="model",
+            label="Model",
+            field_type=FieldType.SELECT,
+            options=[],  # Dynamic
+            default="nvidia/llama-3.3-nemotron-super-49b-v1",
+            description="Select an NVIDIA NIM model"
+        ),
+        FieldConfig(
+            name="prompt",
+            label="Prompt",
+            field_type=FieldType.STRING,
+            placeholder="Enter your prompt...",
+            description="The prompt to send to the model"
+        ),
+        FieldConfig(
+            name="system_message",
+            label="System Message",
+            field_type=FieldType.STRING,
+            required=False,
+            description="Optional system instructions"
+        ),
+        FieldConfig(
+            name="temperature",
+            label="Temperature",
+            field_type=FieldType.NUMBER,
+            default=0.6,
+            required=False,
+            description="Creativity (0-1)"
+        ),
+        FieldConfig(
+            name="max_tokens",
+            label="Max Tokens",
+            field_type=FieldType.NUMBER,
+            default=4096,
+            required=False,
+            description="Maximum tokens to generate"
+        ),
+        FieldConfig(
+            name="thinking",
+            label="Show Reasoning (Thinking)",
+            field_type=FieldType.BOOLEAN,
+            default=False,
+            required=False,
+            description="Capture internal reasoning for reasoning models."
+        ),
+    ]
+
+    outputs = [
+        HandleDef(id="output-0", label="Output"),
+    ]
+
+    _NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+    def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
+        try:
+            from nodes.models import AIModel
+            models = AIModel.objects.filter(provider__slug="nvidia", is_active=True).values_list('value', flat=True)
+            options = list(models)
+            default = "nvidia/llama-3.3-nemotron-super-49b-v1"
+            return {
+                "model": {
+                    "options": options,
+                    "defaultValue": default if default in options else (options[0] if options else default)
+                }
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch dynamic models for NVIDIA: {e}")
+            return {}
+
+    async def stream_execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ):
+        model = config.get("model", "nvidia/llama-3.3-nemotron-super-49b-v1")
+        prompt = config.get("prompt", "")
+        system_message = config.get("system_message", "")
+        temperature = float(config.get("temperature", 0.6))
+        max_tokens = int(config.get("max_tokens", 4096))
+        show_thinking = config.get("thinking", False)
+        credential_id = config.get("credential")
+
+        if not prompt:
+            yield {"type": "error", "message": "Prompt is required"}
+            return
+
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
+
+        if not api_key:
+            yield {"type": "error", "message": "NVIDIA API key not configured"}
+            return
+
+        try:
+            messages = []
+            history = config.get("history", [])
+            if history:
+                messages.extend(history)
+            if system_message:
+                messages = [{"role": "system", "content": system_message}] + messages
+
+            payload = {
+                "model": model,
+                "messages": messages + [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                in_thinking = False
+                async with client.stream(
+                    "POST",
+                    f"{self._NVIDIA_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                ) as response:
+                    if response.status_code != 200:
+                        yield {"type": "error", "message": f"NVIDIA API error: {response.status_code}"}
+                        return
+
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            import json
+                            chunk = json.loads(data_str)
+                            choice = chunk.get("choices", [{}])[0]
+                            delta = choice.get("delta", {})
+
+                            if show_thinking and "reasoning_content" in delta and delta["reasoning_content"]:
+                                yield {"type": "thinking", "content": delta["reasoning_content"]}
+                                continue
+
+                            if "content" in delta and delta["content"]:
+                                text = delta["content"]
+                                if "<think>" in text:
+                                    in_thinking = True
+                                    parts = text.split("<think>", 1)
+                                    if parts[0]:
+                                        yield {"type": "content", "content": parts[0]}
+                                    text = parts[1]
+
+                                if in_thinking:
+                                    if "</think>" in text:
+                                        parts = text.split("</think>", 1)
+                                        if show_thinking:
+                                            yield {"type": "thinking", "content": parts[0]}
+                                        in_thinking = False
+                                        if parts[1]:
+                                            yield {"type": "content", "content": parts[1]}
+                                    else:
+                                        if show_thinking:
+                                            yield {"type": "thinking", "content": text}
+                                else:
+                                    yield {"type": "content", "content": text}
+                        except Exception:
+                            continue
+
+        except Exception as e:
+            yield {"type": "error", "message": str(e)}
+
+    async def execute(
+        self,
+        input_data: dict[str, Any],
+        config: dict[str, Any],
+        context: 'ExecutionContext'
+    ) -> NodeExecutionResult:
+        model = config.get("model", "nvidia/llama-3.3-nemotron-super-49b-v1")
+        prompt = config.get("prompt", "")
+        system_message = config.get("system_message", "")
+        temperature = float(config.get("temperature", 0.6))
+        max_tokens = int(config.get("max_tokens", 4096))
+        show_thinking = config.get("thinking", False)
+        credential_id = config.get("credential")
+
+        if not prompt:
+            return NodeExecutionResult(success=False, error="Prompt is required", output_handle="output-0")
+
+        creds = await context.get_credential(credential_id) if credential_id else None
+        api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
+
+        if not api_key:
+            return NodeExecutionResult(success=False, error="NVIDIA API key not configured", output_handle="output-0")
+
+        try:
+            messages = []
+            history = config.get("history", [])
+            if history:
+                messages.extend(history)
+            if system_message:
+                messages = [{"role": "system", "content": system_message}] + messages
+
+            payload = {
+                "model": model,
+                "messages": messages + [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    f"{self._NVIDIA_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+
+                if response.status_code != 200:
+                    return NodeExecutionResult(
+                        success=False,
+                        error=f"NVIDIA API error: {response.text}",
+                        output_handle="output-0"
+                    )
+
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+                result_data = {"content": content, "model": model}
+
+                if show_thinking:
+                    import re
+                    match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+                    if match:
+                        result_data["thinking"] = match.group(1).strip()
+                        result_data["content"] = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+                return NodeExecutionResult(
+                    success=True,
+                    items=[NodeItem(json=result_data)],
+                    output_handle="output-0"
+                )
+
+        except Exception as e:
+            return NodeExecutionResult(success=False, error=f"NVIDIA error: {str(e)}", output_handle="output-0")

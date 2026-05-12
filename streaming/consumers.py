@@ -9,7 +9,7 @@ Django Channels consumers for:
 Usage:
     # In frontend
     ws = new WebSocket('ws://localhost:8000/ws/execution/<execution_id>/');
-    ws.onmessage = (e) => console.log(JSON.parse(e.data));
+    ws.onmessage = (event) => handleExecutionEvent(JSON.parse(event.data));
     
     # Respond to HITL
     ws.send(JSON.stringify({type: 'hitl_response', request_id: '...', response: {...}}));
@@ -318,7 +318,8 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
             )
             
             # Determine status based on response
-            response_value = response.get('value', response)
+            # Accept either a wrapped {"value": ...} or a bare response value.
+            response_value = response.get('value', response) if isinstance(response, dict) else response
             if response_value in ('approve', 'approved', True):
                 hitl_request.status = 'approved'
             elif response_value in ('reject', 'rejected', False):
@@ -495,7 +496,8 @@ class HITLNotificationConsumer(AsyncWebsocketConsumer):
                 status='pending'
             )
             
-            response_value = response.get('value', response)
+            # Accept either a wrapped {"value": ...} or a bare response value.
+            response_value = response.get('value', response) if isinstance(response, dict) else response
             if response_value in ('approve', 'approved', True):
                 hitl_request.status = 'approved'
             elif response_value in ('reject', 'rejected', False):

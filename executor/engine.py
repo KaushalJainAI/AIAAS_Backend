@@ -1,44 +1,90 @@
 """
-Execution Engine (The Worker)
+Deterministic workflow execution engine.
 
-This module is responsible for the deterministic execution of workflows.
-It accepts a compiled workflow (or JSON) and executes it reliably, treating
-the workflow as a "Glass Box" with full observability.
+This is the "worker" half of the engine/king split. It consumes a compiled
+LangGraph StateGraph and runs it against a prepared state, emitting logs
+and heartbeats along the way.
 
-It does NOT make high-level decisions or handle user intent - that is the job
-of the Orchestrator (King Agent).
+High-level decisions (user intent, HITL, workflow generation) live in
+KingOrchestrator. The engine never makes those calls — it only invokes the
+graph and reports the outcome.
 """
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import Any
 from uuid import UUID
-from datetime import datetime
-from typing import Any, Dict
 
-from django.utils import timezone
 from asgiref.sync import sync_to_async
 
 from compiler.compiler import WorkflowCompiler, WorkflowCompilationError
-from logs.models import ExecutionLog
 from logs.logger import ExecutionLogger
-from orchestrator.interface import OrchestratorInterface, ExecutionState, SupervisionLevel
+from orchestrator.interface import (
+    ExecutionState, OrchestratorInterface, SupervisionLevel,
+)
 
 logger = logging.getLogger(__name__)
+
+# How often to update the execution's heartbeat while the graph runs.
+# Short enough that the zombie reaper (5-min cutoff) won't false-positive;
+# long enough to avoid pointless DB writes.
+_HEARTBEAT_INTERVAL_S = 30
+
+
+def _initial_state(
+    execution_id: UUID,
+    workflow_id: int,
+    user_id: int,
+    *,
+    input_data: dict | None,
+    credentials: dict | None,
+    parent_execution_id: UUID | None,
+    nesting_depth: int,
+    workflow_chain: list[int] | None,
+    timeout_budget_ms: int | None,
+    skills: list[dict] | None,
+) -> dict:
+    """Build the initial WorkflowState dict the compiled graph expects."""
+    return {
+        "execution_id": str(execution_id),
+        "user_id": user_id,
+        "workflow_id": workflow_id,
+        "current_node": "",
+        "node_outputs": {"_input_global": input_data or {}},
+        "variables": {},
+        "credentials": credentials or {},
+        "loop_stats": {},
+        "error": None,
+        "status": "running",
+        "nesting_depth": nesting_depth,
+        "workflow_chain": workflow_chain or [],
+        "parent_execution_id": str(parent_execution_id) if parent_execution_id else None,
+        "timeout_budget_ms": timeout_budget_ms,
+        "skills": skills or [],
+    }
+
+
+def _result_to_execution_state(status: str) -> ExecutionState:
+    """Map a workflow-state status string to an ExecutionState enum value."""
+    mapping = {
+        "failed": ExecutionState.FAILED,
+        "cancelled": ExecutionState.CANCELLED,
+        "paused": ExecutionState.PAUSED,
+    }
+    return mapping.get(status, ExecutionState.COMPLETED)
+
 
 class ExecutionEngine:
     """
     Deterministic Workflow Execution Engine.
-    
-    Responsibilities:
-    1. Compile Workflow JSON -> LangGraph
-    2. Execute the Graph
-    3. separate Execution State management
+
+    1. Compile workflow JSON → LangGraph
+    2. Execute the graph
+    3. Manage execution lifecycle logging
     """
-    
+
     def __init__(self, orchestrator: OrchestratorInterface | None = None):
-        """
-        Args:
-            orchestrator: Optional supervisor to handle hooks (before_node, on_error, etc.)
-        """
         self.orchestrator = orchestrator
 
     async def run_workflow(
@@ -47,156 +93,142 @@ class ExecutionEngine:
         workflow_id: int,
         user_id: int,
         workflow_json: dict,
-        input_data: dict[str, Any] = None,
-        credentials: dict[str, Any] = None,
+        input_data: dict[str, Any] | None = None,
+        credentials: dict[str, Any] | None = None,
         parent_execution_id: UUID | None = None,
         nesting_depth: int = 0,
         workflow_chain: list[int] | None = None,
         timeout_budget_ms: int | None = None,
-        supervision_level: 'SupervisionLevel' = None,
+        supervision_level: "SupervisionLevel" = None,
         skills: list[dict] | None = None,
     ) -> ExecutionState:
         """
-        Run a workflow from start to finish (or until paused/failed).
-        
-        Args:
-            supervision_level: Level of orchestrator supervision.
-                - FULL: All hooks called
-                - ERROR_ONLY: Only on_error hook
-                - NONE: No hooks (pure execution)
+        Run a workflow end-to-end (or until paused / cancelled / failed).
         """
-        logger.info(f"Engine starting execution {execution_id} for workflow {workflow_id} (supervision={supervision_level})")
-        
-        # 1. Create Logger (Start monitoring IMMEDIATELY)
+        logger.info(
+            f"Engine starting execution {execution_id} for workflow "
+            f"{workflow_id} (supervision={supervision_level})"
+        )
         exec_logger = ExecutionLogger()
-        # NOTE: ExecutionLog is now created by KingOrchestrator to prevent race conditions.
-        # We do NOT call start_execution_async here anymore.
 
-        # Determine orchestrator to pass based on supervision level
-        effective_orchestrator = self.orchestrator
-        if supervision_level == SupervisionLevel.NONE:
-            effective_orchestrator = None  # No hooks at all
-        
-        # 2. Compile & Build Graph (Single Pass)
-        graph = None
+        # NONE supervision means no orchestrator hooks at all.
+        effective_orchestrator = (
+            None if supervision_level == SupervisionLevel.NONE else self.orchestrator
+        )
+
+        graph = await self._compile(
+            workflow_json, user_id, effective_orchestrator, supervision_level,
+            execution_id, exec_logger,
+        )
+        if graph is None:
+            return ExecutionState.FAILED
+
+        initial_state = _initial_state(
+            execution_id, workflow_id, user_id,
+            input_data=input_data, credentials=credentials,
+            parent_execution_id=parent_execution_id,
+            nesting_depth=nesting_depth,
+            workflow_chain=workflow_chain,
+            timeout_budget_ms=timeout_budget_ms,
+            skills=skills,
+        )
+
+        async with _heartbeat(exec_logger, execution_id):
+            return await self._invoke_graph(graph, initial_state, exec_logger, execution_id)
+
+    async def _compile(
+        self, workflow_json, user_id, orchestrator, supervision_level,
+        execution_id, exec_logger,
+    ):
+        """Compile inside sync_to_async; log and return None on failure."""
+        from credentials.models import Credential
+
+        @sync_to_async
+        def _do():
+            cred_ids = set(map(
+                str,
+                Credential.objects.filter(user_id=user_id).values_list("id", flat=True),
+            ))
+            compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=cred_ids)
+            return compiler.compile(
+                orchestrator=orchestrator, supervision_level=supervision_level,
+            )
+
         try:
-            # Pass all user credential IDs so they are used for validation
-            # We fetch IDs only to satisfy compile-time validation without pre-decrypting data
-            from credentials.models import Credential
-            
-            @sync_to_async
-            def compile_workflow():
-                cred_ids = set(map(str, Credential.objects.filter(user_id=user_id).values_list('id', flat=True)))
-                compiler = WorkflowCompiler(workflow_json, user=None, user_credentials=cred_ids)
-                
-                # Direct compilation to StateGraph
-                # Pass orchestrator and supervision level for hook filtering
-                return compiler.compile(
-                    orchestrator=effective_orchestrator,
-                    supervision_level=supervision_level
-                )
-            
-            graph = await compile_workflow()
-            
+            return await _do()
         except WorkflowCompilationError as e:
-            error_msg = f"Compilation failed: {e}"
-            logger.error(f"{error_msg} for execution {execution_id}")
             await exec_logger.complete_execution(
-                execution_id=execution_id,
-                status="failed",
-                error_message=error_msg
+                execution_id=execution_id, status="failed",
+                error_message=f"Compilation failed: {e}",
             )
-            return ExecutionState.FAILED
+            logger.error(f"Compilation failed for execution {execution_id}: {e}")
+            return None
         except Exception as e:
-            error_msg = f"Unexpected compilation error: {str(e)}"
-            logger.exception(f"{error_msg} for execution {execution_id}")
             await exec_logger.complete_execution(
-                execution_id=execution_id,
-                status="failed",
-                error_message=error_msg
+                execution_id=execution_id, status="failed",
+                error_message=f"Unexpected compilation error: {e}",
             )
-            return ExecutionState.FAILED
-        
-        # 3. Prepare Initial State
-        initial_state = {
-            "execution_id": str(execution_id),
-            "user_id": user_id,
-            "workflow_id": workflow_id,
-            "current_node": "",
-            "node_outputs": {}, 
-            "variables": {},
-            "credentials": credentials or {},
-            "error": None,
-            "status": "running",
-            "nesting_depth": nesting_depth,
-            "workflow_chain": workflow_chain or [],
-            "parent_execution_id": str(parent_execution_id) if parent_execution_id else None,
-            "timeout_budget_ms": timeout_budget_ms,
-            "skills": skills or []
-        }
-        
-        # Map input to entry points (if needed, or just dump in node_outputs)
-        # For simplicity, we put input in special keys as before
-        # Ideally the specific trigger nodes pull this out
-        initial_state["node_outputs"]["_input_global"] = input_data or {}
-        
-        async def heartbeat_pulse():
-            while True:
-                await asyncio.sleep(30)
-                await exec_logger.heartbeat(execution_id)
+            logger.exception(f"Unexpected compilation error for execution {execution_id}")
+            return None
 
-        heartbeat_task = asyncio.create_task(heartbeat_pulse())
-        
+    async def _invoke_graph(
+        self, graph, initial_state, exec_logger, execution_id,
+    ) -> ExecutionState:
         try:
-            # 4. Invoke Graph
-            # This is where the magic happens. LangGraph runs the DAG.
-            # It will block until completion or a handled interruption (managed by orchestrator hooks / wait)
             final_state = await graph.ainvoke(initial_state)
-            
-            # 5. Handle Result
-            final_status = final_state.get("status", "completed")
-            if final_status == "running":
-                # If it's still 'running' but the graph finished, it's successful
-                final_status = "completed"
-                
-            error = final_state.get("error")
-            
-            # Log completion
-            await exec_logger.complete_execution(
-                execution_id=execution_id,
-                status=final_status,
-                output_data=final_state.get("node_outputs", {}),
-                error_message=error if error else ""
-            )
-            
-            if final_status == "failed":
-                return ExecutionState.FAILED
-            elif final_status == "cancelled":
-                return ExecutionState.CANCELLED
-            elif final_status == "paused":
-                 return ExecutionState.PAUSED
-            else:
-                return ExecutionState.COMPLETED
-
         except asyncio.CancelledError:
             logger.info(f"Engine execution {execution_id} cancelled")
             await exec_logger.complete_execution(
-                execution_id=execution_id,
-                status="cancelled",
-                error_message="Execution cancelled by user"
+                execution_id=execution_id, status="cancelled",
+                error_message="Execution cancelled by user",
             )
             raise
         except Exception as e:
             logger.exception(f"Engine crashed during execution {execution_id}")
             await exec_logger.complete_execution(
-                execution_id=execution_id,
-                status="failed",
-                error_message=str(e)
+                execution_id=execution_id, status="failed", error_message=str(e),
             )
             return ExecutionState.FAILED
-        finally:
-            heartbeat_task.cancel()
+
+        # Normalise "still running" to "completed" — the graph finished.
+        status = final_state.get("status") or "completed"
+        if status == "running":
+            status = "completed"
+
+        await exec_logger.complete_execution(
+            execution_id=execution_id, status=status,
+            output_data=final_state.get("node_outputs", {}),
+            error_message=final_state.get("error") or "",
+        )
+        return _result_to_execution_state(status)
+
+
+class _heartbeat:
+    """
+    Async context manager that pings the execution logger at a fixed interval
+    while the wrapped block runs. Cancels cleanly on exit.
+    """
+    def __init__(self, exec_logger: ExecutionLogger, execution_id: UUID):
+        self._logger = exec_logger
+        self._execution_id = execution_id
+        self._task: asyncio.Task | None = None
+
+    async def _pulse(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+                await self._logger.heartbeat(self._execution_id)
+        except asyncio.CancelledError:
+            pass
+
+    async def __aenter__(self) -> "_heartbeat":
+        self._task = asyncio.create_task(self._pulse())
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._task:
+            self._task.cancel()
             try:
-                await heartbeat_task
+                await self._task
             except asyncio.CancelledError:
                 pass

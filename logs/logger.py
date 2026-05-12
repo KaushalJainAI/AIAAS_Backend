@@ -249,11 +249,28 @@ class ExecutionLogger:
                 if status == 'completed':
                     wf.successful_executions = F('successful_executions') + 1
                 if duration_ms:
-                    wf.average_duration_ms = duration_ms if not wf.average_duration_ms else (wf.average_duration_ms * 4 + duration_ms) / 5
+                    wf.average_duration_ms = int(duration_ms if not wf.average_duration_ms else (wf.average_duration_ms * 4 + duration_ms) / 5)
                 wf.save()
             await update_workflow_stats()
         except Exception: pass
         
+        # Create Notification for failed workflow
+        if status == 'failed':
+            try:
+                from notifications.utils import create_notification
+                @sync_to_async
+                def send_fail_notification():
+                    create_notification(
+                        user=exec_log.user,
+                        type='workflow_failed',
+                        title='Workflow Failed',
+                        message=f'Workflow "{exec_log.workflow.name}" failed to execute.',
+                        data={'execution_id': str(execution_id), 'error': error_message}
+                    )
+                await send_fail_notification()
+            except Exception as e:
+                logger.error(f"Failed to create fail notification: {e}")
+
         # Broadcast
         try:
             broadcaster = get_broadcaster()

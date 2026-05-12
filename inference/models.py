@@ -4,6 +4,67 @@ from django.core.validators import MinValueValidator
 import uuid
 
 
+class KnowledgeBase(models.Model):
+    """
+    A named, persistent vector knowledge base owned by a user.
+    Each KB has its own HNSW FAISS index stored locally and in S3.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='knowledge_bases'
+    )
+    name = models.CharField(max_length=255, default='Default')
+    description = models.TextField(blank=True)
+    embedding_model = models.CharField(
+        max_length=100,
+        default='Qwen/Qwen3-Embedding-0.6B',
+        help_text='Embedding model used for this KB'
+    )
+    vector_dim = models.IntegerField(default=1024)
+    doc_count = models.IntegerField(default=0)
+    vector_count = models.IntegerField(default=0)
+    index_size_bytes = models.BigIntegerField(default=0)
+    s3_index_key = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text='S3 key for the FAISS index bundle (not publicly downloadable)'
+    )
+    is_default = models.BooleanField(
+        default=False,
+        help_text='User\'s default KB — auto-created on first document upload'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Knowledge Base'
+        verbose_name_plural = 'Knowledge Bases'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'name'],
+                name='unique_kb_name_per_user'
+            )
+        ]
+        indexes = [
+            models.Index(fields=['user', 'is_default']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.user})"
+
+    @property
+    def local_index_path(self):
+        from django.conf import settings as django_settings
+        return django_settings.FAISS_INDEX_DIR / f'kb_{self.id}.faiss'
+
+    @property
+    def local_docs_path(self):
+        from django.conf import settings as django_settings
+        return django_settings.FAISS_INDEX_DIR / f'kb_{self.id}_docs.pkl'
+
+
 class Document(models.Model):
     """
     Uploaded documents for RAG (Retrieval-Augmented Generation).
@@ -37,6 +98,14 @@ class Document(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='documents'
+    )
+    knowledge_base = models.ForeignKey(
+        KnowledgeBase,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='documents',
+        help_text='KB this document is indexed into'
     )
     
     # File Info
