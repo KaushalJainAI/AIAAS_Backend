@@ -1,13 +1,66 @@
-.env
-.pytest_cache/
+# Python
 __pycache__/
 *.py[cod]
-*.sqlite3
-*.sqlite3-*
-db.sqlite3
-media/
-*.log
+*$py.class
+*.so
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
 venv/
 .venv/
+env/
+
+# Django runtime data — must NEVER be baked into the image
+db.sqlite3
+db.sqlite3-*
+*.sqlite3
+*.sqlite3-*
+data/
+media/
+staticfiles/
+static/              # collectstatic regenerates this; for prod it goes to S3
+logs/
+*.log
+
+# Indexes / model caches
+**/indices/
+**/.cache/
+**/huggingface/
+
+# Build artifacts
 dist/
 build/
+*.egg
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+
+# Secrets
+.env
+.env.*
+!.env.example
+!.env.ec2.example
+
+# Docs / dev-only
+docs/
+archive/
+test-reports/
+tests/
+*.md
+!README.md
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Backups
+*.tar.gz
+*.bak
+*.backup
