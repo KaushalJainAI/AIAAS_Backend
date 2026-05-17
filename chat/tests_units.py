@@ -18,8 +18,9 @@ from django.test import SimpleTestCase
 
 from chat.extraction import (
     clean_json_string, extract_tool_calls, fuzzy_json_loads,
-    parse_tool_arguments, strip_tool_calls,
+    is_tool_plan_json, parse_tool_arguments, strip_tool_calls,
 )
+from chat.views import has_structured_final_response
 from chat.graph import _count_ai_messages, _openai_tc_to_langchain
 
 
@@ -114,6 +115,13 @@ class ExtractToolCallsTests(SimpleTestCase):
         out = extract_tool_calls(text)
         self.assertTrue(any(t.get("tool") == "web_search" for t in out))
 
+    def test_planner_json_with_thoughts_action_query(self):
+        text = '{"thoughts": "Need fresh news.", "action": "web_search", "query": "AI news May 2026"}'
+        out = extract_tool_calls(text)
+        self.assertEqual(out[0]["tool"], "web_search")
+        self.assertEqual(out[0]["args"]["query"], "AI news May 2026")
+        self.assertTrue(is_tool_plan_json(text))
+
 
 class StripToolCallsTests(SimpleTestCase):
     def test_removes_bracket_call(self):
@@ -125,6 +133,23 @@ class StripToolCallsTests(SimpleTestCase):
     def test_idempotent_on_clean_text(self):
         s = "Just answer text."
         self.assertEqual(strip_tool_calls(s).strip(), s)
+
+    def test_removes_planner_json(self):
+        s = 'Before {"thoughts": "Need fresh news.", "action": "web_search", "query": "AI news"} After'
+        out = strip_tool_calls(s)
+        self.assertNotIn('"action"', out)
+        self.assertIn("Before", out)
+        self.assertIn("After", out)
+
+
+class FinalResponseDetectionTests(SimpleTestCase):
+    def test_planner_json_is_not_final(self):
+        text = '{"thoughts": "Need fresh news.", "action": "web_search", "query": "AI news May 2026"}'
+        self.assertFalse(has_structured_final_response(text))
+
+    def test_response_json_is_final(self):
+        text = '{"response": "Done.", "follow_ups": []}'
+        self.assertTrue(has_structured_final_response(text))
 
 
 # ─────────────────────────────────────────────────────────────────────────

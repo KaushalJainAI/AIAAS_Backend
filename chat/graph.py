@@ -110,7 +110,7 @@ async def _is_vision_enabled_model(model_value: str, provider_slug: str) -> bool
 async def agent_node(state: ChatAgentState, config: RunnableConfig) -> dict:
     """Call the LLM. Returns AIMessage (with or without tool_calls)."""
     from chat.views import execute_llm
-    from chat.extraction import extract_tool_calls
+    from chat.extraction import extract_tool_calls, is_tool_plan_json
     import chat.tools as shared_tools
 
     conf = config or {}
@@ -213,7 +213,8 @@ async def agent_node(state: ChatAgentState, config: RunnableConfig) -> dict:
                         content += chunk["content"]
                     elif chunk["type"] == "thinking":
                         thinking_delta += chunk["content"]
-                        await callback("thinking_chunk", {"content": chunk["content"]})
+                        if not is_tool_plan_json(chunk["content"]):
+                            await callback("thinking_chunk", {"content": chunk["content"]})
                     elif chunk["type"] == "tool_calls":
                         for tc in chunk["tool_calls"]:
                             idx = tc.get("index", 0)

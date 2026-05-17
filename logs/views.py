@@ -19,6 +19,7 @@ from drf_spectacular.utils import extend_schema, inline_serializer
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import serializers as drf_serializers
 
+from core.pagination import paginate_keyset
 from .models import ExecutionLog, NodeExecutionLog, AuditEntry, OrchestratorThought
 from .serializers import (
     AnalyticsFilterSerializer,
@@ -299,7 +300,7 @@ async def audit_list(request):
     action_type = params.get('action_type')
     workflow_id = params.get('workflow_id')
     limit = params['limit']
-    offset = params['offset']
+    cursor = params.get('cursor')
     
     def get_audit():
         qs = AuditEntry.objects.filter(user=request.user)
@@ -310,22 +311,28 @@ async def audit_list(request):
         if workflow_id:
             qs = qs.filter(workflow_id=workflow_id)
         
-        total = qs.count()
-        
+        total = qs.count() if not cursor else None
+        page = paginate_keyset(qs, limit=limit, cursor=cursor)
         entries = list(
-            qs.order_by('-created_at')[offset:offset + limit]
+            AuditEntry.objects.filter(id__in=[entry.id for entry in page.items])
+            .order_by('-created_at', '-id')
             .values(
                 'id', 'action_type', 'request_details', 'response',
                 'workflow_id', 'node_id', 'created_at', 'ip_address'
             )
         )
-        return {"count": total, "results": entries}
+        return {
+            "count": total,
+            "results": entries,
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        }
 
     result = await sync_to_async(get_audit)()
     return Response({
         **result,
         "limit": limit,
-        "offset": offset,
+        "offset": 0,
     })
 
 
@@ -409,7 +416,7 @@ async def execution_list(request):
     workflow_id = params.get('workflow_id')
     exec_status = params.get('status')
     limit = params['limit']
-    offset = params['offset']
+    cursor = params.get('cursor')
     
     def get_executions():
         qs = ExecutionLog.objects.filter(user=request.user)
@@ -420,25 +427,34 @@ async def execution_list(request):
         if exec_status:
             qs = qs.filter(status=exec_status)
         
-        total = qs.count()
-        
+        total = qs.count() if not cursor else None
+        qs = qs.select_related('workflow')
+        page = paginate_keyset(qs, limit=limit, cursor=cursor)
+        page_ids = [execution.id for execution in page.items]
         executions = list(
-            qs.annotate(workflow_name=F('workflow__name'))
-            .order_by('-created_at')[offset:offset + limit]
+            ExecutionLog.objects.filter(id__in=page_ids)
+            .select_related('workflow')
+            .annotate(workflow_name=F('workflow__name'))
+            .order_by('-created_at', '-id')
             .values(
-                'execution_id', 'workflow_id', 'workflow_name',
+                'id', 'execution_id', 'workflow_id', 'workflow_name',
                 'status', 'trigger_type', 'duration_ms',
                 'nodes_executed', 'tokens_used', 'error_message',
                 'started_at', 'completed_at', 'created_at'
             )
         )
-        return {"count": total, "results": executions}
+        return {
+            "count": total,
+            "results": executions,
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        }
 
     result = await sync_to_async(get_executions)()
     return Response({
         **result,
         "limit": limit,
-        "offset": offset,
+        "offset": 0,
     })
 
 

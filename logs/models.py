@@ -158,7 +158,9 @@ class ExecutionLog(models.Model):
         indexes = [
             models.Index(fields=['execution_id']),
             models.Index(fields=['workflow', '-created_at']),
+            models.Index(fields=['workflow', '-created_at', '-id']),
             models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['user', '-created_at', '-id']),
             models.Index(fields=['status', '-created_at']),
             models.Index(fields=['trigger_type', '-created_at']),
         ]
@@ -380,6 +382,7 @@ class AuditEntry(models.Model):
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['user', '-created_at', '-id']),
             models.Index(fields=['workflow', '-created_at']),
             models.Index(fields=['action_type', '-created_at']),
             models.Index(fields=['-created_at']),

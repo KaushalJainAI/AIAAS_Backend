@@ -19,9 +19,11 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiRespo
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import serializers as drf_serializers
 
+from core.pagination import paginate_keyset
 from .models import Workflow, WorkflowVersion, HITLRequest, ConversationMessage
 from .serializers import (
     WorkflowSerializer,
+    WorkflowListSerializer,
     WorkflowVersionSerializer,
     HITLRequestSerializer,
     ConversationMessageSerializer
@@ -120,13 +122,29 @@ def workflow_list(request):
     """
     if request.method == 'GET':
         status_filter = request.query_params.get('status')
+        cursor = request.query_params.get('cursor')
+        wants_cursor_page = cursor is not None or 'limit' in request.query_params
+        try:
+            limit = min(max(int(request.query_params.get('limit', 50)), 1), 100)
+        except (TypeError, ValueError):
+            limit = 50
         qs = Workflow.objects.filter(user=request.user)
         
         if status_filter:
             qs = qs.filter(status=status_filter)
+
+        if not wants_cursor_page:
+            serializer = WorkflowSerializer(qs.order_by('-updated_at'), many=True)
+            return Response(serializer.data)
         
-        serializer = WorkflowSerializer(qs.order_by('-updated_at'), many=True)
-        return Response(serializer.data)
+        page = paginate_keyset(qs, limit=limit, cursor=cursor, sort_field='updated_at')
+        serializer = WorkflowListSerializer(page.items, many=True)
+        return Response({
+            'results': serializer.data,
+            'next_cursor': page.next_cursor,
+            'has_more': page.has_more,
+            'limit': limit,
+        })
     
     elif request.method == 'POST':
         # Use serializer for initial validation

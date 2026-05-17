@@ -3679,6 +3679,13 @@ class NvidiaNode(BaseNodeHandler):
         creds = await context.get_credential(credential_id) if credential_id else None
         api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
 
+        # Fall back to the server-wide NVIDIA key (settings.NVIDIA_API_KEY) when
+        # the user hasn't configured a per-user credential — keeps NVIDIA chat
+        # working out-of-the-box for authenticated users too.
+        if not api_key:
+            from django.conf import settings as _dj_settings
+            api_key = getattr(_dj_settings, "NVIDIA_API_KEY", "") or None
+
         if not api_key:
             yield {"type": "error", "message": "NVIDIA API key not configured"}
             return
@@ -3777,6 +3784,11 @@ class NvidiaNode(BaseNodeHandler):
 
         creds = await context.get_credential(credential_id) if credential_id else None
         api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
+
+        # Env-var fallback so NVIDIA chat works without a per-user credential.
+        if not api_key:
+            from django.conf import settings as _dj_settings
+            api_key = getattr(_dj_settings, "NVIDIA_API_KEY", "") or None
 
         if not api_key:
             return NodeExecutionResult(success=False, error="NVIDIA API key not configured", output_handle="output-0")

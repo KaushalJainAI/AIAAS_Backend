@@ -202,8 +202,10 @@ class Document(models.Model):
             models.Index(fields=['document_id']),
             models.Index(fields=['user', 'status']),
             models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['user', '-created_at', '-id']),
             models.Index(fields=['file_type', 'status']),
             models.Index(fields=['sharing_mode', 'status']),  # For platform KB queries
+            models.Index(fields=['sharing_mode', '-created_at', '-id']),
         ]
 
     def save(self, *args, **kwargs):

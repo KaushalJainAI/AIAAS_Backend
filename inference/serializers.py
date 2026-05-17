@@ -51,6 +51,19 @@ class DocumentSerializer(serializers.ModelSerializer):
         return obj.user.get_full_name() or obj.user.username
 
 
+class DocumentListSerializer(DocumentSerializer):
+    """Compact document list serializer; detail endpoints include content."""
+
+    class Meta(DocumentSerializer.Meta):
+        fields = [
+            'id', 'title', 'filename', 'file_type', 'file_size',
+            'chunk_count', 'is_shared', 'shared_at', 'created_at',
+            'updated_at', 'sharing_mode', 'status', 'author_name',
+            'metadata', 'knowledge_base_id', 'knowledge_base_name',
+            'error_message',
+        ]
+
+
 class RagSearchSerializer(serializers.Serializer):
     query = serializers.CharField(required=True)
     top_k = serializers.IntegerField(default=5, min_value=1, max_value=50)

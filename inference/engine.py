@@ -45,6 +45,22 @@ EMBEDDING_MODEL = 'Qwen/Qwen3-Embedding-0.6B'
 EMBEDDER_VERSION = f'{EMBEDDING_MODEL}:{EMBEDDING_DIM}'
 
 
+def _get_local_model_path(cache_dir: Path) -> Path | str:
+    """
+    Prefer the cached HF snapshot so startup does not make network metadata
+    requests. Fall back to the repo id on first install so Transformers can
+    populate the cache once.
+    """
+    model_cache_dir = cache_dir / f"models--{EMBEDDING_MODEL.replace('/', '--')}"
+    ref_file = model_cache_dir / "refs" / "main"
+    if ref_file.exists():
+        revision = ref_file.read_text(encoding="utf-8").strip()
+        snapshot_dir = model_cache_dir / "snapshots" / revision
+        if (snapshot_dir / "config.json").exists():
+            return snapshot_dir
+    return EMBEDDING_MODEL
+
+
 class QwenEmbedder:
     """
     Wraps Qwen3-Embedding-0.6B with PyTorch dynamic int8 quantization on CPU.
@@ -99,15 +115,21 @@ def _load_qwen_embedder() -> QwenEmbedder:
 
     cache_dir = Path(settings.BASE_DIR) / "static" / "model_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
+    model_path = _get_local_model_path(cache_dir)
+    local_files_only = isinstance(model_path, Path)
 
     tokenizer = AutoTokenizer.from_pretrained(
-        EMBEDDING_MODEL, trust_remote_code=True, cache_dir=cache_dir
+        model_path,
+        trust_remote_code=True,
+        cache_dir=cache_dir,
+        local_files_only=local_files_only,
     )
     model = AutoModel.from_pretrained(
-        EMBEDDING_MODEL,
+        model_path,
         dtype=torch.float32,
         trust_remote_code=True,
         cache_dir=cache_dir,
+        local_files_only=local_files_only,
     )
     model.eval()
 

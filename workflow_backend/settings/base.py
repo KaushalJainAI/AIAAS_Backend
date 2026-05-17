@@ -235,8 +235,20 @@ REST_FRAMEWORK = {
         'stream': '20/minute',
         'password_reset': '10/hour',
         'password_change': '10/hour',
+        'guest_chat_min': '3/minute',
+        'guest_chat_hour': '15/hour',
+        'guest_chat_day': '50/day',
     },
 }
+
+# --- Guest chat (anonymous NVIDIA NIM demo) ---
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '')
+NVIDIA_GUEST_MODEL = os.environ.get(
+    'NVIDIA_GUEST_MODEL',
+    'nvidia/llama-3.3-nemotron-super-49b-v1',
+)
+GUEST_CHAT_MAX_TOKENS = int(os.environ.get('GUEST_CHAT_MAX_TOKENS', '200000'))
+GUEST_USER_EMAIL = os.environ.get('GUEST_USER_EMAIL', 'guest@aiaas.local')
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'AIAAS API',

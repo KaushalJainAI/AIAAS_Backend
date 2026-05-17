@@ -156,6 +156,7 @@ class Workflow(models.Model):
         indexes = [
             models.Index(fields=['user', 'status']),
             models.Index(fields=['user', '-updated_at']),
+            models.Index(fields=['user', '-updated_at', '-id']),
             models.Index(fields=['status', '-updated_at']),
             models.Index(fields=['is_template', 'status']),
         ]

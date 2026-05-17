@@ -16,11 +16,12 @@ from drf_spectacular.utils import extend_schema, inline_serializer
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import serializers as drf_serializers
 
+from core.pagination import paginate_keyset
 from .models import Document, KnowledgeBase
 from .engine import get_hnsw_kb, get_kb_manager, get_rag_pipeline
 from .utils import validate_file_upload
 from .serializers import (
-    DocumentSerializer, KnowledgeBaseSerializer,
+    DocumentSerializer, DocumentListSerializer, KnowledgeBaseSerializer,
     RagSearchSerializer, RagQuerySerializer,
 )
 from django.core.exceptions import ValidationError
@@ -206,13 +207,53 @@ async def document_list(request):
     """
     if request.method == 'GET':
         def _get():
+            wants_cursor_page = (
+                'limit' in request.query_params
+                or 'cursor' in request.query_params
+                or 'my_cursor' in request.query_params
+                or 'public_cursor' in request.query_params
+                or 'scope' in request.query_params
+            )
+            if not wants_cursor_page:
+                my_docs = Document.objects.filter(user=request.user)\
+                    .select_related('user', 'knowledge_base').order_by('-created_at')
+                public_docs = Document.objects.filter(sharing_mode__in=['shared_read', 'shared_write'])\
+                    .select_related('user', 'knowledge_base').order_by('-shared_at')
+                return {
+                    'my_documents': DocumentSerializer(my_docs, many=True).data,
+                    'public_documents': DocumentSerializer(public_docs, many=True).data,
+                }
+
+            try:
+                limit = min(max(int(request.query_params.get('limit', 50)), 1), 100)
+            except (TypeError, ValueError):
+                limit = 50
+            scope = request.query_params.get('scope', 'all')
+            my_cursor = request.query_params.get('my_cursor') or request.query_params.get('cursor')
+            public_cursor = request.query_params.get('public_cursor')
             my_docs = Document.objects.filter(user=request.user)\
                 .select_related('user', 'knowledge_base').order_by('-created_at')
             public_docs = Document.objects.filter(sharing_mode__in=['shared_read', 'shared_write'])\
-                .select_related('user', 'knowledge_base').order_by('-shared_at')
+                .select_related('user', 'knowledge_base').order_by('-created_at')
+            if scope == 'public':
+                my_page = None
+                public_page = paginate_keyset(public_docs, limit=limit, cursor=my_cursor or public_cursor)
+            elif scope == 'personal':
+                my_page = paginate_keyset(my_docs, limit=limit, cursor=my_cursor)
+                public_page = None
+            else:
+                my_page = paginate_keyset(my_docs, limit=limit, cursor=my_cursor)
+                public_page = paginate_keyset(public_docs, limit=limit, cursor=public_cursor)
             return {
-                'my_documents': DocumentSerializer(my_docs, many=True).data,
-                'public_documents': DocumentSerializer(public_docs, many=True).data,
+                'my_documents': DocumentListSerializer(my_page.items, many=True).data if my_page else [],
+                'public_documents': DocumentListSerializer(public_page.items, many=True).data if public_page else [],
+                'my_next_cursor': my_page.next_cursor if my_page else None,
+                'public_next_cursor': public_page.next_cursor if public_page else None,
+                'my_has_more': my_page.has_more if my_page else False,
+                'public_has_more': public_page.has_more if public_page else False,
+                'next_cursor': (public_page.next_cursor if scope == 'public' and public_page else my_page.next_cursor if my_page else None),
+                'has_more': (public_page.has_more if scope == 'public' and public_page else my_page.has_more if my_page else False),
+                'limit': limit,
             }
         return Response(await sync_to_async(_get)())
 

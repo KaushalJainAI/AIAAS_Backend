@@ -56,6 +56,19 @@ class WorkflowSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(f"edges[{index}] must be an object.")
         return value
 
+
+class WorkflowListSerializer(serializers.ModelSerializer):
+    """Compact serializer for workflow lists; detail endpoints return full JSON."""
+    node_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Workflow
+        fields = [
+            'id', 'name', 'slug', 'description', 'status', 'icon', 'color',
+            'tags', 'execution_count', 'last_executed_at', 'created_at',
+            'updated_at', 'node_count',
+        ]
+
 class WorkflowVersionSerializer(serializers.ModelSerializer):
     """Serializer for WorkflowVersion snapshots."""
     class Meta:

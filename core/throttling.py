@@ -246,6 +246,30 @@ class RegistrationThrottle(SimpleRateThrottle):
         return f'throttle_register_{self.get_ident(request)}'
 
 
+class GuestChatMinuteThrottle(SimpleRateThrottle):
+    """Per-IP minute bucket for anonymous guest chat."""
+    scope = 'guest_chat_min'
+
+    def get_cache_key(self, request, view):
+        return f'throttle_guest_chat_min_{self.get_ident(request)}'
+
+
+class GuestChatHourThrottle(SimpleRateThrottle):
+    """Per-IP hourly bucket for anonymous guest chat."""
+    scope = 'guest_chat_hour'
+
+    def get_cache_key(self, request, view):
+        return f'throttle_guest_chat_hour_{self.get_ident(request)}'
+
+
+class GuestChatDayThrottle(SimpleRateThrottle):
+    """Per-IP daily bucket for anonymous guest chat."""
+    scope = 'guest_chat_day'
+
+    def get_cache_key(self, request, view):
+        return f'throttle_guest_chat_day_{self.get_ident(request)}'
+
+
 def get_throttle_headers(throttle_instance) -> dict:
     """
     Generate rate limit headers for response.

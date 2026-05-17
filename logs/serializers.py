@@ -24,6 +24,7 @@ class AuditFilterSerializer(serializers.Serializer):
     workflow_id = serializers.IntegerField(required=False, allow_null=True)
     limit = serializers.IntegerField(default=50, min_value=1, max_value=100)
     offset = serializers.IntegerField(default=0, min_value=0)
+    cursor = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 class ExecutionListFilterSerializer(serializers.Serializer):
     """Serializer for execution log listing and pagination."""
@@ -31,6 +32,7 @@ class ExecutionListFilterSerializer(serializers.Serializer):
     status = serializers.CharField(required=False, allow_null=True)
     limit = serializers.IntegerField(default=20, min_value=1, max_value=100)
     offset = serializers.IntegerField(default=0, min_value=0)
+    cursor = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 class AuditExportSerializer(serializers.Serializer):
     """Serializer for audit export parameters."""

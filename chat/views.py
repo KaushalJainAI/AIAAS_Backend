@@ -25,7 +25,10 @@ from workflow_backend.thresholds import (
     MAX_TOOL_ITERATIONS
 )
 
-from .extraction import extract_tool_calls, strip_tool_calls, get_block_signatures, parse_tool_arguments, fuzzy_json_loads
+from .extraction import (
+    extract_tool_calls, strip_tool_calls, get_block_signatures,
+    parse_tool_arguments, fuzzy_json_loads, is_tool_plan_json,
+)
 from .models import ChatSession, ChatMessage, ChatAttachment
 from .serializers import ChatSessionSerializer, ChatMessageSerializer, ChatAttachmentSerializer
 
@@ -237,6 +240,8 @@ def has_structured_final_response(text: str) -> bool:
     try:
         data = json.loads(raw, strict=False)
         if isinstance(data, dict):
+            if is_tool_plan_json(data):
+                return False
             resp = data.get("response")
             if isinstance(resp, str) and bool(resp.strip()):
                 return True
@@ -246,7 +251,7 @@ def has_structured_final_response(text: str) -> bool:
     # Fallback to prevent overthinking loops if it's text.
     # Accept text as final if it's long enough and doesn't look like
     # intermediate action narration ("I'll search for...", "Let me check...").
-    if len(text.strip()) > 10 and not looks_like_intermediate_action_text(text):
+    if len(text.strip()) > 10 and not looks_like_intermediate_action_text(text) and not is_tool_plan_json(text):
         return True
 
     return False
@@ -886,6 +891,7 @@ def get_format_instructions(provider: str, model: str) -> str:
             "\n\n### CRITICAL: RESPONSE FORMATTING (STRICT JSON) ###\n"
             "You MUST output your final answer as a JSON object wrapped in <json_response> tags.\n"
             "DO NOT add any conversational filler, intro, or outro outside these tags.\n\n"
+            "Never expose planner JSON such as {'thoughts': ..., 'action': ..., 'query': ...}; if you need a tool, call it through the tool interface and continue until you can return the final answer.\n\n"
             "STRUCTURE:\n"
             "<json_response>\n"
             "{\n"
@@ -906,6 +912,8 @@ def get_format_instructions(provider: str, model: str) -> str:
         "\n\n### FINAL RESPONSE FORMATTING (MANDATORY JSON) ###\n"
         "Your ENTIRE output must be a single valid JSON object. "
         "DO NOT include any conversational preamble, intro, or closing remarks outside the JSON.\n\n"
+        "Do not output intermediate planner objects like {\"thoughts\": ..., \"action\": ..., \"query\": ...}. "
+        "If a tool is needed, use the tool interface and continue until you can return the final answer object.\n\n"
         "STRUCTURE:\n"
         "{\n"
         '  "response": "Your full detailed answer with markdown formatting here.",\n'
@@ -2551,6 +2559,10 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str, str]:
         
         # If the LLM returned JSON but forgot the 'response' wrapper key
         if not content and len(data) > 0 and 'response' not in data:
+            if is_tool_plan_json(data):
+                content = ""
+                thinking = data.get("thoughts") or data.get("thought") or thinking
+                return content, follow_ups, thinking, summary
             for key in ['content', 'text', 'answer']:
                 if key in data:
                     content = data[key]
@@ -2700,8 +2712,8 @@ def parse_llm_json_response(raw: Any) -> tuple[str, list[str], str, str]:
                 _re_module.IGNORECASE,
             )
             if cleaned_text and not pending_action_phrases:
-                return cleaned_text, [], thinking
-            return "I ran tools but could not format a final response yet. Please retry once.", [], thinking
+                return cleaned_text, [], thinking, ""
+            return "I ran tools but could not format a final response yet. Please retry once.", [], thinking, ""
 
         # If regex completely fails, strip random JSON wrappers and return it directly
         clean_raw = _re_module.sub(r'^```[a-z]*\s*\n|\n```$', '', clean_raw).strip()

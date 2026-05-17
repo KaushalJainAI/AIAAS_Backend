@@ -30,6 +30,50 @@ class ToolCallParser:
     }
 
     @staticmethod
+    def _iter_json_objects(content: str):
+        """Yield balanced JSON objects embedded in a larger LLM response."""
+        if not content:
+            return
+
+        decoder = json.JSONDecoder()
+        idx = 0
+        while idx < len(content):
+            start = content.find("{", idx)
+            if start == -1:
+                break
+            try:
+                obj, end = decoder.raw_decode(content[start:])
+                raw = content[start:start + end]
+                yield obj, raw
+                idx = start + max(end, 1)
+            except json.JSONDecodeError:
+                idx = start + 1
+
+    @classmethod
+    def is_tool_plan_json(cls, value) -> bool:
+        """
+        True for internal planner objects such as:
+        {"thoughts": "...", "action": "web_search", "query": "..."}
+
+        These are tool intentions, not user-facing final answers.
+        """
+        if isinstance(value, str):
+            parsed = cls.fuzzy_json_loads(value)
+            if isinstance(parsed, dict):
+                value = parsed
+            else:
+                return any(cls.is_tool_plan_json(obj) for obj, _raw in cls._iter_json_objects(value))
+
+        if not isinstance(value, dict):
+            return False
+
+        action = value.get("action") or value.get("tool")
+        if not isinstance(action, str) or not action.strip():
+            return False
+
+        return any(k in value for k in ("query", "args", "arguments", "parameters", "thoughts", "thought"))
+
+    @staticmethod
     def clean_json_string(s: str) -> str:
         """Removes common LLM artifacts from JSON strings."""
         if not s:
@@ -327,6 +371,27 @@ class ToolCallParser:
                     pass
                 tool_calls.append({'tool': 'execute_python_code', 'args': {'code': code}, 'raw': raw})
 
+        # 17. Internal planner JSON emitted as text:
+        # {"thoughts": "...", "action": "web_search", "query": "..."}
+        for data, raw in cls._iter_json_objects(content):
+            if not isinstance(data, dict) or not cls.is_tool_plan_json(data):
+                continue
+            if any(tc['raw'] == raw for tc in tool_calls):
+                continue
+
+            name = (data.get("tool") or data.get("action") or "").strip()
+            if not name:
+                continue
+
+            args = data.get("args") or data.get("arguments") or data.get("parameters")
+            if args is None:
+                args = {}
+                for key in ("query", "url", "prompt", "intent", "code"):
+                    if data.get(key) is not None:
+                        args[key] = data.get(key)
+            args = cls.parse_tool_arguments(args)
+            tool_calls.append({'tool': name, 'args': args or {}, 'raw': raw})
+
         return tool_calls
 
     @classmethod
@@ -346,6 +411,10 @@ class ToolCallParser:
 
         for pattern in cls.PATTERNS.values():
             cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL | re.MULTILINE)
+
+        for data, raw in list(cls._iter_json_objects(cleaned) or []):
+            if cls.is_tool_plan_json(data):
+                cleaned = cleaned.replace(raw, "")
 
         cleaned = re.sub(r'<(?:thought|think)>.*?</(?:thought|think)>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
 
@@ -393,6 +462,7 @@ class ToolCallParser:
             r'</tool_code>',
             r"'tool'\s*=>",
             r"'args'\s*=>",
+            r'"thoughts"\s*:\s*".*?"\s*,\s*"action"\s*:',
         ]
 
 
@@ -400,6 +470,7 @@ class ToolCallParser:
 clean_json_string = ToolCallParser.clean_json_string
 fuzzy_json_loads = ToolCallParser.fuzzy_json_loads
 parse_tool_arguments = ToolCallParser.parse_tool_arguments
+is_tool_plan_json = ToolCallParser.is_tool_plan_json
 extract_tool_calls = ToolCallParser.extract_tool_calls
 strip_tool_calls = ToolCallParser.strip_tool_calls
 get_block_signatures = ToolCallParser.get_block_signatures
