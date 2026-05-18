@@ -1,7 +1,7 @@
 import logging
 from celery import shared_task
 from .models import Generation
-from .services.openrouter import OpenRouterService
+from .services.openrouter import MissingOpenRouterCredentialError, OpenRouterService
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,16 @@ def poll_video_generation(self, generation_id):
             logger.error(f"Generation {generation_id} has no job_id")
             return
 
-        result = OpenRouterService.poll_video_status(gen.job_id)
+        try:
+            service = OpenRouterService.for_user(gen.user)
+        except MissingOpenRouterCredentialError as e:
+            gen.status = "failed"
+            gen.error_message = str(e)
+            gen.save()
+            _broadcast_generation(gen, "generation.failed")
+            return
+
+        result = service.poll_video_status(gen.job_id)
 
         if result["status"] == "completed":
             gen.status = "completed"

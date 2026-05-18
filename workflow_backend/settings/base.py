@@ -430,6 +430,7 @@ LOGGING = {
 
 CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'openai/gpt-4o-mini')
 
-OPEN_ROUTER_KEY = os.environ.get('OPEN_ROUTER_KEY', '')
+# NOTE: OpenRouter API keys are loaded per-user from the encrypted `credentials`
+# vault (slug 'openrouter'). Do not reintroduce an OPEN_ROUTER_KEY setting.
 IMAGINE_AGENT_MODEL = os.environ.get('IMAGINE_AGENT_MODEL', 'openrouter/openai/gpt-4o-mini')
 IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD', '0.10'))

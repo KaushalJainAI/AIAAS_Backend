@@ -3,7 +3,7 @@ import logging
 from typing import Optional
 
 from ..models import Generation
-from .openrouter import OpenRouterService
+from .openrouter import MissingOpenRouterCredentialError, OpenRouterService
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +63,20 @@ def run_generation(generation: Generation) -> Generation:
     _broadcast(generation, "generation.started", {"prompt": generation.prompt})
 
     try:
+        service = OpenRouterService.for_user(generation.user)
+    except MissingOpenRouterCredentialError as e:
+        generation.status = "failed"
+        generation.error_message = str(e)
+        generation.save()
+        _broadcast(generation, "generation.failed", {
+            "output_url": None,
+            "error": generation.error_message,
+        })
+        return generation
+
+    try:
         if generation.type == "image":
-            result = OpenRouterService.generate_image(generation.prompt, generation.model, config)
+            result = service.generate_image(generation.prompt, generation.model, config)
             if "error" in result:
                 generation.status = "failed"
                 generation.error_message = result["error"]
@@ -74,7 +86,7 @@ def run_generation(generation: Generation) -> Generation:
             generation.save()
 
         elif generation.type == "video":
-            result = OpenRouterService.generate_video(generation.prompt, generation.model, config)
+            result = service.generate_video(generation.prompt, generation.model, config)
             if "error" in result:
                 generation.status = "failed"
                 generation.error_message = result["error"]
@@ -88,7 +100,7 @@ def run_generation(generation: Generation) -> Generation:
                 poll_video_generation.delay(generation.id)
 
         elif generation.type == "audio":
-            result = OpenRouterService.generate_audio(generation.prompt, generation.model, config)
+            result = service.generate_audio(generation.prompt, generation.model, config)
             if "error" in result:
                 generation.status = "failed"
                 generation.error_message = result["error"]

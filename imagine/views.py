@@ -14,7 +14,7 @@ from .serializers import (
     ImagineConversationSerializer,
 )
 from .services.dispatcher import run_generation
-from .services.openrouter import OpenRouterService
+from .services.openrouter import MissingOpenRouterCredentialError, OpenRouterService
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +31,18 @@ class ImagineViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def capabilities(self, request):
         capabilities = cache.get("openrouter_capabilities")
-        if not capabilities:
-            capabilities = OpenRouterService.fetch_models()
-            if capabilities.get("image") or capabilities.get("video") or capabilities.get("audio"):
-                cache.set("openrouter_capabilities", capabilities, 3600)
+        if capabilities:
+            return Response(capabilities)
+        try:
+            service = OpenRouterService.for_user(request.user)
+        except MissingOpenRouterCredentialError as e:
+            return Response(
+                {"detail": str(e), "image": [], "video": [], "audio": []},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        capabilities = service.fetch_models()
+        if capabilities.get("image") or capabilities.get("video") or capabilities.get("audio"):
+            cache.set("openrouter_capabilities", capabilities, 3600)
         return Response(capabilities)
 
     def perform_create(self, serializer):

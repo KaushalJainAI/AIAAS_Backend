@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from django.conf import settings
 from django.core.cache import cache
 
-from ..services.openrouter import OpenRouterService
+from ..services.openrouter import MissingOpenRouterCredentialError, OpenRouterService
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +63,10 @@ def _capabilities_summary(caps: Dict[str, List[Dict[str, Any]]]) -> str:
     return "\n".join(lines)
 
 
-def _get_capabilities() -> Dict[str, List[Dict[str, Any]]]:
+def _get_capabilities(service: OpenRouterService) -> Dict[str, List[Dict[str, Any]]]:
     caps = cache.get("openrouter_capabilities")
     if not caps:
-        caps = OpenRouterService.fetch_models()
+        caps = service.fetch_models()
         if any(caps.get(k) for k in ("image", "video", "audio")):
             cache.set("openrouter_capabilities", caps, 3600)
     return caps or {"image": [], "video": [], "audio": []}
@@ -107,9 +107,32 @@ def _coerce_params(params: Any) -> Dict[str, Any]:
     return out
 
 
-def classify(message: str, history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    """Synchronous classifier; returns the intent dict."""
-    caps = _get_capabilities()
+def classify(
+    message: str,
+    user,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Synchronous classifier; returns the intent dict.
+
+    `user` is required so the OpenRouter API key can be pulled from the
+    encrypted credentials vault rather than environment.
+    """
+    try:
+        service = OpenRouterService.for_user(user)
+    except MissingOpenRouterCredentialError as e:
+        return {
+            "type": "image",
+            "model": None,
+            "prompt": message,
+            "params": {},
+            "confidence": 0.0,
+            "missing_required": ["credential"],
+            "clarifying_question": str(e),
+            "estimated_cost_usd": 0.0,
+            "reasoning": "no openrouter credential configured",
+        }
+
+    caps = _get_capabilities(service)
     history = history or []
 
     try:
@@ -119,7 +142,7 @@ def classify(message: str, history: Optional[List[Dict[str, str]]] = None) -> Di
         return _fallback_intent(message, caps)
 
     model_id = getattr(settings, "IMAGINE_AGENT_MODEL", "openrouter/openai/gpt-4o-mini")
-    api_key = getattr(settings, "OPEN_ROUTER_KEY", None)
+    api_key = service._api_key  # routed through the per-user credential
 
     user_block = f"User request: {message}\n\nAvailable models:{_capabilities_summary(caps)}"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]

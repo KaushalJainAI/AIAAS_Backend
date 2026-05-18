@@ -72,7 +72,11 @@ def run_turn(conversation: ImagineConversation, user_message: str) -> Dict[str, 
             conversation=conversation, role='user', content=user_message,
         )
 
-    intent = classify(user_message, history=_conversation_history(conversation))
+    intent = classify(
+        user_message,
+        user=conversation.user,
+        history=_conversation_history(conversation),
+    )
     threshold = float(getattr(settings, "IMAGINE_HITL_COST_THRESHOLD", 0.10))
 
     if needs_hitl(intent, threshold):
