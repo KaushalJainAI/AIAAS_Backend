@@ -22,7 +22,8 @@ data/
 media/
 staticfiles/
 static/              # collectstatic regenerates this; for prod it goes to S3
-logs/
+# NOTE: do NOT exclude logs/ — it is a Django app (Backend/logs/apps.py).
+#       Same for tests/ below. Only exclude actual log *files*.
 *.log
 
 # Indexes / model caches
@@ -50,7 +51,7 @@ build/
 docs/
 archive/
 test-reports/
-tests/
+# tests/ kept — may be imported as a package
 *.md
 !README.md
 

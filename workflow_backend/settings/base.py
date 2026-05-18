@@ -103,7 +103,6 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'corsheaders',
     'channels',
-    'storages',
     'django.contrib.sites',
     'allauth',
     'allauth.account',
@@ -201,6 +200,11 @@ FAISS_INDEX_DIR.mkdir(parents=True, exist_ok=True)
 USE_S3 = os.environ.get('USE_S3', 'False').lower() in ('true', '1', 'yes')
 
 if USE_S3:
+    # django-storages is only registered when S3 is actually enabled
+    # (the package lives in requirements-linux.txt, not the Windows requirements).
+    if 'storages' not in INSTALLED_APPS:
+        INSTALLED_APPS.append('storages')
+
     AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
     AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
     AWS_STORAGE_BUCKET_NAME = os.environ.get('AWS_STORAGE_BUCKET_NAME', 'aiaas-bucket-07')

@@ -17,10 +17,6 @@ def health_check(request):
 urlpatterns = [
     path('admin/', admin.site.urls),
 
-    # Third-party auth package endpoints. Project auth endpoints live in core.urls.
-    path('api/auth/', include('dj_rest_auth.urls')),
-    path('api/auth/registration/', include('dj_rest_auth.registration.urls')),
-    
     # Health check
     path('api/health/', health_check, name='health-check'),
 

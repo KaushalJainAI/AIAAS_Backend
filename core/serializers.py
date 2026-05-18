@@ -4,7 +4,9 @@ Serializers for User Management and Authentication
 Following NGU backend patterns with DRF serializers for API views.
 """
 from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from .models import UserProfile, APIKey, UsageTracking
@@ -104,41 +106,90 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 # ==================== Auth Serializers ====================
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """JWT token with additional user claims and user data in response"""
+    """JWT token with additional user claims and user data in response.
     
+    Accepts `email` and `password` instead of the default `username`.
+    Raises a 401 AuthenticationFailed (not a 400 ValidationError) on bad
+    credentials so the frontend always receives a structured `detail` message.
+    """
+
+    username_field = 'email'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Replace the auto-generated username field label with 'email'
+        self.fields[self.username_field] = serializers.EmailField()
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
-        
+
         # Add custom claims
         token['email'] = user.email
         token['username'] = user.username
-        
+
         # Add tier if profile exists
         if hasattr(user, 'profile') and user.profile:
             token['tier'] = user.profile.tier
         else:
             token['tier'] = 'free'
-        
+
         return token
-    
+
     def validate(self, attrs):
-        data = super().validate(attrs)
-        
-        # Get or create profile for user data
-        profile, _ = UserProfile.objects.get_or_create(user=self.user)
-        
-        # Add user data to response for frontend
-        data['user'] = {
-            'id': self.user.id,
-            'email': self.user.email,
-            'name': f"{self.user.first_name} {self.user.last_name}".strip() or self.user.username,
-            'tier': profile.tier,
-            'credits': profile.credits_remaining,
-            'createdAt': self.user.date_joined.isoformat(),
+        email = attrs.get('email', '').strip().lower()
+        password = attrs.get('password', '')
+
+        User = get_user_model()
+
+        # Resolve the user by email
+        try:
+            user = User.objects.get(email__iexact=email)
+        except User.DoesNotExist:
+            raise AuthenticationFailed(
+                'Invalid email or password. Please try again.',
+                code='authentication_failed',
+            )
+
+        # Check password
+        if not user.check_password(password):
+            raise AuthenticationFailed(
+                'Invalid email or password. Please try again.',
+                code='authentication_failed',
+            )
+
+        # Check account active
+        if not user.is_active:
+            raise AuthenticationFailed(
+                'This account has been disabled. Please contact support.',
+                code='account_disabled',
+            )
+
+        # Build tokens manually (bypass default username-based lookup)
+        refresh = RefreshToken.for_user(user)
+        # Embed custom claims
+        refresh['email'] = user.email
+        refresh['username'] = user.username
+        try:
+            refresh['tier'] = user.profile.tier
+        except Exception:
+            refresh['tier'] = 'free'
+
+        # Get or create profile
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+
+        return {
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'name': f"{user.first_name} {user.last_name}".strip() or user.username,
+                'tier': profile.tier,
+                'credits': profile.credits_remaining,
+                'createdAt': user.date_joined.isoformat(),
+            },
         }
-        
-        return data
 
 
 class GoogleLoginSerializer(serializers.Serializer):

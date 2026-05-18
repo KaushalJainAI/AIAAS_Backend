@@ -1,9 +1,20 @@
+import logging
+import os
 import sys
 import threading
 from django.apps import AppConfig
 
+logger = logging.getLogger(__name__)
 
 _SKIP_CMDS = {'migrate', 'makemigrations', 'collectstatic', 'test', 'shell', 'dbshell'}
+
+
+def _safe_preload():
+    try:
+        from .engine import _preload_embedder
+        _preload_embedder()
+    except BaseException as exc:  # incl. SystemExit / OOM-related aborts caught at Python layer
+        logger.warning("Embedder preload failed (will load lazily on first use): %r", exc)
 
 
 class InferenceConfig(AppConfig):
@@ -11,11 +22,8 @@ class InferenceConfig(AppConfig):
     name = 'inference'
 
     def ready(self):
-        # Skip during management commands that don't serve requests
         if set(sys.argv) & _SKIP_CMDS:
             return
-
-        # ready() fires after ALL Django apps and their modules are fully imported,
-        # so transformers / torch / bitsandbytes are safe to import here with no races.
-        from .engine import _preload_embedder
-        threading.Thread(target=_preload_embedder, daemon=True, name='embedder-preload').start()
+        if os.environ.get('PRELOAD_EMBEDDER', 'True').lower() not in ('true', '1', 'yes'):
+            return
+        threading.Thread(target=_safe_preload, daemon=True, name='embedder-preload').start()

@@ -28,3 +28,8 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
+
+# ── CSRF trusted origins (required by Django 4+ for HTTPS POST requests) ─────
+CSRF_TRUSTED_ORIGINS = [
+    'https://aiaas.kaushaljain.com',
+]

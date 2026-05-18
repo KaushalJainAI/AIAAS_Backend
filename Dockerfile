@@ -4,23 +4,26 @@ FROM python:3.12-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# apt cache mount: keeps .debs across builds so apt-get is near-instant on rebuild.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends build-essential libpq-dev
 
 WORKDIR /build
 
 COPY requirements-linux.txt .
 
-# CPU-only torch from the dedicated index, then the rest from PyPI.
-# --no-cache-dir keeps the layer lean; site-packages will be copied to runtime.
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 \
-    && pip install --no-cache-dir -r requirements-linux.txt
+# pip cache mount: persists pip's wheel cache between builds, so unchanged packages
+# (which is most of them, most of the time) are reused instead of re-downloaded.
+# The builder stage's site-packages is what we COPY to runtime — the cache stays here.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --upgrade pip \
+    && pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 \
+    && pip install -r requirements-linux.txt
 
 
 # ── Stage 2: runtime — no compilers, only runtime shared libs ───────────
@@ -28,14 +31,13 @@ FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     DJANGO_SETTINGS_MODULE=workflow_backend.settings.deployment
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 \
-        libmagic1 \
-        curl \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libpq5 libmagic1 curl
 
 # Copy installed Python packages and console scripts from the builder.
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
