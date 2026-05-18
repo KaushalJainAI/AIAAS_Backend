@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def _map_resolution_to_size(res_str: Optional[str]) -> str:
+    """Coerce a free-form resolution string to OpenRouter's image_size enum."""
     if not res_str:
         return "1K"
     s = res_str.upper()
@@ -19,12 +20,39 @@ def _map_resolution_to_size(res_str: Optional[str]) -> str:
     return "1K"
 
 
+def _normalize_video_resolution(res_str: Optional[str]) -> str:
+    """Coerce a resolution string into one of OpenRouter's video enums."""
+    if not res_str:
+        return "720p"
+    s = res_str.lower().strip()
+    for known in ("480p", "720p", "1080p"):
+        if known in s:
+            return known
+    if "4k" in s or "2160" in s:
+        return "4K"
+    if "2k" in s or "1440" in s:
+        return "2K"
+    if "1k" in s:
+        return "1K"
+    return "720p"
+
+
+def _parse_seconds(value, default: int = 5) -> int:
+    """Accept '5', '5s', '10 seconds', 5, etc. Falls back to default on garbage."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    digits = "".join(c for c in str(value) if c.isdigit())
+    return int(digits) if digits else default
+
+
 def _build_config(generation: Generation) -> dict:
     return {
         "aspect_ratio": generation.aspect_ratio,
         "image_size": _map_resolution_to_size(generation.resolution),
-        "resolution": generation.resolution,
-        "duration": generation.duration,
+        "resolution": _normalize_video_resolution(generation.resolution),
+        "duration": _parse_seconds(generation.duration, default=5),
         "negative_prompt": generation.negative_prompt,
         "seed": generation.seed,
         "voice": generation.voice,
