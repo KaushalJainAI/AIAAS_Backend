@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 
 _global_embedder = None
 _embedder_lock = asyncio.Lock()
-EMBEDDING_DIM = 1024
-EMBEDDING_MODEL = 'Qwen/Qwen3-Embedding-0.6B'
+EMBEDDING_DIM = 384
+EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
 
 # Bump this whenever the model weights, tokenizer, or pooling strategy change
 # in a way that makes old embeddings incompatible with new ones.
@@ -63,81 +63,48 @@ def _get_local_model_path(cache_dir: Path) -> Path | str:
 
 class QwenEmbedder:
     """
-    Wraps Qwen3-Embedding-0.6B with PyTorch dynamic int8 quantization on CPU.
-    Exposes encode(texts) returning list of normalised numpy arrays (N, 1024).
+    Wraps a sentence-transformers model (all-MiniLM-L6-v2, 384-dim) on CPU —
+    chosen to fit comfortably under 2 GB RAM. Exposes encode(texts) returning
+    a list of L2-normalised numpy arrays (N, EMBEDDING_DIM).
+
+    Class name retained for backwards-compatibility with existing imports.
     """
 
-    def __init__(self, model, tokenizer):
+    def __init__(self, model):
         self._model = model
-        self._tokenizer = tokenizer
-
-    def _last_token_pool(self, last_hidden_state, attention_mask):
-        import torch
-        seq_len = attention_mask.sum(dim=1) - 1
-        batch_idx = torch.arange(last_hidden_state.size(0))
-        return last_hidden_state[batch_idx, seq_len]
-
-    def _normalise(self, vec: np.ndarray) -> np.ndarray:
-        norm = np.linalg.norm(vec)
-        return vec / norm if norm > 0 else vec
 
     def encode(self, texts: list[str], batch_size: int = 32) -> list:
         """
         Encode *texts* into normalised numpy arrays (N, EMBEDDING_DIM).
 
-        For large lists the input is processed in batches of *batch_size* to
-        keep peak memory bounded while still being faster than one-at-a-time.
+        Batching keeps peak memory bounded on small instances.
         """
-        import torch
-        all_vecs: list[np.ndarray] = []
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start:start + batch_size]
-            inputs = self._tokenizer(
-                batch,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=512,
-            )
-            with torch.no_grad():
-                out = self._model(**inputs)
-                pooled = self._last_token_pool(out.last_hidden_state, inputs['attention_mask'])
-            arr = pooled.float().numpy()  # (B, dim)
-            all_vecs.extend(self._normalise(row) for row in arr)
-        return all_vecs
+        vecs = self._model.encode(
+            list(texts),
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        return [row for row in vecs]
 
 
 def _load_qwen_embedder() -> QwenEmbedder:
-    import torch
-    from transformers import AutoTokenizer, AutoModel
+    from sentence_transformers import SentenceTransformer
 
-    logger.info(f"[Embedder] Loading {EMBEDDING_MODEL} | device=cpu | quant=int8")
+    logger.info(f"[Embedder] Loading {EMBEDDING_MODEL} | device=cpu")
 
     cache_dir = Path(settings.BASE_DIR) / "static" / "model_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    model_path = _get_local_model_path(cache_dir)
-    local_files_only = isinstance(model_path, Path)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_path,
-        trust_remote_code=True,
-        cache_dir=cache_dir,
-        local_files_only=local_files_only,
+    model = SentenceTransformer(
+        EMBEDDING_MODEL,
+        device='cpu',
+        cache_folder=str(cache_dir),
     )
-    model = AutoModel.from_pretrained(
-        model_path,
-        dtype=torch.float32,
-        trust_remote_code=True,
-        cache_dir=cache_dir,
-        local_files_only=local_files_only,
-    )
-    model.eval()
 
-    # Dynamic int8 quantization — all Linear layers quantized at inference time, CPU only
-    model = torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
-
-    logger.info(f"[Embedder] {EMBEDDING_MODEL} ready (int8, cpu).")
-    return QwenEmbedder(model, tokenizer)
+    logger.info(f"[Embedder] {EMBEDDING_MODEL} ready (cpu).")
+    return QwenEmbedder(model)
 
 
 def _preload_embedder():
