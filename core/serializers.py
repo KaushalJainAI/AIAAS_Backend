@@ -142,10 +142,12 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         User = get_user_model()
 
-        # Resolve the user by email
-        try:
-            user = User.objects.get(email__iexact=email)
-        except User.DoesNotExist:
+        # Resolve the user by email. Use filter().first() (not .get()) so that
+        # any legacy duplicate emails can never raise MultipleObjectsReturned
+        # (which surfaced as a 500). Resolve deterministically to the earliest
+        # account when more than one matches.
+        user = User.objects.filter(email__iexact=email).order_by('id').first()
+        if user is None:
             raise AuthenticationFailed(
                 'Invalid email or password. Please try again.',
                 code='authentication_failed',

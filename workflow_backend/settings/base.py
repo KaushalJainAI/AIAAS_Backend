@@ -90,6 +90,14 @@ ALLOWED_HOSTS = [
 ALLOWED_HOSTS.extend(_split_env_list(os.environ.get('ALLOWED_HOSTS', '')))
 ALLOWED_HOSTS = [h for h in ALLOWED_HOSTS if h]
 
+# Trust the same hostnames for CSRF (needed for the admin / cookie-auth POSTs
+# over HTTPS; the JWT API auth is header-based and does not rely on this).
+CSRF_TRUSTED_ORIGINS = [
+    f'https://{h}' for h in ALLOWED_HOSTS
+    if h and not h.startswith('.') and h not in ('localhost', '127.0.0.1')
+]
+CSRF_TRUSTED_ORIGINS += ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:8000']
+
 INSTALLED_APPS = [
     'daphne',
     'django.contrib.admin',
@@ -428,7 +436,7 @@ LOGGING = {
     },
 }
 
-CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'openai/gpt-4o-mini')
+CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'nvidia/llama-3.3-nemotron-super-49b-v1')
 
 # NOTE: OpenRouter API keys are loaded per-user from the encrypted `credentials`
 # vault (slug 'openrouter'). Do not reintroduce an OPEN_ROUTER_KEY setting.

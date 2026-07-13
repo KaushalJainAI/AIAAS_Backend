@@ -61,12 +61,12 @@ class UserProfile(models.Model):
     # Credential/AI Preferences (Global for Orchestrator/King)
     llm_provider = models.CharField(
         max_length=30,
-        default='openrouter',
+        default='nvidia',
         help_text='Global LLM provider for internal AI reasoning'
     )
     llm_model = models.CharField(
         max_length=150,
-        default='google/gemini-2.0-flash-exp:free',
+        default='nvidia/llama-3.3-nemotron-super-49b-v1',
         help_text='Global LLM model for internal AI reasoning'
     )
     llm_credential_id = models.IntegerField(

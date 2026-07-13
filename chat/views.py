@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import logging
+import os
 import re
 import urllib.request
 from typing import Any
@@ -313,7 +314,31 @@ PROVIDER_NODE_MAP = {
     'anthropic': 'anthropic',
     'deepseek': 'deepseek',
     'xai': 'xai',
+    'nvidia': 'nvidia',
 }
+
+
+# Platform-managed default keys, read from the environment. Used only when a user
+# has no personal (BYOK) credential for the provider, so the app works out of the box.
+_PLATFORM_ENV_KEYS = {
+    'nvidia': ('NVIDIA_API_KEY',),
+    'gemini': ('GEMINI_API_KEY', 'GOOGLE_API_KEY'),
+    'perplexity': ('PERPLEXITY_API_KEY',),
+    'openai': ('OPENAI_API_KEY',),
+    'openrouter': ('OPENROUTER_API_KEY', 'OPEN_ROUTER_KEY'),
+    'anthropic': ('ANTHROPIC_API_KEY',),
+    'deepseek': ('DEEPSEEK_API_KEY',),
+    'xai': ('XAI_API_KEY',),
+}
+
+
+def _platform_api_key(provider: str) -> str | None:
+    """Return a platform default API key for the provider from env, or None."""
+    for env_name in _PLATFORM_ENV_KEYS.get(provider, ()):  # first match wins
+        val = os.environ.get(env_name, '').strip()
+        if val:
+            return val
+    return None
 
 
 # ==================== Token Estimation ====================
@@ -1128,7 +1153,15 @@ async def execute_llm(
         active_cred = await sync_to_async(get_cred)()
         if active_cred:
             credential_id = str(active_cred.id)
-        else:
+
+    # Platform default key fallback: if the user has no personal credential for
+    # this provider, fall back to a platform-managed key from the environment.
+    # This lets the agents work out of the box while still letting any user
+    # override with their own key (BYOK) via the credentials vault.
+    api_key_override = None
+    if not credential_id and provider != 'ollama':
+        api_key_override = _platform_api_key(provider)
+        if not api_key_override:
             return {"content": f"Error: No verified credentials for {provider}", "usage": {}}
 
     context = ExecutionContext(
@@ -1144,6 +1177,7 @@ async def execute_llm(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "credential": credential_id,
+        "api_key_override": api_key_override,
         "history": history or [],
         "response_format": response_format,
         "attachments": attachments or [],
@@ -1564,6 +1598,7 @@ async def send_message(request, session_id: str):
 
     # If we have eager results, we inject them and treat this as the 'final' call
     interrupted = False  # Track if loop was interrupted due to timeout/limits
+    llm_result = None  # Only set in the direct-LLM branch; agentic loop leaves it None
     actual_max_iterations = resolve_agent_iteration_limit(intent)
     if eager_results:
         combined_eager = "\n\n".join(eager_results)
@@ -1596,6 +1631,7 @@ async def send_message(request, session_id: str):
             model=model,
             system_message=system_message,
             user_id=request.user.id,
+            thread_id=str(session.id),
             response_format=response_format,
             clean_content=clean_content,
             intent=intent,

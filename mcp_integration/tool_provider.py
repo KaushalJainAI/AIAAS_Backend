@@ -17,6 +17,7 @@ The provider exposes two calls:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -26,7 +27,7 @@ from typing import Any
 
 from django.core.exceptions import PermissionDenied
 
-from .client import MCPClientManager, get_servers_for_user
+from .client import MCPClientManager, get_servers_for_user, LIST_TOOLS_TIMEOUT
 from .credential_injector import CredentialInvalidError, CredentialMissingError
 from .models import MCPServer
 
@@ -97,21 +98,27 @@ class MCPToolProvider:
         `user`. Safe to call on every chat turn — `list_tools` is cached.
         """
         servers = await get_servers_for_user(user)
-        descriptors: list[dict[str, Any]] = []
-        for server in servers:
+
+        async def _descriptors_for(server) -> list[dict[str, Any]]:
+            # Bound each server: a hung/absent stdio server must not stall the
+            # whole agent turn. Query all servers concurrently.
             try:
                 manager = MCPClientManager(server.id, user=user)
-                tools = await manager.list_tools()
+                tools = await asyncio.wait_for(manager.list_tools(), timeout=LIST_TOOLS_TIMEOUT)
             except CredentialMissingError as e:
                 # Don't advertise a tool the user can't actually call.
                 logger.info("Skipping MCP server %s for user %s: %s", server.name, getattr(user, "id", None), e)
-                continue
+                return []
+            except asyncio.TimeoutError:
+                logger.warning("Timed out listing tools for MCP server %s", server.name)
+                return []
             except Exception as e:  # noqa: BLE001
                 logger.warning("Failed to list tools for MCP server %s: %s", server.name, e)
-                continue
-            for t in tools:
-                descriptors.append(_build_openai_descriptor(server, t))
-        return descriptors
+                return []
+            return [_build_openai_descriptor(server, t) for t in tools]
+
+        results = await asyncio.gather(*(_descriptors_for(s) for s in servers))
+        return [d for group in results for d in group]
 
     @staticmethod
     async def _resolve_binding(name: str, user) -> _ToolBinding | None:

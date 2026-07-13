@@ -164,7 +164,8 @@ class KingOrchestrator(OrchestratorInterface):
     """
     
     # Prompts for workflow generation (design-time, uses knowledge base)
-    GENERATE_PROMPT = """You are an AI assistant that generates workflow definitions.
+    GENERATE_PROMPT = """/no_think
+You are an AI assistant that generates workflow definitions.
 Given a natural language description, create a valid workflow JSON.
 
 Available node types:
@@ -200,7 +201,8 @@ User request: {description}
 
 Generate ONLY valid JSON, no explanation:"""
 
-    MODIFY_PROMPT = """You are an AI assistant that modifies workflow definitions.
+    MODIFY_PROMPT = """/no_think
+You are an AI assistant that modifies workflow definitions.
 
 Given an existing workflow JSON and a natural-language modification request,
 produce a new workflow JSON that applies the change.
@@ -257,8 +259,8 @@ Output ONLY the JSON object, no other text."""
     def __init__(
         self,
         user_id: int | None = None,
-        llm_type: str = "openrouter",
-        llm_model: str = "google/gemini-2.0-flash-exp:free",
+        llm_type: str = "nvidia",
+        llm_model: str = "nvidia/llama-3.3-nemotron-super-49b-v1",
         credential_id: str | None = None,
     ):
         # Identity + LLM config (defaults; may be overridden by user profile).
@@ -818,6 +820,11 @@ Output ONLY the JSON object, no other text."""
         if result.success:
             # [FIX] Safety check for result.data being None
             data = result.data or {}
+            # Some handlers (e.g. NvidiaNode) return their payload via items[].json
+            # rather than .data — fall back to it so content isn't silently lost.
+            if not data and getattr(result, "items", None):
+                first = result.items[0]
+                data = getattr(first, "json", None) or (first if isinstance(first, dict) else {}) or {}
             content = data.get("content", "")
             
             # [NEW] Capture model-generated thinking/reasoning if present
@@ -866,23 +873,48 @@ Output ONLY the JSON object, no other text."""
             raise LLMProviderError(error_msg, is_connection_error=is_connection_error)
     
     def _parse_json_response(self, response: str) -> dict:
-        """Parse JSON from LLM response."""
+        """Parse JSON from an LLM response, tolerant of reasoning models.
+
+        Reasoning models (e.g. nemotron) emit a <think>...</think> block before
+        the answer; a naive first-brace/last-brace slice then captures a stray
+        brace from that prose and json.loads fails. We strip the think block and
+        any code fences, then walk the string to pull the first *balanced* JSON
+        object.
+        """
         import json
-        response = response.strip()
-        
-        # Remove markdown code blocks if present
-        if response.startswith("```"):
-            lines = response.split("\n")
-            response = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-        
-        # Find JSON object
-        start = response.find("{")
-        end = response.rfind("}") + 1
-        
+        import re
+
+        if not response:
+            raise ValueError("No valid JSON found in response")
+
+        s = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+
+        # Remove a leading markdown code fence if present.
+        if s.startswith("```"):
+            s = re.sub(r"^```[a-zA-Z]*\n?", "", s).rstrip("`").strip()
+
+        start = s.find("{")
+        if start != -1:
+            depth = 0
+            for i in range(start, len(s)):
+                if s[i] == "{":
+                    depth += 1
+                elif s[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(s[start:i + 1])
+                        except json.JSONDecodeError:
+                            break
+
+        # Last resort: greedy slice (handles minor trailing noise).
+        end = s.rfind("}") + 1
         if start >= 0 and end > start:
-            json_str = response[start:end]
-            return json.loads(json_str)
-        
+            try:
+                return json.loads(s[start:end])
+            except json.JSONDecodeError:
+                pass
+
         raise ValueError("No valid JSON found in response")
     
     def _validate_workflow(self, workflow: dict) -> bool:
@@ -1013,7 +1045,7 @@ Output ONLY the JSON object, no other text."""
             thought=f"Constructing workflow nodes and edges for: {description[:100]}"
         )
         workflow = self._parse_json_response(response)
-        
+
         if not self._validate_workflow(workflow):
             raise ValueError("Invalid workflow structure generated")
         

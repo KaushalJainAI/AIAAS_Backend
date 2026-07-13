@@ -23,6 +23,28 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
+# Keys that appear in standard JSON Schema / OpenAI function params but are
+# rejected by Gemini's functionDeclarations schema (a strict OpenAPI subset).
+_GEMINI_SCHEMA_UNSUPPORTED = {
+    "additionalProperties", "$schema", "$id", "$ref", "definitions",
+    "patternProperties", "const", "examples", "default", "title",
+}
+
+
+def _sanitize_gemini_schema(schema: Any) -> Any:
+    """Recursively strip JSON-Schema keys Gemini's function schema rejects."""
+    if isinstance(schema, dict):
+        cleaned = {}
+        for key, value in schema.items():
+            if key in _GEMINI_SCHEMA_UNSUPPORTED:
+                continue
+            cleaned[key] = _sanitize_gemini_schema(value)
+        return cleaned
+    if isinstance(schema, list):
+        return [_sanitize_gemini_schema(item) for item in schema]
+    return schema
+
+
 def _validate_attachment_path(file_path: str) -> bool:
     """
     Validate that an attachment file path is within the allowed MEDIA_ROOT.
@@ -228,7 +250,8 @@ class OpenAINode(BaseNodeHandler):
         max_tokens = config.get("max_tokens", 1024)
         show_thinking = config.get("thinking", False)
         
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
         if not api_key:
@@ -402,7 +425,8 @@ class OpenAINode(BaseNodeHandler):
             )
         
         # Get API key from credentials
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         # Support both 'apiKey' (from schema) and 'api_key' (common)
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
@@ -820,7 +844,8 @@ class GeminiNode(BaseNodeHandler):
         show_thinking = config.get("thinking", False)
         
         credential_id = config.get("credential")
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
         if not api_key:
@@ -828,9 +853,10 @@ class GeminiNode(BaseNodeHandler):
             return
 
         api_key = api_key.strip()
-        api_version = "v1"
-        if "exp" in model_name or "preview" in model_name:
-            api_version = "v1beta"
+        # v1beta supports the stable models (1.5/2.0/2.5) AND the features we use
+        # (responseMimeType/responseSchema JSON mode + functionDeclarations tools),
+        # which the v1 endpoint rejects. Use it uniformly.
+        api_version = "v1beta"
 
         try:
             async with httpx.AsyncClient(timeout=120) as client:
@@ -906,7 +932,7 @@ class GeminiNode(BaseNodeHandler):
                             gemini_tools.append({
                                 "name": t["function"]["name"],
                                 "description": t["function"].get("description", ""),
-                                "parameters": t["function"].get("parameters", {})
+                                "parameters": _sanitize_gemini_schema(t["function"].get("parameters", {}))
                             })
                     if gemini_tools:
                         payload["tools"] = [{"functionDeclarations": gemini_tools}]
@@ -1016,7 +1042,8 @@ class GeminiNode(BaseNodeHandler):
         
         # Get API key from credentials
         credential_id = config.get("credential")
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         # Support both 'apiKey' (from schema) and 'api_key' (common)
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
@@ -1032,9 +1059,10 @@ class GeminiNode(BaseNodeHandler):
         
         # Determine API version: 
         # Use v1 for stable (1.5, 2.0, 2.5) unless specifically preview/exp
-        api_version = "v1"
-        if "exp" in model_name or "preview" in model_name:
-            api_version = "v1beta"
+        # v1beta supports the stable models (1.5/2.0/2.5) AND the features we use
+        # (responseMimeType/responseSchema JSON mode + functionDeclarations tools),
+        # which the v1 endpoint rejects. Use it uniformly.
+        api_version = "v1beta"
         
         try:
             async with httpx.AsyncClient(timeout=120) as client:
@@ -1182,7 +1210,7 @@ class GeminiNode(BaseNodeHandler):
                             gemini_tools.append({
                                 "name": t["function"]["name"],
                                 "description": t["function"].get("description", ""),
-                                "parameters": t["function"].get("parameters", {})
+                                "parameters": _sanitize_gemini_schema(t["function"].get("parameters", {}))
                             })
                     if gemini_tools:
                         payload["tools"] = [{"functionDeclarations": gemini_tools}]
@@ -1713,7 +1741,8 @@ class PerplexityNode(BaseNodeHandler):
         max_tokens = config.get("max_tokens", 1024)
         show_thinking = config.get("thinking", False)
         
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
         if not api_key:
@@ -1981,7 +2010,8 @@ class PerplexityNode(BaseNodeHandler):
             )
         
         # Get API key from credentials
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         # Support both 'apiKey' (from schema) and 'api_key' (common)
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
@@ -2152,7 +2182,8 @@ class OpenRouterNode(BaseNodeHandler):
         max_tokens = config.get("max_tokens", 1024)
         show_thinking = config.get("thinking", False)
         
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
         if not api_key:
@@ -2474,7 +2505,8 @@ class OpenRouterNode(BaseNodeHandler):
             )
 
         # ── Credentials ───────────────────────────────────────────────────────
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
 
         if not api_key:
@@ -2967,7 +2999,8 @@ class HuggingFaceNode(BaseNodeHandler):
         max_new_tokens = int(config.get("max_tokens", 512))
         credential_id = config.get("credential")
         
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
         if not api_key:
@@ -3085,7 +3118,8 @@ class HuggingFaceNode(BaseNodeHandler):
                 output_handle="error"
             )
             
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = creds.get("apiKey") or creds.get("api_key") if creds else None
         
         if not api_key:
@@ -3316,7 +3350,8 @@ class XAINode(BaseNodeHandler):
             yield {"type": "error", "message": "Prompt is required"}
             return
             
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
         
         if not api_key:
@@ -3447,7 +3482,8 @@ class XAINode(BaseNodeHandler):
         if not prompt:
             return NodeExecutionResult(success=False, error="Prompt is required", output_handle="output-0")
             
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
         
         if not api_key:
@@ -3676,7 +3712,8 @@ class NvidiaNode(BaseNodeHandler):
             yield {"type": "error", "message": "Prompt is required"}
             return
 
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
 
         # Fall back to the server-wide NVIDIA key (settings.NVIDIA_API_KEY) when
@@ -3782,7 +3819,8 @@ class NvidiaNode(BaseNodeHandler):
         if not prompt:
             return NodeExecutionResult(success=False, error="Prompt is required", output_handle="output-0")
 
-        creds = await context.get_credential(credential_id) if credential_id else None
+        creds = ({"apiKey": config["api_key_override"]} if config.get("api_key_override")
+                 else (await context.get_credential(credential_id) if credential_id else None))
         api_key = (creds.get("apiKey") or creds.get("api_key")) if creds else None
 
         # Env-var fallback so NVIDIA chat works without a per-user credential.
@@ -3792,6 +3830,15 @@ class NvidiaNode(BaseNodeHandler):
 
         if not api_key:
             return NodeExecutionResult(success=False, error="NVIDIA API key not configured", output_handle="output-0")
+
+        # Nemotron only honors the "/no_think" reasoning switch when it arrives
+        # as a system message. Callers (e.g. the workflow generator) put it at
+        # the top of the prompt string, so hoist it into the system role —
+        # otherwise the model reasons until it hits the token cap and returns
+        # only a <think> block with no answer.
+        if prompt.lstrip().startswith("/no_think"):
+            prompt = prompt.lstrip()[len("/no_think"):].lstrip("\n")
+            system_message = ("/no_think\n" + system_message) if system_message else "/no_think"
 
         try:
             messages = []

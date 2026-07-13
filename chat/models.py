@@ -17,9 +17,11 @@ class ChatSession(models.Model):
     
     title = models.CharField(max_length=255, default="New Chat", blank=True)
     
-    # Per-conversation AI Settings
-    llm_provider = models.CharField(max_length=50, default='openrouter')
-    llm_model = models.CharField(max_length=100, default='google/gemini-2.0-flash-exp:free')
+    # Per-conversation AI Settings.
+    # Default to NVIDIA NIM (backed by a platform NVIDIA_API_KEY) so new chats
+    # work out of the box; users can switch provider/model per conversation.
+    llm_provider = models.CharField(max_length=50, default='nvidia')
+    llm_model = models.CharField(max_length=100, default='nvidia/llama-3.3-nemotron-super-49b-v1')
     intent = models.CharField(max_length=50, default='chat')
     system_prompt = models.TextField(blank=True, default="")
     

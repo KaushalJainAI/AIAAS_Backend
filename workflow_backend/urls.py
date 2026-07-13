@@ -5,7 +5,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
 from orchestrator.views import receive_webhook
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAdminUser
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
 
@@ -20,17 +20,18 @@ urlpatterns = [
     # Health check
     path('api/health/', health_check, name='health-check'),
 
-    # API Schema & Docs (public, read-only)
-    path('api/schema/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema'),
-    path('api/schema/json/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema-json'),
-    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny]), name='swagger-ui'),
-    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny]), name='redoc'),
-    
+    # API Schema & Docs — admin-only. Exposing the full API surface + schema
+    # unauthenticated leaks the entire backend contract to anyone.
+    path('api/schema/', SpectacularAPIView.as_view(permission_classes=[IsAdminUser]), name='schema'),
+    path('api/schema/json/', SpectacularAPIView.as_view(permission_classes=[IsAdminUser]), name='schema-json'),
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[IsAdminUser]), name='swagger-ui'),
+    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[IsAdminUser]), name='redoc'),
+
     # Aliases for common paths
-    path('swagger.json', SpectacularAPIView.as_view(permission_classes=[AllowAny])),
-    path('openapi.json', SpectacularAPIView.as_view(permission_classes=[AllowAny])),
-    path('redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny])),
-    path('docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny])),
+    path('swagger.json', SpectacularAPIView.as_view(permission_classes=[IsAdminUser])),
+    path('openapi.json', SpectacularAPIView.as_view(permission_classes=[IsAdminUser])),
+    path('redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[IsAdminUser])),
+    path('docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[IsAdminUser])),
     
     # Core (auth, users, API keys)
     path('api/', include('core.urls')),

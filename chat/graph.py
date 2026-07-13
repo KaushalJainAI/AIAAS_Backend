@@ -203,38 +203,48 @@ async def agent_node(state: ChatAgentState, config: RunnableConfig) -> dict:
                 attachments=attachments,
                 stream=True,
             )
-            async with asyncio.timeout(LLM_CALL_TIMEOUT):
-                chunk_count = 0
-                async for chunk in stream_gen:
-                    chunk_count += 1
-                    if chunk_count > MAX_THINKING_CHUNKS:
-                        break
-                    if chunk["type"] == "content":
-                        content += chunk["content"]
-                    elif chunk["type"] == "thinking":
-                        thinking_delta += chunk["content"]
-                        if not is_tool_plan_json(chunk["content"]):
-                            await callback("thinking_chunk", {"content": chunk["content"]})
-                    elif chunk["type"] == "tool_calls":
-                        for tc in chunk["tool_calls"]:
-                            idx = tc.get("index", 0)
-                            while len(tool_calls_raw) <= idx:
-                                tool_calls_raw.append({"type": "function", "function": {"name": "", "arguments": ""}})
-                            target = tool_calls_raw[idx]
-                            if "id" in tc:
-                                target["id"] = tc["id"]
-                            if "function" in tc:
-                                if "name" in tc["function"]:
-                                    target["function"]["name"] += tc["function"]["name"]
-                                if "arguments" in tc["function"]:
-                                    target["function"]["arguments"] += tc["function"]["arguments"]
-                    elif chunk["type"] == "metadata":
-                        usage = chunk.get("usage", {})
-                        tokens_used += usage.get("total_tokens", usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
-                    elif chunk["type"] == "error":
-                        logger.error(f"[Agent Node] LLM error: {chunk.get('message')}")
-                        content = f"LLM Error: {chunk.get('message', 'Unknown')}"
-                        break
+            # execute_llm returns a plain dict (not an async stream) on an error
+            # path — e.g. provider unavailable or the user has no verified
+            # credential. Surface it gracefully instead of crashing on `async for`.
+            if isinstance(stream_gen, dict):
+                content = stream_gen.get("content") or (
+                    "The selected LLM provider is unavailable. Add and verify a "
+                    "provider credential (e.g. OpenRouter) in Settings to use chat."
+                )
+                logger.warning(f"[Agent Node] LLM unavailable (no stream): {content}")
+            else:
+                async with asyncio.timeout(LLM_CALL_TIMEOUT):
+                    chunk_count = 0
+                    async for chunk in stream_gen:
+                        chunk_count += 1
+                        if chunk_count > MAX_THINKING_CHUNKS:
+                            break
+                        if chunk["type"] == "content":
+                            content += chunk["content"]
+                        elif chunk["type"] == "thinking":
+                            thinking_delta += chunk["content"]
+                            if not is_tool_plan_json(chunk["content"]):
+                                await callback("thinking_chunk", {"content": chunk["content"]})
+                        elif chunk["type"] == "tool_calls":
+                            for tc in chunk["tool_calls"]:
+                                idx = tc.get("index", 0)
+                                while len(tool_calls_raw) <= idx:
+                                    tool_calls_raw.append({"type": "function", "function": {"name": "", "arguments": ""}})
+                                target = tool_calls_raw[idx]
+                                if "id" in tc:
+                                    target["id"] = tc["id"]
+                                if "function" in tc:
+                                    if "name" in tc["function"]:
+                                        target["function"]["name"] += tc["function"]["name"]
+                                    if "arguments" in tc["function"]:
+                                        target["function"]["arguments"] += tc["function"]["arguments"]
+                        elif chunk["type"] == "metadata":
+                            usage = chunk.get("usage", {})
+                            tokens_used += usage.get("total_tokens", usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
+                        elif chunk["type"] == "error":
+                            logger.error(f"[Agent Node] LLM error: {chunk.get('message')}")
+                            content = f"LLM Error: {chunk.get('message', 'Unknown')}"
+                            break
         except asyncio.TimeoutError:
             logger.warning("[Agent Node] LLM stream timed out")
             if not content:
