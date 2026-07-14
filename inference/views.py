@@ -295,8 +295,14 @@ async def document_list(request):
         ), kb.id
 
     doc, resolved_kb_id = await sync_to_async(_create)()
-    from .tasks import process_document_task
-    process_document_task.delay(doc.id, resolved_kb_id)
+    # Index inline in a background thread. There is no Celery worker / Redis
+    # broker on this deployment, so .delay() would hang on broker-reconnect and
+    # then fail — leaving the upload stuck "pending". The thread runs the same
+    # sync indexing service used by kb_assign_document.
+    from .tasks import process_document
+    threading.Thread(
+        target=process_document, args=(doc.id, resolved_kb_id), daemon=True
+    ).start()
 
     return Response(DocumentSerializer(doc).data, status=201)
 
@@ -304,10 +310,18 @@ async def document_list(request):
 @api_view(['GET', 'DELETE'])
 @permission_classes([IsAuthenticated])
 async def document_detail(request, document_id: int):
-    doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user)
+    doc = await sync_to_async(
+        lambda: get_object_or_404(
+            Document.objects.select_related('user', 'knowledge_base'),
+            id=document_id, user=request.user,
+        )
+    )()
 
     if request.method == 'GET':
-        return Response(DocumentSerializer(doc).data)
+        # Serialize in a sync context: the serializer touches obj.user /
+        # obj.knowledge_base, which would trigger a lazy DB query from this
+        # async view and raise SynchronousOnlyOperation.
+        return Response(await sync_to_async(lambda: DocumentSerializer(doc).data)())
 
     # DELETE — also remove vectors from its KB
     kb_id = doc.knowledge_base_id
@@ -325,22 +339,33 @@ async def document_detail(request, document_id: int):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 async def document_share(request, document_id: int):
-    doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user)
+    doc = await sync_to_async(
+        lambda: get_object_or_404(
+            Document.objects.select_related('user', 'knowledge_base'),
+            id=document_id, user=request.user,
+        )
+    )()
 
     if doc.sharing_mode == 'private':
         doc.sharing_mode = 'shared_read'
         doc.is_shared = True
         doc.shared_at = timezone.now()
-        from .tasks import share_document_task
-        share_document_task.delay(doc.id, request.user.id)
+        # Inline background thread — no Celery worker on this box (see upload).
+        from .tasks import share_document
+        threading.Thread(
+            target=share_document, args=(doc.id, request.user.id), daemon=True
+        ).start()
     else:
+        # Serialize in a sync context (obj.user / obj.knowledge_base are lazy).
+        data = await sync_to_async(lambda: DocumentSerializer(doc).data)()
         return Response({
-            **DocumentSerializer(doc).data,
+            **data,
             'error': 'Un-sharing documents is not allowed once they are part of the platform knowledge base.',
         }, status=403)
 
     await sync_to_async(doc.save)()
-    return Response({**DocumentSerializer(doc).data, 'message': f'Document set to {doc.sharing_mode}'})
+    data = await sync_to_async(lambda: DocumentSerializer(doc).data)()
+    return Response({**data, 'message': f'Document set to {doc.sharing_mode}'})
 
 
 # =============================================================================

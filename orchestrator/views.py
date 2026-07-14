@@ -436,16 +436,21 @@ async def execute_workflow(request, workflow_id: int):
     if not workflow:
         return Response({'error': 'Workflow not found'}, status=status.HTTP_404_NOT_FOUND)
     
-    input_data = request.data.get('input_data', {})
-    is_async = request.data.get('async', True)
+    # request.data is normally an object, but a client can send a bare JSON
+    # scalar/array; treat anything non-dict as "no body" instead of 500ing on
+    # `.get`.
+    data = request.data if isinstance(request.data, dict) else {}
+
+    input_data = data.get('input_data', {})
+    is_async = data.get('async', True)
     
     # Get orchestrator
     orchestrator = get_orchestrator(request.user.id)
     
     # Apply user's LLM settings for orchestrator thought generation
-    llm_provider = request.data.get('llm_provider')
-    llm_model = request.data.get('llm_model')
-    llm_credential = request.data.get('llm_credential')
+    llm_provider = data.get('llm_provider')
+    llm_model = data.get('llm_model')
+    llm_credential = data.get('llm_credential')
     if llm_provider or llm_model or llm_credential:
         await orchestrator.update_settings(llm_type=llm_provider, llm_model=llm_model, credential_id=llm_credential)
     
@@ -603,14 +608,24 @@ async def execution_status(request, execution_id: str):
     
     if not handle:
         return Response({'error': 'Execution not found or not authorized'}, status=404)
-    
+
+    # The in-memory handle doesn't carry compile/validation failures (those are
+    # recorded on the ExecutionLog). Fall back to the persisted error message so
+    # the UI can always show *why* a run failed instead of a bare "failed".
+    error = handle.error
+    if not error and handle.state.value in ('failed', 'cancelled', 'timeout'):
+        from logs.models import ExecutionLog
+        log = await ExecutionLog.objects.filter(execution_id=exec_uuid).afirst()
+        if log and log.error_message:
+            error = log.error_message
+
     return Response({
         'execution_id': str(handle.execution_id),
         'workflow_id': handle.workflow_id,
         'state': handle.state.value,
         'current_node': handle.current_node,
         'progress': handle.progress,
-        'error': handle.error,
+        'error': error,
         'started_at': handle.started_at,
         'completed_at': handle.completed_at,
         'pending_hitl': {

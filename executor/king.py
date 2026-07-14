@@ -917,6 +917,153 @@ Output ONLY the JSON object, no other text."""
 
         raise ValueError("No valid JSON found in response")
     
+    # Maps the loose, category-ish type words the LLM tends to emit (it often
+    # confuses a node's *category* — "ai", "trigger", "integration" — with its
+    # concrete registry type) onto real, runnable handler types. Anything not
+    # matched falls back to `set`, a no-op passthrough that always compiles, so
+    # a generated workflow can always at least be Run instead of dying with
+    # "Unknown node type".
+    _TYPE_SYNONYMS = {
+        # triggers — all collapse to manual_trigger: it has no required config
+        # and is what actually fires on a manual "Run" (webhook/form/schedule
+        # triggers need external events, so they'd never fire in the demo and
+        # only add required-field friction).
+        "trigger": "manual_trigger", "manual": "manual_trigger",
+        "start": "manual_trigger", "manual_trigger": "manual_trigger",
+        "webhook": "manual_trigger", "http_trigger": "manual_trigger",
+        "schedule": "manual_trigger", "cron": "manual_trigger",
+        "timer": "manual_trigger", "interval": "manual_trigger",
+        "form": "manual_trigger", "email_trigger": "manual_trigger",
+        # AI / LLM (all → nvidia, which uses the server key with no credential)
+        "ai": "nvidia", "llm": "nvidia", "agent": "nvidia", "gpt": "nvidia",
+        "summarize": "nvidia", "summarizer": "nvidia", "generate": "nvidia",
+        "completion": "nvidia", "chat": "nvidia", "text": "nvidia",
+        "nvidia": "nvidia", "openai": "openai", "gemini": "gemini",
+        # http / api
+        "http": "http_request", "http_request": "http_request",
+        "api": "http_request", "rest": "http_request", "request": "http_request",
+        "fetch": "http_request", "webhook_call": "http_request",
+        # storage / output / generic → set (safe passthrough)
+        "store": "set", "storage": "set", "database": "set", "db": "set",
+        "save": "set", "set": "set", "output": "set", "integration": "set",
+        "transform": "set", "format": "set", "variable": "set",
+        # control flow / misc that map 1:1
+        "if": "if", "condition": "if", "branch": "if",
+        "loop": "loop", "code": "code", "notification": "notification",
+        "slack": "slack", "stop": "stop",
+    }
+    # Placeholder credential names the LLM invents (e.g. "AI_CREDENTIAL"); these
+    # reference nothing real and make the compiler reject the node. Strip them —
+    # nvidia falls back to the server key and passthrough nodes need no cred.
+    _PLACEHOLDER_CRED_KEYS = ("credential", "credential_id", "api_key")
+
+    # Intent keywords → concrete type, checked as whole word-tokens (so "ai"
+    # matches "ai_1" / "ai_agent" but not "email" or "airtable"). Ordered by
+    # priority; first group with a matching token wins.
+    _KEYWORD_GROUPS = (
+        ("nvidia", {"ai", "llm", "gpt", "agent", "classify", "classifier",
+                    "classification", "summarize", "summarizer", "summary",
+                    "generate", "generation", "nlp", "sentiment", "extract",
+                    "extraction", "analyze", "analysis", "completion", "prompt"}),
+        ("manual_trigger", {"trigger", "webhook", "hook", "form", "schedule",
+                            "cron", "timer", "interval", "scheduled", "start"}),
+        ("http_request", {"http", "api", "rest", "fetch", "request", "call"}),
+        ("slack", {"slack"}),
+        ("notification", {"notify", "notification", "alert"}),
+        ("if", {"if", "condition", "conditional", "branch", "route", "router"}),
+        ("loop", {"loop", "iterate", "foreach"}),
+    )
+
+    def _infer_type_from_keywords(self, type_key: str, node_id: str) -> str:
+        """Best-effort map an unrecognized type to a real one via keywords.
+
+        Falls back to `set` (a no-op passthrough) so the workflow always
+        compiles even when nothing matches.
+        """
+        import re
+        tokens = set(re.split(r"[^a-z0-9]+", f"{type_key} {node_id.lower()}"))
+        tokens.discard("")
+        for target, words in self._KEYWORD_GROUPS:
+            if tokens & words:
+                return target
+        return "set"
+
+    def _normalize_generated_workflow(self, workflow: dict) -> dict:
+        """Coerce LLM-generated nodes into concrete, runnable registry types.
+
+        The LLM is only loosely faithful to the node-type list it's given, so a
+        raw generation frequently can't be Run. This deterministically rewrites
+        each node's type to a real handler, mirrors it into `data.nodeType`
+        (the frontend convention), drops invented credential placeholders, and
+        gives AI nodes a working default model. Best-effort: never raises.
+        """
+        try:
+            registry = self._get_registry()
+            valid = set(registry.get_node_types())
+        except Exception:
+            valid = set()
+
+        for node in workflow.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            data = node.get("data")
+            if not isinstance(data, dict):
+                data = {}
+                node["data"] = data
+
+            raw = (node.get("nodeType") or data.get("nodeType")
+                   or node.get("type") or "").strip()
+            key = raw.lower()
+
+            if valid and raw in valid:
+                resolved = raw
+            elif key in self._TYPE_SYNONYMS and (
+                not valid or self._TYPE_SYNONYMS[key] in valid
+            ):
+                resolved = self._TYPE_SYNONYMS[key]
+            else:
+                # No exact/synonym hit: scan the type words *and* the node id
+                # (e.g. "ai_1", "classify_node") for an intent keyword so an AI
+                # step becomes a real LLM node rather than a no-op passthrough.
+                resolved = self._infer_type_from_keywords(key, str(node.get("id", "")))
+
+            node["type"] = resolved
+            data["nodeType"] = resolved
+
+            config = data.get("config")
+            if not isinstance(config, dict):
+                config = {}
+                data["config"] = config
+
+            # Drop invented credential references (compiler rejects unknown ones;
+            # nvidia + passthrough nodes don't need one on this deployment).
+            for ck in self._PLACEHOLDER_CRED_KEYS:
+                if ck in config:
+                    config.pop(ck, None)
+
+            # AI nodes need a real model; the LLM often invents one.
+            if resolved == "nvidia":
+                model = str(config.get("model") or "")
+                if "/" not in model:  # e.g. "summarization_model" → invalid
+                    config["model"] = "microsoft/phi-4-mini-instruct"
+                if not str(config.get("prompt") or "").strip():
+                    config["prompt"] = (
+                        data.get("label")
+                        or "Process the input and produce a helpful result."
+                    )
+
+            # The passthrough `set` node has required fields; supply defaults so
+            # a fallback-mapped node still compiles.
+            if resolved == "set":
+                config.setdefault("values", {})
+                config.setdefault("keep_input", True)
+
+            # http_request needs a method; default to GET (URL still user-supplied).
+            if resolved == "http_request":
+                config.setdefault("method", "GET")
+
+        return workflow
+
     def _validate_workflow(self, workflow: dict) -> bool:
         """Validate workflow has required structure."""
         if not isinstance(workflow, dict):
@@ -1048,8 +1195,8 @@ Output ONLY the JSON object, no other text."""
 
         if not self._validate_workflow(workflow):
             raise ValueError("Invalid workflow structure generated")
-        
-        return workflow
+
+        return self._normalize_generated_workflow(workflow)
     
     async def modify_workflow(
         self,
@@ -1085,11 +1232,11 @@ Output ONLY the JSON object, no other text."""
         
         try:
             modified = self._parse_json_response(response)
-            
+
             if not self._validate_workflow(modified):
                 raise ValueError("Invalid workflow structure")
-            
-            return modified
+
+            return self._normalize_generated_workflow(modified)
             
         except Exception as e:
             logger.error(f"Failed to modify workflow: {e}")

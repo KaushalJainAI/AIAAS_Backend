@@ -101,11 +101,20 @@ class InputSanitizationMiddleware(MiddlewareMixin):
                  else:
                      return None
         
+        # Only object bodies have named fields to sanitize. A non-dict here
+        # (a bare JSON scalar/list, or a body that came back malformed under a
+        # concurrent ASGI request-body read) has nothing for us to inspect —
+        # fail open and let the view/DRF parse it. Without this guard,
+        # `field in body` raises TypeError and returns a 500 for the request
+        # (observed: concurrent POSTs with a tiny `{}` body crashed here).
+        if not isinstance(body, dict):
+            return None
+
         # Sanitize relevant fields
         sanitizer = get_sanitizer()
         violations = []
         modified = False
-        
+
         for field in self.SANITIZE_FIELDS:
             if field in body and isinstance(body[field], str):
                 result = sanitizer.sanitize(body[field])

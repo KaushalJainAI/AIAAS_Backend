@@ -3622,6 +3622,7 @@ class NvidiaNode(BaseNodeHandler):
             label="NVIDIA API Key",
             field_type=FieldType.CREDENTIAL,
             credential_type="nvidia",
+            required=False,  # Falls back to the server-wide NVIDIA_API_KEY
             description="Select your NVIDIA NIM credential"
         ),
         FieldConfig(

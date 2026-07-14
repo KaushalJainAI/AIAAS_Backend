@@ -157,11 +157,20 @@ class ExecutionEngine:
         try:
             return await _do()
         except WorkflowCompilationError as e:
+            # Include the specific validation errors (e.g. "Unknown node type",
+            # "Field 'URL' is required") so the UI can show an actionable reason
+            # instead of a bare "validation failed".
+            details = "; ".join(
+                f"{getattr(err, 'node_id', None) + ': ' if getattr(err, 'node_id', None) else ''}"
+                f"{getattr(err, 'message', str(err))}"
+                for err in getattr(e, "errors", [])
+            )
+            message = f"Compilation failed: {e}" + (f" ({details})" if details else "")
             await exec_logger.complete_execution(
                 execution_id=execution_id, status="failed",
-                error_message=f"Compilation failed: {e}",
+                error_message=message,
             )
-            logger.error(f"Compilation failed for execution {execution_id}: {e}")
+            logger.error(f"Compilation failed for execution {execution_id}: {message}")
             return None
         except Exception as e:
             await exec_logger.complete_execution(

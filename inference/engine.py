@@ -13,11 +13,13 @@ Key design decisions:
 """
 import asyncio
 import logging
+import os
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
 import numpy as np
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -26,93 +28,100 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Global embedder singleton
-# Model : Qwen/Qwen3-Embedding-0.6B  (0.6B params, text-only)
-# Quant : PyTorch dynamic int8 on CPU (torch.quantization.quantize_dynamic)
+# Model : nvidia/nv-embedqa-e5-v5  (served via NVIDIA NIM, OpenAI-compatible)
 # Dim   : 1024
 #
-# To switch models, update EMBEDDING_MODEL and EMBEDDING_DIM below.
-# On the next startup every KB whose stored version differs will be
-# automatically re-indexed in the background (see _maybe_reindex).
+# Embeddings are produced by an external API rather than a local model — the
+# 912MB box cannot hold sentence-transformers/torch in RAM. The same
+# NVIDIA_API_KEY that powers chat is reused here. Override the model/endpoint
+# with the EMBEDDING_MODEL / EMBEDDING_API_BASE env vars.
+#
+# On startup every KB whose stored version differs from EMBEDDER_VERSION is
+# automatically re-indexed in the background (see initialize()).
 # ---------------------------------------------------------------------------
 
 _global_embedder = None
 _embedder_lock = asyncio.Lock()
-EMBEDDING_DIM = 384
-EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
+EMBEDDING_DIM = int(os.environ.get('EMBEDDING_DIM', '1024'))
+EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'nvidia/nv-embedqa-e5-v5')
+EMBEDDING_API_BASE = os.environ.get(
+    'EMBEDDING_API_BASE', 'https://integrate.api.nvidia.com/v1'
+)
 
 # Bump this whenever the model weights, tokenizer, or pooling strategy change
 # in a way that makes old embeddings incompatible with new ones.
 EMBEDDER_VERSION = f'{EMBEDDING_MODEL}:{EMBEDDING_DIM}'
 
 
-def _get_local_model_path(cache_dir: Path) -> Path | str:
-    """
-    Prefer the cached HF snapshot so startup does not make network metadata
-    requests. Fall back to the repo id on first install so Transformers can
-    populate the cache once.
-    """
-    model_cache_dir = cache_dir / f"models--{EMBEDDING_MODEL.replace('/', '--')}"
-    ref_file = model_cache_dir / "refs" / "main"
-    if ref_file.exists():
-        revision = ref_file.read_text(encoding="utf-8").strip()
-        snapshot_dir = model_cache_dir / "snapshots" / revision
-        if (snapshot_dir / "config.json").exists():
-            return snapshot_dir
-    return EMBEDDING_MODEL
-
-
 class QwenEmbedder:
     """
-    Wraps a sentence-transformers model (all-MiniLM-L6-v2, 384-dim) on CPU —
-    chosen to fit comfortably under 2 GB RAM. Exposes encode(texts) returning
-    a list of L2-normalised numpy arrays (N, EMBEDDING_DIM).
+    API-backed embedder. Calls an OpenAI-compatible /embeddings endpoint
+    (NVIDIA NIM's nv-embedqa-e5-v5, 1024-dim) and returns a list of
+    L2-normalised numpy arrays (N, EMBEDDING_DIM). No local model or torch
+    required — nothing to load into RAM.
+
+    NVIDIA retrieval models need an `input_type` hint: use "passage" when
+    indexing documents and "query" when embedding a search query.
 
     Class name retained for backwards-compatibility with existing imports.
     """
 
-    def __init__(self, model):
-        self._model = model
+    # NVIDIA's embeddings endpoint caps how many inputs it accepts per call.
+    _MAX_BATCH = 32
 
-    def encode(self, texts: list[str], batch_size: int = 32) -> list:
+    def __init__(self, api_key: str, model: str, base_url: str, dim: int):
+        self._api_key = api_key
+        self._model = model
+        self._base_url = base_url.rstrip('/')
+        self._dim = dim
+        self._client = httpx.Client(timeout=60.0)
+
+    def _call(self, inputs: list[str], input_type: str) -> list:
+        resp = self._client.post(
+            f'{self._base_url}/embeddings',
+            headers={'Authorization': f'Bearer {self._api_key}'},
+            json={
+                'model': self._model,
+                'input': inputs,
+                'input_type': input_type,
+                'encoding_format': 'float',
+                'truncate': 'END',  # never fail on long chunks
+            },
+        )
+        resp.raise_for_status()
+        # Preserve request order — the API tags each row with its index.
+        rows = sorted(resp.json()['data'], key=lambda d: d.get('index', 0))
+        return [r['embedding'] for r in rows]
+
+    def encode(self, texts: list[str], batch_size: int = 32,
+               input_type: str = 'passage') -> list:
         """
         Encode *texts* into normalised numpy arrays (N, EMBEDDING_DIM).
 
-        Batching keeps peak memory bounded on small instances.
+        Requests are chunked to stay under the endpoint's per-call input cap.
         """
-        vecs = self._model.encode(
-            list(texts),
-            batch_size=batch_size,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        return [row for row in vecs]
+        # The API rejects empty strings; substitute a single space.
+        safe = [t if (isinstance(t, str) and t.strip()) else ' ' for t in texts]
+        batch = min(batch_size, self._MAX_BATCH)
+        out: list = []
+        for i in range(0, len(safe), batch):
+            for emb in self._call(safe[i:i + batch], input_type):
+                v = np.asarray(emb, dtype='float32')
+                norm = float(np.linalg.norm(v))
+                if norm > 0:
+                    v = v / norm
+                out.append(v)
+        return out
 
 
 def _load_qwen_embedder() -> QwenEmbedder:
-    from sentence_transformers import SentenceTransformer
-
-    logger.info(f"[Embedder] Loading {EMBEDDING_MODEL} | device=cpu")
-
-    cache_dir = Path(settings.BASE_DIR) / "static" / "model_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # Prefer the already-downloaded local snapshot. When present, load fully
-    # offline so startup makes no network calls to the HF Hub (avoids the
-    # per-boot HEAD requests + "set a HF_TOKEN" warnings and the external
-    # dependency on a 912MB box). Falls back to the repo id for first install.
-    local_path = _get_local_model_path(cache_dir)
-    is_local = not (isinstance(local_path, str) and local_path == EMBEDDING_MODEL)
-
-    model = SentenceTransformer(
-        str(local_path),
-        device='cpu',
-        cache_folder=str(cache_dir),
-        local_files_only=is_local,
-    )
-
-    logger.info(f"[Embedder] {EMBEDDING_MODEL} ready (cpu).")
-    return QwenEmbedder(model)
+    api_key = getattr(settings, 'NVIDIA_API_KEY', '') or os.environ.get('NVIDIA_API_KEY', '')
+    if not api_key:
+        raise RuntimeError(
+            'NVIDIA_API_KEY is not configured — required for the embeddings API.'
+        )
+    logger.info(f"[Embedder] Using API model {EMBEDDING_MODEL} @ {EMBEDDING_API_BASE}")
+    return QwenEmbedder(api_key, EMBEDDING_MODEL, EMBEDDING_API_BASE, EMBEDDING_DIM)
 
 
 def _preload_embedder():
@@ -362,13 +371,13 @@ class HNSWKnowledgeBase:
 
     # ---- Embedding helpers ---------------------------------------------------
 
-    async def _embed_text(self, text: str) -> np.ndarray:
-        results = await asyncio.to_thread(self._embedder.encode, [text])
+    async def _embed_text(self, text: str, input_type: str = 'passage') -> np.ndarray:
+        results = await asyncio.to_thread(self._embedder.encode, [text], 32, input_type)
         return results[0]
 
     async def _embed_texts(self, texts: list[str], batch_size: int = 32) -> list[np.ndarray]:
         """Batch-embed a list of texts (runs encoding in a worker thread)."""
-        return await asyncio.to_thread(self._embedder.encode, texts, batch_size)
+        return await asyncio.to_thread(self._embedder.encode, texts, batch_size, 'passage')
 
     # Public aliases for compatibility
     async def embed_text(self, text: str) -> np.ndarray:
@@ -523,7 +532,7 @@ class HNSWKnowledgeBase:
         min_score = min_score if min_score is not None else SEARCH_MIN_SCORE
         top_k = top_k or SEARCH_TOP_K
 
-        query_emb = await self._embed_text(query)
+        query_emb = await self._embed_text(query, input_type='query')
         search_k = min(top_k * 3, self._index.ntotal)
         distances, indices = self._index.search(
             np.array([query_emb], dtype='float32'), search_k

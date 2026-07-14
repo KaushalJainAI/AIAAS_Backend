@@ -2944,8 +2944,9 @@ def upload_file(request, session_id: str):
     # Hierarchical RAG: Index into User Knowledge Base
     if file_type in ('pdf', 'pptx', 'text') and extracted_text:
         try:
+            import threading
             from inference.models import Document as InferenceDoc
-            from inference.tasks import process_document_task
+            from inference.tasks import process_document
 
             inf_doc = InferenceDoc.objects.create(
                 user=request.user,
@@ -2959,8 +2960,10 @@ def upload_file(request, session_id: str):
             attachment.inference_document = inf_doc
             attachment.save(update_fields=['inference_document'])
 
-            # Index into User KB (persistent, read-only from chat sessions)
-            process_document_task.delay(inf_doc.id)
+            # Index into User KB inline (no Celery worker/broker on this box).
+            threading.Thread(
+                target=process_document, args=(inf_doc.id,), daemon=True
+            ).start()
         except Exception as e:
             logger.error(f"Failed to trigger RAG indexing for {file.name}: {e}")
 
