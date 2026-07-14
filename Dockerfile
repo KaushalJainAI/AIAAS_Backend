@@ -22,8 +22,7 @@ COPY requirements-linux.txt .
 # The builder stage's site-packages is what we COPY to runtime — the cache stays here.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --upgrade pip \
-    && pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 \
-    && pip install -r requirements-linux.txt
+    && pip install --retries 10 --timeout 120 --resume-retries 10 -r requirements-linux.txt
 
 
 # ── Stage 2: runtime — no compilers, only runtime shared libs ───────────
@@ -33,11 +32,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DJANGO_SETTINGS_MODULE=workflow_backend.settings.deployment
 
+# nodejs/npm are required at runtime: stdio MCP servers are launched as
+# `npx -y @modelcontextprotocol/...` subprocesses by mcp_integration.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
     && apt-get update \
-    && apt-get install -y --no-install-recommends libpq5 libmagic1 curl
+    && apt-get install -y --no-install-recommends libpq5 libmagic1 curl nodejs npm
 
 # Copy installed Python packages and console scripts from the builder.
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages

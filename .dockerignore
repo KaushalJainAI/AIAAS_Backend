@@ -21,7 +21,10 @@ db.sqlite3-*
 data/
 media/
 staticfiles/
-static/              # collectstatic regenerates this; for prod it goes to S3
+# collectstatic regenerates this; also holds the local HF model_cache.
+# NOTE: .dockerignore has no inline comments — a trailing `# ...` becomes part
+# of the pattern and silently disables it. Keep comments on their own line.
+static/
 # NOTE: do NOT exclude logs/ — it is a Django app (Backend/logs/apps.py).
 #       Same for tests/ below. Only exclude actual log *files*.
 *.log
