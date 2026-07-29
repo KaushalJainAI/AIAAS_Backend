@@ -6,10 +6,13 @@ status-machine bypasses, and webhook spoofing.
 """
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
+from executor.trigger_manager import TriggerManager, TriggerRegistryUnavailable
 from orchestrator.models import Workflow
 
 User = get_user_model()
@@ -46,6 +49,14 @@ class WebhookAngry(TestCase):
     def setUp(self):
         self.alice = User.objects.create_user("alice", "a@x.com", "x" * 12)
         self.client = APIClient()
+        # These tests are about how the *view* handles hostile input, so the
+        # registry is stubbed to "nothing is registered". Left unstubbed the
+        # lookup would hit a Redis that isn't running under test settings, and
+        # every case would error on the connection instead of exercising the
+        # path it was written for.
+        patcher = patch.object(TriggerManager, "lookup_webhook", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_webhook_for_nonexistent_user_does_not_500(self):
         # /api/webhooks/<user_id>/<path>
@@ -65,6 +76,34 @@ class WebhookAngry(TestCase):
         )
         # Django URL resolver should normalise — anything but 5xx is OK.
         self.assertLess(r.status_code, 500)
+
+    def test_registry_outage_is_503_not_404(self):
+        """
+        A Redis outage must not be reported as "no such webhook". Senders like
+        GitHub disable a hook that keeps 404ing, so answering 404 here would
+        turn a transient outage into a permanently unhooked integration.
+        """
+        with patch.object(
+            TriggerManager, "lookup_webhook",
+            side_effect=TriggerRegistryUnavailable("connection refused"),
+        ):
+            r = self.client.post(
+                f"/api/webhooks/{self.alice.id}/test", {"x": 1}, format="json"
+            )
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r["Retry-After"], "30")
+
+    def test_registry_outage_does_not_leak_internals(self):
+        """The 503 body is for an untrusted caller — no host names, no stack."""
+        with patch.object(
+            TriggerManager, "lookup_webhook",
+            side_effect=TriggerRegistryUnavailable("Error 111 connecting to redis-prod:6379"),
+        ):
+            r = self.client.post(
+                f"/api/webhooks/{self.alice.id}/test", {}, format="json"
+            )
+        self.assertNotIn("redis-prod", r.content.decode())
+        self.assertNotIn("6379", r.content.decode())
 
 
 class HealthCheckTests(TestCase):

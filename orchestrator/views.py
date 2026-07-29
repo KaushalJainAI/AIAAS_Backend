@@ -54,7 +54,7 @@ from compiler.validators import (
     validate_type_compatibility,
 )
 from logs.models import ExecutionLog
-from executor.trigger_manager import get_trigger_manager
+from executor.trigger_manager import TriggerRegistryUnavailable, get_trigger_manager
 from executor.king import AuthorizationError, StateConflictError
 
 logger = logging.getLogger(__name__)
@@ -1546,8 +1546,20 @@ def receive_webhook(request, user_id, webhook_path):
     Matches user_id and path in Redis registry.
     """
     mgr = get_trigger_manager()
-    config = mgr.lookup_webhook(user_id, webhook_path)
-    
+    try:
+        config = mgr.lookup_webhook(user_id, webhook_path)
+    except TriggerRegistryUnavailable as e:
+        # We can't tell whether this hook exists. Say so honestly: 503 is
+        # retryable and senders back off, where a 404 would claim the hook is
+        # gone and get it disabled at the far end.
+        _webhook_logger.error(f"Webhook registry unavailable for {user_id}/{webhook_path}: {e}")
+        response = JsonResponse(
+            {"error": "Webhook registry temporarily unavailable. Retry shortly."},
+            status=503,
+        )
+        response["Retry-After"] = "30"
+        return response
+
     if not config:
         _webhook_logger.warning(f"Webhook not found: {user_id}/{webhook_path}")
         return JsonResponse({"error": "Webhook not found"}, status=404)

@@ -9,6 +9,18 @@ from workflow_backend.celery import app
 
 logger = logging.getLogger(__name__)
 
+
+class TriggerRegistryUnavailable(RuntimeError):
+    """
+    Raised when the Redis registry can't be reached, so we genuinely do not
+    know whether a webhook is registered or not.
+
+    This is deliberately distinct from "the webhook isn't registered". The
+    caller must not collapse the two: answering 404 during an outage tells
+    GitHub the hook is gone, and GitHub disables hooks that keep 404ing.
+    """
+
+
 # Trigger node classifications — centralised so adding a new polling/webhook
 # trigger is a single-line change.
 _WEBHOOK_TRIGGERS = {"webhook_trigger", "github_trigger", "telegram_trigger"}
@@ -91,11 +103,18 @@ class TriggerManager:
 
     def lookup_webhook(self, user_id: int, path: str) -> dict | None:
         """
-        Lookup a webhook configuration by user and path.
+        Look up a webhook configuration by user and path.
+
+        Returns None when no such webhook is registered. Raises
+        TriggerRegistryUnavailable when Redis can't answer — an outage is not
+        the same fact as an absent registration.
         """
         path = path.strip("/")
         key = f"webhook:{user_id}/{path}"
-        data = self._redis.get(key)
+        try:
+            data = self._redis.get(key)
+        except redis.RedisError as e:
+            raise TriggerRegistryUnavailable(str(e)) from e
         if data:
             return json.loads(data)
         return None
