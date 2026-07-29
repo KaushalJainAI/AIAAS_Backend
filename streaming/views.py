@@ -41,7 +41,9 @@ class ExecutionStreamView(APIView):
         """Stream execution events via SSE."""
         # Verify user owns this execution
         try:
-            execution = ExecutionLog.objects.get(
+            # Ownership check: the .get() raising DoesNotExist *is* the
+            # guard. Nothing needs the row, but the query must stay.
+            ExecutionLog.objects.get(
                 execution_id=execution_id,
                 user=request.user
             )
@@ -128,7 +130,9 @@ class ExecutionEventsHistoryView(APIView):
         """Get execution event history."""
         # Verify user owns this execution
         try:
-            execution = ExecutionLog.objects.get(
+            # Ownership check: the .get() raising DoesNotExist *is* the
+            # guard. Nothing needs the row, but the query must stay.
+            ExecutionLog.objects.get(
                 execution_id=execution_id,
                 user=request.user
             )
@@ -232,7 +236,8 @@ def test_stream_event(request, execution_id: UUID):
     
     # Verify user owns this execution
     try:
-        execution = ExecutionLog.objects.get(
+        # Ownership check: the .get() raising DoesNotExist *is* the guard.
+        ExecutionLog.objects.get(
             execution_id=execution_id,
             user=request.user
         )

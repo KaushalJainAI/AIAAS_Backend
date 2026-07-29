@@ -1470,7 +1470,8 @@ def export_workflow_zip(request, workflow_id):
 
     # Verify ownership
     try:
-        workflow = Workflow.objects.get(id=workflow_id, user=request.user)
+        # Ownership check: the .get() raising DoesNotExist *is* the guard.
+        Workflow.objects.get(id=workflow_id, user=request.user)
     except Workflow.DoesNotExist:
         return HttpResponse(
             '{"error": "Workflow not found"}',
