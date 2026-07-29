@@ -124,7 +124,7 @@ async def stream_nvidia_chat(
         yield {"type": "error", "message": "NVIDIA API key not configured on this server."}
         return
 
-    model = model or getattr(settings, "NVIDIA_GUEST_MODEL", "nvidia/llama-3.3-nemotron-super-49b-v1")
+    model = model or getattr(settings, "NVIDIA_GUEST_MODEL", "nvidia/nemotron-3-super-120b-a12b")
 
     payload = {
         "model": model,

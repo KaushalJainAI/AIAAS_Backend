@@ -284,9 +284,12 @@ REST_FRAMEWORK = {
 
 # --- Guest chat (anonymous NVIDIA NIM demo) ---
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '')
+# Nemotron 3 Super is 120B total but 12B active per token, so it answers at
+# roughly small-model latency while reasoning like a much larger one — which is
+# what makes it worth serving to anonymous visitors.
 NVIDIA_GUEST_MODEL = os.environ.get(
     'NVIDIA_GUEST_MODEL',
-    'nvidia/llama-3.3-nemotron-super-49b-v1',
+    'nvidia/nemotron-3-super-120b-a12b',
 )
 GUEST_CHAT_MAX_TOKENS = int(os.environ.get('GUEST_CHAT_MAX_TOKENS', '200000'))
 GUEST_USER_EMAIL = os.environ.get('GUEST_USER_EMAIL', 'guest@aiaas.local')
