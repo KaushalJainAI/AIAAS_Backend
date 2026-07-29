@@ -5,8 +5,7 @@ Provides blocking approval gates with timeouts and notifications.
 """
 import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import Any
+from datetime import datetime
 from uuid import UUID, uuid4
 from enum import Enum
 

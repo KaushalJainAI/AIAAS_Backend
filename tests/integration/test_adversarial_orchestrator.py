@@ -9,7 +9,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from rest_framework.test import APIClient
 
 from executor.trigger_manager import TriggerManager, TriggerRegistryUnavailable

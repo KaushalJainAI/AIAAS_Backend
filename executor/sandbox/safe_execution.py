@@ -7,8 +7,7 @@ with method whitelisting and validation.
 import ast
 import logging
 import builtins
-from typing import Any, Callable
-from functools import wraps
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +261,6 @@ class CodeSandbox:
             Dict with 'result', 'output', 'error' keys
         """
         import io
-        import sys
         from contextlib import redirect_stdout, redirect_stderr
         
         # Validate first

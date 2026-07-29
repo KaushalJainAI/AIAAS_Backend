@@ -3,8 +3,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from django.contrib.auth.models import User
 from uuid import uuid4
-from unittest.mock import patch, MagicMock
-import asyncio
+from unittest.mock import patch
 
 class ExecutionControlSecurityTests(APITestCase):
     """

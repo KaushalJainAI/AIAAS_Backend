@@ -5,4 +5,6 @@ class TemplatesConfig(AppConfig):
     name = 'templates'
 
     def ready(self):
-        import templates.signals
+        # Imported for the @receiver side effects, not for a name.
+        # See orchestrator/apps.py.
+        import templates.signals  # noqa: F401

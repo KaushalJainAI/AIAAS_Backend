@@ -16,7 +16,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase
 
 from compiler.compiler import (
     WorkflowCompiler,
@@ -27,7 +27,7 @@ from compiler.compiler import (
 )
 from compiler.config_access import get_credential_ref, get_node_config
 from compiler.node_types import CONDITIONAL_NODE_TYPES, LOOP_NODE_TYPES
-from compiler.schemas import CompileError, ExecutionContext, _coerce_to_items
+from compiler.schemas import ExecutionContext, _coerce_to_items
 from compiler.validators import (
     topological_sort,
     validate_credentials,

@@ -8,7 +8,7 @@ Tests for:
 """
 from django.test import TestCase, RequestFactory
 from django.contrib.auth.models import User
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from django.urls import reverse
 from rest_framework.test import APIClient
 

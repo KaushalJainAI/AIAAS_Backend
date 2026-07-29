@@ -1,6 +1,5 @@
 import aiohttp
 import logging
-import json
 from cryptography.fernet import Fernet
 from asgiref.sync import sync_to_async
 

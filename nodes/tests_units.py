@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 from django.test import SimpleTestCase
 
 from nodes.handlers.base import (
-    BaseNodeHandler, FieldConfig, FieldType, HandleDef, NodeCategory,
+    BaseNodeHandler, FieldConfig, FieldType, NodeCategory,
     NodeExecutionResult, NodeItem, build_json_schema_from_fields,
     format_schema_for_prompt,
 )

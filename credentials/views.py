@@ -1,9 +1,9 @@
-from rest_framework import status, serializers as drf_serializers
+from rest_framework import status
 from adrf import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer, OpenApiResponse
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse
 from django.conf import settings as django_settings
 from django.core import signing
 from urllib.parse import urlparse
@@ -258,7 +258,7 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         redirect_origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
         if redirect_origin not in ALLOWED_REDIRECT_ORIGINS:
             return Response(
-                {'error': f'Redirect URI origin is not allowed'},
+                {'error': 'Redirect URI origin is not allowed'},
                 status=status.HTTP_400_BAD_REQUEST
             )
             

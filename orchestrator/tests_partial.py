@@ -2,8 +2,6 @@
 from django.contrib.auth.models import User
 from rest_framework import status
 from rest_framework.test import APITestCase, APIClient
-import json
-from uuid import uuid4
 
 class PartialExecutionTests(APITestCase):
     def setUp(self):

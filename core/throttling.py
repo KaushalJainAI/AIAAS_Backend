@@ -10,7 +10,6 @@ Usage:
         ...
 """
 from rest_framework.throttling import UserRateThrottle, SimpleRateThrottle
-from rest_framework.exceptions import Throttled
 from django.core.cache import cache
 import logging
 

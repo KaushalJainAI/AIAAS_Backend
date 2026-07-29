@@ -16,7 +16,6 @@ from rest_framework.response import Response
 from asgiref.sync import sync_to_async
 
 from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiResponse
-from drf_spectacular.types import OpenApiTypes
 from rest_framework import serializers as drf_serializers
 
 from core.pagination import paginate_keyset

@@ -1,5 +1,5 @@
 from django.test import TestCase
-from .handlers.base import BaseNodeHandler, FieldConfig, FieldType, HandleDef, NodeSchema
+from .handlers.base import BaseNodeHandler, FieldConfig, FieldType
 from .handlers.registry import NodeRegistry
 
 class TransformationNode(BaseNodeHandler):

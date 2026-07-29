@@ -6,7 +6,7 @@ Provides node discovery and schema generation for frontend.
 """
 import logging
 from typing import Type
-from nodes.handlers.base import BaseNodeHandler, NodeSchema
+from nodes.handlers.base import BaseNodeHandler
 
 logger = logging.getLogger(__name__)
 

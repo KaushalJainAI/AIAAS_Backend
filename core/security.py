@@ -13,7 +13,6 @@ Usage:
         log_security_event(violations)
 """
 import re
-import html
 import logging
 from typing import Optional
 from dataclasses import dataclass, field

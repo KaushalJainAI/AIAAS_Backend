@@ -17,7 +17,6 @@ Usage:
 import json
 import logging
 from datetime import datetime
-from uuid import UUID
 from typing import Optional
 
 from channels.generic.websocket import AsyncWebsocketConsumer

@@ -8,7 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
-from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer, OpenApiResponse
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse
 
 from .client import MCPClientManager
 from .credential_injector import (

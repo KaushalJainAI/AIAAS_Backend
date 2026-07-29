@@ -31,7 +31,6 @@ from orchestrator.interface import (
     OrchestratorInterface,
     OrchestratorDecision,
     ContinueDecision,
-    PauseDecision,
     AbortDecision,
     ExecutionState,
     SupervisionLevel,
@@ -45,7 +44,6 @@ from executor.exceptions import (
     StateConflictError,
 )
 from executor.hitl import HITLRequest, HITLRequestType
-from logs.models import ExecutionLog
 from skills.models import Skill
 from workflow_backend.thresholds import DEFAULT_HITL_TIMEOUT_SECONDS, MAX_LOOP_COUNT, EXECUTION_TTL_SECONDS
 
@@ -1114,7 +1112,7 @@ Output ONLY the JSON object, no other text."""
                 await self._broadcast_activity({"type": "thought", "content": f"Found direct template match: {template['name']}"})
                 return await self._clone_template(template, prompt, effective_user_id, modify=False)
             elif strategy == "clone" and template:
-                await self._broadcast_activity({"type": "thought", "content": f"Found similar template, adapting it..."})
+                await self._broadcast_activity({"type": "thought", "content": "Found similar template, adapting it..."})
                 return await self._clone_template(template, prompt, effective_user_id, modify=True)
             
             # Default: Generate from scratch using LLM

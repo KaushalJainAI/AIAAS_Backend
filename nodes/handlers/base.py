@@ -202,7 +202,6 @@ def format_schema_for_prompt(schema: dict) -> str:
     """Format a JSON schema as a prompt instruction for models without native JSON mode."""
     if not schema:
         return ""
-    import json
     fields_desc = []
     for name, prop in schema.get("properties", {}).items():
         fields_desc.append(f'  "{name}": <{prop["type"]}>')

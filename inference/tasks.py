@@ -4,7 +4,7 @@ from django.utils import timezone
 from asgiref.sync import async_to_sync
 
 from .models import Document, KnowledgeBase
-from .engine import get_hnsw_kb, get_kb_manager
+from .engine import get_hnsw_kb
 from .utils import extract_text_from_file
 
 logger = logging.getLogger(__name__)

@@ -13,7 +13,7 @@ Endpoint reference (Nov 2025+ docs):
 """
 import base64
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import requests
 

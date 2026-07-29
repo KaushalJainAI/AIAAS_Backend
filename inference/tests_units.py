@@ -67,7 +67,6 @@ class ChunkTextTests(SimpleTestCase):
 # ─────────────────────────────────────────────────────────────────────────
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
 
 from inference.engine import RAGPipeline, SearchResult
 

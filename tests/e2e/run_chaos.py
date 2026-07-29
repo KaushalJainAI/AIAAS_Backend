@@ -8,8 +8,6 @@ return 5xx. A 5xx here is a bug.
 """
 from __future__ import annotations
 
-import string
-import time
 
 import requests
 

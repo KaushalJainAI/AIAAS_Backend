@@ -4,10 +4,9 @@ Logs App API Views - Insights and Analytics Endpoints
 Provides execution statistics, per-workflow metrics, and audit trail APIs.
 """
 from datetime import timedelta
-from typing import Any
 
 from django.db.models import Count, Sum, Avg, F, Q
-from django.db.models.functions import TruncDate, TruncHour
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 from adrf.decorators import api_view
 from rest_framework.decorators import permission_classes

@@ -286,7 +286,7 @@ class OpenAINode(BaseNodeHandler):
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
                             if not _validate_attachment_path(file_path):
-                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                logger.warning("Blocked path traversal in Gemini attachment")
                                 continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
@@ -902,7 +902,7 @@ class GeminiNode(BaseNodeHandler):
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
                             if not _validate_attachment_path(file_path):
-                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                logger.warning("Blocked path traversal in Gemini attachment")
                                 continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
@@ -1128,7 +1128,7 @@ class GeminiNode(BaseNodeHandler):
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
                             if not _validate_attachment_path(file_path):
-                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                logger.warning("Blocked path traversal in Gemini attachment")
                                 continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
@@ -1361,7 +1361,7 @@ class OllamaNode(BaseNodeHandler):
                         try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
                             if not _validate_attachment_path(file_path):
-                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                logger.warning("Blocked path traversal in Gemini attachment")
                                 continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
@@ -1590,7 +1590,7 @@ class OllamaNode(BaseNodeHandler):
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
                             if not _validate_attachment_path(file_path):
-                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                logger.warning("Blocked path traversal in Gemini attachment")
                                 continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
@@ -2542,7 +2542,7 @@ class OpenRouterNode(BaseNodeHandler):
                     try:
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
                             if not _validate_attachment_path(file_path):
-                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                logger.warning("Blocked path traversal in Gemini attachment")
                                 continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
@@ -3519,7 +3519,7 @@ class XAINode(BaseNodeHandler):
                                 
                             file_path = att.file.path if hasattr(att.file, 'path') else att.file.name
                             if not _validate_attachment_path(file_path):
-                                logger.warning(f"Blocked path traversal in Gemini attachment")
+                                logger.warning("Blocked path traversal in Gemini attachment")
                                 continue
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')

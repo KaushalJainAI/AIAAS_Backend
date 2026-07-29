@@ -5,7 +5,6 @@ from django.conf import settings
 
 from compiler.config_access import get_node_config
 from compiler.validators import get_node_type
-from workflow_backend.celery import app
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,5 @@
 import os
 import django
-import sys
 
 # Set up Django environment BEFORE importing models
 # Fix: Correct settings path to workflow_backend.settings

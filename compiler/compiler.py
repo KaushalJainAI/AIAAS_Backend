@@ -25,8 +25,11 @@ from langgraph.graph import StateGraph, END, START
 from langgraph.graph.state import CompiledStateGraph
 
 from .schemas import (
-    NodeExecutionPlan,  # Re-exported for back-compat with external callers.
     ExecutionContext,
+    # Unused in this module on purpose: re-exported for back-compat with
+    # external callers, which the linter cannot see. Nothing in this repo
+    # imports it from here, so dropping it looks safe and would not be.
+    NodeExecutionPlan,  # noqa: F401
 )
 from .config_access import get_node_config, get_node_data
 from .node_types import CONDITIONAL_NODE_TYPES, LOOP_NODE_TYPES
@@ -277,7 +280,7 @@ class WorkflowCompiler:
         # Imported inside the closure to avoid top-level circular imports.
         async def node_function(state: WorkflowState) -> WorkflowState:
             from orchestrator.interface import (
-                AbortDecision, PauseDecision, SupervisionLevel,
+                AbortDecision, PauseDecision,
             )
 
             state["current_node"] = node_id

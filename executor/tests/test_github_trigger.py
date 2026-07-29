@@ -1,7 +1,6 @@
 import pytest
 import asyncio
 from uuid import uuid4
-from datetime import datetime
 from compiler.schemas import ExecutionContext
 from nodes.handlers.triggers import GitHubTriggerNode
 

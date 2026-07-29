@@ -3,7 +3,6 @@ Inference App API Views — Documents, Knowledge Bases, and RAG Endpoints
 """
 import threading
 import logging
-from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
@@ -14,7 +13,6 @@ from adrf.decorators import api_view
 from rest_framework.decorators import permission_classes
 from drf_spectacular.utils import extend_schema, inline_serializer
 from drf_spectacular.types import OpenApiTypes
-from rest_framework import serializers as drf_serializers
 
 from core.pagination import paginate_keyset
 from .models import Document, KnowledgeBase

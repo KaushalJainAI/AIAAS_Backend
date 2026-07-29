@@ -1,9 +1,7 @@
 import logging
 import asyncio
 import numpy as np
-from typing import List, Dict, Any, Optional
-from django.db import models
-from django.conf import settings
+from typing import Dict, Any, Optional
 from difflib import SequenceMatcher
 
 from .models import Skill

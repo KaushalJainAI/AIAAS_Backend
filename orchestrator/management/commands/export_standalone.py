@@ -7,7 +7,6 @@ Flask application that can run independently without Django.
 Usage:
     python manage.py export_standalone <workflow_id> [--output-dir ./exports] [--zip]
 """
-import os
 import re
 import json
 import shutil

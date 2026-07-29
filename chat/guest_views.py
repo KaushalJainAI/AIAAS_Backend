@@ -16,7 +16,6 @@ import json
 import logging
 from uuid import UUID
 
-from adrf.decorators import api_view
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.http import StreamingHttpResponse

@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 from django.test import SimpleTestCase
 
 from executor.test_generator import (
-    ValidationResult, generate_test_input, validate_test_result,
+    generate_test_input, validate_test_result,
 )
 
 

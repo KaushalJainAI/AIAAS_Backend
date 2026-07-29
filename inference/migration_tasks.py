@@ -67,7 +67,6 @@ def reindex_all_knowledge_bases(self):
                 logger.info(f"[Reindex] KB {kb_id} ({kb_name}) — rebuilt successfully.")
 
                 # Update DB stats
-                from inference.models import Document
                 KnowledgeBase.objects.filter(id=kb_id).update(
                     embedding_model=EMBEDDER_VERSION.split(':')[0],
                     vector_dim=int(EMBEDDER_VERSION.split(':')[1]),

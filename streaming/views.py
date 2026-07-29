@@ -6,11 +6,10 @@ Provides HTTP endpoints for:
 - Stream history/replay
 - Connection management
 """
-import asyncio
 import logging
 from uuid import UUID
 
-from django.http import StreamingHttpResponse, JsonResponse
+from django.http import StreamingHttpResponse
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response

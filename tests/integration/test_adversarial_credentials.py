@@ -7,9 +7,7 @@ verify the model doesn't blindly hand back garbage or leak via exceptions.
 """
 from __future__ import annotations
 
-import json
 
-from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 

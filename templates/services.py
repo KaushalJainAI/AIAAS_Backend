@@ -2,9 +2,8 @@ import logging
 import asyncio
 import numpy as np
 from typing import List, Dict, Any, Optional
-from django.db.models import Avg, Count, Q, F
-from django.db import transaction, models
-from django.conf import settings
+from django.db.models import Avg, Count
+from django.db import models
 
 from .models import WorkflowTemplate, WorkflowRating
 from inference.engine import get_platform_knowledge_base
@@ -17,7 +16,6 @@ class TemplateService:
         Create or update a template from a workflow.
         """
         from orchestrator.models import Workflow
-        from asgiref.sync import sync_to_async
         
         try:
             # Use sync_to_async for DB lookups if not using aget

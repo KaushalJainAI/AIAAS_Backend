@@ -1,9 +1,6 @@
 from django.db import models
 from django.conf import settings
 from cryptography.fernet import Fernet
-from django.conf import settings as django_settings
-import base64
-import os
 
 
 class CredentialType(models.Model):
@@ -184,7 +181,6 @@ class Credential(models.Model):
         """
         import json
         import logging
-        from django.utils import timezone
         
         logger = logging.getLogger(__name__)
         

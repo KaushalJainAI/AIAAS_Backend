@@ -8,7 +8,7 @@ Includes:
 """
 import json
 import logging
-from typing import Callable, Optional
+from typing import Optional
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils.deprecation import MiddlewareMixin

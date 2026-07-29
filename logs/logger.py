@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from datetime import datetime
 from typing import Any, Dict, List
 from uuid import UUID
 
@@ -447,8 +446,6 @@ class ExecutionLogger:
         Persist an orchestrator thought immediately to the DB.
         Thoughts are cognitive events and bypass buffering for immediate visibility.
         """
-        from django.contrib.auth import get_user_model
-        from orchestrator.models import Workflow
         from .models import OrchestratorThought
         
         try:

@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from .handlers.registry import get_registry
-from .models import AIProvider, AIModel
+from .models import AIProvider
 from credentials.models import Credential
 from django.views.decorators.cache import never_cache
 from django.utils.decorators import method_decorator

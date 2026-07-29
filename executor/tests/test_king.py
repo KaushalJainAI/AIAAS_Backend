@@ -15,7 +15,6 @@ from django.test import SimpleTestCase
 
 from executor.exceptions import LLMProviderError
 from executor.king import ExecutionHandle, KingOrchestrator
-from orchestrator.interface import ExecutionState, SupervisionLevel
 
 
 class ExecutionHandleGoalTests(SimpleTestCase):

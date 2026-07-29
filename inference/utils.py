@@ -3,7 +3,6 @@ import csv
 import logging
 import magic
 import bleach
-from io import StringIO
 from pypdf import PdfReader
 from django.core.exceptions import ValidationError
 from workflow_backend.thresholds import MAX_DOCUMENT_SIZE

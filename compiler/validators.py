@@ -18,8 +18,8 @@ import re
 from collections import defaultdict, deque
 from typing import Any
 
-from .config_access import get_credential_ref, get_node_config, get_node_data
-from .node_types import LOOP_NODE_TYPES, TRIGGER_NODE_TYPES
+from .config_access import get_credential_ref, get_node_config
+from .node_types import LOOP_NODE_TYPES
 from .schemas import CompileError
 
 

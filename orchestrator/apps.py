@@ -12,7 +12,10 @@ class OrchestratorConfig(AppConfig):
         """
         import sys
         import os
-        import orchestrator.signals  # Register signals
+        # Load-bearing despite looking unused: importing the module is what
+        # runs the @receiver decorators. Dropping it silently disables trigger
+        # cleanup on workflow delete.
+        import orchestrator.signals  # noqa: F401
 
         # Avoid running during management commands like migrate or makemigrations
         if any(cmd in sys.argv for cmd in ['migrate', 'makemigrations', 'collectstatic', 'test', 'showmigrations']):

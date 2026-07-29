@@ -11,7 +11,7 @@ from rest_framework.throttling import AnonRateThrottle
 from rest_framework.throttling import UserRateThrottle
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum
 from django.utils import timezone as django_timezone
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -25,7 +25,6 @@ import uuid
 
 from .models import UserProfile, APIKey, UsageTracking, PasswordOTP
 from .serializers import (
-    UserSerializer,
     UserProfileSerializer,
     UserRegistrationSerializer,
     CustomTokenObtainPairSerializer,
@@ -40,7 +39,6 @@ from .serializers import (
     PasswordResetConfirmSerializer,
 )
 from logs.models import ExecutionLog
-from .permissions import IsOwner
 
 
 # ==================== CUSTOM THROTTLES ====================
@@ -217,7 +215,7 @@ class GoogleLoginView(APIView):
         # 2. Get User Info
         try:
             user_info = provider.get_user_info(access_token)
-        except Exception as e:
+        except Exception:
             return Response({'error': 'Failed to fetch user info'}, status=status.HTTP_400_BAD_REQUEST)
             
         email = user_info.get('email')

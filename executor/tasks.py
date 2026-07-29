@@ -523,7 +523,6 @@ def update_template_metrics(template_id: int, success: bool, duration_ms: int):
     Update usage metrics for a template.
     """
     from orchestrator.models import WorkflowTemplate
-    from django.db.models import F
     
     try:
         template = WorkflowTemplate.objects.get(id=template_id)

@@ -5,7 +5,6 @@ Supports email and push notifications for HITL requests.
 """
 import logging
 from datetime import datetime
-from typing import Any
 from enum import Enum
 
 logger = logging.getLogger(__name__)

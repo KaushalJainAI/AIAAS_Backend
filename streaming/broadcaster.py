@@ -26,7 +26,6 @@ from typing import AsyncGenerator, Optional
 from uuid import UUID
 from dataclasses import dataclass, asdict
 
-from django.core.cache import cache
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 

@@ -7,8 +7,6 @@ import ast
 import logging
 from typing import Type
 import importlib.util
-import sys
-from io import StringIO
 
 from nodes.handlers.base import BaseNodeHandler, NodeCategory, FieldType
 

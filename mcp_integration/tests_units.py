@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 
 from mcp_integration.credential_injector import (
     CredentialInjector, CredentialInvalidError, CredentialMissingError,
-    ResolvedCredentials, _coerce_user_id, _extract_field,
+    _coerce_user_id, _extract_field,
     _MAPPING_RE, _PLACEHOLDER_RE,
 )
 

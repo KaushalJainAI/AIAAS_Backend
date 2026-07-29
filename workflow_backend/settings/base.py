@@ -338,8 +338,11 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
+# These look unused, but a settings module *is* its namespace — Django reads
+# these names off it directly, so the import is the assignment. The module is
+# present; the guard only covers a build that strips it.
 try:
-    from workflow_backend.thresholds import (
+    from workflow_backend.thresholds import (  # noqa: F401
         DATA_UPLOAD_MAX_MEMORY_SIZE,
         FILE_UPLOAD_MAX_MEMORY_SIZE,
         DATA_UPLOAD_MAX_NUMBER_FIELDS,

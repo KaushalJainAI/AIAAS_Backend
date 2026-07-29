@@ -7,7 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Generation, ImagineConversation, ImagineMessage
+from .models import Generation, ImagineConversation
 from .serializers import (
     GenerationSerializer,
     ImagineConversationDetailSerializer,
