@@ -137,3 +137,8 @@ __pycache__/
 *.pyc
 .venv/
 
+
+# collectstatic output. model_cache lives under static/ but is ML weights, not
+# assets — collect it and you publish 1.3GB at /static/model_cache/.
+# Always: manage.py collectstatic --ignore=model_cache
+staticfiles/

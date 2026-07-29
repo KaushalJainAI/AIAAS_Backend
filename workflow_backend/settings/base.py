@@ -143,6 +143,10 @@ SITE_ID = 1
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves STATIC_ROOT itself. runserver only serves static when DEBUG is on,
+    # so with DEBUG=False the admin loaded with no CSS; nginx proxies /static
+    # straight through to Django, so there was nothing else to fall back on.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
