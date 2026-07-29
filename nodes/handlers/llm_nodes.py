@@ -291,7 +291,11 @@ class OpenAINode(BaseNodeHandler):
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}})
-                        except: pass
+                        except (OSError, ValueError, UnicodeDecodeError) as e:
+                            # One unreadable file shouldn't fail the whole request, but it
+                            # must not vanish either: a silently dropped attachment looks
+                            # to the user like the model ignored what they sent.
+                            logger.warning(f"Skipping unreadable attachment: {e}")
 
                 messages.append({"role": "user", "content": user_content})
 
@@ -378,7 +382,8 @@ class OpenAINode(BaseNodeHandler):
                                         yield {"type": "thinking", "content": text}
                                 else:
                                     yield {"type": "content", "content": text}
-                        except: continue
+                        except Exception:
+                            continue
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}
@@ -668,7 +673,7 @@ class OpenAINode(BaseNodeHandler):
                         parsed = json.loads(content.strip().strip("```json").strip("```"))
                         captured_thinking = parsed.get("thinking")
                         content = parsed.get("content", content)
-                    except:
+                    except (ValueError, AttributeError, TypeError):
                         pass # Fallback to raw content
 
                 if show_thinking and not captured_thinking and not is_gen:
@@ -910,7 +915,11 @@ class GeminiNode(BaseNodeHandler):
                             if att.file_type == 'image': mime_type = "image/jpeg"
                             elif att.file_type == 'video': mime_type = "video/mp4"
                             final_user_parts.append({"inline_data": {"mime_type": mime_type, "data": b64_data}})
-                        except: pass
+                        except (OSError, ValueError, UnicodeDecodeError) as e:
+                            # One unreadable file shouldn't fail the whole request, but it
+                            # must not vanish either: a silently dropped attachment looks
+                            # to the user like the model ignored what they sent.
+                            logger.warning(f"Skipping unreadable attachment: {e}")
 
                 contents.append({"role": "user", "parts": final_user_parts})
 
@@ -1006,7 +1015,7 @@ class GeminiNode(BaseNodeHandler):
                                         "total_tokens": usage.get("totalTokenCount", 0),
                                     }
                                 }
-                        except:
+                        except Exception:
                             continue
 
         except Exception as e:
@@ -1263,7 +1272,7 @@ class GeminiNode(BaseNodeHandler):
                         parsed = json.loads(content.strip().strip("```json").strip("```"))
                         captured_thinking = parsed.get("thinking")
                         content = parsed.get("content", content)
-                    except:
+                    except (ValueError, AttributeError, TypeError):
                         # Fallback to <think> tags for models that use them
                         import re
                         match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
@@ -1366,7 +1375,11 @@ class OllamaNode(BaseNodeHandler):
                             with open(file_path, "rb") as f:
                                 b64_data = base64.b64encode(f.read()).decode('utf-8')
                             user_content.append({"type": "image", "image": b64_data})
-                        except: pass
+                        except (OSError, ValueError, UnicodeDecodeError) as e:
+                            # One unreadable file shouldn't fail the whole request, but it
+                            # must not vanish either: a silently dropped attachment looks
+                            # to the user like the model ignored what they sent.
+                            logger.warning(f"Skipping unreadable attachment: {e}")
                 
                 messages.append({"role": "user", "content": user_content if len(user_content) > 1 else effective_prompt})
 
@@ -1426,7 +1439,8 @@ class OllamaNode(BaseNodeHandler):
                                         "eval_count": chunk.get("eval_count")
                                     }
                                 }
-                        except: continue
+                        except Exception:
+                            continue
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}
@@ -1655,7 +1669,7 @@ class OllamaNode(BaseNodeHandler):
                         parsed = json.loads(content.strip().strip("```json").strip("```"))
                         captured_thinking = parsed.get("thinking")
                         content = parsed.get("content", content)
-                    except:
+                    except (ValueError, AttributeError, TypeError):
                         pass # Fallback
 
                 if show_thinking and not captured_thinking:
@@ -1835,7 +1849,8 @@ class PerplexityNode(BaseNodeHandler):
                             if chunk.get("citations"):
                                 yield {"type": "citations", "citations": chunk["citations"]}
 
-                        except: continue
+                        except Exception:
+                            continue
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}
@@ -2116,7 +2131,7 @@ class PerplexityNode(BaseNodeHandler):
                         parsed = json.loads(content.strip().strip("```json").strip("```"))
                         captured_thinking = parsed.get("thinking")
                         content = parsed.get("content", content)
-                    except:
+                    except (ValueError, AttributeError, TypeError):
                         pass # Fallback to raw content
 
                 if show_thinking and not captured_thinking:
@@ -2794,7 +2809,7 @@ class OpenRouterNode(BaseNodeHandler):
                         captured_thinking = parsed_json.get("thinking")
                         # For content, prioritize 'content' or 'code' (for json_code)
                         content = parsed_json.get("content") or parsed_json.get("code") or content
-                except:
+                except (ValueError, AttributeError, TypeError):
                     pass
 
             if show_thinking and not captured_thinking:
@@ -3078,7 +3093,8 @@ class HuggingFaceNode(BaseNodeHandler):
                                 else:
                                     yield {"type": "content", "content": text}
                                     
-                        except: continue
+                        except Exception:
+                            continue
 
         except Exception as e:
             yield {"type": "error", "message": f"Hugging Face error: {str(e)}"}
@@ -3203,7 +3219,7 @@ class HuggingFaceNode(BaseNodeHandler):
                         parsed = json.loads(content.strip().strip("```json").strip("```"))
                         captured_thinking = parsed.get("thinking")
                         content = parsed.get("content", content)
-                    except:
+                    except (ValueError, AttributeError, TypeError):
                         pass # Fallback
 
                 if show_thinking and not captured_thinking:
@@ -3386,7 +3402,11 @@ class XAINode(BaseNodeHandler):
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}
                         })
-                    except: pass
+                    except (OSError, ValueError, UnicodeDecodeError) as e:
+                        # One unreadable file shouldn't fail the whole request, but it
+                        # must not vanish either: a silently dropped attachment looks
+                        # to the user like the model ignored what they sent.
+                        logger.warning(f"Skipping unreadable attachment: {e}")
 
             messages = []
             history = config.get("history", [])
@@ -3462,7 +3482,8 @@ class XAINode(BaseNodeHandler):
                                 else:
                                     yield {"type": "content", "content": text}
 
-                        except: continue
+                        except Exception:
+                            continue
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}

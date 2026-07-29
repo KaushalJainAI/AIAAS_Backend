@@ -570,7 +570,7 @@ Output ONLY the JSON object, no other text."""
                     thought_text = thinking_text
                 elif not thought_text:
                     thought_text = "Analysis complete."
-            except:
+            except (ValueError, AttributeError, TypeError):
                 # Fallback if model fails to output valid JSON
                 thinking_text = ""
                 thought_text = llm_response.strip() or "No response generated."
@@ -1749,7 +1749,13 @@ Output ONLY the JSON object, no other text."""
                         node_id="orchestrator",
                         error_message=f"Orchestrator Failure mid-workflow during '{node_id}' analysis: {error}"
                     )
-                except: pass
+                except Exception as log_error:
+                    # We're already aborting; a failure to *record* the abort
+                    # must not mask the original error, but losing it silently
+                    # is how an execution ends up with no explanation at all.
+                    logger.error(
+                        f"Could not log abort reason for execution {execution_id}: {log_error}"
+                    )
                 
                 return AbortDecision(error_msg)
 

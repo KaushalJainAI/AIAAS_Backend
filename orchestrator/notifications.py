@@ -150,7 +150,11 @@ This request will expire if not responded to.
         try:
             await send_hitl_request_to_user(user_id, notification_data)
             return True
-        except:
+        except Exception as e:
+            # A bare False made a delivery failure indistinguishable from a
+            # user with no open channel, and a HITL prompt that never arrives
+            # just looks like a workflow that hung.
+            logger.warning(f"Websocket notification to user {user_id} failed: {e}")
             return False
 
 

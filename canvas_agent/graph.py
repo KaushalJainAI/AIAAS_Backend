@@ -32,7 +32,9 @@ def _convert_openai_tc_to_langchain(raw_tool_calls: list) -> list[dict]:
         args_str = func.get("arguments", "{}")
         try:
             args = json.loads(args_str)
-        except:
+        except (ValueError, TypeError):
+            # Model emitted a bare string instead of a JSON object — treat it
+            # as the query. Only parse failures belong here.
             args = {"query": args_str}
         converted.append({
             "name": name,

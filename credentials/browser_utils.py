@@ -1,6 +1,11 @@
 import logging
 import time
 from selenium import webdriver
+from selenium.common.exceptions import (
+    ElementNotInteractableException,
+    NoSuchElementException,
+    WebDriverException,
+)
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -66,7 +71,8 @@ def login_and_extract_tokens(url, username, password):
                             break
                     if user_input:
                         break
-                except:
+                except WebDriverException:
+                    # This selector didn't match on this page; try the next one.
                     continue
             
             if not user_input:
@@ -81,9 +87,11 @@ def login_and_extract_tokens(url, username, password):
             pass_input = None
             try:
                 pass_input = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-            except:
-                pass 
-                
+            except NoSuchElementException:
+                # Handled two lines down, which raises with a clearer message.
+                pass
+
+
             if not pass_input:
                  raise Exception("Could not find password field")
                  
@@ -95,8 +103,9 @@ def login_and_extract_tokens(url, username, password):
             try:
                 submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
                 submit_btn.click()
-            except:
-                # Fallback: hit enter on password field
+            except (NoSuchElementException, ElementNotInteractableException):
+                # No usable submit button — fall back to submitting the form
+                # from the password field.
                 pass_input.submit()
                 
             # 6. Wait for Login to Complete
