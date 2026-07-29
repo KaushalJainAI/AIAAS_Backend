@@ -4,25 +4,42 @@ Shared Tool Registry for Agentic Execution
 import ipaddress
 import json
 import logging
+import re
 import socket
-import os
 import asyncio
-from pathlib import Path
 from typing import Any, Dict, List
-from django.db.models import Q as models_Q
-from django.conf import settings
 from urllib.parse import urlparse
-from workflow_backend.thresholds import READ_URL_CHAR_LIMIT
+from workflow_backend.thresholds import (
+    READ_URL_CHAR_LIMIT,
+    HISTORY_SEARCH_MAX_MATCHES,
+    HISTORY_SEARCH_SNIPPET_CHARS,
+    HISTORY_SEARCH_MAX_TOTAL_CHARS,
+    HISTORY_SEARCH_MAX_PATTERN_LEN,
+    HISTORY_SEARCH_SCAN_LIMIT,
+    HTML_ARTIFACT_MAX_CHARS,
+    HTML_ARTIFACT_MAX_WIDTH,
+    HTML_ARTIFACT_MAX_HEIGHT,
+    HTML_ARTIFACT_MIN_WIDTH,
+    HTML_ARTIFACT_MIN_HEIGHT,
+    HTML_ARTIFACT_DEFAULT_WIDTH,
+    HTML_ARTIFACT_DEFAULT_HEIGHT,
+)
 
 logger = logging.getLogger(__name__)
 
-# Tools that require Human-In-The-Loop approval before execution
+# Tools that require Human-In-The-Loop approval before execution.
+#
+# The shell/file/python entries are gone along with the tools themselves — chat
+# no longer touches the filesystem or executes code. What remains is the set that
+# can still act on the user's behalf: drive their browser session or reach an
+# internal endpoint.
+#
+# render_html_artifact is deliberately NOT here. It renders inside a sandboxed
+# iframe with no network, no same-origin access and no session, so there is
+# nothing for a human to meaningfully approve — and prompting on every chart
+# would train users to click through approvals without reading them, which is
+# what makes the prompts on the remaining tools worthless.
 SENSITIVE_TOOLS = [
-    "write_file",
-    "delete_file",
-    "execute_python_code",
-    "execute_shell",
-    "run_workflow",
     "frontend_click",
     "frontend_fill",
     "frontend_navigate",
@@ -85,110 +102,12 @@ class SSRFValidator:
 
 
 class ToolExecutor:
-    @staticmethod
-    def _is_safe_path(target_path: Path) -> bool:
-        """Check if path contains sensitive directories or files."""
-        sensitive_names = {'.env', '.git', '.ssh', '.aws', 'secrets', 'credentials.json', 'db.sqlite3'}
-        for part in target_path.parts:
-            if part in sensitive_names or part.endswith('.pem') or part.endswith('.key'):
-                return False
-        return True
+    # _is_safe_path lived here to keep the file tools away from .env/.ssh/*.pem.
+    # Those tools are gone, and a path allow-list with no callers is worse than
+    # no allow-list: it reads like the filesystem is still guarded, so the next
+    # person to add a file tool assumes protection that nothing is applying.
 
     AVAILABLE_TOOLS = [
-        {
-            "type": "function",
-            "function": {
-                "name": "execute_shell",
-                "description": "Execute a shell command on the server. Use this for system tasks, installing packages, or running scripts. Requires user approval.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to execute."
-                        }
-                    },
-                    "required": ["command"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "description": "List files and directories in a given path within the workspace. Use this to explore the project structure.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The directory path to list (relative to workspace root). Use '.' for root."
-                        }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read the complete content of a file. Use this to examine code or configuration.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The file path to read (relative to workspace root)."
-                        }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Create a new file or overwrite an existing one with new content. This tool requires user approval before execution.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The file path to write to (relative to workspace root)."
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The full content to write to the file."
-                        }
-                    },
-                    "required": ["path", "content"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "delete_file",
-                "description": "Delete a file from the workspace. This tool requires user approval before execution.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The file path to delete (relative to workspace root)."
-                        }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": False
-                }
-            }
-        },
         {
             "type": "function",
             "function": {
@@ -239,24 +158,6 @@ class ToolExecutor:
                         }
                     },
                     "required": ["query"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "suggest_workflow",
-                "description": "Search the user's available platform workflows to suggest one that solves their request. Run this when the user asks to build, run, or find a workflow, automation, or sequence.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "intent": {
-                            "type": "string",
-                            "description": "A description of what the user wants the workflow to accomplish (e.g. 'send an email to my boss', 'sync data to salesforce')."
-                        }
-                    },
-                    "required": ["intent"],
                     "additionalProperties": False
                 }
             }
@@ -392,29 +293,6 @@ class ToolExecutor:
         {
             "type": "function",
             "function": {
-                "name": "execute_python_code",
-                "description": "Execute python code in a secure sandbox. Use this to perform calculations, data transformation, or execute logic. Print your results to standard output so they can be captured.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "The python code string to execute."
-                        },
-                        "engine": {
-                            "type": "string",
-                            "enum": ["in_process", "wasm"],
-                            "description": "The sandbox engine. 'in_process' is fastest but uses AST limits. 'wasm' enforces strict CPU/RAM limits via WebAssembly (good for untrusted logic)."
-                        }
-                    },
-                    "required": ["code"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "list_knowledge_bases",
                 "description": "List all knowledge bases (KBs) available to the user. Call this first to discover which KBs exist and their IDs before deciding which one to search. Each KB has a name, document count, and vector count.",
                 "parameters": {
@@ -510,17 +388,43 @@ class ToolExecutor:
         {
             "type": "function",
             "function": {
-                "name": "list_workflows",
-                "description": "List all workflows available in the user's account. Use this to show the user their existing automations or to find a workflow before running it.",
+                "name": "search_conversation_history",
+                "description": (
+                    "Search the ENTIRE history of this conversation, including turns that are "
+                    "no longer in your visible context and your own earlier reasoning. "
+                    "Only the most recent turns are replayed to you automatically — everything "
+                    "older is still stored and only reachable through this tool. "
+                    "Use it whenever the user refers to something you cannot see ('the number I "
+                    "gave you earlier', 'what we decided yesterday'). Prefer this over telling "
+                    "the user you do not remember."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "search": {
+                        "query": {
                             "type": "string",
-                            "description": "Optional search term to filter workflows by name or description."
+                            "description": (
+                                "Words or a phrase to look for. Matching is case-insensitive and "
+                                "term-based: results are ranked by how many of your terms they "
+                                "contain, so give several specific words rather than a sentence."
+                            )
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["all", "messages", "reasoning"],
+                            "description": (
+                                "'messages' searches what was said, 'reasoning' searches your own "
+                                "stored thinking from earlier turns, 'all' searches both. "
+                                "Defaults to 'all'."
+                            )
+                        },
+                        "role": {
+                            "type": "string",
+                            "enum": ["any", "user", "assistant"],
+                            "description": "Restrict to one speaker. Defaults to 'any'."
                         }
                     },
-                    "required": [],
+                    "required": ["query"],
                     "additionalProperties": False
                 }
             }
@@ -528,21 +432,41 @@ class ToolExecutor:
         {
             "type": "function",
             "function": {
-                "name": "run_workflow",
-                "description": "Trigger the execution of a user's workflow by its ID. Use after finding a workflow via list_workflows or suggest_workflow.",
+                "name": "render_html_artifact",
+                "description": (
+                    "Render a self-contained HTML/CSS/JS snippet as a live, interactive card in "
+                    "the chat. Use for charts, diagrams, tables, small demos or anything better "
+                    "shown than described. The snippet runs in a locked-down sandbox: it has no "
+                    "network access, no access to the page around it, and no access to the user's "
+                    "session. Inline all CSS and JS — external files will not load."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "workflow_id": {
-                            "type": "integer",
-                            "description": "The ID of the workflow to execute."
+                        "html": {
+                            "type": "string",
+                            "description": "A complete, self-contained HTML document or fragment."
                         },
-                        "input_data": {
-                            "type": "object",
-                            "description": "Optional input parameters to pass to the workflow."
+                        "title": {
+                            "type": "string",
+                            "description": "Short label shown on the card header."
+                        },
+                        "width": {
+                            "type": "integer",
+                            "description": (
+                                f"Requested width in px. Clamped to "
+                                f"{HTML_ARTIFACT_MIN_WIDTH}-{HTML_ARTIFACT_MAX_WIDTH}."
+                            )
+                        },
+                        "height": {
+                            "type": "integer",
+                            "description": (
+                                f"Requested height in px. Clamped to "
+                                f"{HTML_ARTIFACT_MIN_HEIGHT}-{HTML_ARTIFACT_MAX_HEIGHT}."
+                            )
                         }
                     },
-                    "required": ["workflow_id"],
+                    "required": ["html"],
                     "additionalProperties": False
                 }
             }
@@ -607,14 +531,24 @@ class ToolExecutor:
         }
     ]
 
+    # Tools that only make sense when the conversation has a memory to consult.
+    # Offering these with memory off would be incoherent: the model would call a
+    # tool that reads exactly the history we just told it it cannot have.
+    MEMORY_DEPENDENT_TOOLS = {"search_conversation_history", "get_chat_message_full_text"}
+
     @staticmethod
-    async def get_available_tools(user_id: int | None) -> List[Dict[str, Any]]:
+    async def get_available_tools(user_id: int | None, memory_enabled: bool = True) -> List[Dict[str, Any]]:
         """
         Return the full tool list for this user: built-in tools + any MCP tools
         the user has enabled. Safe to call on every agent turn (MCP tool lists
         are cached in Redis).
         """
         tools = list(ToolExecutor.AVAILABLE_TOOLS)
+        if not memory_enabled:
+            tools = [
+                t for t in tools
+                if t.get("function", {}).get("name") not in ToolExecutor.MEMORY_DEPENDENT_TOOLS
+            ]
         if user_id is None:
             return tools
         try:
@@ -662,118 +596,6 @@ class ToolExecutor:
             "type": "video_results",
             "text": f"Successfully retrieved {len(res.get('videos', []))} videos for '{query}'. They have been attached to the UI view.",
             "videos": res.get("videos", [])
-        })
-
-    @staticmethod
-    async def _list_files(args: Dict, context: Dict) -> str:
-        path_str = args.get("path", ".")
-        try:
-            # Ensure path is within workspace (simple check)
-            root = Path(settings.BASE_DIR).parent # Assuming Backend is in AIAAS/Backend
-            target = (root / path_str).resolve()
-            if not str(target).startswith(str(root)):
-                return f"Error: Access denied. Path '{path_str}' is outside the workspace."
-            if not ToolExecutor._is_safe_path(target):
-                return f"Error: Access denied. Path '{path_str}' contains sensitive or blocked files."
-            
-            if not target.exists():
-                return f"Error: Path '{path_str}' does not exist."
-            
-            items = []
-            for item in target.iterdir():
-                # Filter out sensitive files from listing
-                if ToolExecutor._is_safe_path(item):
-                    items.append({
-                        "name": item.name,
-                        "type": "directory" if item.is_dir() else "file",
-                        "size": item.stat().st_size if item.is_file() else None
-                    })
-            return json.dumps({"path": path_str, "items": items})
-        except Exception as e:
-            return f"Error listing files: {str(e)}"
-
-    @staticmethod
-    async def _read_file(args: Dict, context: Dict) -> str:
-        path_str = args.get("path", "")
-        if not path_str:
-            return "Error: Missing path"
-        try:
-            root = Path(settings.BASE_DIR).parent
-            target = (root / path_str).resolve()
-            if not str(target).startswith(str(root)):
-                return f"Error: Access denied. Path '{path_str}' is outside the workspace."
-            if not ToolExecutor._is_safe_path(target):
-                return f"Error: Access denied. Path '{path_str}' is blocked for security reasons."
-            
-            if not target.is_file():
-                return f"Error: '{path_str}' is not a file or does not exist."
-            
-            content = target.read_text(encoding='utf-8', errors='replace')
-            return json.dumps({"path": path_str, "content": content})
-        except Exception as e:
-            return f"Error reading file: {str(e)}"
-
-    @staticmethod
-    async def _write_file(args: Dict, context: Dict) -> str:
-        path_str = args.get("path", "")
-        content = args.get("content", "")
-        if not path_str:
-            return "Error: Missing path"
-        try:
-            root = Path(settings.BASE_DIR).parent
-            target = (root / path_str).resolve()
-            if not str(target).startswith(str(root)):
-                return f"Error: Access denied. Path '{path_str}' is outside the workspace."
-            if not ToolExecutor._is_safe_path(target):
-                return f"Error: Access denied. Path '{path_str}' is blocked for security reasons."
-            
-            # Ensure parent directory exists
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding='utf-8')
-            return json.dumps({"status": "success", "path": path_str, "message": "File written successfully."})
-        except Exception as e:
-            return f"Error writing file: {str(e)}"
-
-    @staticmethod
-    async def _delete_file(args: Dict, context: Dict) -> str:
-        path_str = args.get("path", "")
-        if not path_str:
-            return "Error: Missing path"
-        try:
-            root = Path(settings.BASE_DIR).parent
-            target = (root / path_str).resolve()
-            if not str(target).startswith(str(root)):
-                return f"Error: Access denied. Path '{path_str}' is outside the workspace."
-            if not ToolExecutor._is_safe_path(target):
-                return f"Error: Access denied. Path '{path_str}' is blocked for security reasons."
-            
-            if not target.exists():
-                return f"Error: File '{path_str}' does not exist."
-            
-            if target.is_dir():
-                import shutil
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-            return json.dumps({"status": "success", "path": path_str, "message": "Deleted successfully."})
-        except Exception as e:
-            return f"Error deleting: {str(e)}"
-
-    @staticmethod
-    async def _suggest_workflow(args: Dict, context: Dict) -> str:
-        from .views import suggest_workflow
-        intent = args.get("intent", "")
-        user_id = context.get("user_id")
-        if not intent or not user_id:
-            return "Error: Missing intent or missing user context to search workflows"
-        sug = await suggest_workflow(user_id, intent)
-        if not sug:
-            return json.dumps({"found": False, "message": "No relevant workflows found in your account."})
-        return json.dumps({
-            "found": True,
-            "workflow_id": sug["workflow_id"],
-            "name": sug["name"],
-            "description": sug.get("description", "No description provided")
         })
 
     @staticmethod
@@ -852,79 +674,196 @@ class ToolExecutor:
             return f"Error: Failed to read message from database: {str(e)}"
 
     @staticmethod
-    async def _execute_shell(args: Dict, context: Dict) -> str:
-        command = args.get("command", "")
-        if not command:
-            return "Error: Missing command"
-        try:
-            # Secure environment to prevent leakage of secrets (e.g. AWS_SECRET_ACCESS_KEY, DATABASE_URL)
-            safe_env = {
-                "PATH": os.environ.get("PATH", ""),
-                "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-                "HOME": os.environ.get("HOME", "/tmp")
-            }
-            # We run this in a shell. For safety in a real prod app, 
-            # we would restrict the commands allowed.
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=safe_env
+    async def _search_conversation_history(args: Dict, context: Dict) -> str:
+        """
+        Grep-style lookup over everything this conversation has ever said or thought.
+
+        Only the last HISTORY_WINDOW turns are replayed into the prompt; this is
+        how the model reaches the rest without us paying for it every turn.
+
+        Two design decisions worth stating, because both look like shortcuts:
+
+        1. Term matching, not regex. The pattern comes from the model, and Python's
+           `re` has no evaluation timeout, so a backtracking pattern like (a+)+$ run
+           over stored message text pins a worker with no way to interrupt it. The
+           retrieval quality difference is small; the availability difference is not.
+
+        2. Scanning in Python rather than filtering in the DB. Half of what we
+           search is metadata['thinking'], and JSON-key containment lookups differ
+           between Postgres and the SQLite used by the test suite. A bounded scan
+           behaves identically on both. HISTORY_SEARCH_SCAN_LIMIT keeps it cheap.
+        """
+        from asgiref.sync import sync_to_async
+        from .models import ChatMessage
+
+        query = (args.get("query") or "").strip()
+        if not query:
+            return json.dumps({"error": "Missing query."})
+        if len(query) > HISTORY_SEARCH_MAX_PATTERN_LEN:
+            query = query[:HISTORY_SEARCH_MAX_PATTERN_LEN]
+
+        scope = (args.get("scope") or "all").lower()
+        if scope not in ("all", "messages", "reasoning"):
+            scope = "all"
+        role = (args.get("role") or "any").lower()
+        if role not in ("any", "user", "assistant"):
+            role = "any"
+
+        session_id = context.get("session_id")
+        user_id = context.get("user_id")
+        if not session_id:
+            return json.dumps({"error": "No conversation context available for search."})
+
+        terms = [t for t in re.split(r'\s+', query.lower()) if len(t) > 1]
+        if not terms:
+            return json.dumps({"error": "Query too short to search."})
+
+        def _search() -> list[dict]:
+            qs = ChatMessage.objects.filter(session_id=session_id)
+            # Ownership: the session must belong to the caller. Scoping by
+            # session_id alone would let a leaked/guessed UUID read another
+            # user's conversation.
+            if user_id:
+                qs = qs.filter(session__user_id=user_id)
+            if role != "any":
+                qs = qs.filter(role=role)
+            else:
+                qs = qs.filter(role__in=["user", "assistant"])
+
+            rows = list(
+                qs.order_by('-created_at')
+                .values('id', 'role', 'content', 'metadata', 'created_at')[:HISTORY_SEARCH_SCAN_LIMIT]
             )
-            # Enforce resource quota (timeout) to prevent DoS (e.g. fork bombs, infinite loops)
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30.0)
-            except asyncio.TimeoutError:
-                process.kill()
-                return json.dumps({
-                    "status": "error",
-                    "error": "Execution timed out after 30 seconds.",
-                    "stderr": ""
-                })
-            
-            return json.dumps({
-                "status": "success" if process.returncode == 0 else "error",
-                "exit_code": process.returncode,
-                "stdout": stdout.decode(errors='replace'),
-                "stderr": stderr.decode(errors='replace')
-            })
+
+            scored = []
+            for r in rows:
+                haystacks = []
+                if scope in ("all", "messages"):
+                    haystacks.append(("message", r.get('content') or ""))
+                if scope in ("all", "reasoning"):
+                    meta = r.get('metadata') or {}
+                    if isinstance(meta, dict):
+                        thinking = meta.get('thinking') or ""
+                        if thinking:
+                            haystacks.append(("reasoning", thinking))
+
+                best = None
+                for kind, text in haystacks:
+                    low = text.lower()
+                    hits = [t for t in terms if t in low]
+                    if not hits:
+                        continue
+                    # Rank by how much of the query a row accounts for; ties go to
+                    # the row that matched on what was actually said over what was
+                    # merely thought.
+                    score = len(hits) / len(terms) + (0.1 if kind == "message" else 0)
+                    if best is None or score > best[0]:
+                        first = min(low.find(t) for t in hits)
+                        best = (score, kind, text, first)
+
+                if best:
+                    score, kind, text, pos = best
+                    half = HISTORY_SEARCH_SNIPPET_CHARS // 2
+                    start = max(0, pos - half)
+                    end = min(len(text), pos + half)
+                    snippet = text[start:end]
+                    if start > 0:
+                        snippet = "..." + snippet
+                    if end < len(text):
+                        snippet = snippet + "..."
+                    scored.append({
+                        "score": round(score, 3),
+                        "message_id": r['id'],
+                        "role": r['role'],
+                        "found_in": kind,
+                        "timestamp": r['created_at'].isoformat(),
+                        "snippet": snippet,
+                    })
+
+            scored.sort(key=lambda x: (-x["score"], -x["message_id"]))
+            return scored[:HISTORY_SEARCH_MAX_MATCHES]
+
+        try:
+            matches = await sync_to_async(_search)()
         except Exception as e:
-            return f"Error executing shell command: {str(e)}"
+            logger.error(f"search_conversation_history failed: {e}")
+            return json.dumps({"error": f"History search failed: {e}"})
+
+        if not matches:
+            return json.dumps({
+                "matches": [],
+                "message": (
+                    "No earlier messages matched those terms. Try fewer or different "
+                    "keywords before concluding the information was never provided."
+                ),
+            })
+
+        # Final ceiling. The whole point of this tool is to keep the context small,
+        # so it must not be able to return more than the window it is protecting —
+        # drop whole matches rather than truncating mid-snippet.
+        payload, total = [], 0
+        for m in matches:
+            cost = len(m["snippet"])
+            if total + cost > HISTORY_SEARCH_MAX_TOTAL_CHARS:
+                break
+            payload.append(m)
+            total += cost
+
+        return json.dumps({
+            "matches": payload,
+            "returned": len(payload),
+            "truncated": len(payload) < len(matches),
+            "hint": "Call get_chat_message_full_text(message_id=...) for the full text of any match.",
+        })
 
     @staticmethod
-    async def _execute_python_code(args: Dict, context: Dict) -> str:
-        from executor.sandbox.safe_execution import safe_execute
-        code = args.get("code", "")
-        engine = args.get("engine", "in_process")
-        if not code:
-            return "Error: Missing code"
-        try:
-            # Enforce resource quota (timeout)
-            try:
-                exec_res = await asyncio.wait_for(
-                    asyncio.to_thread(safe_execute, code, None, engine),
-                    timeout=30.0
-                )
-            except asyncio.TimeoutError:
-                return json.dumps({
-                    "status": "error",
-                    "error": "Python execution timed out after 30 seconds.",
-                    "stderr": ""
-                })
+    async def _render_html_artifact(args: Dict, context: Dict) -> str:
+        """
+        Hand a self-contained HTML snippet to the client for sandboxed rendering.
 
-            if not exec_res.get("success"):
-                return json.dumps({
-                    "status": "error",
-                    "error": exec_res.get("error") or "Execution failed with no error message.",
-                    "stderr": exec_res.get("stderr") or ""
-                })
-            return json.dumps({
-                "status": "success",
-                "output": exec_res.get("output"),
-                "result": str(exec_res.get("result")) if exec_res.get("result") is not None else None
-            })
-        except Exception as e:
-            return f"Error: Sandbox execution failed: {str(e)}"
+        Nothing is executed here. The server's job is to bound the payload and
+        pin the dimensions; the frontend renders it in a sandboxed iframe.
+
+        Clamping server-side matters even though the frontend clamps too: the
+        stored metadata is replayed when the conversation is reloaded, so an
+        unclamped size persisted today becomes an oversized card on every future
+        render. Bound it once, at write time.
+        """
+        html = args.get("html") or ""
+        if not html.strip():
+            return json.dumps({"error": "Missing html."})
+
+        truncated = False
+        if len(html) > HTML_ARTIFACT_MAX_CHARS:
+            html = html[:HTML_ARTIFACT_MAX_CHARS]
+            truncated = True
+
+        def _clamp(raw, default, lo, hi) -> int:
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                return default
+            return max(lo, min(hi, v))
+
+        width = _clamp(args.get("width"), HTML_ARTIFACT_DEFAULT_WIDTH,
+                       HTML_ARTIFACT_MIN_WIDTH, HTML_ARTIFACT_MAX_WIDTH)
+        height = _clamp(args.get("height"), HTML_ARTIFACT_DEFAULT_HEIGHT,
+                        HTML_ARTIFACT_MIN_HEIGHT, HTML_ARTIFACT_MAX_HEIGHT)
+
+        title = (args.get("title") or "Rendered output").strip()[:80]
+
+        return json.dumps({
+            "type": "html_artifact",
+            "title": title,
+            "html": html,
+            "width": width,
+            "height": height,
+            "truncated": truncated,
+            "note": (
+                f"Rendered at {width}x{height}px in a sandboxed frame."
+                + (" Content was truncated to fit the size limit." if truncated else "")
+            ),
+        })
 
     @staticmethod
     async def _list_knowledge_bases(args: Dict, context: Dict) -> str:
@@ -1088,58 +1027,6 @@ class ToolExecutor:
             return json.dumps({"status": "error", "error": f"Failed to scrape '{url}': {str(e)}"})
 
     @staticmethod
-    async def _list_workflows(args: Dict, context: Dict) -> str:
-        from asgiref.sync import sync_to_async
-        from orchestrator.models import Workflow
-        user_id = context.get("user_id")
-        if not user_id:
-            return "Error: Missing user context"
-        search_term = args.get("search", "")
-        try:
-            qs = Workflow.objects.filter(user_id=user_id)
-            if search_term:
-                qs = qs.filter(
-                    models_Q(name__icontains=search_term) | models_Q(description__icontains=search_term)
-                )
-            workflows = await sync_to_async(list)(qs.values('id', 'name', 'description', 'is_active')[:50])
-            return json.dumps({"status": "success", "workflows": workflows, "count": len(workflows)})
-        except Exception as e:
-            return f"Error: Failed to list workflows: {str(e)}"
-
-    @staticmethod
-    async def _run_workflow(args: Dict, context: Dict) -> str:
-        from asgiref.sync import sync_to_async
-        from orchestrator.models import Workflow
-        workflow_id = args.get("workflow_id")
-        if not workflow_id:
-            return "Error: Missing workflow_id"
-        user_id = context.get("user_id")
-        input_data = args.get("input_data", {})
-        try:
-            wf = await sync_to_async(Workflow.objects.filter(id=int(workflow_id), user_id=user_id).first)()
-            if not wf:
-                return json.dumps({"status": "error", "error": f"Workflow {workflow_id} not found or access denied."})
-            try:
-                from compiler.engine import WorkflowEngine
-                engine = WorkflowEngine()
-                result = await engine.execute(workflow_id=wf.id, user_id=user_id, input_data=input_data)
-                return json.dumps({
-                    "status": "success",
-                    "workflow_id": wf.id,
-                    "workflow_name": wf.name,
-                    "execution_result": str(result)[:3000],
-                })
-            except ImportError:
-                return json.dumps({
-                    "status": "queued",
-                    "workflow_id": wf.id,
-                    "workflow_name": wf.name,
-                    "message": "Workflow execution has been queued. The workflow engine will process it.",
-                })
-        except Exception as e:
-            return f"Error: Failed to run workflow: {str(e)}"
-
-    @staticmethod
     async def _frontend_action(func_name: str, args: Dict, context: Dict) -> str:
         from channels.layers import get_channel_layer
         user_id = context.get("user_id")
@@ -1292,27 +1179,20 @@ class ToolExecutor:
 
         try:
             dispatch = {
-                "execute_shell": cls._execute_shell,
-                "list_files": cls._list_files,
-                "read_file": cls._read_file,
-                "write_file": cls._write_file,
-                "delete_file": cls._delete_file,
                 "web_search": cls._web_search,
                 "image_search": cls._image_search,
                 "video_search": cls._video_search,
-                "suggest_workflow": cls._suggest_workflow,
                 "get_current_time": cls._get_current_time,
                 "dispatch_ui_actions": cls._dispatch_ui_actions,
                 "call_internal_api": cls._call_internal_api,
                 "read_url": cls._read_url,
                 "read_attachment_text": cls._read_attachment_text,
                 "get_chat_message_full_text": cls._get_chat_message_full_text,
-                "execute_python_code": cls._execute_python_code,
+                "search_conversation_history": cls._search_conversation_history,
+                "render_html_artifact": cls._render_html_artifact,
                 "list_knowledge_bases": cls._list_knowledge_bases,
                 "knowledge_base_search": cls._knowledge_base_search,
                 "scrape_webpage": cls._scrape_webpage,
-                "list_workflows": cls._list_workflows,
-                "run_workflow": cls._run_workflow,
             }
 
             if func_name in dispatch:

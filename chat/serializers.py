@@ -24,8 +24,8 @@ class ChatSessionSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatSession
         fields = [
-            'id', 'title', 'llm_provider', 'llm_model', 
-            'system_prompt', 'total_tokens_used',
+            'id', 'title', 'llm_provider', 'llm_model',
+            'system_prompt', 'memory_enabled', 'total_tokens_used',
             'created_at', 'updated_at', 'messages'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'messages', 'total_tokens_used']

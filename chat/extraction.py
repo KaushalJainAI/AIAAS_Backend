@@ -357,7 +357,13 @@ class ToolCallParser:
             args = cls.parse_tool_arguments(args_raw)
             tool_calls.append({'tool': name, 'args': args, 'raw': raw})
 
-        # 16. Pure Python Markdown Block fallback (assumes execute_python_code tool)
+        # 16. A ```python block occasionally carries a tool call encoded as JSON
+        # rather than actual code. Parse that case only.
+        #
+        # This previously ended by turning *any* unrecognised python block into an
+        # execute_python_code call. That tool is gone — and the fallback was wrong
+        # even while it existed, because a model illustrating its answer with a
+        # code sample had the sample executed instead of displayed.
         for match in re.finditer(cls.PATTERNS['python_markdown'], content, re.DOTALL):
             raw = match.group(0)
             code = match.group(1).strip()
@@ -366,10 +372,8 @@ class ToolCallParser:
                     data = cls.fuzzy_json_loads(code)
                     if isinstance(data, dict) and 'tool' in data:
                         tool_calls.append({'tool': data.get('tool'), 'args': data.get('args', {}), 'raw': raw})
-                        continue
                 except Exception:
                     pass
-                tool_calls.append({'tool': 'execute_python_code', 'args': {'code': code}, 'raw': raw})
 
         # 17. Internal planner JSON emitted as text:
         # {"thoughts": "...", "action": "web_search", "query": "..."}

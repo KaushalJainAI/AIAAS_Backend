@@ -1,8 +1,45 @@
 # ==================== Chat Context & Window Limits ====================
 MAX_CONTEXT_TOKENS = 100_000  # 100K token hard limit
-HISTORY_WINDOW = 50  # Max messages to consider for history
+# How many *conversational* turns (user + assistant only, never system) get
+# replayed verbatim. Everything older stays in the DB and is reachable through
+# the search_conversation_history tool, so shrinking this window loses no data —
+# it only stops us paying for context the model usually does not need.
+HISTORY_WINDOW = 20
 ASSISTANT_SUMMARY_WORD_LIMIT = 300  # Summarize AI responses longer than this
 FLASH_SUMMARY_CHAR_LIMIT = 30_000  # Truncate content for summary generation to prevent context bloat
+
+# The last line of defence before a request leaves for the provider. The
+# per-section budgets above are advisory and each one is computed in isolation,
+# so a turn that hits several of them at once can still add up to more than the
+# model accepts. clamp_llm_input applies this to the assembled payload, which is
+# the only place the true total is known.
+MAX_LLM_INPUT_TOKENS = 96_000
+MAX_SINGLE_MESSAGE_TOKENS = 24_000  # One message may not eat the whole budget
+
+# ==================== Conversation History Retrieval ====================
+# Bounds for the grep-style lookup into older turns. The point of the tool is to
+# *avoid* blowing the window, so its own output has to be capped harder than the
+# window it is protecting.
+HISTORY_SEARCH_MAX_MATCHES = 12       # Messages returned per search
+HISTORY_SEARCH_SNIPPET_CHARS = 600    # Characters of context around each hit
+HISTORY_SEARCH_MAX_TOTAL_CHARS = 12_000  # Hard ceiling on the whole tool result
+HISTORY_SEARCH_MAX_PATTERN_LEN = 200  # Guards against pathological queries
+# Newest-N messages the search will scan. A cap is needed because the scan runs
+# in Python (see _search_conversation_history for why not the DB), so cost is
+# linear in messages examined.
+HISTORY_SEARCH_SCAN_LIMIT = 800
+
+# ==================== HTML Artifact Limits ====================
+# The model can author markup, so every number here is a containment boundary
+# rather than a style preference: an artifact must not be able to cover the page
+# or push the composer off screen.
+HTML_ARTIFACT_MAX_CHARS = 24_000
+HTML_ARTIFACT_MAX_WIDTH = 720   # px
+HTML_ARTIFACT_MAX_HEIGHT = 520  # px
+HTML_ARTIFACT_MIN_WIDTH = 160   # px
+HTML_ARTIFACT_MIN_HEIGHT = 120  # px
+HTML_ARTIFACT_DEFAULT_WIDTH = 640   # px
+HTML_ARTIFACT_DEFAULT_HEIGHT = 360  # px
 
 # ==================== File & Document Limits ====================
 IS_LARGE_FILE_THRESHOLD = 120_000  # Characters before a file is considered "large" (triggers RAG instead of direct injection)

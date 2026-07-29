@@ -54,6 +54,7 @@ class ChatAgentState(TypedDict):
     intent: str
     history_list: list
     max_iterations: int
+    memory_enabled: bool
 
 
 # ─────────────── Helpers ───────────────
@@ -122,9 +123,16 @@ async def agent_node(state: ChatAgentState, config: RunnableConfig) -> dict:
     at_limit = iteration >= state.get("max_iterations", 30) - 1
 
     # ── Build prompt ──
-    # Find original human message
+    # The *latest* human message is this turn's question.
+    #
+    # This used to take the first one and break. The checkpointer is keyed by
+    # thread_id = chat session id and `messages` uses the add_messages reducer,
+    # so a new run on an existing session appends to the stored list rather than
+    # replacing it — meaning "first HumanMessage" is the first thing the user
+    # ever said in that conversation. Every turn after the first therefore
+    # re-answered the opening question, ignoring what was actually asked.
     original_prompt = ""
-    for msg in state["messages"]:
+    for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
             original_prompt = msg.content
             break
@@ -174,7 +182,9 @@ async def agent_node(state: ChatAgentState, config: RunnableConfig) -> dict:
     if at_limit:
         tools_payload = None
     else:
-        tools_payload = await shared_tools.get_available_tools(state.get("user_id"))
+        tools_payload = await shared_tools.get_available_tools(
+            state.get("user_id"), memory_enabled=state.get("memory_enabled", True)
+        )
 
     thinking_delta = ""
     content = ""
@@ -368,13 +378,14 @@ async def tools_node(state: ChatAgentState, config: RunnableConfig) -> dict:
         args = _sanitize_tool_args(args)
         if fn == "web_search" and not args.get("query"):
             args["query"] = clean_content
-        if fn == "suggest_workflow" and not args.get("intent"):
-            args["intent"] = clean_content
-        # Guard: if code tool was called with empty code, give the LLM a helpful retry hint
-        if fn == "execute_python_code" and not args.get("code"):
-            logger.warning(f"[Tools Node] execute_python_code called with empty code. Raw args: {tc.get('args', {})}")
+        # Guard: an empty query is the common failure for the history search, and
+        # the model recovers if told exactly which argument was missing.
+        if fn == "search_conversation_history" and not args.get("query"):
             tool_messages.append(ToolMessage(
-                content="Error: The 'code' argument was empty. You must provide Python code in the 'code' parameter. Example: {\"code\": \"print(2+2)\"}",
+                content=(
+                    "Error: The 'query' argument was empty. Provide the keywords to look for, "
+                    "e.g. {\"query\": \"budget figure spreadsheet\"}."
+                ),
                 tool_call_id=call_id,
                 name=fn,
             ))
@@ -382,8 +393,6 @@ async def tools_node(state: ChatAgentState, config: RunnableConfig) -> dict:
 
         # Trace
         thought_ctx = thinking.strip()[-150:] if thinking else ""
-        if fn == "execute_python_code" and args.get("code"):
-            thought_ctx = f"**Executing Code:**\n```python\n{args['code']}\n```\n\n{thought_ctx}"
         trace_entry = {"tool": fn, "args": args, "iteration": iteration, "thought": thought_ctx, "summary": thought_ctx}
         tool_trace.append(trace_entry)
 
@@ -392,8 +401,11 @@ async def tools_node(state: ChatAgentState, config: RunnableConfig) -> dict:
 
         logger.info(f"[Tools Node iter={iteration}] Calling: {fn} | args keys: {list(args.keys())} | code_present: {'code' in args and bool(args.get('code'))}")
 
-        # Execute
-        ctx = {"user_id": state["user_id"]}
+        # Execute.
+        # thread_id is the ChatSession UUID (views sets it from str(session.id)).
+        # search_conversation_history needs it to scope the lookup to this
+        # conversation — without it the tool cannot tell whose history to read.
+        ctx = {"user_id": state["user_id"], "session_id": state.get("thread_id")}
         try:
             res = await asyncio.wait_for(shared_tools.execute_tool(fn, args, ctx), timeout=TOOL_CALL_TIMEOUT)
         except asyncio.TimeoutError:
@@ -443,19 +455,19 @@ async def tools_node(state: ChatAgentState, config: RunnableConfig) -> dict:
                     metadata["videos"] = vids
                     if callback:
                         await callback("videos_update", {"videos": vids})
-            elif fn == "suggest_workflow":
+            elif fn == "render_html_artifact":
                 parsed = json.loads(res)
-                if parsed.get("found"):
-                    metadata["workflow_id"] = parsed.get("workflow_id")
-                    metadata["workflow_name"] = parsed.get("name")
-            elif fn == "execute_python_code":
-                parsed = json.loads(res)
-                execs = metadata.get("code_executions", [])
-                execs.append({"code": args.get("code", ""), "output": parsed.get("output", ""), "result": parsed.get("result", ""), "iteration": iteration})
-                metadata["code_executions"] = execs
-                metadata["has_code_execution"] = True
-                if callback:
-                    await callback("code_execution", {"code": args.get("code", ""), "output": parsed.get("output", ""), "result": parsed.get("result", ""), "error": parsed.get("error", "") if parsed.get("status") == "error" else ""})
+                if parsed.get("type") == "html_artifact":
+                    artifacts = metadata.get("html_artifacts", [])
+                    artifacts.append({
+                        "title": parsed.get("title"),
+                        "html": parsed.get("html"),
+                        "width": parsed.get("width"),
+                        "height": parsed.get("height"),
+                    })
+                    metadata["html_artifacts"] = artifacts
+                    if callback:
+                        await callback("html_artifact", artifacts[-1])
             elif fn == "generate_image":
                 parsed = json.loads(res)
                 if parsed.get("status") == "success" and parsed.get("image_url"):
@@ -501,20 +513,17 @@ async def tools_node(state: ChatAgentState, config: RunnableConfig) -> dict:
                 if parsed.get("status") == "success":
                     if callback:
                         await callback("status", {"phase": "page_scraped", "message": f"Scraped {parsed.get('url', 'page')} successfully."})
-            elif fn == "run_workflow":
+            elif fn == "search_conversation_history":
                 parsed = json.loads(res)
-                if parsed.get("status") in ("success", "queued"):
-                    metadata["workflow_execution"] = {
-                        "workflow_id": parsed.get("workflow_id"),
-                        "workflow_name": parsed.get("workflow_name"),
-                        "status": parsed.get("status"),
-                    }
+                if parsed.get("matches"):
+                    # Surfaced so the UI can show *that* the assistant went back
+                    # through the history — otherwise recalling something from 200
+                    # turns ago looks like the model simply had it in context.
                     if callback:
-                        await callback("status", {"phase": "workflow_triggered", "message": f"Workflow '{parsed.get('workflow_name')}' {parsed.get('status')}."})
-            elif fn == "list_workflows":
-                parsed = json.loads(res)
-                if parsed.get("status") == "success":
-                    metadata["available_workflows"] = parsed.get("workflows", [])
+                        await callback("status", {
+                            "phase": "history_recall",
+                            "message": f"Recalled {parsed.get('returned', 0)} earlier message(s) from this conversation.",
+                        })
         except (json.JSONDecodeError, TypeError, AttributeError):
             pass
 
@@ -572,6 +581,7 @@ async def run_agent_loop(
     attachments: list | None = None,
     stream_callback=None,
     max_iterations: int = 30,
+    memory_enabled: bool = True,
 ) -> dict:
     """
     Run the agentic tool loop via LangGraph.
@@ -646,6 +656,7 @@ async def run_agent_loop(
         "intent": intent,
         "history_list": history_list,
         "max_iterations": max_iterations,
+        "memory_enabled": memory_enabled,
     }
 
     config = {
@@ -659,20 +670,26 @@ async def run_agent_loop(
 
     interrupted = False
     try:
-        # If there is already a state for this thread_id, we might be resuming.
-        # But if we pass initial_state, it might overwrite? 
-        # Actually ainvoke with initial_state will start fresh if no state exists,
-        # or resume if state exists AND we pass None as state?
-        # Standard pattern for resume: result = await graph.ainvoke(None, config=config)
-        
+        # Resume ONLY when the graph is genuinely paused mid-run — i.e. it stopped
+        # at an interrupt() awaiting HITL approval.
+        #
+        # `.values` alone is the wrong test, and was the bug: thread_id is the
+        # chat session id, so every turn after the first finds leftover values
+        # from the previous turn and takes the resume branch. Resuming a graph
+        # that already reached END re-emits its terminal state, so the user's new
+        # message was never looked at and they got the *previous* answer back.
+        # It hid in dev because MemorySaver is per-process and a reload clears it;
+        # under a long-lived ASGI worker it would hit on the 2nd message of every
+        # conversation.
+        #
+        # `.next` is the reliable signal: non-empty means there are still nodes
+        # pending (paused), empty means the run finished.
         state_snapshot = await chat_agent_graph.aget_state(config)
-        if state_snapshot.values:
-            # Resuming
-            logger.info(f"[LangGraph] Resuming thread {thread_id}")
+        if state_snapshot.values and state_snapshot.next:
+            logger.info(f"[LangGraph] Resuming interrupted thread {thread_id} (pending: {state_snapshot.next})")
             result = await chat_agent_graph.ainvoke(None, config=config)
         else:
-            # New run
-            logger.info(f"[LangGraph] Starting new thread {thread_id}")
+            logger.info(f"[LangGraph] Starting new run on thread {thread_id}")
             result = await chat_agent_graph.ainvoke(initial_state, config=config)
 
     except Exception as e:

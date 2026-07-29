@@ -23,7 +23,8 @@ from workflow_backend.thresholds import (
     MAX_CONTEXT_TOKENS, HISTORY_WINDOW, SEARCH_RESULT_LIMIT,
     ASSISTANT_SUMMARY_WORD_LIMIT, IS_LARGE_FILE_THRESHOLD, LARGE_FILE_PREVIEW_LENGTH, DOCUMENT_EXTRACT_CAP,
     IMAGE_SEARCH_MAX_RESULTS, VIDEO_SEARCH_MAX_RESULTS,
-    MAX_TOOL_ITERATIONS
+    MAX_TOOL_ITERATIONS,
+    MAX_LLM_INPUT_TOKENS, MAX_SINGLE_MESSAGE_TOKENS,
 )
 
 from .extraction import (
@@ -347,6 +348,181 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+# Which AIModel capability flag each attachment kind needs before we will hand it
+# to a provider. pdf/pptx/text are absent on purpose: those are read as extracted
+# text, so they ride in as ordinary tokens and need no special support.
+_ATTACHMENT_CAPABILITY = {
+    'image': 'supports_image_input',
+    'video': 'supports_video_input',
+}
+_TEXT_EXTRACTED_TYPES = {'pdf', 'pptx', 'text'}
+
+
+async def partition_attachments_for_model(model_name: str, attachments: list) -> tuple[list, list]:
+    """
+    Split attachments into what this model can actually ingest, and what it can't.
+
+    Sending an image to a text-only model does not degrade gracefully. Depending
+    on the provider it is a 400, or — worse — the image part is dropped and the
+    model answers confidently about a picture it never received. Both look to the
+    user like the assistant ignored their upload, so the caller is expected to
+    surface `blocked` rather than fail silently.
+
+    Returns (sendable, blocked); each blocked entry carries a human-readable
+    reason suitable for showing to the user.
+    """
+    from nodes.models import AIModel
+
+    if not attachments:
+        return [], []
+
+    model_obj = await AIModel.objects.filter(value=model_name, is_active=True).afirst()
+
+    sendable, blocked = [], []
+    for att in attachments:
+        kind = (att.file_type or 'other').lower()
+
+        if kind in _TEXT_EXTRACTED_TYPES:
+            sendable.append(att)
+            continue
+
+        capability = _ATTACHMENT_CAPABILITY.get(kind)
+        if capability is None:
+            # Audio and everything else: no ingestion path exists at all, so this
+            # is not a per-model limitation and switching models will not help.
+            blocked.append({
+                "filename": att.filename,
+                "file_type": kind,
+                "reason": f"'{kind}' attachments cannot be read by any model here.",
+                "switch_model_helps": False,
+            })
+            continue
+
+        if model_obj is not None and getattr(model_obj, capability, False):
+            sendable.append(att)
+        else:
+            blocked.append({
+                "filename": att.filename,
+                "file_type": kind,
+                "reason": f"The selected model ({model_name}) cannot read {kind} input.",
+                "switch_model_helps": True,
+            })
+
+    return sendable, blocked
+
+
+def describe_blocked_attachments(blocked: list) -> str:
+    """Render the blocked list as a line the user can act on."""
+    if not blocked:
+        return ""
+    switchable = [b for b in blocked if b.get("switch_model_helps")]
+    unsupported = [b for b in blocked if not b.get("switch_model_helps")]
+
+    parts = []
+    if switchable:
+        names = ", ".join(f"**{b['filename']}**" for b in switchable)
+        kinds = ", ".join(sorted({b['file_type'] for b in switchable}))
+        parts.append(
+            f"{names} could not be read because the selected model does not accept "
+            f"{kinds} input. Switch to a multimodal model to use "
+            f"{'them' if len(switchable) > 1 else 'it'}."
+        )
+    if unsupported:
+        names = ", ".join(f"**{b['filename']}**" for b in unsupported)
+        parts.append(f"{names} is a file type that cannot be read by any available model.")
+    return " ".join(parts)
+
+
+def _truncate_middle(text: str, max_tokens: int) -> str:
+    """
+    Cut the middle out of an oversized string, keeping both ends.
+
+    Head-only truncation is the obvious approach and the wrong one here: the tail
+    of a user turn is usually the actual question ("...given all that, which
+    should I pick?"). Losing it leaves the model a pile of context and no task.
+    """
+    max_chars = max_tokens * 4
+    if len(text) <= max_chars:
+        return text
+    keep = max_chars // 2
+    return (
+        f"{text[:keep]}\n\n"
+        f"[... {len(text) - 2 * keep} characters trimmed to fit the context window ...]\n\n"
+        f"{text[-keep:]}"
+    )
+
+
+def clamp_llm_input(
+    prompt: str,
+    system_message: str,
+    history: list[dict] | None,
+    max_total_tokens: int = MAX_LLM_INPUT_TOKENS,
+) -> tuple[str, str, list[dict]]:
+    """
+    Final guard on what we are about to send a provider.
+
+    Every other budget in this module is computed per-section and in isolation:
+    the history payload has one, deep research has another, attachments a third.
+    A turn that brushes all of them can still add up past what the model accepts,
+    and the failure mode is a hard 400 from the provider *after* the user has
+    already waited through tool calls and research. This runs on the assembled
+    request, which is the first point the real total is known.
+
+    Sacrificial order is deliberate — system message, then the current prompt,
+    are the last things to go, because dropping either changes what the model was
+    asked to do. Old history goes first: it is the only part that is recoverable,
+    since it stays in the DB and search_conversation_history can fetch it back.
+    """
+    history = list(history or [])
+
+    # 1. No single message may monopolise the budget.
+    system_message = _truncate_middle(system_message, MAX_SINGLE_MESSAGE_TOKENS)
+    prompt = _truncate_middle(prompt, MAX_SINGLE_MESSAGE_TOKENS)
+    for entry in history:
+        content = entry.get("content") or ""
+        if estimate_tokens(content) > MAX_SINGLE_MESSAGE_TOKENS:
+            entry["content"] = _truncate_middle(content, MAX_SINGLE_MESSAGE_TOKENS)
+
+    fixed_tokens = estimate_tokens(system_message) + estimate_tokens(prompt)
+
+    # 2. Drop history oldest-first until the whole thing fits.
+    def history_tokens(entries: list[dict]) -> int:
+        return sum(estimate_tokens(e.get("content") or "") for e in entries)
+
+    dropped = 0
+    while history and fixed_tokens + history_tokens(history) > max_total_tokens:
+        history.pop(0)
+        dropped += 1
+
+    if dropped:
+        logger.info(
+            f"[Context] Dropped {dropped} oldest history message(s) to fit "
+            f"{max_total_tokens} tokens. They remain in the DB and are reachable "
+            f"via search_conversation_history."
+        )
+        # Tell the model the history it can see is partial. Without this it has
+        # no way to distinguish "this never happened" from "this was trimmed",
+        # and will confidently answer from an incomplete record instead of
+        # reaching for the retrieval tool.
+        history.insert(0, {
+            "role": "system",
+            "content": (
+                f"[CONTEXT NOTICE: {dropped} earlier message(s) were trimmed from this "
+                f"window to fit the model's limit. They are still stored. If the user "
+                f"refers to something you cannot see, call search_conversation_history "
+                f"to retrieve it rather than saying you do not remember.]"
+            ),
+        })
+
+    # 3. Still over with no history left: the prompt itself is the problem.
+    if fixed_tokens > max_total_tokens:
+        budget = max_total_tokens - estimate_tokens(system_message)
+        prompt = _truncate_middle(prompt, max(budget, 1000))
+        logger.warning("[Context] Prompt exceeded the input budget on its own; trimmed.")
+
+    return prompt, system_message, history
+
+
 def build_history_prompt(messages: list, max_tokens: int = MAX_CONTEXT_TOKENS) -> str:
     """
     Build a conversation history string from messages, 
@@ -441,11 +617,7 @@ def classify_intent(content: str) -> tuple[str, str]:
         return 'video', content_stripped[7:].strip()
     if content_stripped.startswith('/research '):
         return 'research', content_stripped[10:].strip()
-    if content_stripped.startswith('/workflow '):
-        return 'workflow', content_stripped[10:].strip()
-    if content_stripped.startswith('/coding '):
-        return 'coding', content_stripped[8:].strip()
-    
+
     # Heuristic-based implicit search detection
     search_indicators = [
         'what is', 'who is', 'when did', 'how to', 'latest', 'current',
@@ -458,6 +630,30 @@ def classify_intent(content: str) -> tuple[str, str]:
             return 'search', content_stripped
     
     return 'chat', content_stripped
+
+
+# Phrases that mean "this question is about our conversation, not the world".
+# Kept narrow on purpose: a false positive costs one cheap DB scan and some
+# injected context, but a false negative is the failure the user actually
+# notices — the assistant claiming not to remember something they just said.
+_RECALL_MARKERS = (
+    'earlier', 'previously', 'before', 'last time', 'you said', 'you told me',
+    'i said', 'i told you', 'i mentioned', 'we discussed', 'we talked about',
+    'we decided', 'remember', 'recall', 'you mentioned', 'as i mentioned',
+    'what did i', 'what was the', 'remind me', 'go back to', 'my name is',
+    'earlier you', 'above', 'the one i gave', 'i gave you',
+)
+
+
+def looks_like_conversation_recall(content: str) -> bool:
+    """
+    Whether the user is asking about something said earlier in this chat.
+
+    Used to decide whether to look the answer up before calling the model,
+    rather than relying on the model to call search_conversation_history itself.
+    """
+    low = (content or '').lower()
+    return any(marker in low for marker in _RECALL_MARKERS)
 
 
 def resolve_agent_iteration_limit(intent: str) -> int:
@@ -476,12 +672,29 @@ def _fetch_enriched_history_messages(session: ChatSession, excluded_message_id, 
     """
     Load recent history and enrich messages with attachment/source context.
     """
-    msgs = list(
-        ChatMessage.objects.filter(session=session)
+    # The window is counted in *conversational* turns only. System rows are the
+    # upload markers, and they are what carries metadata['attachment_id'] — the
+    # enrichment below reads that to re-attach files. Counting them against the
+    # 20 would let a handful of uploads push out the actual conversation, and
+    # excluding them outright would silently drop every attachment from context.
+    # So: take 20 user/assistant turns, then re-admit the system rows that fall
+    # inside the span those turns cover.
+    turns = list(
+        ChatMessage.objects.filter(session=session, role__in=['user', 'assistant'])
         .exclude(id=excluded_message_id)
         .order_by('-created_at')[:HISTORY_WINDOW]
     )
-    msgs.reverse()
+    if turns:
+        oldest_kept = turns[-1].created_at
+        system_rows = list(
+            ChatMessage.objects.filter(
+                session=session, role='system', created_at__gte=oldest_kept
+            ).exclude(id=excluded_message_id)
+        )
+    else:
+        system_rows = []
+
+    msgs = sorted(turns + system_rows, key=lambda m: m.created_at)
 
     seen_attachments: dict[str, bool] = {}
     assistant_seen_after = False
@@ -676,25 +889,6 @@ async def run_eager_search_intent(clean_content: str, user_id: int, shared_tools
         result["sources"] = parsed_res.get("sources", [])[:50]
         result["eager_text"] = parsed_res.get("text", "")
     return result
-
-
-async def run_workflow_suggestion_intent(clean_content: str, user_id: int, shared_tools) -> dict:
-    """
-    Execute eager workflow suggestion and return normalized payload.
-    """
-    res = await shared_tools.execute_tool("suggest_workflow", {"intent": clean_content}, {"user_id": user_id})
-    result = {"raw_result": res, "workflow_id": None, "workflow_name": None}
-    try:
-        parsed = json.loads(res)
-        if parsed.get("found"):
-            result["workflow_id"] = parsed.get("workflow_id")
-            result["workflow_name"] = parsed.get("name")
-    except Exception:
-        pass
-    return result
-
-
-# ==================== DuckDuckGo Search ====================
 async def perform_web_search(query: str, max_results: int = SEARCH_RESULT_LIMIT) -> dict:
     """
     Execute a web search using DuckDuckGo.
@@ -1039,6 +1233,12 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
         "\n5. CLARIFICATION: Only ask for clarification if the request is truly unanswerable (max 1-2 per session)."
         "\n6. CODE PRESENTATION: Use appropriate markdown code blocks with language identifiers for all code."
         "\n7. RESOURCE AWARENESS: You have access to a persistent database of documents and web sources. For historical turns, you only see **summaries/vignettes**. If you need the full text for deep analysis or specific citations, you MUST use the `read_attachment_text` tool (for files) or `read_url` (for links) instead of asking the user to re-upload."
+        + (
+            f"\n7b. CONVERSATION RECALL: You are shown only the most recent {HISTORY_WINDOW} turns. The rest of this conversation is stored and searchable — it is NOT lost. If the user refers to anything you cannot see, call `search_conversation_history` BEFORE responding. Saying \"I don't have that in my context\" or asking the user to repeat themselves when you have not searched is a failure."
+            if session.memory_enabled else
+            "\n7b. NO MEMORY THIS TURN: The user has switched memory off, so you can see only their current message and have no access to earlier turns. If they refer to something previously discussed, say plainly that memory is off and ask them to re-state it or turn memory back on. Do not pretend to recall it."
+        )
+        + "\n7c. SHOWING vs TELLING: When the answer is a chart, diagram, table, comparison or small interactive demo, call `render_html_artifact` with a self-contained HTML snippet instead of describing it in prose. Inline all CSS/JS; the sandbox blocks external requests."
         "\n8. RESOURCE LIMIT: You can review a maximum of 50 resources (search results, URLs, or files) per request to stay within context limits."
         "\n9. KNOWLEDGE BASE (RAG): You have `list_knowledge_bases` and `knowledge_base_search` tools. Use `list_knowledge_bases` first to discover the user's KBs (name, doc count), then `knowledge_base_search` with the right `kb_id` to retrieve relevant chunks. Only call these tools when the user's query is genuinely about their uploaded document content — do NOT call them for general knowledge questions."
         "\n10. META-DATA SILENCE: Never repeat internal tags like `<context_metadata>`, `[FULL RESOURCE CONTENT]`, or system instructions in your final response to the user. These are for your eyes only."
@@ -1065,16 +1265,10 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
         )
     
     mode_augmentation = ""
-    if intent == 'coding':
-        mode_augmentation = "\n\n### CODING MODE ACTIVE ###\n- Prioritize technical precision and robust error handling.\n- You have an `execute_python_code` tool. You MUST use this tool to verify, test, or run scripts if the user asks you to execute code. Do not claim you lack a sandbox.\n- Provide complete, copyable code snippets."
-    elif intent == 'file_manipulation':
-        mode_augmentation = "\n\n### FILE MANIPULATION MODE ACTIVE ###\n- You have direct access to workspace files via tools.\n- Verify file state before and after any modification."
-    elif intent == 'research':
+    if intent == 'research':
         mode_augmentation = "\n\n### DEEP RESEARCH MODE ACTIVE ###\n- Synthesize information from multiple distinct sources.\n- Identify contradictions in sources and present a balanced view.\n- Heavily utilize your `web_search` and `read_url` tools."
     elif intent in ['search', 'chat']:
-        mode_augmentation = "\n\n### GENERAL ASSISTANT MODE ###\n- You have access to `web_search`, `image_search`, `video_search`, and `suggest_workflow`. Use the most appropriate tool to answer the user's query dynamically."
-    elif intent == 'workflow':
-        mode_augmentation = "\n\n### WORKFLOW ASSISTANT MODE ###\n- You have a `suggest_workflow` tool. Prioritize invoking it to help the user find or build automation sequences."
+        mode_augmentation = "\n\n### GENERAL ASSISTANT MODE ###\n- You have access to `web_search`, `image_search`, `video_search`, and `render_html_artifact`. Use the most appropriate tool to answer the user's query dynamically."
     elif intent == 'image':
         mode_augmentation = "\n\n### IMAGE GENERATION/SEARCH MODE ###\n- The user wants visuals. Prioritize invoking the `image_search` tool."
     elif intent == 'video':
@@ -1086,6 +1280,11 @@ def build_augmented_system_message(session, current_time: str, intent: str, prov
     tool_list_str = "\n\n### AVAILABLE TOOLS ###\nYou have direct access to the following tools. Use them when appropriate:\n"
     for t in shared_tools.AVAILABLE_TOOLS:
         fn = t.get("function", {})
+        # Must match the filtering in get_available_tools, or the prompt advertises
+        # a tool the model is not actually given — which reads to the model as a
+        # capability it has, and produces calls that come back "not recognized".
+        if not session.memory_enabled and fn.get('name') in shared_tools.ToolExecutor.MEMORY_DEPENDENT_TOOLS:
+            continue
         tool_list_str += f"- `{fn.get('name')}`: {fn.get('description')}\n"
     
     return f"{base}{context_block}{directives}{tool_list_str}{mode_augmentation}{format_instr}{optimization_hint}"
@@ -1114,6 +1313,13 @@ async def execute_llm(
     from compiler.schemas import ExecutionContext
     from credentials.models import Credential
     from asgiref.sync import sync_to_async
+
+    # Applied here rather than at each call site because this is the one function
+    # every chat LLM call goes through — the agent loop, deep research, the JSON
+    # repair pass and graph.py all land here. Clamping per call site would mean
+    # remembering to do it in nine places, and the one that got forgotten would
+    # be the one that 400s in production.
+    prompt, system_message, history = clamp_llm_input(prompt, system_message, history)
 
     registry = get_registry()
     node_type = PROVIDER_NODE_MAP.get(provider, provider)
@@ -1292,55 +1498,6 @@ async def ensure_final_response_payload(
 # ==================== Assistant Summarization ====================
 # (Removed `generate_assistant_summary` to avoid Gemini API quota issues.
 #  Summarization is now handled via simple text truncation inline.)
-
-
-# ==================== Workflow Suggestion ====================
-async def suggest_workflow(user_id: int, intent_description: str) -> dict | None:
-    """
-    Find the best matching workflow for the user's intent.
-    Returns { workflow_id, name, description } or None.
-    """
-    from orchestrator.models import Workflow
-    from asgiref.sync import sync_to_async
-
-    try:
-        workflows = await sync_to_async(list)(
-            Workflow.objects.filter(user_id=user_id).values('id', 'name', 'description')[:20]
-        )
-
-        if not workflows:
-            return None
-
-        # Simple keyword matching for now; can be upgraded to LLM-based matching later
-        intent_lower = intent_description.lower()
-        best_match = None
-        best_score = 0
-
-        for wf in workflows:
-            name_lower = (wf.get('name', '') or '').lower()
-            desc_lower = (wf.get('description', '') or '').lower()
-            
-            # Score = number of intent words found in workflow name/description
-            score = sum(1 for word in intent_lower.split() if word in name_lower or word in desc_lower)
-            
-            if score > best_score:
-                best_score = score
-                best_match = wf
-
-        if best_match and best_score >= 2:
-            return {
-                "workflow_id": best_match['id'],
-                "name": best_match['name'],
-                "description": best_match.get('description', ''),
-            }
-
-        return None
-    except Exception as e:
-        logger.error(f"Workflow suggestion failed: {e}")
-        return None
-
-
-# ==================== ViewSet ====================
 class ChatSessionViewSet(viewsets.ModelViewSet):
     """ViewSet for managing standalone chat sessions."""
     serializer_class = ChatSessionSerializer
@@ -1421,7 +1578,7 @@ async def send_message(request, session_id: str):
     # Priority: explicit intent param > slash command parsing > heuristic detection
     explicit_intent = request.data.get('intent', '').strip().lower()
     
-    if explicit_intent and explicit_intent in ('chat', 'search', 'research', 'image','video', 'workflow', 'coding', 'file_manipulation'):
+    if explicit_intent and explicit_intent in ('chat', 'search', 'research', 'image', 'video'):
         intent = explicit_intent
         clean_content = content.strip()
     else:
@@ -1496,7 +1653,7 @@ async def send_message(request, session_id: str):
     # ---- Eager Tool Execution for Explicit Intents ----
     # This saves 1 LLM roundtrip (~5-10s) when the user uses a button or slash command.
     eager_results = []
-    if intent in ['search', 'research', 'workflow']:
+    if intent in ['search', 'research']:
         if intent == 'search':
             search_data = await run_eager_search_intent(clean_content, request.user.id, shared_tools)
             metadata['search_query'] = search_data["search_query"]
@@ -1566,19 +1723,6 @@ async def send_message(request, session_id: str):
                 
             eager_results.append(f"[Deep Research Performed]\nQueries Decided: {queries}\nTotal Links Analyzed: {len(valid_sources)}\nImages: {len(metadata.get('images', []))}\nVideos: {len(metadata.get('videos', []))}\n\nExtracted Content for Synthesis:\n{combined}\n\nReview this deeply researched data, understanding you must analyze the dates/times and provide an exceptionally robust response.")
             
-        elif intent == 'workflow':
-            workflow_data = await run_workflow_suggestion_intent(clean_content, request.user.id, shared_tools)
-            if workflow_data["workflow_id"]:
-                metadata['workflow_id'] = workflow_data["workflow_id"]
-                metadata['workflow_name'] = workflow_data["workflow_name"]
-            eager_results.append(f"[Eager Tool: suggest_workflow executed]\nResult: {workflow_data['raw_result']}")
-            
-        # These intents add specific behavioral instructions instead of terminating early
-        if intent == 'coding':
-            system_message += "\n\n### CODING MODE ACTIVE ###\n- Prioritize technical precision, clean code, and robust error handling.\n- Use code blocks for all snippets.\n- If the user asks for a project fix, use tools to read the code first."
-            
-        if intent == 'file_manipulation':
-            system_message += "\n\n### FILE MANIPULATION MODE ACTIVE ###\n- You are specialized in reading, writing, and organizing workspace files.\n- Use the provided file system tools to fulfill requests accurately.\n- Always verify file existence before modification."
 
     # Determine response format (use json_object if supported by model/handler)
     response_format = "json_object" if provider in ['openai', 'gemini', 'openrouter'] else "text"
@@ -1784,15 +1928,30 @@ async def send_message_stream(request, session_id: str):
         # ---- Intent Resolution (No Locking) ----
         explicit_intent = req_data.get('intent', '').strip().lower()
         
-        if explicit_intent and explicit_intent in ('chat', 'search', 'research', 'image', 'video', 'workflow', 'coding', 'file_manipulation'):
+        if explicit_intent and explicit_intent in ('chat', 'search', 'research', 'image', 'video'):
             intent = explicit_intent
             clean_content = content.strip()
         else:
             intent, clean_content = classify_intent(content)
 
-        # thread_id for LangGraph persistence
-        thread_id = str(session.id)
-        
+        # thread_id for LangGraph persistence.
+        #
+        # With memory off we deliberately use a throwaway id. The graph keeps its
+        # own checkpointed `messages` list keyed by thread_id, and that list is a
+        # second, independent copy of the conversation: emptying history_list and
+        # withholding the search tool does nothing about it, so the model would
+        # still happily recall earlier turns from the checkpoint and the toggle
+        # would appear to do nothing. A fresh id gives this turn an empty graph.
+        #
+        # Approval resume needs the id to be stable *within* a turn, which it is —
+        # it is generated once per request. It cannot resume across turns with
+        # memory off, which is the intended behaviour, not a limitation.
+        if session.memory_enabled:
+            thread_id = str(session.id)
+        else:
+            thread_id = f"{session.id}:nomem:{uuid4()}"
+
+
         # Handle Tool Approvals (HITL)
         approve_call_id = req_data.get('approve_tool_call')
         if approve_call_id:
@@ -1865,13 +2024,19 @@ async def send_message_stream(request, session_id: str):
         ai_model_obj = await AIModel.objects.filter(value=model, is_active=True).afirst()
         supports_docs = ai_model_obj.supports_document_input if ai_model_obj else False
 
-        history_messages, history_list, _history_prompt = await prepare_history_context(
-            session=session,
-            excluded_message_id=user_msg.id,
-            supports_docs=supports_docs,
-            list_token_budget=MAX_CONTEXT_TOKENS - 4000,
-            prompt_token_budget=MAX_CONTEXT_TOKENS,
-        )
+        # Memory off: answer from this message alone. Nothing is deleted — the
+        # turns stay in the DB and come back the moment it is switched on.
+        if session.memory_enabled:
+            history_messages, history_list, _history_prompt = await prepare_history_context(
+                session=session,
+                excluded_message_id=user_msg.id,
+                supports_docs=supports_docs,
+                list_token_budget=MAX_CONTEXT_TOKENS - 4000,
+                prompt_token_budget=MAX_CONTEXT_TOKENS,
+            )
+        else:
+            history_messages, history_list = [], []
+            yield f"data: {json.dumps({'type': 'status', 'phase': 'memory_off', 'message': 'Memory is off — answering from this message only.'})}\n\n"
 
         await sync_session_model_overrides(req_data, session, provider, model)
         c_time = current_time_string()
@@ -1891,9 +2056,47 @@ async def send_message_stream(request, session_id: str):
         tool_trace = []
         accumulated_tool_context = []
 
+        # ---- Attachments ----
+        # Resolved here, before the branch into agentic vs. deep-research, because
+        # both paths need it. It used to be computed inside the research branch
+        # only, which is why the agentic path — the one that serves ordinary chat
+        # — called run_agent_loop with a hardcoded attachments=[] and silently
+        # ignored every upload.
+        att_ids = []
+        # Only pull attachments from the last 5 turns to prevent context bloat
+        for m in history_messages[-5:]:
+            if m.metadata and m.metadata.get('attachment_id'):
+                try:
+                    att_ids.append(UUID(m.metadata['attachment_id']))
+                except (TypeError, ValueError):
+                    pass
+        candidate_attachments = []
+        if att_ids:
+            att_ids = list(set(att_ids))
+            candidate_attachments = await sync_to_async(list)(
+                ChatAttachment.objects.filter(id__in=att_ids).exclude(is_large_file=True)
+            )
+
+        active_attachments, blocked_attachments = await partition_attachments_for_model(
+            model, candidate_attachments
+        )
+        blocked_notice = describe_blocked_attachments(blocked_attachments)
+        if blocked_attachments:
+            logger.info(f"[Attachments] Withheld {len(blocked_attachments)} from {model}: {blocked_notice}")
+            # Tell the client directly — the user needs to know their upload was
+            # not read even if the model says nothing about it.
+            yield f"data: {json.dumps({'type': 'attachments_blocked', 'message': blocked_notice, 'items': blocked_attachments})}\n\n"
+            meta['blocked_attachments'] = blocked_attachments
+            # And tell the model, so it does not answer as though it saw them.
+            system_message += (
+                f"\n\n[ATTACHMENTS WITHHELD: {len(blocked_attachments)} file(s) the user "
+                f"uploaded were not given to you. {blocked_notice} Say so plainly rather "
+                f"than guessing at the contents.]"
+            )
+
         # ---- Eager Tool Execution ----
         eager_results = []
-        if intent in ['search', 'research', 'workflow']:
+        if intent in ['search', 'research']:
             if intent == 'search':
                 yield f"data: {json.dumps({'type': 'status', 'phase': 'searching', 'message': 'Searching the web...'})}\n\n"
                 yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'web_search', 'args': {'query': clean_content}, 'iteration': 0})}\n\n"
@@ -2039,14 +2242,6 @@ async def send_message_stream(request, session_id: str):
                 )
                 yield f"data: {json.dumps({'type': 'status', 'phase': 'analyzing', 'message': f'Analyzed {len(valid_sources)} sources. Synthesizing...'})}\n\n"
 
-            elif intent == 'workflow':
-                yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'suggest_workflow', 'args': {'intent': clean_content}, 'iteration': 0})}\n\n"
-                tool_trace.append({"tool": "suggest_workflow", "args": {"intent": clean_content}, "iteration": 0})
-                workflow_data = await run_workflow_suggestion_intent(clean_content, request.user.id, shared_tools)
-                if workflow_data["workflow_id"]:
-                    meta['workflow_id'] = workflow_data["workflow_id"]
-                    meta['workflow_name'] = workflow_data["workflow_name"]
-                eager_results.append(f"[Eager Tool: suggest_workflow executed]\nResult: {workflow_data['raw_result']}")
 
         # RAG is now fully tool-driven: the LLM calls list_knowledge_bases / knowledge_base_search
         # as needed rather than receiving injected context on every message.
@@ -2054,6 +2249,52 @@ async def send_message_stream(request, session_id: str):
         if reference_data and isinstance(reference_data, dict):
             ref_msg_id = reference_data.get('message_id')
             full_prompt = f"[SYSTEM INSTRUCTION: The user's query specifically refers to a portion of Message ID {ref_msg_id}. Please prioritize this context when answering.]\n\n{clean_content}"
+
+        # ---- Eager conversation recall ----
+        # When the user is plainly asking about something said earlier, look it up
+        # for the model instead of hoping the model looks it up itself.
+        #
+        # The tool is offered and the system prompt tells the model to use it, but
+        # measured against nemotron it simply did not: three consecutive runs
+        # answered "I don't have that in my context" with an empty tool_trace
+        # while the same query through the tool returned the answer immediately.
+        # Recall is the feature, not a nice-to-have, so it cannot be contingent on
+        # a given model's willingness to call a function. The model still has the
+        # tool for cases this heuristic misses.
+        if session.memory_enabled and looks_like_conversation_recall(clean_content):
+            try:
+                recall_raw = await shared_tools.execute_tool(
+                    "search_conversation_history",
+                    {"query": clean_content},
+                    {"user_id": request.user.id, "session_id": str(session.id)},
+                )
+                recall = json.loads(recall_raw)
+                if recall.get("matches"):
+                    n_recalled = recall.get("returned", 0)
+                    recall_event = {
+                        'type': 'status',
+                        'phase': 'history_recall',
+                        'message': f'Recalled {n_recalled} earlier message(s) from this conversation.',
+                    }
+                    yield f"data: {json.dumps(recall_event)}\n\n"
+                    tool_trace.append({
+                        "tool": "search_conversation_history",
+                        "args": {"query": clean_content}, "iteration": 0,
+                    })
+                    lines = [
+                        f"- [{m['role']} @ {m['timestamp'][:19]}] {m['snippet']}"
+                        for m in recall["matches"]
+                    ]
+                    full_prompt = (
+                        f"{full_prompt}\n\n"
+                        f"[RECALLED FROM EARLIER IN THIS CONVERSATION — these turns are outside "
+                        f"your visible window but did happen. Use them to answer; do not tell the "
+                        f"user you have no record of them.]\n"
+                        + "\n".join(lines)
+                    )
+            except Exception as recall_err:
+                # Recall is an enhancement; failing it must not fail the turn.
+                logger.warning(f"[Recall] Eager history search failed: {recall_err}")
 
         # ---- Generate final response ----
         llm_result = None
@@ -2066,28 +2307,6 @@ async def send_message_stream(request, session_id: str):
             yield f"data: {json.dumps({'type': 'agent_trace', 'sub_type': 'thought', 'content': 'Synthesizing all research findings and tool outputs into a final response...'})}\n\n"
             combined_eager = "\n\n".join(eager_results)
             prompt_ctx = f"{full_prompt}\n\nAdditional context from tools:\n{combined_eager}\n\nPlease provide your final answer in the requested JSON format."
-            # Check model capabilities for multimodal support
-            from nodes.models import AIModel
-            ai_model_obj = await AIModel.objects.filter(value=model, is_active=True).afirst()
-            supports_docs = ai_model_obj.supports_document_input if ai_model_obj else False
-
-            # Collect attachments if model supports them
-            active_attachments = []
-            if supports_docs:
-                att_ids = []
-                # Only pull attachments from the last 5 turns to prevent context bloat
-                for m in history_messages[-5:]:
-                    if m.metadata and m.metadata.get('attachment_id'):
-                        try:
-                            att_ids.append(UUID(m.metadata['attachment_id']))
-                        except (TypeError, ValueError):
-                            pass
-                if att_ids:
-                    # Filter for unique IDs and fetch
-                    att_ids = list(set(att_ids))
-                    active_attachments = await sync_to_async(list)(
-                        ChatAttachment.objects.filter(id__in=att_ids).exclude(is_large_file=True)
-                    )
 
             # Non-agentic: Standard LLM call with streaming
             
@@ -2293,10 +2512,11 @@ async def send_message_stream(request, session_id: str):
                     clean_content=clean_content,
                     intent=intent,
                     history_list=history_list,
-                    attachments=[],
+                    attachments=active_attachments,
                     stream_callback=_stream_cb,
                     max_iterations=actual_max_iterations,
                     thread_id=thread_id,
+                    memory_enabled=session.memory_enabled,
                 )
 
             _graph_task = _aio.create_task(_run_graph())
@@ -3031,102 +3251,6 @@ def _extract_pptx_text_sync(file_bytes: bytes) -> str:
     except Exception as e:
         logger.error(f"PPTX extraction failed: {e}")
         return ""
-
-
-# ==================== Run Workflow from Chat ====================
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-async def run_workflow_from_chat(request, session_id: str):
-    """
-    Execute a workflow suggested by the AI assistant.
-    Called when the user clicks "Approve & Run" on a workflow suggestion.
-    """
-    try:
-        session_uuid = UUID(session_id)
-        session = await ChatSession.objects.filter(id=session_uuid, user=request.user).afirst()
-    except ValueError:
-        return Response({'error': 'Invalid session ID format'}, status=400)
-
-    if not session:
-        return Response({'error': 'Chat session not found'}, status=404)
-
-    workflow_id = request.data.get('workflow_id')
-    if not workflow_id:
-        return Response({'error': 'workflow_id is required'}, status=400)
-
-    from orchestrator.models import Workflow
-    from executor.king import get_orchestrator
-    from asgiref.sync import sync_to_async
-
-    workflow = await Workflow.objects.filter(id=workflow_id, user=request.user).afirst()
-    if not workflow:
-        return Response({'error': 'Workflow not found'}, status=404)
-
-    # Build workflow JSON
-    workflow_json = {
-        'id': workflow.id,
-        'nodes': workflow.nodes,
-        'edges': workflow.edges,
-        'settings': workflow.workflow_settings,
-    }
-
-    # Get credentials
-    from executor.credential_utils import get_workflow_credentials
-    active_creds = await sync_to_async(get_workflow_credentials)(request.user.id, workflow_json)
-
-    # Start execution
-    orchestrator = get_orchestrator(request.user.id)
-    try:
-        handle = await orchestrator.start(
-            workflow_json=workflow_json,
-            user_id=request.user.id,
-            input_data={},
-            credentials=active_creds,
-            supervision=workflow.supervision_level,
-            context=workflow.context,
-        )
-    except Exception as e:
-        logger.error(f"Workflow execution from chat failed: {e}")
-        
-        ai_msg = await ChatMessage.objects.acreate(
-            session=session,
-            role='assistant',
-            content=f"❌ Failed to start workflow: {str(e)}",
-            message_type='workflow_result',
-            metadata={'workflow_id': workflow_id, 'error': str(e)},
-        )
-        return Response({
-            'ai_response': await serialize_message(ai_msg),
-            'error': str(e),
-        }, status=400)
-
-    # Save execution started message
-    ai_msg = await ChatMessage.objects.acreate(
-        session=session,
-        role='assistant',
-        content=(
-            f"🚀 **Workflow started!**\n\n"
-            f"**{workflow.name}** is now running.\n"
-            f"Execution ID: `{handle.execution_id}`\n\n"
-            f"You can track progress in the Executions panel."
-        ),
-        message_type='workflow_result',
-        metadata={
-            'workflow_id': workflow_id,
-            'workflow_name': workflow.name,
-            'execution_id': str(handle.execution_id),
-        },
-    )
-
-    return Response({
-        'ai_response': await serialize_message(ai_msg),
-        'execution_id': str(handle.execution_id),
-        'workflow_name': workflow.name,
-    })
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
 def execute_tool_view(request):
     """
     Direct tool execution endpoint.

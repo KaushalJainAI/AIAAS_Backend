@@ -24,7 +24,17 @@ class ChatSession(models.Model):
     llm_model = models.CharField(max_length=100, default='nvidia/llama-3.3-nemotron-super-49b-v1')
     intent = models.CharField(max_length=50, default='chat')
     system_prompt = models.TextField(blank=True, default="")
-    
+
+    # When off, the assistant answers from the current message alone: no earlier
+    # turns are replayed and the history-search tool is withheld.
+    #
+    # This gates *recall*, not *retention* — messages are still written to the DB
+    # exactly as before. That distinction matters: a user who turns this off to
+    # ask a one-off question expects the conversation to still be there when they
+    # turn it back on. Purging on toggle would be a different, destructive feature
+    # and is deliberately not what this does.
+    memory_enabled = models.BooleanField(default=True)
+
     # Token usage tracking
     total_tokens_used = models.IntegerField(default=0)
     
