@@ -2,7 +2,7 @@
 
 Shipping and sharing **autonomous agents** instead of DAGs.
 
-Status: design, not built. Written 2026-07-29.
+Written 2026-07-29. **Phase 1 is built** (see §8); phases 2–4 remain design.
 
 ---
 
@@ -60,13 +60,16 @@ Checked against the code on 2026-07-29, not assumed.
   WASM engines), KB search, `list_workflows` / `run_workflow`.
 - Frontend: the agent builder at `/agents/new` produces an `AgentConfig` already.
 
-**Missing**
+**Missing** *(as of the original writing — the first three are now done)*
 
-- No agents API. The builder can't save, so nothing can be published. **This is
-  the blocker for everything else.**
-- `WorkflowTemplate` stores `nodes`/`edges` — no agent shape.
-- No tool-grant model, no portable requirements, no egress policy, no spend cap.
+- ~~No agents API.~~ Built: `orchestrator/agents.py`.
+- ~~No tool-grant model, no egress policy, no spend cap.~~ Built as columns on
+  `Workflow`.
+- `WorkflowTemplate` stores `nodes`/`edges` — no agent shape. Still true.
+- Portable `requirements` has a column but nothing writes it yet — it only
+  matters at publish time (Phase 2).
 - No permissions screen on install.
+- No agent runtime, so a saved agent cannot yet be executed.
 - Agents can't call workflows as tools yet (`run_workflow` exists in chat, not
   wired to an agent runtime).
 
@@ -205,11 +208,25 @@ send the reminder; a workflow decides *how* the mail is composed and sent.
 
 ## 8. Phases
 
-**Phase 1 — make agents real (backend, blocking)**
-- `kind`, `tool_grants`, `requirements`, `guardrails`, `trigger` on `Workflow`
-- CRUD endpoints; `/agents/new` saves for the first time
-- Agent runtime: LangGraph loop with the granted tools, honouring
-  `supervision_level` via the existing `HITLRequest` path
+**Phase 1 — make agents real (backend, blocking)** — *mostly done*
+- ✅ `kind`, `tool_grants`, `requirements`, `guardrails`, `trigger` on `Workflow`,
+  plus `sandbox` and `agent_context` (migration `orchestrator/0011`)
+- ✅ CRUD at `/api/orchestrator/agents/`; `/agents/new` saves. See
+  `orchestrator/agents.py` and `orchestrator/tests_agents.py`
+- ✅ The egress knob §9.1 asked for. `shell + egress=full` is refused outright
+- ⬜ Agent runtime: LangGraph loop with the granted tools, honouring
+  `supervision_level` via the existing `HITLRequest` path. **This is what is
+  left** — agents can be defined and saved, but not yet executed, so every
+  `runs` count is currently 0.
+
+Two decisions worth recording, because they were not in the original design:
+
+- **`PATCH` merges onto the stored config rather than replacing it.** A partial
+  save that reset unsent knobs to their defaults would silently widen or narrow
+  a grant — the failure §5 calls unforgivable. Tested.
+- **Tool grants are stored as the full closed set,** not just the keys that were
+  sent. An absent key has to read as "denied", never as "unset, so whatever the
+  runtime defaults to".
 
 **Phase 2 — sharing**
 - Mirror the fields onto `WorkflowTemplate`; publish from an agent

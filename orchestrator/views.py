@@ -128,8 +128,10 @@ def workflow_list(request):
             limit = min(max(int(request.query_params.get('limit', 50)), 1), 100)
         except (TypeError, ValueError):
             limit = 50
-        qs = Workflow.objects.filter(user=request.user)
-        
+        # Agents share this table but are not node graphs; they have their own
+        # endpoint and would render here as empty canvases.
+        qs = Workflow.objects.filter(user=request.user, kind='workflow')
+
         if status_filter:
             qs = qs.filter(status=status_filter)
 

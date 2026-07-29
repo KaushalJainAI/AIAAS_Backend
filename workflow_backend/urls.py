@@ -86,6 +86,18 @@ urlpatterns = [
     
     # Imagine (Image/Video/Audio Generation)
     path('api/imagine/', include('imagine.urls')),
+
+    # Datasets (training and eval examples)
+    path('api/', include('datasets.urls')),
+
+    # Evals (suites, cases, scored runs)
+    path('api/evals/', include('evals.urls')),
+
+    # Tuning (fine-tuning jobs)
+    path('api/tuning/', include('tuning.urls')),
+
+    # Extract (document -> rows)
+    path('api/extraction/', include('extraction.urls')),
 ]
 
 

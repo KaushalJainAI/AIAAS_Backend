@@ -3,12 +3,16 @@ Orchestrator App URL Configuration
 """
 from django.urls import path
 
-from . import views
+from . import agents, views
 from .views import export_workflow_zip
 
 app_name = 'orchestrator'
 
 urlpatterns = [
+    # Agents (a Workflow with kind='agent' — see docs/AGENT_TEMPLATES.md)
+    path('agents/', agents.agent_list, name='agent_list'),
+    path('agents/<int:agent_id>/', agents.agent_detail, name='agent_detail'),
+
     # Workflow CRUD
     path('workflows/', views.workflow_list, name='workflow_list'),
     path('workflows/<int:workflow_id>/', views.workflow_detail, name='workflow_detail'),

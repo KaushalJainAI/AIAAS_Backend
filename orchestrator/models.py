@@ -15,7 +15,16 @@ class Workflow(models.Model):
         ('paused', 'Paused'),
         ('archived', 'Archived'),
     ]
-    
+
+    # An agent is a Workflow with no nodes: same publish / fork / version / rate
+    # machinery, different execution model. `kind` is explicit rather than
+    # inferred from len(nodes) == 0 so an agent that caches a sub-graph doesn't
+    # silently become a workflow. See docs/AGENT_TEMPLATES.md §3.
+    KIND_CHOICES = [
+        ('workflow', 'Workflow'),
+        ('agent', 'Agent'),
+    ]
+
     SUPERVISION_CHOICES = [
         ('error_only', 'Error Only (Recommended)'),
         ('full', 'Full Supervision'),
@@ -118,7 +127,53 @@ class Workflow(models.Model):
         default=False,
         help_text='Whether this workflow is a template'
     )
-    
+
+    # ---------------- Agent fields ----------------
+    # Only meaningful when kind == 'agent'. Each column has one job, because the
+    # permissions screen shown at install renders from tool_grants +
+    # requirements + guardrails and the runtime reads the same rows. A single
+    # opaque config blob would let the screen and the enforcement drift apart,
+    # which is the one failure this design cannot tolerate.
+    kind = models.CharField(
+        max_length=12,
+        choices=KIND_CHOICES,
+        default='workflow',
+        db_index=True,
+        help_text='Whether this row is a node graph or an autonomous agent'
+    )
+    tool_grants = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Which tools the agent may call, e.g. {"codeExecution": true, "shell": false}'
+    )
+    requirements = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Portable requirements for sharing — what kind of connection/KB '
+                  'the agent needs, never the author\'s own row ids'
+    )
+    guardrails = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='autonomy, spend cap, egress policy, review agent'
+    )
+    trigger = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='How it is invoked, e.g. {"mode": "maintenance", "cron": "0 9 * * 1"}'
+    )
+    sandbox = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Execution envelope: file access, workdir, venv, cpu, memory'
+    )
+    agent_context = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='What the agent is given: connectors, knowledge base ids, skill ids, org/environment flags'
+    )
+
+
     # Metadata
     tags = models.JSONField(
         default=list,
@@ -159,6 +214,9 @@ class Workflow(models.Model):
             models.Index(fields=['user', '-updated_at', '-id']),
             models.Index(fields=['status', '-updated_at']),
             models.Index(fields=['is_template', 'status']),
+            # Every agent and workflow listing filters on kind, so it pays for
+            # itself immediately.
+            models.Index(fields=['user', 'kind', '-updated_at']),
         ]
 
     def __str__(self):
@@ -178,6 +236,11 @@ class Workflow(models.Model):
     def is_active(self):
         """Check if workflow is currently active"""
         return self.status == 'active'
+
+    @property
+    def is_agent(self):
+        """Autonomous agent rather than a node graph."""
+        return self.kind == 'agent'
 
     # Subworkflow & Template Support
     is_subworkflow_enabled = models.BooleanField(

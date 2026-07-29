@@ -137,6 +137,12 @@ INSTALLED_APPS = [
     'canvas_agent',
     'notifications',
     'imagine',
+    # The improve loop: corrections become datasets, datasets grade agents and
+    # tune models.
+    'datasets',
+    'evals',
+    'tuning',
+    'extraction',
 ]
 
 SITE_ID = 1
