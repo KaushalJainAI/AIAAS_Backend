@@ -206,7 +206,23 @@ def get_registry() -> NodeRegistry:
         registry.register(GitHubNode)
         registry.register(HTTPRequestNode)
         registry.register(FirecrawlScrapeNode)
-        
+
+        # Register the REST connector pack (messaging, CRM, ticketing, dev
+        # tooling, storage, commerce, support, marketing).
+        #
+        # Wrapped like the other optional groups: a syntax error or a bad import
+        # in one connector module should cost you that pack, not the whole node
+        # palette. Without this the registry raises during app startup and the
+        # editor comes up with no nodes at all.
+        try:
+            from nodes.handlers.connectors import ALL_CONNECTORS
+            for connector_cls in ALL_CONNECTORS:
+                registry.register(connector_cls)
+            logger.info("Registered %d REST connectors", len(ALL_CONNECTORS))
+        except (ImportError, ModuleNotFoundError) as e:
+            logger.warning(f"Could not register REST connectors: {e}")
+
+
         # Register AI / LLM Nodes
         from nodes.handlers.llm_nodes import OpenAINode, GeminiNode, OllamaNode, PerplexityNode, OpenRouterNode, HuggingFaceNode, XAINode, NvidiaNode
         registry.register(OpenAINode)

@@ -1,14 +1,13 @@
 """
 Shared Tool Registry for Agentic Execution
 """
-import ipaddress
 import json
 import logging
 import re
-import socket
 import asyncio
 from typing import Any, Dict, List
-from urllib.parse import urlparse
+
+from core.net import validate_url
 from workflow_backend.thresholds import (
     READ_URL_CHAR_LIMIT,
     HISTORY_SEARCH_MAX_MATCHES,
@@ -47,58 +46,11 @@ SENSITIVE_TOOLS = [
 ]
 
 
+# The SSRF ruleset now lives in core.net, because the workflow HTTP connector
+# needs exactly the same guard and a second copy would drift. Kept as a thin
+# shim so the existing call sites and any external importer keep working.
 class SSRFValidator:
-    _BLOCKED_IP_RANGES = [
-        ipaddress.ip_network('10.0.0.0/8'),
-        ipaddress.ip_network('172.16.0.0/12'),
-        ipaddress.ip_network('192.168.0.0/16'),
-        ipaddress.ip_network('127.0.0.0/8'),
-        ipaddress.ip_network('169.254.0.0/16'),  # AWS/GCP metadata
-        ipaddress.ip_network('::1/128'),
-        ipaddress.ip_network('fc00::/7'),
-        ipaddress.ip_network('fe80::/10'),
-        ipaddress.ip_network('0.0.0.0/8'),
-    ]
-
-    _BLOCKED_HOSTNAMES = {
-        'metadata.google.internal',
-        'metadata.google',
-        'kubernetes.default',
-        'kubernetes.default.svc',
-    }
-
-    @classmethod
-    def validate(cls, url: str) -> tuple[bool, str]:
-        """
-        Validate a URL to prevent SSRF attacks.
-        Returns (is_safe, error_message).
-        """
-        try:
-            parsed = urlparse(url)
-        except Exception:
-            return False, "Invalid URL format"
-
-        if parsed.scheme not in ('http', 'https'):
-            return False, f"URL scheme '{parsed.scheme}' is not allowed. Only http/https permitted."
-
-        hostname = parsed.hostname
-        if not hostname:
-            return False, "URL has no hostname"
-
-        if hostname.lower() in cls._BLOCKED_HOSTNAMES:
-            return False, f"Access to '{hostname}' is blocked"
-
-        try:
-            resolved_ips = socket.getaddrinfo(hostname, parsed.port or 80, proto=socket.IPPROTO_TCP)
-            for family, _type, _proto, _canonname, sockaddr in resolved_ips:
-                ip = ipaddress.ip_address(sockaddr[0])
-                for blocked_range in cls._BLOCKED_IP_RANGES:
-                    if ip in blocked_range:
-                        return False, "Access to internal/private network addresses is blocked"
-        except socket.gaierror:
-            return False, f"Could not resolve hostname '{hostname}'"
-
-        return True, ""
+    validate = staticmethod(validate_url)
 
 
 class ToolExecutor:

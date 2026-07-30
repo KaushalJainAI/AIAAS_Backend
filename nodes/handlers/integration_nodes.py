@@ -9,6 +9,8 @@ from typing import Any, TYPE_CHECKING
 from urllib.parse import quote
 
 
+from core.net import redact_headers, validate_url_async
+
 from .base import (
     BaseNodeHandler,
     NodeCategory,
@@ -18,6 +20,7 @@ from .base import (
     NodeExecutionResult,
     NodeItem,
 )
+from .rest_base import MAX_RESPONSE_BYTES
 
 
 if TYPE_CHECKING:
@@ -1987,23 +1990,53 @@ class HTTPRequestNode(BaseNodeHandler):
                 error="URL is required",
                 output_handle="output-0"
             )
-        
+
+        # This node fetches whatever URL it is handed, and that URL can come from
+        # an upstream expression or an agent rather than a person. Unchecked, on
+        # this deployment that includes http://169.254.169.254/ — the EC2 metadata
+        # service — and every unauthenticated service inside the VPC that assumed
+        # nothing outside could reach it. The same validator already guarded the
+        # chat scraping tools; it was simply never applied here.
+        safe, reason = await validate_url_async(url)
+        if not safe:
+            return NodeExecutionResult(
+                success=False,
+                error=f"Blocked request to {url}: {reason}",
+                output_handle="output-0"
+            )
+
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            # follow_redirects stays off deliberately. Following them would let a
+            # public URL bounce the request to a private one *after* validation,
+            # which is the standard way around a check like the one above.
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
                 request_kwargs = {
                     "headers": headers,
                     "params": query_params,
                 }
-                
+
                 if method in ["POST", "PUT", "PATCH"] and body:
                     request_kwargs["json"] = body
-                
+
                 response = await client.request(
                     method=method,
                     url=url,
                     **request_kwargs,
                 )
-                
+
+                # Node output is persisted and rendered, so an unbounded body is a
+                # way to put a multi-gigabyte string through the worker and into
+                # the database.
+                if len(response.content) > MAX_RESPONSE_BYTES:
+                    return NodeExecutionResult(
+                        success=False,
+                        error=(
+                            f"Response too large ({len(response.content)} bytes, "
+                            f"limit {MAX_RESPONSE_BYTES})."
+                        ),
+                        output_handle="output-0"
+                    )
+
                 # Parse response
                 if response_format == "json":
                     try:
@@ -2012,17 +2045,19 @@ class HTTPRequestNode(BaseNodeHandler):
                         response_data = {"text": response.text}
                 else:
                     response_data = {"text": response.text}
-                
+
                 return NodeExecutionResult(
                     success=True,
                     items=[NodeItem(json={
                         "status_code": response.status_code,
-                        "headers": dict(response.headers),
+                        # Redacted: the raw mapping carries Set-Cookie and auth
+                        # echoes straight into stored workflow data and the UI.
+                        "headers": redact_headers(response.headers),
                         "body": response_data,
                     })],
                     output_handle="output-0"
                 )
-                
+
         except httpx.TimeoutException:
             return NodeExecutionResult(
                 success=False,
