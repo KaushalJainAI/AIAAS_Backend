@@ -1,190 +1,171 @@
 """
-Unit tests for the chat app — focused on pure helpers in extraction.py and
-graph.py that don't require a real LLM or DB.
+Unit tests for the chat agent's plumbing.
 
-These tests are intentionally creative: LLMs emit tool calls in a wide
-variety of (mis-)formats, so the extractor MUST be robust to:
-  * single-quoted JSON
-  * markdown code fences
-  * arrow-hash (Ruby-ish) style
-  * react-style "Action:" prefixes
-  * trailing junk after the JSON object
-  * malformed/incomplete arguments
+These replace the old suite, which exercised a 20-regex tool-call scraper and a
+JSON-envelope parser that no longer exist. What is tested here is what the new
+design actually depends on: stream folding, the weak-model fallback, and the
+follow-up parse.
 """
 from __future__ import annotations
 
-
 from django.test import SimpleTestCase
 
-from chat.extraction import (
-    clean_json_string, extract_tool_calls, fuzzy_json_loads,
-    is_tool_plan_json, parse_tool_arguments, strip_tool_calls,
-)
-from chat.views import has_structured_final_response
-from chat.graph import _count_ai_messages, _openai_tc_to_langchain
+from chat.extraction import extract_text_tool_calls, split_text_tool_calls
+from chat.llm import StreamAccumulator, to_tool_calls
+from chat.agent import _parse_follow_ups
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# fuzzy_json_loads — robustness to LLM output styles
-# ─────────────────────────────────────────────────────────────────────────
+class StreamAccumulatorTests(SimpleTestCase):
+    """Provider streams arrive fragmented; folding them must be exact."""
 
-class FuzzyJsonLoadsTests(SimpleTestCase):
-    def test_strict_json(self):
-        self.assertEqual(fuzzy_json_loads('{"a": 1}'), {"a": 1})
+    def test_content_and_thinking_are_kept_apart(self):
+        acc = StreamAccumulator()
+        acc.add({"type": "thinking", "content": "hmm..."})
+        acc.add({"type": "content", "content": "Hello"})
+        acc.add({"type": "content", "content": " world"})
 
-    def test_single_quoted_python_dict(self):
-        out = fuzzy_json_loads("{'a': 1, 'b': 'two'}")
-        self.assertEqual(out, {"a": 1, "b": "two"})
+        result = acc.finish()
+        self.assertEqual(result.content, "Hello world")
+        self.assertEqual(result.thinking, "hmm...")
 
-    def test_python_literals_true_false_none(self):
-        out = fuzzy_json_loads("{'on': True, 'off': False, 'null': None}")
-        self.assertEqual(out, {"on": True, "off": False, "null": None})
+    def test_tool_call_deltas_are_reassembled_by_index(self):
+        # Name arrives in one chunk, the argument JSON split across several.
+        acc = StreamAccumulator()
+        acc.add({"type": "tool_calls", "tool_calls": [
+            {"index": 0, "id": "call_1", "function": {"name": "web_search"}},
+        ]})
+        acc.add({"type": "tool_calls", "tool_calls": [
+            {"index": 0, "function": {"arguments": '{"que'}},
+        ]})
+        acc.add({"type": "tool_calls", "tool_calls": [
+            {"index": 0, "function": {"arguments": 'ry": "rust"}'}},
+        ]})
 
-    def test_arrow_hash_style(self):
-        # Some models emit Ruby-style => for keys.
-        out = fuzzy_json_loads('{tool => "x", args => {"q": "hi"}}')
-        # Whatever the parser returns, both keys must be reachable.
-        self.assertIsNotNone(out)
+        calls = acc.finish().tool_calls
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].id, "call_1")
+        self.assertEqual(calls[0].name, "web_search")
+        self.assertEqual(calls[0].arguments, {"query": "rust"})
 
-    def test_markdown_fence_stripped(self):
-        s = '```json\n{"k": 1}\n```'
-        self.assertEqual(fuzzy_json_loads(s), {"k": 1})
+    def test_parallel_calls_keep_their_own_arguments(self):
+        acc = StreamAccumulator()
+        for index, (name, args) in enumerate(
+            [("web_search", '{"query": "a"}'), ("image_search", '{"query": "b"}')]
+        ):
+            acc.add({"type": "tool_calls", "tool_calls": [
+                {"index": index, "id": f"c{index}",
+                 "function": {"name": name, "arguments": args}},
+            ]})
 
-    def test_empty_returns_none(self):
-        self.assertIsNone(fuzzy_json_loads(""))
-        self.assertIsNone(fuzzy_json_loads(None))
+        calls = acc.finish().tool_calls
+        self.assertEqual([c.name for c in calls], ["web_search", "image_search"])
+        self.assertEqual([c.arguments["query"] for c in calls], ["a", "b"])
 
-    def test_garbage_returns_none(self):
-        # The function should not crash on non-JSON text.
-        self.assertIsNone(fuzzy_json_loads("this is not json at all"))
+    def test_has_tool_calls_is_true_before_the_stream_ends(self):
+        # Drives the decision to stop streaming content live, so it must flip as
+        # soon as a name appears rather than at finish().
+        acc = StreamAccumulator()
+        self.assertFalse(acc.has_tool_calls)
+        acc.add({"type": "tool_calls", "tool_calls": [
+            {"index": 0, "function": {"name": "web_search"}},
+        ]})
+        self.assertTrue(acc.has_tool_calls)
+
+    def test_usage_is_summed_across_chunks(self):
+        acc = StreamAccumulator()
+        acc.add({"type": "metadata", "usage": {"total_tokens": 30}})
+        acc.add({"type": "metadata",
+                 "usage": {"prompt_tokens": 5, "completion_tokens": 7}})
+        self.assertEqual(acc.finish().tokens, 42)
+
+    def test_error_chunk_is_captured(self):
+        acc = StreamAccumulator()
+        acc.add({"type": "error", "message": "rate limited"})
+        self.assertEqual(acc.error, "rate limited")
 
 
-class CleanJsonStringTests(SimpleTestCase):
-    def test_strips_leading_fence(self):
-        self.assertEqual(clean_json_string('```json\n{}'), '{}')
+class ToolCallNormalisationTests(SimpleTestCase):
+    def test_unparseable_arguments_become_an_empty_dict(self):
+        # Better an empty argument set the tool can reject than a crash.
+        calls = to_tool_calls([
+            {"id": "1", "function": {"name": "web_search", "arguments": "not json"}},
+        ])
+        self.assertEqual(calls[0].arguments, {})
 
-    def test_strips_trailing_fence(self):
-        self.assertEqual(clean_json_string('{}\n```'), '{}')
+    def test_nameless_fragments_are_dropped(self):
+        self.assertEqual(to_tool_calls([{"function": {"arguments": "{}"}}]), ())
+
+    def test_missing_id_is_synthesised(self):
+        calls = to_tool_calls([{"function": {"name": "get_current_time"}}])
+        self.assertTrue(calls[0].id)
+
+
+class TextToolCallFallbackTests(SimpleTestCase):
+    """
+    The fallback for small local models that write calls as text. Capable models
+    emit native tool_calls and never reach this.
+    """
+
+    def test_delimited_call(self):
+        calls = extract_text_tool_calls(
+            '[TOOL_CALL]{"tool": "web_search", "args": {"query": "python"}}[/TOOL_CALL]'
+        )
+        self.assertEqual(calls[0].name, "web_search")
+        self.assertEqual(calls[0].arguments, {"query": "python"})
+
+    def test_bare_json_object(self):
+        calls = extract_text_tool_calls(
+            'Sure, let me look.\n{"name": "web_search", "arguments": {"query": "x"}}'
+        )
+        self.assertEqual(calls[0].name, "web_search")
+
+    def test_inline_arguments_without_a_nested_key(self):
+        calls = extract_text_tool_calls('{"tool": "web_search", "query": "inline"}')
+        self.assertEqual(calls[0].arguments, {"query": "inline"})
+
+    def test_raw_syntax_is_removed_from_the_message(self):
+        # The user must never see the model's internal call syntax.
+        text = 'Checking.\n[TOOL_CALL]{"tool": "web_search", "args": {"query": "q"}}[/TOOL_CALL]'
+        calls, cleaned = split_text_tool_calls(text)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(cleaned, "Checking.")
+        self.assertNotIn("TOOL_CALL", cleaned)
+
+    def test_ordinary_prose_is_not_a_tool_call(self):
+        self.assertEqual(extract_text_tool_calls("Here is the answer."), ())
+
+    def test_json_that_is_not_a_call_is_left_alone(self):
+        # A model explaining a JSON payload must not be read as calling a tool.
+        self.assertEqual(
+            extract_text_tool_calls('Config: {"timeout": 30, "retries": 2}'), ()
+        )
 
     def test_empty_input(self):
-        self.assertEqual(clean_json_string(""), "")
-        self.assertEqual(clean_json_string(None), "")
+        self.assertEqual(extract_text_tool_calls(""), ())
+        self.assertEqual(split_text_tool_calls(""), ((), ""))
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# parse_tool_arguments — must coerce many shapes to dict
-# ─────────────────────────────────────────────────────────────────────────
+class FollowUpParsingTests(SimpleTestCase):
+    def test_plain_object(self):
+        self.assertEqual(
+            _parse_follow_ups('{"follow_ups": ["A?", "B?"]}', 3), ["A?", "B?"]
+        )
 
-class ParseToolArgumentsTests(SimpleTestCase):
-    def test_dict_passthrough(self):
-        self.assertEqual(parse_tool_arguments({"q": "hi"}), {"q": "hi"})
+    def test_surrounding_prose_and_fences_are_tolerated(self):
+        self.assertEqual(
+            _parse_follow_ups('```json\n{"follow_ups": ["A?"]}\n```', 3), ["A?"]
+        )
 
-    def test_json_string_parsed(self):
-        self.assertEqual(parse_tool_arguments('{"q": "hi"}'), {"q": "hi"})
+    def test_limit_is_applied(self):
+        self.assertEqual(
+            len(_parse_follow_ups('{"follow_ups": ["1", "2", "3", "4"]}', 3)), 3
+        )
 
-    def test_single_quoted_string(self):
-        out = parse_tool_arguments("{'q': 'hi'}")
-        self.assertEqual(out, {"q": "hi"})
+    def test_blank_entries_are_dropped(self):
+        self.assertEqual(_parse_follow_ups('{"follow_ups": ["A?", "  "]}', 3), ["A?"])
 
-    def test_empty_string_returns_empty_dict(self):
-        # Convention: empty / unparsable args → {}
-        out = parse_tool_arguments("")
-        self.assertIn(out, ({}, None))
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# extract_tool_calls — recognize many syntaxes
-# ─────────────────────────────────────────────────────────────────────────
-
-class ExtractToolCallsTests(SimpleTestCase):
-    def test_standard_bracket_style(self):
-        text = '[TOOL_CALL]{"tool": "web_search", "args": {"query": "hi"}}[/TOOL_CALL]'
-        out = extract_tool_calls(text)
-        self.assertTrue(any(t.get("tool") == "web_search" for t in out))
-
-    def test_anthropic_invoke_xml(self):
-        text = '<invoke name="web_search">{"query": "hi"}</invoke>'
-        out = extract_tool_calls(text)
-        self.assertTrue(out, "Should have detected at least one tool call")
-
-    def test_returns_empty_for_plain_text(self):
-        self.assertEqual(extract_tool_calls("just a normal answer"), [])
-
-    def test_json_block_format(self):
-        text = '```json\n{"tool": "web_search", "args": {"query": "x"}}\n```'
-        out = extract_tool_calls(text)
-        self.assertTrue(any(t.get("tool") == "web_search" for t in out))
-
-    def test_planner_json_with_thoughts_action_query(self):
-        text = '{"thoughts": "Need fresh news.", "action": "web_search", "query": "AI news May 2026"}'
-        out = extract_tool_calls(text)
-        self.assertEqual(out[0]["tool"], "web_search")
-        self.assertEqual(out[0]["args"]["query"], "AI news May 2026")
-        self.assertTrue(is_tool_plan_json(text))
-
-
-class StripToolCallsTests(SimpleTestCase):
-    def test_removes_bracket_call(self):
-        s = "Here is the answer.[TOOL_CALL]{...}[/TOOL_CALL] More text."
-        out = strip_tool_calls(s)
-        self.assertNotIn("[TOOL_CALL]", out)
-        self.assertNotIn("[/TOOL_CALL]", out)
-
-    def test_idempotent_on_clean_text(self):
-        s = "Just answer text."
-        self.assertEqual(strip_tool_calls(s).strip(), s)
-
-    def test_removes_planner_json(self):
-        s = 'Before {"thoughts": "Need fresh news.", "action": "web_search", "query": "AI news"} After'
-        out = strip_tool_calls(s)
-        self.assertNotIn('"action"', out)
-        self.assertIn("Before", out)
-        self.assertIn("After", out)
-
-
-class FinalResponseDetectionTests(SimpleTestCase):
-    def test_planner_json_is_not_final(self):
-        text = '{"thoughts": "Need fresh news.", "action": "web_search", "query": "AI news May 2026"}'
-        self.assertFalse(has_structured_final_response(text))
-
-    def test_response_json_is_final(self):
-        text = '{"response": "Done.", "follow_ups": []}'
-        self.assertTrue(has_structured_final_response(text))
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# graph helpers
-# ─────────────────────────────────────────────────────────────────────────
-
-class GraphHelperTests(SimpleTestCase):
-    def test_openai_tc_skips_non_function_type(self):
-        raw = [{"type": "code_interpreter"}, {"type": "function", "function": {"name": "x", "arguments": "{}"}, "id": "id1"}]
-        out = _openai_tc_to_langchain(raw)
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["name"], "x")
-        self.assertEqual(out[0]["id"], "id1")
-
-    def test_openai_tc_synthesizes_id_when_missing(self):
-        raw = [{"type": "function", "function": {"name": "x", "arguments": "{}"}}]
-        out = _openai_tc_to_langchain(raw)
-        self.assertTrue(out[0]["id"].startswith("call_"))
-
-    def test_openai_tc_skips_nameless(self):
-        raw = [{"type": "function", "function": {"name": "", "arguments": "{}"}}]
-        self.assertEqual(_openai_tc_to_langchain(raw), [])
-
-    def test_openai_tc_coerces_non_dict_args(self):
-        # If args parse to a string, we wrap it as {"query": ...}.
-        raw = [{"type": "function", "function": {"name": "search", "arguments": '"hello world"'}}]
-        out = _openai_tc_to_langchain(raw)
-        self.assertEqual(out[0]["args"], {"query": "hello world"})
-
-    def test_count_ai_messages(self):
-        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-        msgs = [
-            HumanMessage(content="q"),
-            AIMessage(content="a1"),
-            ToolMessage(content="r", tool_call_id="x", name="t"),
-            AIMessage(content="a2"),
-        ]
-        self.assertEqual(_count_ai_messages(msgs), 2)
+    def test_junk_yields_no_suggestions(self):
+        # Follow-ups are optional garnish; never worth surfacing a parse failure.
+        for junk in ("", "sorry, I can't", '{"follow_ups": "not a list"}', "{broken"):
+            self.assertEqual(_parse_follow_ups(junk, 3), [])

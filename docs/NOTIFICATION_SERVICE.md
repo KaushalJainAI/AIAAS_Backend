@@ -107,6 +107,9 @@ HITL is a critical feature that allows autonomous agents to "pause" and ask for 
 ### Hooks
 The frontend uses a custom hook `useHITLWebSocket` to maintain the user-wide notification connection.
 - **Path:** `better-n8n-frontend/src/hooks/useWebSocket.ts`
+- **Transport:** the hook is an adapter over `src/lib/websocket.ts`, which owns URL
+  resolution (`VITE_WS_URL`), exponential reconnect backoff, and the remount race guard.
+  Connection behaviour is changed there, not per hook.
 - **Component:** `NotificationsTab.tsx` provides the UI for viewing and managing persistent notifications.
 
 ### Notification Types

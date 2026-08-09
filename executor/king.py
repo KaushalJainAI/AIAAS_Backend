@@ -258,7 +258,7 @@ Output ONLY the JSON object, no other text."""
         self,
         user_id: int | None = None,
         llm_type: str = "nvidia",
-        llm_model: str = "nvidia/llama-3.3-nemotron-super-49b-v1",
+        llm_model: str = "nvidia/nemotron-3-super-120b-a12b",
         credential_id: str | None = None,
     ):
         # Identity + LLM config (defaults; may be overridden by user profile).

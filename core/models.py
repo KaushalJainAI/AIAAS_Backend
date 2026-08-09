@@ -66,7 +66,7 @@ class UserProfile(models.Model):
     )
     llm_model = models.CharField(
         max_length=150,
-        default='nvidia/llama-3.3-nemotron-super-49b-v1',
+        default='nvidia/nemotron-3-super-120b-a12b',
         help_text='Global LLM model for internal AI reasoning'
     )
     llm_credential_id = models.IntegerField(

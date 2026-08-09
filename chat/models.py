@@ -21,7 +21,7 @@ class ChatSession(models.Model):
     # Default to NVIDIA NIM (backed by a platform NVIDIA_API_KEY) so new chats
     # work out of the box; users can switch provider/model per conversation.
     llm_provider = models.CharField(max_length=50, default='nvidia')
-    llm_model = models.CharField(max_length=100, default='nvidia/llama-3.3-nemotron-super-49b-v1')
+    llm_model = models.CharField(max_length=100, default='nvidia/nemotron-3-super-120b-a12b')
     intent = models.CharField(max_length=50, default='chat')
     system_prompt = models.TextField(blank=True, default="")
 

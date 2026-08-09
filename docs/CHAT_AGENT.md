@@ -1,118 +1,166 @@
-# AIAAS Backend Chat Agent
+# Chat Agent
 
-This document explains the architecture and capabilities of the Standalone AI Chat Agent located within the `Backend/chat` module. This module powers the platform's "Perplexity-style", conversational AI interface.
+The standalone conversational agent in `Backend/chat/`. Where the
+`KingOrchestrator` (`Backend/orchestrator/`) runs deterministic multi-step DAG
+workflows, this is the free-form chat surface: ask a question, get an answer,
+with tools used as needed.
 
-## 1. Overview and Purpose
+## Module map
 
-While the `KingOrchestrator` (`Backend/orchestrator/`) manages complex, deterministic multi-step DAG workflows, the **Chat Agent** provides a standalone, unstructured chat interface. 
+| Module | Responsibility |
+|---|---|
+| `views.py` | HTTP only — authenticate, parse, delegate, serialise |
+| `pipeline.py` | One turn end to end; both endpoints run exactly this |
+| `agent.py` | The LangGraph tool loop, and the turn's public API |
+| `llm.py` | Provider access: routing, credentials, budgets, stream folding |
+| `tools.py` | Tool schemas and implementations |
+| `search.py` | Web/image/video search and page fetching |
+| `history.py` | What the model gets to see this turn |
+| `prompts.py` | System prompt and the auxiliary prompts |
+| `events.py` / `sse.py` | The event contract, and its SSE transport |
+| `extraction.py` | Fallback parser for models without native tool calls |
 
-It acts as an intelligent sidekick or "Copilot", designed to quickly answer questions, perform web research, suggest workflows, execute code, and summarize dragged-and-dropped documents without requiring the user to build a node-based workflow.
+## The central design decision
 
-## 2. Core Capabilities
+**The model receives a real transcript.** An assistant turn that requested tools
+goes back as an assistant message carrying `tool_calls`; each result goes back as
+a `tool` message with the matching `tool_call_id`.
 
-### A. Dynamic LLM Routing
-The Chat Agent does not hardcode its LLM API calls. Instead, it leverages the `PROVIDER_NODE_MAP` and existing `Credential` schemas to route requests through the visual node registry.
-- Supported Providers: `openai`, `gemini`, `ollama`, `openrouter`, `perplexity`, `huggingface`, `anthropic`, `deepseek`, `xai`.
-- It dynamically fetches the active `Credential` for the requesting user based on the selected provider slug.
+This is load-bearing, not stylistic. The previous implementation flattened tool
+results into prose:
 
-### B. Smart Memory & Context Management (Two-Tiered)
-The Agent utilizes a sophisticated two-tiered context management system to optimize token usage while maintaining long-term memory.
-- **Immediate Context (Flash Memory)**: During the initial turn a resource (Document/Web Page) is introduced, the LLM receives the **full extracted text** for high-fidelity analysis.
-- **Historical Context (Summarized Memory)**: On subsequent turns, the system automatically truncates full resources into **Reference-ID backed Summaries**. 
-  - For files: A ~1500 char extractive preview + UUID.
-  - For web: Semantic snippets + Title/URL.
-- Uses a **100,000 Maximum Context Token** safety limit to prevent context window overflow.
-- A rolling **History Window of 50 messages** to manage data efficiently.
-- Token tracking ensures LLM usage analytics are persistently stored on the session level (`total_tokens_used`).
-
-### C. Intent-Aware Execution & Eager Tool Calls
-Responses are categorized by "Intent" (e.g., `chat`, `search`, `image`, `video`, `workflow`, `coding`). Intents are passed explicitly by the frontend or classified via heuristics or slash commands.
-- **Eager Tool Execution**: If the intent is explicitly `search`, `research`, or `workflow`, the chat agent directly invokes tools *before* the main LLM call. This saves an entire LLM "Agentic" planning roundtrip.
-- **Slash Commands**: 
-  - `/search <query>`: Triggers web search.
-  - `/research <query>`: Triggers deep research loop.
-  - `/image <query>`: Triggers image search/generation.
-  - `/video <query>`: Triggers video search (coming soon).
-  - `/workflow <query>`: Suggests a platform workflow.
-  - `/coding <query>`: Activates Coding Mode with sandbox access.
-
-### D. Coding Mode & Python Sandbox
-Activated via `/coding` or predicted intent, this mode enables technical problem-solving.
-- **`execute_python_code` Tool**: Allows the AI to write and run Python scripts.
-- **Execution Engines**:
-  - `in_process`: Fast execution with AST-based security limits.
-  - `wasm`: Strict CPU/RAM isolation via WebAssembly for untrusted logic.
-- **Safety**: Code is executed in a secure sandbox, capturing `stdout` and `stderr` for the AI to debug its own output.
-
-### E. Integrated Web Search & Deep Research
-Powered by DuckDuckGo (`perform_web_search`), the AI has live internet access. 
-- **Standard Search**: Performs lookup and injects raw search snippet JSONs into the LLM prompt. Retains URLs as structured `sources` metadata.
-- **Deep Research Loop**: When the intent is `research`, the agent shifts into an iterative data-gathering loop:
-  1. A "Research Planner" LLM generates 2-4 distinct search queries and a link depth (15-50).
-  2. The backend executes all searches and scrapes up to 60k text characters across all valid sources.
-  3. The extracted texts are combined and embedded directly into the final LLM synthesis prompt.
-
-### F. Document Indexing (Inference-style RAG)
-Users can upload files natively. This follows the "Inference App" pattern.
-- Support for PDFs, PPTX, TXT, CSV, JSON, and Images.
-- **Autonomous Recall**: The system injects only a summary and ID. The AI uses the `read_attachment_text` tool to "fetch" full content if needed.
-
-### G. Semantic Workflow Suggestion
-- Utilizing `suggest_workflow`, it searches workflow descriptions, titles, and IDs.
-- Returns a `workflow_suggestion` message payload allowing the frontend to present a clickable link.
-
-### H. Extended Native Tools
-- `web_search`: DuckDuckGo text/image/video search.
-- `read_attachment_text`: Query DB for full file content.
-- `read_url`: Scrape and convert a web page to text.
-- `execute_python_code`: Secure code execution (Requires HITL approval).
-- `execute_shell`: Execute shell commands securely with scrubbed env and timeouts (Requires HITL approval).
-- `list_files`, `read_file`, `write_file`, `delete_file`: Native workspace file manipulation with strict path traversal security (`write` and `delete` require HITL).
-- `get_current_time`: Host system clock awareness.
-- `get_chat_message_full_text`: Retrieve full content of summarized history messages.
-- `call_internal_api`: Generic caller to simulate and execute internal backend Django REST APIs securely on the user's behalf (Requires HITL approval).
-- `dispatch_ui_actions`: Send real-time commands via WebSocket to the user's frontend.
-
-### I. Agentic Tool Loop & Stabilization (LangGraph)
-The chat engine features a robust iterative loop powered by **LangGraph** (`chat_agent_graph`). It uses `MemorySaver` for state persistence across interactions, allowing the AI to use multiple tools in sequence and pause for user input.
-- **Human-In-The-Loop (HITL) Interrupts**: When the agent attempts to use a tool from the `SENSITIVE_TOOLS` registry (e.g., `execute_shell`, `write_file`), the graph execution is suspended (`interrupt()`) and an `ask_permission` event is sent to the frontend. Execution only resumes upon user approval.
-- **Security Hardening**:
-  - Direct execution of sensitive tools via API bypass is strictly blocked.
-  - Subprocess environments are scrubbed of production secrets to prevent leakage.
-  - File access is guarded by `_is_safe_path` to block reading of `.env`, `.git`, or credential files.
-- **Iteration Limits**: Dynamically bounded based on intent (e.g., higher for research).
-- **Timeouts**: LLM calls (180s) and Tool runs (e.g., 30s hard timeout for shell/python execution) have strict bounds to prevent resource exhaustion (DoS).
-- **JSON Repair**: If the LLM returns invalid JSON or fails to follow the schema, a "Repair" pass is triggered to normalize the output.
-- **Sanitization**: Tool arguments are stripped of hallucinated XML/HTML tags before execution.
-
-### J. Strict JSON Output Structure
-The LLM must respond using a rigid JSON schema:
-```json
-{
-  "response": "Detailed markdown explanation...",
-  "summary": "Quick one-sentence summary...",
-  "follow_ups": ["Q1", "Q2", "Q3"],
-  "sources": [...],
-  "thinking": "Internal reasoning process..."
-}
+```text
+--- PREVIOUS ACTIONS & TOOL RESULTS IN THIS TURN ---
+Assistant Action: ...
+Tool 'web_search' Result: ...
 ```
 
-### K. Context Referencing (Message Referencing)
-Users can reference specific messages or highlighted text. This is injected as a silent system instruction to bias the LLM's attention without duplicating text in the prompt.
+That takes the model off the distribution it was trained on, and it responds by
+*imitating* tool-call syntax in text rather than emitting it. Compensating for
+that required a 480-line scraper with twenty regexes covering a dozen invented
+dialects. Thread the messages correctly and native tool calls simply work.
 
-## 3. Database Architecture (`models.py`)
+Providers accept this because every handler in `nodes/handlers/llm_nodes.py`
+builds its request as `[system] + history + [user prompt]` and extends `history`
+verbatim. `agent.to_wire` renders the LangChain messages into that shape.
 
-- **`ChatSession`**: Stores LLM configuration, session title, and token usage.
-- **`ChatMessage`**: Stores turns with roles (`user`, `assistant`, `system`) and a `metadata` blob for citations, tool traces, and media.
-- **`ChatAttachment`**: Stores uploaded files and extracted text. Linked to `inference.Document` for RAG support.
+One consequence: the trailing slot is always a user message, so when the
+transcript ends on tool output the whole transcript goes in as history and the
+trailing turn carries a continuation instruction (`prompts.CONTINUE`).
 
-## 4. API Structure (`urls.py` / `views.py`)
-- `POST /api/chat/sessions/`: Create session.
-- `POST /api/chat/sessions/<id>/message/`: Sync/Async message endpoint.
-- `GET /api/chat/sessions/<id>/stream/`: Server-Sent Events (SSE) stream for real-time AI response rendering.
-- `POST /api/chat/sessions/<id>/upload/`: File upload.
+## Response format: plain markdown
 
-## 5. Memory & Context Strategy
-- **Two-Tiered Context**: Snippets for history, full text on-demand via tools.
-- **Hierarchical RAG**: Scopes include File-level, User-level, and Platform-level knowledge.
-- **Token Optimization**: Automatic truncation of older history and large tool blocks to stay within 100k token limits.
+The agent streams markdown. There is no JSON envelope.
+
+The earlier contract required every reply to arrive as
+`{"response": ..., "summary": ..., "follow_ups": [...]}`, which meant nothing
+could be shown until the whole object had arrived and parsed — `content_chunk`
+was commented out in the view. Around 550 lines existed to coax, repair and
+re-parse that JSON, including a second LLM call whose only job was fixing
+malformed output.
+
+Instead:
+
+- **The answer** streams token-by-token as `content_chunk`.
+- **Follow-up questions** come from one small separate call after the answer
+  (`agent.suggest_follow_ups`), skipped for short replies.
+- **The summary** is derived deterministically from the answer
+  (`pipeline.context_summary`) — it feeds later context windows, so it never
+  needed to be the model's job.
+
+### Streaming and preambles
+
+Content streams optimistically. If the response turns out to have requested a
+tool as well — a model saying "let me look that up" before calling
+`web_search` — the agent emits `content_reset` and the client clears its live
+buffer. Retracting the rare preamble beats withholding every answer until the
+response is known to be final.
+
+## Turn flow
+
+```
+views.send_message_stream
+  └─ pipeline.run_chat_turn(sink=SSEBridge.sink)
+       ├─ classify intent, guard media capability
+       ├─ persist the user message
+       ├─ history.load_history → to_wire_history
+       ├─ history.partition_attachments  (blocked uploads are reported, not dropped)
+       ├─ prompts.build_system_message
+       ├─ eager recall injection (see below)
+       ├─ agent.run_turn ──> LangGraph: agent ⇄ tools
+       ├─ agent.suggest_follow_ups
+       └─ persist the assistant message (+ summary, sources, trace)
+```
+
+`send_message` is the same call with an event sink that discards.
+
+## Behaviours worth knowing
+
+**Memory toggle.** `session.memory_enabled` gates *recall*, not *retention* —
+messages are always written to the database. With it off the turn also gets a
+throwaway checkpointer thread id, because the graph keeps its own copy of the
+conversation keyed by `thread_id`; emptying the history payload alone would not
+stop the model reading earlier turns back out of the checkpoint.
+
+**Eager recall.** When the user plainly refers to something said earlier, the
+pipeline runs `search_conversation_history` itself and injects the result. The
+model has the tool and the prompt tells it to use it, but smaller models
+measurably did not — answering "I don't have that in my context" with an empty
+tool trace. Recall is the feature, so it cannot depend on the model choosing to
+call a function.
+
+**Attachments.** Vision models receive files directly. Text-only models get
+extracted text instead, so an upload is never silently ignored. Files that no
+model can read are reported to the user *and* to the model, which stops it
+answering as though it had seen them.
+
+**Deep research** is a tool (`deep_research`), not a mode: it plans queries,
+searches, reads pages and returns the corpus with its sources. It used to run
+ahead of the model on a keyword guess; as a tool the model decides when the
+question warrants it and can follow up on what comes back.
+
+**Human-in-the-loop.** Tools in `SENSITIVE_TOOLS` pause the graph via
+`interrupt()` and emit `ask_permission`. The client resumes by posting
+`approve_tool_call`. `/api/chat/execute-tool/` refuses these outright — reaching
+them there would be a way around the gate rather than a shortcut to it.
+
+**Token budgets.** `llm.clamp_input` runs on the assembled request, the first
+point the real total is known. History is dropped oldest-first because it is the
+only recoverable part — it stays in the database and
+`search_conversation_history` can fetch it back — and the model is told when
+this happened so it reaches for retrieval instead of assuming the gap is empty.
+
+**Weak models.** `extraction.py` recovers tool calls written as text, in two
+shapes only. Capable models never reach it. Guessing at more exotic formats
+would risk running the *wrong* tool, which is worse than telling the model its
+call was not understood.
+
+## Events
+
+`events.Event` is the contract; the values are the names the frontend switches
+on.
+
+| Event | Meaning |
+|---|---|
+| `status` | Phase change (`planning`, `thinking`, `memory_off`, `history_recall`, …) |
+| `thinking_chunk` | Reasoning tokens |
+| `content_chunk` | Answer tokens |
+| `content_reset` | Streamed text was a preamble; clear the buffer |
+| `agent_trace` | A tool call, with its arguments |
+| `sources_update` / `images_update` / `videos_update` | Collected media |
+| `html_artifact` | Rendered artifact |
+| `attachments_blocked` | Uploads the model cannot read |
+| `ask_permission` | HITL gate |
+| `done` | Final user + assistant messages |
+| `error` | Turn failed |
+
+## Testing
+
+- `tests_pipeline.py` — full turns with the provider faked at `llm.stream`:
+  streaming, tool threading, memory toggle, failure handling.
+- `tests_units.py` — stream folding, tool-call normalisation, the text fallback.
+- `tests_rework.py` — context budgets, transcript threading, tool registry.
+- `tests.py` — the guest pipeline.
+
+Fake at `chat.llm.stream` and stub `chat.tools.get_available_tools`; the real
+tool list reaches out to the user's MCP servers.

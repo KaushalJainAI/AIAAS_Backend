@@ -14,16 +14,19 @@ import json
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from chat import agent, prompts
 
 from chat.models import ChatSession, ChatMessage
 from chat.tools import ToolExecutor
-from chat.views import (
-    clamp_llm_input,
-    describe_blocked_attachments,
+from chat.history import describe_blocked as describe_blocked_attachments
+from chat.llm import (
+    clamp_input as clamp_llm_input,
     estimate_tokens,
-    looks_like_conversation_recall,
-    _truncate_middle,
+    truncate_middle as _truncate_middle,
 )
+from chat.pipeline import looks_like_recall as looks_like_conversation_recall
 from workflow_backend.thresholds import (
     HISTORY_SEARCH_MAX_TOTAL_CHARS,
     HTML_ARTIFACT_MAX_HEIGHT,
@@ -327,51 +330,64 @@ class ConversationRecallDetectionTests(SimpleTestCase):
 # Agent loop state handling
 # ─────────────────────────────────────────────────────────────────────────
 
-class AgentPromptSelectionTests(SimpleTestCase):
-    def test_uses_the_latest_human_message_not_the_first(self):
-        """
-        The checkpointer is keyed by session id and `messages` uses an appending
-        reducer, so on turn 2 the state still holds turn 1's HumanMessage. Taking
-        the *first* one made every later turn re-answer the opening question —
-        the user asked something new and got the old answer back.
-        """
-        from unittest.mock import patch
-        from langchain_core.messages import AIMessage, HumanMessage
-        from chat import graph
+class TranscriptThreadingTests(SimpleTestCase):
+    """
+    The model must receive tool results as real `tool` messages linked by
+    `tool_call_id`, not as prose folded into the prompt. Flattening them is what
+    made models imitate tool-call syntax in text instead of emitting it.
+    """
 
-        state = {
-            "messages": [
-                HumanMessage(content="FIRST QUESTION"),
-                AIMessage(content="first answer"),
-                HumanMessage(content="SECOND QUESTION"),
-            ],
-            "metadata": {}, "tool_trace": [], "thinking": "", "total_tokens": 0,
-            "provider": "nvidia", "model": "m", "system_message": "sys",
-            "user_id": 1, "thread_id": "t", "response_format": "text",
-            "clean_content": "SECOND QUESTION", "intent": "chat",
-            "history_list": [], "max_iterations": 30, "memory_enabled": True,
-        }
+    def _transcript(self):
+        return [
+            HumanMessage(content="FIRST QUESTION"),
+            AIMessage(content="first answer"),
+            HumanMessage(content="SECOND QUESTION"),
+        ]
 
-        captured = {}
+    def test_latest_human_message_is_the_prompt(self):
+        # The checkpointer is keyed by session id and `messages` uses an
+        # appending reducer, so on turn 2 the state still holds turn 1's
+        # HumanMessage. Taking the *first* one made every later turn re-answer
+        # the opening question.
+        history, prompt = agent._split_transcript(self._transcript(), at_limit=False)
 
-        async def fake_execute_llm(**kwargs):
-            captured.update(kwargs)
-            return {"content": "ok", "tool_calls": [], "usage": {}}
+        self.assertEqual(prompt, "SECOND QUESTION")
+        self.assertEqual([m["role"] for m in history], ["user", "assistant"])
 
-        async def fake_tools(*_a, **_k):
-            return []
+    def test_tool_results_are_tool_role_messages(self):
+        messages = [
+            HumanMessage(content="who won?"),
+            AIMessage(content="", tool_calls=[
+                {"name": "web_search", "args": {"query": "who won"}, "id": "call_1"},
+            ]),
+            ToolMessage(content="Team A won.", tool_call_id="call_1", name="web_search"),
+        ]
 
-        with patch('chat.views.execute_llm', fake_execute_llm), \
-             patch('chat.tools.get_available_tools', fake_tools):
-            async_to_sync(graph.agent_node)(state, {"configurable": {}})
+        history, prompt = agent._split_transcript(messages, at_limit=False)
 
-        self.assertIn("SECOND QUESTION", captured.get("prompt", ""))
-        # The earlier turn may legitimately appear as trajectory context, but the
-        # question being answered must be the new one.
-        self.assertTrue(
-            captured["prompt"].strip().startswith("SECOND QUESTION"),
-            captured["prompt"][:200],
-        )
+        assistant = history[1]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(assistant["tool_calls"][0]["function"]["name"], "web_search")
+
+        result = history[2]
+        self.assertEqual(result["role"], "tool")
+        self.assertEqual(result["tool_call_id"], "call_1")
+        self.assertEqual(result["content"], "Team A won.")
+
+        # A handler always appends `prompt` as the final user turn, so a tool
+        # result can never be last on the wire; the nudge fills that slot.
+        self.assertEqual(prompt, prompts.CONTINUE)
+
+    def test_at_limit_prompt_forbids_further_tools(self):
+        messages = [
+            HumanMessage(content="q"),
+            AIMessage(content="", tool_calls=[{"name": "web_search", "args": {}, "id": "c"}]),
+            ToolMessage(content="r", tool_call_id="c", name="web_search"),
+        ]
+
+        _, prompt = agent._split_transcript(messages, at_limit=True)
+
+        self.assertEqual(prompt, prompts.CONTINUE_AT_LIMIT)
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -748,7 +748,7 @@ class GeminiNode(BaseNodeHandler):
             return {
                 "model": {
                     "options": options,
-                    "defaultValue": "gemini-2.0-flash" if "gemini-2.0-flash" in options else (options[0] if options else "gemini-2.0-flash")
+                    "defaultValue": "gemini-3.6-flash" if "gemini-3.6-flash" in options else (options[0] if options else "gemini-3.6-flash")
                 }
             }
         except Exception as e:
@@ -774,7 +774,7 @@ class GeminiNode(BaseNodeHandler):
             label="Model",
             field_type=FieldType.SELECT,
             options=[],  # Dynamic
-            default="gemini-2.0-flash"
+            default="gemini-3.6-flash"
         ),
         FieldConfig(
             name="system_message",
@@ -841,7 +841,7 @@ class GeminiNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ):
-        model_name = config.get("model", "gemini-1.5-flash")
+        model_name = config.get("model", "gemini-3.6-flash")
         user_prompt = config.get("prompt", "")
         sys_message = config.get("system_message", "You are a helpful assistant.")
         temp = config.get("temperature", 0.7)
@@ -1028,7 +1028,7 @@ class GeminiNode(BaseNodeHandler):
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
         # 1. Fetch Configuration
-        model_name = config.get("model", "gemini-1.5-flash")
+        model_name = config.get("model", "gemini-3.6-flash")
         user_prompt = config.get("prompt", "")
         sys_message = config.get("system_message", "You are a helpful assistant.")
         temp = config.get("temperature", 0.7)
@@ -2351,7 +2351,7 @@ class OpenRouterNode(BaseNodeHandler):
 
     # Safe fallback used when selected model returns 404
     # Pick something that is both strong and clearly free.
-    FALLBACK_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+    FALLBACK_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
     fields = [
         FieldConfig(
@@ -2367,7 +2367,7 @@ class OpenRouterNode(BaseNodeHandler):
             field_type=FieldType.SELECT,
             options=[],  # Dynamic
             # Default to robust, high‑quality free model
-            default="meta-llama/llama-3.3-70b-instruct:free"
+            default="nvidia/nemotron-3-super-120b-a12b:free"
         ),
         FieldConfig(
             name="prompt",
@@ -2455,8 +2455,8 @@ class OpenRouterNode(BaseNodeHandler):
             return {
                 "model": {
                     "options": options,
-                    "defaultValue": "meta-llama/llama-3.3-70b-instruct:free" 
-                                    if "meta-llama/llama-3.3-70b-instruct:free" in options 
+                    "defaultValue": "nvidia/nemotron-3-super-120b-a12b:free" 
+                                    if "nvidia/nemotron-3-super-120b-a12b:free" in options 
                                     else (options[0] if options else "openrouter/auto")
                 }
             }
@@ -3651,7 +3651,7 @@ class NvidiaNode(BaseNodeHandler):
             label="Model",
             field_type=FieldType.SELECT,
             options=[],  # Dynamic
-            default="nvidia/llama-3.3-nemotron-super-49b-v1",
+            default="nvidia/nemotron-3-super-120b-a12b",
             description="Select an NVIDIA NIM model"
         ),
         FieldConfig(
@@ -3705,7 +3705,7 @@ class NvidiaNode(BaseNodeHandler):
             from nodes.models import AIModel
             models = AIModel.objects.filter(provider__slug="nvidia", is_active=True).values_list('value', flat=True)
             options = list(models)
-            default = "nvidia/llama-3.3-nemotron-super-49b-v1"
+            default = "nvidia/nemotron-3-super-120b-a12b"
             return {
                 "model": {
                     "options": options,
@@ -3722,7 +3722,7 @@ class NvidiaNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ):
-        model = config.get("model", "nvidia/llama-3.3-nemotron-super-49b-v1")
+        model = config.get("model", "nvidia/nemotron-3-super-120b-a12b")
         prompt = config.get("prompt", "")
         system_message = config.get("system_message", "")
         temperature = float(config.get("temperature", 0.6))
@@ -3830,7 +3830,7 @@ class NvidiaNode(BaseNodeHandler):
         config: dict[str, Any],
         context: 'ExecutionContext'
     ) -> NodeExecutionResult:
-        model = config.get("model", "nvidia/llama-3.3-nemotron-super-49b-v1")
+        model = config.get("model", "nvidia/nemotron-3-super-120b-a12b")
         prompt = config.get("prompt", "")
         system_message = config.get("system_message", "")
         temperature = float(config.get("temperature", 0.6))

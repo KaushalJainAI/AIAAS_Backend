@@ -81,6 +81,41 @@ class ToolExecutor:
         {
             "type": "function",
             "function": {
+                "name": "deep_research",
+                "description": (
+                    "Research a topic in depth: plans several search queries, runs them, "
+                    "reads the resulting pages and returns their extracted text with "
+                    "sources. Use this instead of repeated web_search calls when the "
+                    "question needs breadth or corroboration across sources."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "The subject to research, stated in full."
+                        },
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "2-4 distinct search queries covering different angles. "
+                                "Omit to derive them from the topic."
+                            )
+                        },
+                        "max_pages": {
+                            "type": "integer",
+                            "description": "Pages to read, 5-50. Defaults to 15."
+                        }
+                    },
+                    "required": ["topic"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "image_search",
                 "description": "Search for specific images visually related to a topic. Run this if the user asks to see photos, diagrams, or visual examples.",
                 "parameters": {
@@ -513,41 +548,110 @@ class ToolExecutor:
 
     @staticmethod
     async def _web_search(args: Dict, context: Dict) -> str:
-        from .views import perform_web_search
-        query = args.get("query", "")
+        from .search import web_search
+
+        query = (args.get("query") or "").strip()
         if not query:
-            return "Error: Missing search query"
-        res = await perform_web_search(query)
+            return "Error: 'query' is required."
+        results = await web_search(query)
         return json.dumps({
             "type": "search_results",
-            "text": f"Search Results for '{query}':\n\n{res['results_text']}",
-            "sources": res.get("sources", [])
+            "text": (
+                f"Search results for '{query}':\n\n{results.text}" if results.text
+                else f"No results found for '{query}'. Try different wording."
+            ),
+            "sources": list(results.sources),
         })
 
     @staticmethod
     async def _image_search(args: Dict, context: Dict) -> str:
-        from .views import perform_image_search
-        query = args.get("query", "")
+        from .search import image_search
+
+        query = (args.get("query") or "").strip()
         if not query:
-            return "Error: Missing image search query"
-        res = await perform_image_search(query)
+            return "Error: 'query' is required."
+        images = await image_search(query)
         return json.dumps({
             "type": "image_results",
-            "text": f"Successfully retrieved {len(res.get('images', []))} images for '{query}'. They have been attached to the UI view.",
-            "images": res.get("images", [])
+            "text": f"Retrieved {len(images)} image(s) for '{query}'; they are shown in the UI.",
+            "images": images,
         })
 
     @staticmethod
     async def _video_search(args: Dict, context: Dict) -> str:
-        from .views import perform_video_search
-        query = args.get("query", "")
+        from .search import video_search
+
+        query = (args.get("query") or "").strip()
         if not query:
-            return "Error: Missing video search query"
-        res = await perform_video_search(query)
+            return "Error: 'query' is required."
+        videos = await video_search(query)
         return json.dumps({
             "type": "video_results",
-            "text": f"Successfully retrieved {len(res.get('videos', []))} videos for '{query}'. They have been attached to the UI view.",
-            "videos": res.get("videos", [])
+            "text": f"Retrieved {len(videos)} video(s) for '{query}'; they are shown in the UI.",
+            "videos": videos,
+        })
+
+    #: Total extracted text handed back from one deep_research call. Past this
+    #: the model starts losing the earlier sources anyway, and the context clamp
+    #: would trim it blindly rather than by relevance.
+    DEEP_RESEARCH_CHAR_BUDGET = 60_000
+
+    @staticmethod
+    async def _deep_research(args: Dict, context: Dict) -> str:
+        """
+        Breadth-first research: fan out across queries, read the pages, return
+        the text with its sources.
+
+        This is the pipeline that used to be inlined in the streaming view and
+        ran ahead of the model on a keyword guess. As a tool the model decides
+        when the question actually warrants it, and can follow up on what comes
+        back instead of being handed one fixed synthesis prompt.
+        """
+        from .search import scrape_sources, web_search
+
+        topic = (args.get("topic") or "").strip()
+        if not topic:
+            return "Error: 'topic' is required."
+
+        queries = [str(q).strip() for q in (args.get("queries") or []) if str(q).strip()]
+        queries = queries[:4] or [topic]
+
+        try:
+            max_pages = int(args.get("max_pages", 15))
+        except (TypeError, ValueError):
+            max_pages = 15
+        max_pages = max(5, min(max_pages, 50))
+
+        results = await asyncio.gather(*(web_search(q, max_results=10) for q in queries))
+
+        by_url: Dict[str, Dict[str, Any]] = {}
+        for result in results:
+            for source in result.sources:
+                if source.get("url"):
+                    by_url.setdefault(source["url"], source)
+
+        blocks, usable = await scrape_sources(list(by_url.values())[:max_pages])
+        if not usable:
+            return json.dumps({
+                "type": "deep_research",
+                "text": (
+                    f"Searched {len(queries)} quer{'y' if len(queries) == 1 else 'ies'} "
+                    f"for '{topic}' but could not read any of the pages found. "
+                    f"Try web_search with narrower terms."
+                ),
+                "queries": queries,
+                "sources": [],
+            })
+
+        corpus = "\n\n".join(blocks)[:ToolExecutor.DEEP_RESEARCH_CHAR_BUDGET]
+        return json.dumps({
+            "type": "deep_research",
+            "text": (
+                f"Deep research on '{topic}'.\nQueries: {queries}\n"
+                f"Pages read: {len(usable)}\n\n{corpus}"
+            ),
+            "queries": queries,
+            "sources": usable,
         })
 
     @staticmethod
@@ -1132,6 +1236,7 @@ class ToolExecutor:
         try:
             dispatch = {
                 "web_search": cls._web_search,
+                "deep_research": cls._deep_research,
                 "image_search": cls._image_search,
                 "video_search": cls._video_search,
                 "get_current_time": cls._get_current_time,

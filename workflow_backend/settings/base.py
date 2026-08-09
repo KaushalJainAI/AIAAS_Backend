@@ -452,7 +452,7 @@ LOGGING = {
     },
 }
 
-CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'nvidia/llama-3.3-nemotron-super-49b-v1')
+CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'nvidia/nemotron-3-super-120b-a12b')
 
 # NOTE: OpenRouter API keys are loaded per-user from the encrypted `credentials`
 # vault (slug 'openrouter'). Do not reintroduce an OPEN_ROUTER_KEY setting.
