@@ -19,6 +19,12 @@ from .base import (
     build_json_schema_from_fields,
     format_schema_for_prompt,
 )
+from .llm_base import (
+    ChatChunkParser,
+    dynamic_model_options,
+    iter_sse_chunks,
+    split_think_tags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -222,19 +228,7 @@ class OpenAINode(BaseNodeHandler):
     
     def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
         """Fetch OpenAI models from database"""
-        try:
-            from nodes.models import AIModel
-            models = AIModel.objects.filter(provider__slug="openai", is_active=True).values_list('value', flat=True)
-            options = list(models)
-            return {
-                "model": {
-                    "options": options,
-                    "defaultValue": "gpt-4o-mini" if "gpt-4o-mini" in options else (options[0] if options else "gpt-4o-mini")
-                }
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch dynamic models for OpenAI: {e}")
-            return {}
+        return dynamic_model_options("openai", "gpt-4o-mini")
 
     async def stream_execute(
         self,
@@ -326,64 +320,10 @@ class OpenAINode(BaseNodeHandler):
                         yield {"type": "error", "message": f"OpenAI API error: {response.status_code}"}
                         return
 
-                    in_thinking = False
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "): continue
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]": break
-                        
-                        try:
-                            import json
-                            chunk = json.loads(data_str)
-                            if not chunk.get("choices"):
-                                if "usage" in chunk:
-                                    yield {"type": "metadata", "usage": chunk["usage"]}
-                                continue
-                                
-                            delta = chunk["choices"][0].get("delta", {})
-                            if "reasoning_content" in delta and delta["reasoning_content"]:
-                                yield {"type": "thinking", "content": delta["reasoning_content"]}
-                                continue
-
-                            if "tool_calls" in delta:
-                                yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
-                                continue
-
-                            if "content" in delta and delta["content"]:
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
-                                
-                                if in_thinking:
-                                    if "</think>" in text:
-                                        parts = text.split("</think>", 1)
-                                        yield {"type": "thinking", "content": parts[0]}
-                                        in_thinking = False
-                                        if parts[1]: yield {"type": "content", "content": parts[1]}
-                                    else:
-                                        yield {"type": "thinking", "content": text}
-                                else:
-                                    yield {"type": "content", "content": text}
-                        except Exception:
-                            continue
+                    parser = ChatChunkParser()
+                    async for chunk in iter_sse_chunks(response):
+                        for event in parser.feed(chunk):
+                            yield event
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}
@@ -741,19 +681,7 @@ class GeminiNode(BaseNodeHandler):
     
     def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
         """Fetch Gemini models from database"""
-        try:
-            from nodes.models import AIModel
-            models = AIModel.objects.filter(provider__slug="gemini", is_active=True).values_list('value', flat=True)
-            options = list(models)
-            return {
-                "model": {
-                    "options": options,
-                    "defaultValue": "gemini-3.6-flash" if "gemini-3.6-flash" in options else (options[0] if options else "gemini-3.6-flash")
-                }
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch dynamic models for Gemini: {e}")
-            return {}
+        return dynamic_model_options("gemini", "gemini-3.6-flash")
     name = "Gemini"
     category = NodeCategory.AI.value
     description = "Generate text using Google Gemini models"
@@ -977,22 +905,9 @@ class GeminiNode(BaseNodeHandler):
                                     text = p["text"]
                                     full_content += text
                                     
-                                    if "<think>" in text:
-                                        in_thinking = True
-                                        parts_think = text.split("<think>", 1)
-                                        if parts_think[0]: yield {"type": "content", "content": parts_think[0]}
-                                        text = parts_think[1]
-                                    
-                                    if in_thinking:
-                                        if "</think>" in text:
-                                            parts_think = text.split("</think>", 1)
-                                            yield {"type": "thinking", "content": parts_think[0]}
-                                            in_thinking = False
-                                            if parts_think[1]: yield {"type": "content", "content": parts_think[1]}
-                                        else:
-                                            yield {"type": "thinking", "content": text}
-                                    else:
-                                        yield {"type": "content", "content": text}
+                                    events, in_thinking = split_think_tags(text, in_thinking)
+                                    for kind, chunk_text in events:
+                                        yield {"type": kind, "content": chunk_text}
                                 elif "functionCall" in p:
                                     import json
                                     fc = p["functionCall"]
@@ -1413,22 +1328,9 @@ class OllamaNode(BaseNodeHandler):
                                 if "reasoning_content" in msg and msg["reasoning_content"]:
                                      yield {"type": "thinking", "content": msg["reasoning_content"]}
 
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
-                                
-                                if in_thinking:
-                                    if "</think>" in text:
-                                        parts = text.split("</think>", 1)
-                                        yield {"type": "thinking", "content": parts[0]}
-                                        in_thinking = False
-                                        if parts[1]: yield {"type": "content", "content": parts[1]}
-                                    else:
-                                        yield {"type": "thinking", "content": text}
-                                else:
-                                    yield {"type": "content", "content": text}
+                                events, in_thinking = split_think_tags(text, in_thinking)
+                                for kind, chunk_text in events:
+                                    yield {"type": kind, "content": chunk_text}
                             
                             if chunk.get("done"):
                                 yield {
@@ -1447,19 +1349,7 @@ class OllamaNode(BaseNodeHandler):
 
     def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
         """Fetch Ollama models from database"""
-        try:
-            from nodes.models import AIModel
-            models = AIModel.objects.filter(provider__slug="ollama", is_active=True).values_list('value', flat=True)
-            options = list(models)
-            return {
-                "model": {
-                    "options": options,
-                    "defaultValue": "llama3.2:latest" if "llama3.2:latest" in options else (options[0] if options else "llama3.2:latest")
-                }
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch dynamic models for Ollama: {e}")
-            return {}
+        return dynamic_model_options("ollama", "llama3.2:latest")
     name = "Ollama (Local)"
     category = NodeCategory.AI.value
     description = "Generate text using local Ollama models"
@@ -1794,7 +1684,6 @@ class PerplexityNode(BaseNodeHandler):
                 if tools_payload:
                     payload["tools"] = tools_payload
 
-                in_thinking = False
                 async with client.stream(
                     "POST", 
                     "https://api.perplexity.ai/chat/completions",
@@ -1805,71 +1694,17 @@ class PerplexityNode(BaseNodeHandler):
                         yield {"type": "error", "message": f"Perplexity API error: {response.status_code}"}
                         return
 
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "): continue
-                        data_str = line[6:].strip()
-                        if not data_str: continue
-                        
-                        try:
-                            import json
-                            chunk = json.loads(data_str)
-                            choice = chunk.get("choices", [{}])[0]
-                            delta = choice.get("delta", {})
-                            
-                            if "reasoning_content" in delta and delta["reasoning_content"]:
-                                yield {"type": "thinking", "content": delta["reasoning_content"]}
-                                continue
-
-                            if "tool_calls" in delta:
-                                yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
-                                continue
-
-                            if "content" in delta and delta["content"]:
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
-                                
-                                if in_thinking:
-                                    if "</think>" in text:
-                                        parts = text.split("</think>", 1)
-                                        yield {"type": "thinking", "content": parts[0]}
-                                        in_thinking = False
-                                        if parts[1]: yield {"type": "content", "content": parts[1]}
-                                    else:
-                                        yield {"type": "thinking", "content": text}
-                                else:
-                                    yield {"type": "content", "content": text}
-
-                            if chunk.get("usage"):
-                                yield {"type": "metadata", "usage": chunk["usage"]}
-                            
-                            if chunk.get("citations"):
-                                yield {"type": "citations", "citations": chunk["citations"]}
-
-                        except Exception:
-                            continue
+                    parser = ChatChunkParser()
+                    async for chunk in iter_sse_chunks(response):
+                        for event in parser.feed(chunk):
+                            yield event
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}
 
     def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
         """Fetch Perplexity models from database"""
-        try:
-            from nodes.models import AIModel
-            models = AIModel.objects.filter(provider__slug="perplexity", is_active=True).values_list('value', flat=True)
-            options = list(models)
-            return {
-                "model": {
-                    "options": options,
-                    "defaultValue": "sonar" if "sonar" in options else (options[0] if options else "sonar")
-                }
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch dynamic models for Perplexity: {e}")
-            return {}
+        return dynamic_model_options("perplexity", "sonar")
     name = "Perplexity"
     category = NodeCategory.AI.value
     description = "Generate web-grounded answers using Perplexity AI"
@@ -2209,7 +2044,6 @@ class OpenRouterNode(BaseNodeHandler):
         
         MAX_RETRIES = 5
         retry_count = 0
-        in_thinking = False
 
         while retry_count < MAX_RETRIES:
             try:
@@ -2271,69 +2105,10 @@ class OpenRouterNode(BaseNodeHandler):
                             yield {"type": "error", "message": f"OpenRouter API error: {response.status_code}"}
                             return
 
-                        async for line in response.aiter_lines():
-                            if not line:
-                                continue
-                            line = line.strip()
-                            if not line.startswith("data: ") and not line.startswith("{"):
-                                continue
-                            if line.startswith("data: "):
-                                data_str = line[6:].strip()
-                            else:
-                                data_str = line
-                            if not data_str or data_str == "[DONE]": continue
-                            
-                            try:
-                                import json
-                                chunk = json.loads(data_str)
-                                choice = chunk.get("choices", [{}])[0]
-                                delta = choice.get("delta", {})
-                                
-                                if not delta:
-                                    msg = choice.get("message", {})
-                                    if msg.get("content"):
-                                        delta = {"content": msg["content"]}
-                                
-                                if "reasoning" in delta and delta["reasoning"]:
-                                    yield {"type": "thinking", "content": delta["reasoning"]}
-                                    continue
-                                
-                                if "reasoning_content" in delta and delta["reasoning_content"]:
-                                    yield {"type": "thinking", "content": delta["reasoning_content"]}
-                                    continue
-
-                                if "tool_calls" in delta:
-                                    yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
-                                    continue
-
-                                if "content" in delta and delta["content"]:
-                                    text = delta["content"]
-                                    if "<think>" in text:
-                                        in_thinking = True
-                                        parts = text.split("<think>", 1)
-                                        if parts[0]: yield {"type": "content", "content": parts[0]}
-                                        text = parts[1]
-                                    
-                                    if in_thinking:
-                                        if "</think>" in text:
-                                            parts = text.split("</think>", 1)
-                                            yield {"type": "thinking", "content": parts[0]}
-                                            in_thinking = False
-                                            if parts[1]: yield {"type": "content", "content": parts[1]}
-                                        else:
-                                            yield {"type": "thinking", "content": text}
-                                    else:
-                                        yield {"type": "content", "content": text}
-
-                                if chunk.get("usage"):
-                                    yield {"type": "metadata", "usage": chunk["usage"]}
-
-                            except json.JSONDecodeError as e:
-                                logger.warning(f"[OpenRouter] JSON parse error: {e}, line: {data_str[:100]}")
-                                continue
-                            except Exception as e:
-                                logger.warning(f"[OpenRouter] Chunk parse error: {e}")
-                                continue
+                        parser = ChatChunkParser()
+                        async for chunk in iter_sse_chunks(response, allow_bare_json=True):
+                            for event in parser.feed(chunk):
+                                yield event
                         return # Success
             except Exception as e:
                 retry_count += 1
@@ -2448,21 +2223,7 @@ class OpenRouterNode(BaseNodeHandler):
 
     def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
         """Fetch OpenRouter models from database"""
-        try:
-            from nodes.models import AIModel
-            models = AIModel.objects.filter(provider__slug="openrouter", is_active=True).values_list('value', flat=True)
-            options = list(models)
-            return {
-                "model": {
-                    "options": options,
-                    "defaultValue": "nvidia/nemotron-3-super-120b-a12b:free" 
-                                    if "nvidia/nemotron-3-super-120b-a12b:free" in options 
-                                    else (options[0] if options else "openrouter/auto")
-                }
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch dynamic models for OpenRouter: {e}")
-            return {}
+        return dynamic_model_options("openrouter", "nvidia/nemotron-3-super-120b-a12b:free")
 
     async def execute(
         self,
@@ -2901,23 +2662,7 @@ class HuggingFaceNode(BaseNodeHandler):
 
     def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
         """Fetch Hugging Face models from database"""
-        try:
-            from nodes.models import AIModel
-            # Note: HuggingFaceNode usually uses model IDs, but we can still fetch registered models
-            models = AIModel.objects.filter(provider__slug="huggingface", is_active=True).values_list('value', flat=True)
-            options = list(models)
-            if not options:
-                 # Default if nothing in DB
-                 return {}
-            return {
-                "model": {
-                    "options": options,
-                    "defaultValue": "meta-llama/Meta-Llama-3-8B-Instruct" if "meta-llama/Meta-Llama-3-8B-Instruct" in options else options[0]
-                }
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch dynamic models for HuggingFace: {e}")
-            return {}
+        return dynamic_model_options("huggingface", "meta-llama/Meta-Llama-3-8B-Instruct")
     name = "Hugging Face"
     category = NodeCategory.AI.value
     description = "Generate text using Hugging Face models"
@@ -3076,22 +2821,9 @@ class HuggingFaceNode(BaseNodeHandler):
                             text = chunk.get("token", {}).get("text", "")
                             
                             if text:
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
-                                
-                                if in_thinking:
-                                    if "</think>" in text:
-                                        parts = text.split("</think>", 1)
-                                        yield {"type": "thinking", "content": parts[0]}
-                                        in_thinking = False
-                                        if parts[1]: yield {"type": "content", "content": parts[1]}
-                                    else:
-                                        yield {"type": "thinking", "content": text}
-                                else:
-                                    yield {"type": "content", "content": text}
+                                events, in_thinking = split_think_tags(text, in_thinking)
+                                for kind, chunk_text in events:
+                                    yield {"type": kind, "content": chunk_text}
                                     
                         except Exception:
                             continue
@@ -3335,19 +3067,7 @@ class XAINode(BaseNodeHandler):
 
     def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
         """Fetch xAI models from database"""
-        try:
-            from nodes.models import AIModel
-            models = AIModel.objects.filter(provider__slug="xai", is_active=True).values_list('value', flat=True)
-            options = list(models)
-            return {
-                "model": {
-                    "options": options,
-                    "defaultValue": "grok-beta" if "grok-beta" in options else (options[0] if options else "grok-beta")
-                }
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch dynamic models for xAI: {e}")
-            return {}
+        return dynamic_model_options("xai", "grok-beta")
 
     async def stream_execute(
         self,
@@ -3430,7 +3150,6 @@ class XAINode(BaseNodeHandler):
                 payload["tools"] = tools_payload
 
             async with httpx.AsyncClient(timeout=120) as client:
-                in_thinking = False
                 async with client.stream(
                     "POST", 
                     "https://api.x.ai/v1/chat/completions",
@@ -3444,46 +3163,10 @@ class XAINode(BaseNodeHandler):
                         yield {"type": "error", "message": f"xAI API error: {response.status_code}"}
                         return
 
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "): continue
-                        data_str = line[6:].strip()
-                        if not data_str or data_str == "[DONE]": continue
-                        
-                        try:
-                            import json
-                            chunk = json.loads(data_str)
-                            choice = chunk.get("choices", [{}])[0]
-                            delta = choice.get("delta", {})
-                            
-                            if "reasoning_content" in delta and delta["reasoning_content"]:
-                                yield {"type": "thinking", "content": delta["reasoning_content"]}
-                                continue
-
-                            if "tool_calls" in delta:
-                                yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
-                                continue
-
-                            if "content" in delta and delta["content"]:
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]: yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
-                                
-                                if in_thinking:
-                                    if "</think>" in text:
-                                        parts = text.split("</think>", 1)
-                                        yield {"type": "thinking", "content": parts[0]}
-                                        in_thinking = False
-                                        if parts[1]: yield {"type": "content", "content": parts[1]}
-                                    else:
-                                        yield {"type": "thinking", "content": text}
-                                else:
-                                    yield {"type": "content", "content": text}
-
-                        except Exception:
-                            continue
+                    parser = ChatChunkParser()
+                    async for chunk in iter_sse_chunks(response):
+                        for event in parser.feed(chunk):
+                            yield event
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}
@@ -3701,20 +3384,8 @@ class NvidiaNode(BaseNodeHandler):
     _NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
     def get_dynamic_fields(self) -> dict[str, dict[str, Any]]:
-        try:
-            from nodes.models import AIModel
-            models = AIModel.objects.filter(provider__slug="nvidia", is_active=True).values_list('value', flat=True)
-            options = list(models)
-            default = "nvidia/nemotron-3-super-120b-a12b"
-            return {
-                "model": {
-                    "options": options,
-                    "defaultValue": default if default in options else (options[0] if options else default)
-                }
-            }
-        except Exception as e:
-            logger.warning(f"Failed to fetch dynamic models for NVIDIA: {e}")
-            return {}
+        """Fetch NVIDIA models from database"""
+        return dynamic_model_options("nvidia", "nvidia/nemotron-3-super-120b-a12b")
 
     async def stream_execute(
         self,
@@ -3766,7 +3437,6 @@ class NvidiaNode(BaseNodeHandler):
             }
 
             async with httpx.AsyncClient(timeout=120) as client:
-                in_thinking = False
                 async with client.stream(
                     "POST",
                     f"{self._NVIDIA_BASE_URL}/chat/completions",
@@ -3780,46 +3450,10 @@ class NvidiaNode(BaseNodeHandler):
                         yield {"type": "error", "message": f"NVIDIA API error: {response.status_code}"}
                         return
 
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[6:].strip()
-                        if not data_str or data_str == "[DONE]":
-                            continue
-                        try:
-                            import json
-                            chunk = json.loads(data_str)
-                            choice = chunk.get("choices", [{}])[0]
-                            delta = choice.get("delta", {})
-
-                            if show_thinking and "reasoning_content" in delta and delta["reasoning_content"]:
-                                yield {"type": "thinking", "content": delta["reasoning_content"]}
-                                continue
-
-                            if "content" in delta and delta["content"]:
-                                text = delta["content"]
-                                if "<think>" in text:
-                                    in_thinking = True
-                                    parts = text.split("<think>", 1)
-                                    if parts[0]:
-                                        yield {"type": "content", "content": parts[0]}
-                                    text = parts[1]
-
-                                if in_thinking:
-                                    if "</think>" in text:
-                                        parts = text.split("</think>", 1)
-                                        if show_thinking:
-                                            yield {"type": "thinking", "content": parts[0]}
-                                        in_thinking = False
-                                        if parts[1]:
-                                            yield {"type": "content", "content": parts[1]}
-                                    else:
-                                        if show_thinking:
-                                            yield {"type": "thinking", "content": text}
-                                else:
-                                    yield {"type": "content", "content": text}
-                        except Exception:
-                            continue
+                    parser = ChatChunkParser(emit_thinking=show_thinking, emit_tool_calls=False)
+                    async for chunk in iter_sse_chunks(response):
+                        for event in parser.feed(chunk):
+                            yield event
 
         except Exception as e:
             yield {"type": "error", "message": str(e)}
