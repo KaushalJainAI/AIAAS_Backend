@@ -4,7 +4,6 @@ Orchestrator App URL Configuration
 from django.urls import path
 
 from . import agents, views
-from .views import export_workflow_zip
 
 app_name = 'orchestrator'
 
@@ -12,6 +11,8 @@ urlpatterns = [
     # Agents (a Workflow with kind='agent' — see docs/AGENT_TEMPLATES.md)
     path('agents/', agents.agent_list, name='agent_list'),
     path('agents/<int:agent_id>/', agents.agent_detail, name='agent_detail'),
+    path('agents/<int:agent_id>/execute/', agents.agent_execute, name='agent_execute'),
+    path('agents/<int:agent_id>/approve/', agents.agent_approve, name='agent_approve'),
 
     # Workflow CRUD
     path('workflows/', views.workflow_list, name='workflow_list'),
@@ -65,6 +66,5 @@ urlpatterns = [
     path('workflows/<int:workflow_id>/clone/', views.clone_workflow, name='clone_workflow'),
     
     # Standalone Export
-    path('workflows/<int:workflow_id>/export/', export_workflow_zip, name='export_workflow'),
 ]
 

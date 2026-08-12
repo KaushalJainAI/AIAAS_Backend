@@ -1,3 +1,12 @@
+import pytest
+
+# MVP: these tests drive HTTP endpoints that are commented out of
+# workflow_backend/urls.py until the eval-scoring executor exists. The models and
+# view logic they cover are unchanged and still in the tree — only the routes
+# are gone, so every request 404s. Skipped rather than deleted: uncommenting
+# the two `path(...)` lines and this `pytestmark` restores the coverage.
+pytestmark = pytest.mark.skip(reason="MVP: /api/evals/ routes disabled until the executor lands")
+
 from django.contrib.auth.models import User
 from rest_framework import status
 from rest_framework.test import APITestCase

@@ -14,45 +14,50 @@ sign the base is missing something and should grow instead.
 
 Grouped by what they are for, one module per group.
 """
-from .messaging import (
-    MattermostNode,
-    MicrosoftTeamsNode,
-    TwilioSMSNode,
-    WhatsAppNode,
-)
-from .crm import (
-    HubSpotNode,
-    PipedriveNode,
-    SalesforceNode,
-)
+# TRIMMED — the connector long tail is disabled for now. Only Google, S3, GitLab,
+# Jira/Linear and SendGrid stay registered; the rest are commented out here rather
+# than deleted, so re-enabling one means uncommenting its import and its entry in
+# ALL_CONNECTORS below. Every module file is still present in this package.
+#
+# from .messaging import (
+#     MattermostNode,
+#     MicrosoftTeamsNode,
+#     TwilioSMSNode,
+#     WhatsAppNode,
+# )
+# from .crm import (
+#     HubSpotNode,
+#     PipedriveNode,
+#     SalesforceNode,
+# )
 from .ticketing import (
-    AsanaNode,
-    ClickUpNode,
+    # AsanaNode,
+    # ClickUpNode,
     JiraNode,
     LinearNode,
-    TodoistNode,
+    # TodoistNode,
 )
 from .devtools import (
     GitLabNode,
-    PagerDutyNode,
-    SentryNode,
+    # PagerDutyNode,
+    # SentryNode,
 )
 from .storage import (
-    DropboxNode,
+    # DropboxNode,
     GoogleCalendarNode,
     GoogleDriveNode,
     S3Node,
 )
-from .commerce import (
-    ShopifyNode,
-    StripeNode,
-)
-from .support import (
-    IntercomNode,
-    ZendeskNode,
-)
+# from .commerce import (
+#     ShopifyNode,
+#     StripeNode,
+# )
+# from .support import (
+#     IntercomNode,
+#     ZendeskNode,
+# )
 from .marketing import (
-    MailchimpNode,
+    # MailchimpNode,
     SendGridNode,
 )
 
@@ -60,39 +65,39 @@ from .marketing import (
 #: this rather than naming each class, so adding a connector means editing one
 #: list instead of three files and forgetting the third.
 ALL_CONNECTORS = [
-    # Messaging
-    MicrosoftTeamsNode,
-    TwilioSMSNode,
-    WhatsAppNode,
-    MattermostNode,
-    # CRM
-    HubSpotNode,
-    PipedriveNode,
-    SalesforceNode,
+    # Messaging — DISABLED (Slack, Discord and Telegram live in integration_nodes.py)
+    # MicrosoftTeamsNode,
+    # TwilioSMSNode,
+    # WhatsAppNode,
+    # MattermostNode,
+    # CRM — DISABLED
+    # HubSpotNode,
+    # PipedriveNode,
+    # SalesforceNode,
     # Ticketing / project management
     JiraNode,
     LinearNode,
-    AsanaNode,
-    ClickUpNode,
-    TodoistNode,
+    # AsanaNode,
+    # ClickUpNode,
+    # TodoistNode,
     # Developer tooling
     GitLabNode,
-    SentryNode,
-    PagerDutyNode,
+    # SentryNode,
+    # PagerDutyNode,
     # Storage / calendar
     GoogleDriveNode,
     GoogleCalendarNode,
-    DropboxNode,
+    # DropboxNode,
     S3Node,
-    # Commerce
-    StripeNode,
-    ShopifyNode,
-    # Support
-    ZendeskNode,
-    IntercomNode,
+    # Commerce — DISABLED
+    # StripeNode,
+    # ShopifyNode,
+    # Support — DISABLED
+    # ZendeskNode,
+    # IntercomNode,
     # Marketing
     SendGridNode,
-    MailchimpNode,
+    # MailchimpNode,
 ]
 
 __all__ = ["ALL_CONNECTORS"] + [c.__name__ for c in ALL_CONNECTORS]

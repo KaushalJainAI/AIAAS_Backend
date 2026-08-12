@@ -138,6 +138,10 @@ Model: `StreamEvent`.
 Models: `Workflow`, `WorkflowVersion`, `HITLRequest`, `ConversationMessage`,
 `WorkflowTestResult`, `WorkflowCloneHistory`, `TriggerState`. All function-based views.
 
+Agents live here too, on the same `Workflow` table with `kind='agent'` — see
+[docs/AGENT_TEMPLATES.md](AGENT_TEMPLATES.md) §3 for why. Their routes are in
+[orchestrator/agents.py](../orchestrator/agents.py), not `views.py`.
+
 | URL | Method | What | Access | Complexity | Tested | Serializer | DB tables | Notes |
 |-----|--------|------|--------|-----------|--------|-----------|-----------|-------|
 | `/api/orchestrator/workflows/` | GET/POST | List / create workflow | Auth | O(n) | ✅ | `WorkflowSerializer` | Workflow | `nodes` accepts a string (audit gap 1) |
@@ -162,7 +166,10 @@ Models: `Workflow`, `WorkflowVersion`, `HITLRequest`, `ConversationMessage`,
 | `/api/orchestrator/executions/{id}/thoughts/` | GET | Orchestrator thought log | Auth | O(n) | ~ | — | OrchestratorThought | |
 | `/api/orchestrator/workflows/{id}/test/` | POST | Run test suite for workflow | Auth | Heavy | ~ | — | WorkflowTestResult | |
 | `/api/orchestrator/workflows/{id}/clone/` | POST | Clone a workflow | Auth | O(1) | ~ | — | Workflow, WorkflowCloneHistory | |
-| `/api/orchestrator/workflows/{id}/export/` | GET | Export workflow as zip | Auth | O(n) | ~ | — | Workflow | Streams a zip |
+| `/api/orchestrator/agents/` | GET/POST | List / create agent (a `Workflow` with `kind='agent'`) | Auth | O(n) | ✅ | `AgentSerializer` | Workflow, ExecutionLog | `tests_agents`; stats counted from the log, not stored |
+| `/api/orchestrator/agents/{id}/` | GET/PUT/PATCH/DELETE | Agent detail | Auth (owner) | O(1) | ✅ | `AgentSerializer` | Workflow | PATCH **merges** onto the stored config — a partial save must not reset an unsent grant |
+| `/api/orchestrator/agents/{id}/execute/` | POST | Run an agent against a goal | Auth (owner) | Heavy | ✅ | `AgentExecuteSerializer` | Workflow, ExecutionLog | Synchronous; 402 when the spend cap is reached. Tools gated by `tool_grants` — [orchestrator/agent_runtime.py](../orchestrator/agent_runtime.py) |
+| `/api/orchestrator/agents/{id}/approve/` | POST | Approve a tool call a run paused on | Auth (owner) | O(1) | ✅ | `AgentApproveSerializer` | Workflow | Ownership re-checked: a thread id is not an authorisation |
 | `/api/webhooks/{user_id}/{path}` | POST | **Public** webhook receiver (triggers workflows) | **Public** | Heavy | ~ | — | Workflow, TriggerState, ExecutionLog | Only unauthenticated write path — review carefully |
 
 ---
@@ -308,12 +315,20 @@ Models: `OSWorkspace`, `OSAppWindow`, `OSNotification`. Router ViewSets.
 
 ---
 
-## 15. Canvas agent — app: `canvas_agent` — [canvas_agent/views.py](../canvas_agent/views.py)
+## 15. Canvas agent — app: `canvas_agent` — ⚠ **DISABLED**
+
+The app is commented out of `INSTALLED_APPS`, its `include()` is commented out of
+[workflow_backend/urls.py](../workflow_backend/urls.py), and its WebSocket consumer is
+commented out of [streaming/routing.py](../streaming/routing.py). **None of the routes below
+are currently served** — they 404. The app code is still present in
+[canvas_agent/](../canvas_agent/); re-enabling is a matter of uncommenting those three sites.
 
 | URL | Method | What | Access | Complexity | Tested | Serializer | DB tables | Notes |
 |-----|--------|------|--------|-----------|--------|-----------|-----------|-------|
-| `/api/canvas-agent/command/` | POST | Run a canvas instruction (LangGraph) | Auth | Heavy/External | — | — | Workflow | ⚠ Hangs, no timeout (audit §6) |
-| `/api/canvas-agent/node-types/` | GET | Available node types | Auth | O(1) | — | — | CustomNode | |
+| ~~`/api/canvas-agent/command/`~~ | POST | Run a canvas instruction (LangGraph) | Auth | Heavy/External | — | — | Workflow | Disabled. ⚠ Hangs, no timeout (audit §6) |
+| ~~`/api/canvas-agent/node-types/`~~ | GET | Available node types | Auth | O(1) | — | — | CustomNode | Disabled |
+
+WebSocket `ws/canvas-agent/` is likewise disabled.
 
 ---
 

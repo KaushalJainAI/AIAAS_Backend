@@ -78,8 +78,8 @@ urlpatterns = [
     # BrowserOS
     path('api/browseros/', include('browserOS.urls')),
 
-    # Canvas Agent
-    path('api/canvas-agent/', include('canvas_agent.urls')),
+    # Canvas Agent — DISABLED, see canvas_agent/ (app also commented out of INSTALLED_APPS)
+    # path('api/canvas-agent/', include('canvas_agent.urls')),
 
     # Notifications
     path('api/notifications/', include('notifications.urls')),
@@ -90,11 +90,16 @@ urlpatterns = [
     # Datasets (training and eval examples)
     path('api/', include('datasets.urls')),
 
-    # Evals (suites, cases, scored runs)
-    path('api/evals/', include('evals.urls')),
-
-    # Tuning (fine-tuning jobs)
-    path('api/tuning/', include('tuning.urls')),
+    # MVP: Evals and Tuning are routed out until their executors exist.
+    # Both apps accept work and record it as 'queued', but nothing consumes
+    # that queue — `POST /evals/suites/{id}/run/` never scores, and a TuningJob
+    # never leaves 'queued', which also makes `deploy` (completed-only)
+    # unreachable. Serving endpoints that silently accept work they will never
+    # do is worse than not serving them. The apps stay in INSTALLED_APPS so
+    # their models and migrations are untouched; restore these two lines with
+    # the workers.
+    # path('api/evals/', include('evals.urls')),
+    # path('api/tuning/', include('tuning.urls')),
 
     # Extract (document -> rows)
     path('api/extraction/', include('extraction.urls')),

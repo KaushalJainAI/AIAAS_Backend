@@ -134,7 +134,7 @@ INSTALLED_APPS = [
     'browserOS',
     'django_celery_beat',
     'buddy',
-    'canvas_agent',
+    # 'canvas_agent',  # DISABLED — Platform Copilot parked; app code kept in canvas_agent/
     'notifications',
     'imagine',
     # The improve loop: corrections become datasets, datasets grade agents and
