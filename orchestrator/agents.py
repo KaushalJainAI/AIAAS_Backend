@@ -39,7 +39,10 @@ logger = logging.getLogger(__name__)
 # The closed sets. Anything outside them is rejected rather than stored, because
 # an unknown tool key would sail through the permissions screen (which renders
 # what it knows) and land in the runtime unrecognised.
-TOOL_KEYS = {'codeExecution', 'shell', 'webSearch', 'scrape', 'fileOps', 'rag'}
+# 'mcp' unlocks the user's own configured MCP servers. It is a grant rather
+# than an always-on capability because those tools reach real systems under
+# the user's credentials — see mcp_integration/credential_injector.py.
+TOOL_KEYS = {'codeExecution', 'shell', 'webSearch', 'scrape', 'fileOps', 'rag', 'mcp'}
 CONNECTOR_IDS = {'gdrive', 'gmail', 'sheets', 'photos', 'calendar', 'slack'}
 FILE_ACCESS = {'none', 'readonly', 'scoped', 'full'}
 TRIGGER_MODES = {'goal', 'maintenance', 'template'}
@@ -315,6 +318,25 @@ class AgentSerializer(serializers.Serializer):
         return workflow
 
 
+class AgentExecuteSerializer(serializers.Serializer):
+    """What one run is asked to do."""
+
+    goal = serializers.CharField(max_length=8000)
+    #: Pass the thread id of a paused run to resume it after approval.
+    thread_id = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate_goal(self, value):
+        goal = value.strip()
+        if not goal:
+            raise serializers.ValidationError('Give the agent something to do.')
+        return goal
+
+
+class AgentApproveSerializer(serializers.Serializer):
+    thread_id = serializers.CharField(max_length=200)
+    call_id = serializers.CharField(max_length=200)
+
+
 def _with_stats(configs, workflows, user):
     """Attach observed behaviour to serialized agents.
 
@@ -421,3 +443,88 @@ def agent_detail(request, agent_id: int):
 
     AgentSerializer.apply(agent, serializer.validated_data).save()
     return Response(_with_stats([AgentSerializer.to_config(agent)], [agent], request.user)[0])
+
+
+@extend_schema(
+    methods=['POST'],
+    request=AgentExecuteSerializer,
+    responses={200: OpenApiResponse(description='The agent run, or the approval it is waiting on')},
+    description='Run an agent against a goal, using only the tools it was granted.',
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def agent_execute(request, agent_id: int):
+    """Run an agent.
+
+    Synchronous on purpose for now: the run streams nothing yet, and a Celery
+    hop would put the result behind a poll for no gain. When streaming lands it
+    moves to the SSE path chat already uses, which is why the runtime takes a
+    sink rather than returning only at the end.
+    """
+    from asgiref.sync import async_to_sync
+
+    from .agent_runtime import AgentRunRefused, run_agent
+
+    agent = get_object_or_404(Workflow, id=agent_id, user=request.user, kind='agent')
+
+    serializer = AgentExecuteSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    goal = serializer.validated_data['goal']
+
+    try:
+        run = async_to_sync(run_agent)(
+            agent, goal, user=request.user,
+            thread_id=serializer.validated_data.get('thread_id') or None,
+        )
+    except AgentRunRefused as exc:
+        # A guardrail said no before anything ran. 402 rather than 403: the
+        # caller is permitted, the agent's budget is spent.
+        return Response({'error': str(exc)}, status=status.HTTP_402_PAYMENT_REQUIRED)
+    except Exception:
+        logger.exception('Agent %s execution failed', agent.id)
+        return Response({'error': 'The agent run failed. See execution logs.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response({
+        'execution_id': run.execution_id,
+        'answer': run.answer,
+        'thinking': run.thinking,
+        'tool_trace': run.tool_trace,
+        'tokens': run.tokens,
+        'awaiting_approval': run.awaiting_approval,
+        # Named explicitly so the caller can tell the user a configured
+        # capability was not honoured, rather than leaving them to infer it from
+        # an agent that quietly cannot do its job.
+        'unserved_grants': list(run.unserved_grants),
+        'duration_ms': run.duration_ms,
+    })
+
+
+@extend_schema(
+    methods=['POST'],
+    request=AgentApproveSerializer,
+    responses={200: OpenApiResponse(description='Approval recorded; resume the run')},
+    description='Approve a tool call an agent run paused on.',
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def agent_approve(request, agent_id: int):
+    """Record approval for a paused tool call.
+
+    Ownership of the agent is re-checked here even though the pause carries a
+    thread id: a thread id is a guess-resistant string, not an authorisation.
+    """
+    from asgiref.sync import async_to_sync
+
+    from chat.agent import approve_tool_call
+
+    get_object_or_404(Workflow, id=agent_id, user=request.user, kind='agent')
+
+    serializer = AgentApproveSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    async_to_sync(approve_tool_call)(
+        serializer.validated_data['thread_id'],
+        serializer.validated_data['call_id'],
+    )
+    return Response({'approved': True})

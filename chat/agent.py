@@ -22,7 +22,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Sequence, TypedDict
+from typing import Annotated, Any, Awaitable, Callable, Sequence, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -58,6 +58,11 @@ _NO_PROVIDER_MESSAGE = (
 
 # ── Turn configuration ───────────────────────────────────────────────────────
 
+#: Returns the OpenAI-shaped tool descriptors the model may see this turn.
+ToolSource = Callable[[], Awaitable[list[dict[str, Any]]]]
+#: Runs one tool call: (name, arguments, context) -> result text.
+ToolDispatch = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[str]]
+
 @dataclass(frozen=True, slots=True)
 class TurnContext:
     """Read-only settings for one turn. Lives on the config, not in state."""
@@ -74,6 +79,15 @@ class TurnContext:
     memory_enabled: bool = True
     max_iterations: int = MAX_TOOL_ITERATIONS
     sink: EventSink = null_sink
+
+    # Optional overrides that let a non-chat caller — the agent runtime —
+    # own which tools exist, how they run, and which need approval. The
+    # agent runtime must gate on a grant list the chat registry knows
+    # nothing about, and a denied grant has to fail at call time, not just
+    # go unadvertised. Left None, the chat defaults apply unchanged.
+    tool_source: ToolSource | None = None
+    tool_dispatch: ToolDispatch | None = None
+    sensitive_tools: frozenset[str] | None = None
 
     @property
     def max_tokens(self) -> int:
@@ -324,8 +338,12 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     if not at_limit:
         from . import tools as tool_registry
 
-        tools = await tool_registry.get_available_tools(
-            turn.user_id, memory_enabled=turn.memory_enabled
+        tools = await (
+            turn.tool_source()
+            if turn.tool_source is not None
+            else tool_registry.get_available_tools(
+                turn.user_id, memory_enabled=turn.memory_enabled
+            )
         )
 
     try:
@@ -587,13 +605,19 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     results: list[ToolMessage] = []
 
     tool_context = {"user_id": turn.user_id, "session_id": turn.session_id}
+    sensitive = (
+        turn.sensitive_tools
+        if turn.sensitive_tools is not None
+        else frozenset(tool_registry.SENSITIVE_TOOLS)
+    )
+    dispatch = turn.tool_dispatch or tool_registry.execute_tool
 
     for raw in last.tool_calls:
         call = ToolCall(
             id=raw["id"], name=raw["name"], arguments=dict(raw.get("args") or {})
         )
 
-        if call.name in tool_registry.SENSITIVE_TOOLS:
+        if call.name in sensitive:
             await _require_approval(call, turn, meta)
 
         # web_search with no query is the one omission worth repairing rather
@@ -610,9 +634,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         logger.info("[Tools] iter=%d %s(%s)", iteration, call.name, sorted(arguments))
         try:
             async with asyncio.timeout(TOOL_CALL_TIMEOUT):
-                output = await tool_registry.execute_tool(
-                    call.name, arguments, tool_context
-                )
+                output = await dispatch(call.name, arguments, tool_context)
         except asyncio.TimeoutError:
             output = f"Error: {call.name} timed out after {TOOL_CALL_TIMEOUT}s."
         except Exception as exc:

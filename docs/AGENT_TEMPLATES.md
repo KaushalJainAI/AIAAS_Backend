@@ -56,8 +56,15 @@ Checked against the code on 2026-07-29, not assumed.
 - `WorkflowTestResult` already links to `workflow_template` — the seed of
   shipping eval results alongside a template.
 - `HITLRequest` + the Inbox screen: the approval gate an agent needs.
-- `chat.ToolExecutor`: web search, scrape, file ops, Python sandbox (AST and
-  WASM engines), KB search, `list_workflows` / `run_workflow`.
+- `chat.ToolExecutor`: web search, deep research, scrape, `read_url`, KB search.
+  **Corrected 2026-08-12:** this originally also listed file ops, a Python
+  sandbox and `list_workflows` / `run_workflow`. Those were removed from chat
+  deliberately and `chat/tests_rework.py::RemovedCapabilityTests` asserts they
+  are neither advertised nor dispatchable. They are not reusable; re-adding any
+  of them is a decision to reverse, not a wiring job.
+- `executor.sandbox.safe_execution`: the RestrictedPython sandbox the Code node
+  uses. This *is* reusable, and is what the agent runtime's `execute_python`
+  wraps.
 - Frontend: the agent builder at `/agents/new` produces an `AgentConfig` already.
 
 **Missing** *(as of the original writing — the first three are now done)*
@@ -197,8 +204,9 @@ on their own data are marketing, not evidence.
 
 ## 7. Agents calling workflows
 
-`ToolExecutor._run_workflow` already exists for chat. Expose it to the agent
-runtime, gated by `tool_grants.workflows`, with the allowed workflow IDs listed
+**Corrected 2026-08-12:** `ToolExecutor._run_workflow` no longer exists — see
+§2. This needs writing fresh against `executor/`, then gating by a new
+`tool_grants.workflows` key, with the allowed workflow IDs listed
 in `requirements` so they show on the permissions screen.
 
 This is what keeps side effects deterministic: the agent decides *whether* to
@@ -214,10 +222,29 @@ send the reminder; a workflow decides *how* the mail is composed and sent.
 - ✅ CRUD at `/api/orchestrator/agents/`; `/agents/new` saves. See
   `orchestrator/agents.py` and `orchestrator/tests_agents.py`
 - ✅ The egress knob §9.1 asked for. `shell + egress=full` is refused outright
-- ⬜ Agent runtime: LangGraph loop with the granted tools, honouring
-  `supervision_level` via the existing `HITLRequest` path. **This is what is
-  left** — agents can be defined and saved, but not yet executed, so every
-  `runs` count is currently 0.
+- ✅ Agent runtime: [orchestrator/agent_runtime.py](../orchestrator/agent_runtime.py),
+  run via `POST /api/orchestrator/agents/{id}/execute/`. Phase 1 is complete;
+  `runs` counts are real.
+
+Three decisions worth recording from building it:
+
+- **It borrows `chat.agent`'s loop rather than forking it.** `TurnContext` grew
+  three optional hooks — `tool_source`, `tool_dispatch`, `sensitive_tools` — and
+  the runtime supplies all three. Chat turns pass none and are unchanged. A
+  second loop would have meant two implementations of message threading that
+  must agree, which is the thing the chat rewrite existed to fix.
+- **Grants are enforced at call time, not only at advertising time.**
+  `AgentToolbox.dispatch` re-checks the grant before running anything. A model
+  can name a tool it was never offered, and "we didn't mention it" is not access
+  control. §10's first risk is tested directly.
+- **`shell` and `fileOps` are refused, not faked.** Neither has an
+  implementation this runtime will serve (§9.1 for shell; the chat removal above
+  for file ops). The run reports them in `unserved_grants` and the system prompt
+  names them, so a configured-but-unavailable capability is visible rather than
+  showing up as an agent that mysteriously cannot do its job.
+- **`mcp` is a new grant key**, which is what finally makes the MCP client
+  reachable from an agent rather than from chat alone. Off by default: those
+  tools reach real systems under the user's own credentials.
 
 Two decisions worth recording, because they were not in the original design:
 
