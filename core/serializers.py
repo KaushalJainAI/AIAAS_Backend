@@ -40,6 +40,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'tier', 'compile_limit', 'execute_limit',
             'stream_connections', 'credits_remaining', 'credits_used_total',
             'llm_provider', 'llm_model', 'llm_credential_id',
+            'vision_provider', 'vision_model',
             'default_temperature', 'default_max_tokens',
             'theme_preference', 'accent_color',
             'created_at', 'updated_at'

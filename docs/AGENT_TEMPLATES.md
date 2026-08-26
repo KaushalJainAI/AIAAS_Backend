@@ -56,10 +56,10 @@ Checked against the code on 2026-07-29, not assumed.
 - `WorkflowTestResult` already links to `workflow_template` — the seed of
   shipping eval results alongside a template.
 - `HITLRequest` + the Inbox screen: the approval gate an agent needs.
-- `chat.ToolExecutor`: web search, deep research, scrape, `read_url`, KB search.
+- `chat.tools`: web search, deep research, scrape, `read_url`, KB search.
   **Corrected 2026-08-12:** this originally also listed file ops, a Python
   sandbox and `list_workflows` / `run_workflow`. Those were removed from chat
-  deliberately and `chat/tests_rework.py::RemovedCapabilityTests` asserts they
+  deliberately and `chat/tests/test_rework.py::RemovedCapabilityTests` asserts they
   are neither advertised nor dispatchable. They are not reusable; re-adding any
   of them is a decision to reverse, not a wiring job.
 - `executor.sandbox.safe_execution`: the RestrictedPython sandbox the Code node
@@ -69,7 +69,7 @@ Checked against the code on 2026-07-29, not assumed.
 
 **Missing** *(as of the original writing — the first three are now done)*
 
-- ~~No agents API.~~ Built: `orchestrator/agents.py`.
+- ~~No agents API.~~ Built: `agents/views/agents.py`.
 - ~~No tool-grant model, no egress policy, no spend cap.~~ Built as columns on
   `Workflow`.
 - `WorkflowTemplate` stores `nodes`/`edges` — no agent shape. Still true.
@@ -156,17 +156,17 @@ email and act on your behalf. So install looks like an app store permission
 prompt, generated from `tool_grants` + `requirements` + `guardrails`:
 
 ```
-Finance agent  ·  by Kaushal Jain  ·  ★ 4.6 (28)
+Finance agent  ·  by Kaushal Jain  ·  4.6 (28)
 
 This agent will be able to:
-  ✉  Read your Gmail                        → [Work mailbox      ▾]
+  Read your Gmail  → [Work mailbox  ▾]
   ▤  Read and write Google Sheets           → [Payables 2026     ▾]
-  ⚙  Run Python in a sandbox (no network)
+  Run Python in a sandbox (no network)
   ▦  Search a knowledge base                → [Vendor records    ▾]
 
 Limits:
-  ✅ Asks before sending anything
-  ✅ No internet access from its sandbox
+  Asks before sending anything
+  No internet access from its sandbox
   ₹  Spends at most ₹500/month
 
 From 412 runs by others:
@@ -204,7 +204,7 @@ on their own data are marketing, not evidence.
 
 ## 7. Agents calling workflows
 
-**Corrected 2026-08-12:** `ToolExecutor._run_workflow` no longer exists — see
+**Corrected 2026-08-12:** `_run_workflow` no longer exists — see
 §2. This needs writing fresh against `executor/`, then gating by a new
 `tool_grants.workflows` key, with the allowed workflow IDs listed
 in `requirements` so they show on the permissions screen.
@@ -217,12 +217,12 @@ send the reminder; a workflow decides *how* the mail is composed and sent.
 ## 8. Phases
 
 **Phase 1 — make agents real (backend, blocking)** — *mostly done*
-- ✅ `kind`, `tool_grants`, `requirements`, `guardrails`, `trigger` on `Workflow`,
+- `kind`, `tool_grants`, `requirements`, `guardrails`, `trigger` on `Workflow`,
   plus `sandbox` and `agent_context` (migration `orchestrator/0011`)
-- ✅ CRUD at `/api/orchestrator/agents/`; `/agents/new` saves. See
-  `orchestrator/agents.py` and `orchestrator/tests_agents.py`
-- ✅ The egress knob §9.1 asked for. `shell + egress=full` is refused outright
-- ✅ Agent runtime: [orchestrator/agent_runtime.py](../orchestrator/agent_runtime.py),
+- CRUD at `/api/orchestrator/agents/`; `/agents/new` saves. See
+  `agents/views/agents.py` and `agents/tests/test_agents.py`
+- The egress knob §9.1 asked for. `shell + egress=full` is refused outright
+- Agent runtime: [agents/agent/runtime.py](../agents/agent/runtime.py),
   run via `POST /api/orchestrator/agents/{id}/execute/`. Phase 1 is complete;
   `runs` counts are real.
 

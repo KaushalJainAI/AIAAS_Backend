@@ -131,3 +131,139 @@ class ChatAttachment(models.Model):
 
     def __str__(self):
         return f"{self.filename} ({self.file_type})"
+
+
+class VisionExchange(models.Model):
+    """
+    One question the main agent asked a vision model about an attachment, and
+    the answer it got back.
+
+    Doing three jobs at once: it is the witness's memory (a follow-up arrives
+    with the earlier exchanges already in context), the audit trail of what was
+    asked on the user's behalf, and the data behind the UI affordance that shows
+    a user the assistant did not see their image — it questioned something that
+    could.
+    """
+
+    session = models.ForeignKey(
+        ChatSession, on_delete=models.CASCADE, related_name='vision_exchanges'
+    )
+    attachment = models.ForeignKey(
+        ChatAttachment, on_delete=models.CASCADE, related_name='vision_exchanges'
+    )
+    question = models.TextField()
+    answer = models.TextField()
+    model = models.CharField(max_length=120, blank=True, default="")
+    #: Set when the VLM and the parser read the same glyphs differently. The
+    #: readings themselves stay in `answer`; this is the flag a UI can filter on.
+    disagreement = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['session', 'attachment', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"vision Q on {self.attachment_id}: {self.question[:40]}"
+
+
+def _tool_output_id() -> str:
+    """Short, quotable handle. The model has to copy it back verbatim."""
+    return uuid.uuid4().hex[:12]
+
+
+class ToolOutput(models.Model):
+    """
+    The complete text of a tool result that was too large to replay to the model.
+
+    A tool that returns more than `TOOL_OUTPUT_CHAR_LIMIT` used to have its
+    result dropped into the transcript whole, where it either ate the context
+    window or was blindly trimmed by `llm.clamp_input` — which trims from the
+    middle and tells nobody. The agent could not distinguish "the page said
+    nothing more" from "we threw the rest away".
+
+    So the bounded preview stays in the transcript as the durable record, and
+    the full text lands here where `read_tool_output` can page through it. That
+    is the same trade the per-tool budgets already make, moved to one place and
+    made recoverable: the model is told what it is missing and how to go get it,
+    instead of being handed a silent stump.
+
+    Not a `ChatSession` foreign key on purpose. `tools_node` is shared with the
+    agent runtime, whose `session_id` identifies an agent run rather than a chat,
+    so the scope is stored as an opaque key and checked as one.
+    """
+
+    id = models.CharField(
+        primary_key=True, max_length=12, default=_tool_output_id, editable=False
+    )
+    #: Null for guest chat, which has no account behind it. A null owner is not
+    #: a wildcard: `read_tool_output` matches on it exactly, so one guest cannot
+    #: read another's spill by guessing an id.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='tool_outputs', null=True, blank=True,
+    )
+    #: `TurnContext.session_id` — a chat session id or an agent run id.
+    session_key = models.CharField(max_length=64, db_index=True)
+    turn_id = models.CharField(max_length=64, blank=True, default="")
+    tool_name = models.CharField(max_length=160)
+    content = models.TextField()
+    total_chars = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    #: Retention, not correctness. Once this passes the row is collectable and
+    #: `read_tool_output` reports the text as expired rather than pretending the
+    #: tool returned nothing.
+    expires_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['session_key', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.tool_name} output {self.id} ({self.total_chars} chars)"
+
+
+class ToolPermission(models.Model):
+    """
+    A standing "always allow" the user gave for one tool.
+
+    Without it the per-call gate in `chat.permissions` is unusable in practice:
+    a connector the user reaches for twenty times a day would prompt twenty
+    times, and the twenty-first prompt gets approved without being read. A
+    remembered decision is how a gate stays meaningful — the prompts that
+    remain are the ones the user has not already thought about.
+
+    `session_key` empty means the decision stands for every conversation;
+    otherwise it is scoped to the one the user made it in. Nothing here records
+    a *denial*: refusing is already expressed by not approving, and a stored
+    "never" would need its own expiry and its own way to be taken back.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='tool_permissions',
+    )
+    tool_name = models.CharField(max_length=160)
+    #: Empty for "in every conversation"; a `TurnContext.session_id` otherwise.
+    session_key = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'tool_name', 'session_key'],
+                name='unique_tool_permission_scope',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['user', 'tool_name']),
+        ]
+
+    def __str__(self):
+        scope = self.session_key or 'all conversations'
+        return f"{self.user_id} allows {self.tool_name} ({scope})"

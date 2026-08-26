@@ -13,7 +13,7 @@ with tools used as needed.
 | `pipeline.py` | One turn end to end; both endpoints run exactly this |
 | `agent.py` | The LangGraph tool loop, and the turn's public API |
 | `llm.py` | Provider access: routing, credentials, budgets, stream folding |
-| `tools.py` | Tool schemas and implementations |
+| `tools/` | Tool registry: one module per domain, each tool's schema and implementation declared together |
 | `search.py` | Web/image/video search and page fetching |
 | `history.py` | What the model gets to see this turn |
 | `prompts.py` | System prompt and the auxiliary prompts |
@@ -40,7 +40,7 @@ That takes the model off the distribution it was trained on, and it responds by
 that required a 480-line scraper with twenty regexes covering a dozen invented
 dialects. Thread the messages correctly and native tool calls simply work.
 
-Providers accept this because every handler in `nodes/handlers/llm_nodes.py`
+Providers accept this because every handler in `llm/handlers/llm_nodes.py`
 builds its request as `[system] + history + [user prompt]` and extends `history`
 verbatim. `agent.to_wire` renders the LangChain messages into that shape.
 
@@ -119,10 +119,42 @@ searches, reads pages and returns the corpus with its sources. It used to run
 ahead of the model on a keyword guess; as a tool the model decides when the
 question warrants it and can follow up on what comes back.
 
+**Code execution** is `execute_python`, running the same
+`executor.sandbox` the Code node and the agent runtime use — AST-validated, no
+network, no filesystem, no imports outside a safe standard subset. It is not the
+`execute_python_code` tool that was removed: that one ran `exec` against the
+process and stays unreachable (`tests_rework.RemovedCapabilityTests`). Failures
+come back as a plain `Error: ...` string rather than JSON, so a model cannot
+read a traceback as a result. Unlike in `agent_runtime`, it is *not* sensitive
+here — a human wrote the message that caused the call and is watching the answer
+arrive, and prompting for arithmetic is how approval prompts become noise.
+
+**Delegating to an agent.** `search_agents` lists the user's saved agents
+(`Workflow` rows with `kind='agent'`) with their grants and autonomy;
+`run_agent` runs one; `get_agent_run` checks on it. `run_agent` starts the run
+*detached* via `agent_runtime.start_agent_run` and then waits on its
+`ExecutionLog`, rather than running it inline: an agent run is research-shaped
+and the chat loop cancels a tool call at `TOOL_CALL_TIMEOUT`, which inline would
+kill the agent mid-step and strand its log at `running` forever. Detached, the
+deadline only ends the *waiting* — the run continues and its `execution_id`
+comes back for `get_agent_run` and the canvas. It is in `SENSITIVE_TOOLS`
+because it spends the user's budget and acts under grants they are not watching.
+The reverse direction is closed by the same grant map that opens this one:
+`run_agent` appears in no `GRANT_TOOLS` value, so an agent cannot call it and
+recursion has nowhere to start.
+
 **Human-in-the-loop.** Tools in `SENSITIVE_TOOLS` pause the graph via
 `interrupt()` and emit `ask_permission`. The client resumes by posting
 `approve_tool_call`. `/api/chat/execute-tool/` refuses these outright — reaching
 them there would be a way around the gate rather than a shortcut to it.
+
+**Every tool is directly reachable.** `/api/chat/execute-tool/` takes a tool
+name and arbitrary arguments from an authenticated user, so a tool's own
+ownership check is the only one there is — the model is not the only caller and
+"the agent would never ask for someone else's id" is not access control. Checks
+belong on the column that is always populated: `ChatAttachment.session`, not
+`ChatAttachment.message`, which is null on every fresh upload. Tests:
+`tests/test_agent_tools.py`.
 
 **Token budgets.** `llm.clamp_input` runs on the assembled request, the first
 point the real total is known. History is dropped oldest-first because it is the
@@ -156,10 +188,12 @@ on.
 
 ## Testing
 
-- `tests_pipeline.py` — full turns with the provider faked at `llm.stream`:
+- `tests/test_pipeline.py` — full turns with the provider faked at `llm.stream`:
   streaming, tool threading, memory toggle, failure handling.
-- `tests_units.py` — stream folding, tool-call normalisation, the text fallback.
-- `tests_rework.py` — context budgets, transcript threading, tool registry.
+- `tests/test_units.py` — stream folding, tool-call normalisation, the text fallback.
+- `tests/test_rework.py` — context budgets, transcript threading, tool registry.
+- `tests/test_agent_tools.py` — the sandbox, the agent-runtime tools, and the
+  per-tool ownership checks that `/api/chat/execute-tool/` makes load-bearing.
 - `tests.py` — the guest pipeline.
 
 Fake at `chat.llm.stream` and stub `chat.tools.get_available_tools`; the real

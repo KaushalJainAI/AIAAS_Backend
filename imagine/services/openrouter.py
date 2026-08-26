@@ -1,15 +1,27 @@
 """OpenRouter API client.
 
-Auth keys are NEVER read from settings/.env — they come from the per-user
-encrypted `credentials/` vault (slug `openrouter`, field `apiKey`). Construct
-the service via `OpenRouterService.for_user(user)`.
+Auth keys come from the per-user encrypted `credentials/` vault via
+`credentials.resolution` — the same resolver the chat and node stacks use, so
+"usable credential" means one thing product-wide. This module used to run its
+own vault query which omitted the `is_verified` filter the rest of the system
+applied; media generation would therefore use a key chat had already rejected.
+Construct the service via `OpenRouterService.for_user(user)`.
 
-Endpoint reference (Nov 2025+ docs):
-- Image  : POST /api/v1/chat/completions  with modalities=["image","text"]
+Endpoint reference:
+- Image  : POST /api/v1/images             → data[].b64_json
 - Video  : POST /api/v1/videos             → polling job (id, polling_url)
 - Poll   : GET  /api/v1/videos/{id}        → status, unsigned_urls
 - TTS    : POST /api/v1/audio/speech       → raw audio bytes
-- Models : GET  /api/v1/models             → filter by output_modalities
+- Catalog: GET  /api/v1/images/models, GET /api/v1/videos/models
+
+Image generation used to ride on `chat/completions` with
+`modalities=["image","text"]`. That path still works, but it can only reach the
+~10 image models that are *also* chat models (Gemini and GPT Image). FLUX,
+Seedream, Recraft, Krea, Qwen Image, MAI-Image and Riverflow are not chat
+models at all and are reachable only through `POST /images` — two thirds of the
+catalog was unaddressable. The unified endpoint also names its fields properly
+(`resolution`, not `image_config.image_size`) and adds `quality`,
+`output_format` and `n`.
 """
 import base64
 import logging
@@ -17,11 +29,20 @@ from typing import Any, Dict, List
 
 import requests
 
+from credentials.resolution import CredentialUnavailable, resolve_api_key_sync
+
+from . import catalog
+
 logger = logging.getLogger(__name__)
 
 
 class MissingOpenRouterCredentialError(RuntimeError):
-    """Raised when a user has no active OpenRouter credential configured."""
+    """Raised when a user has no usable OpenRouter credential configured.
+
+    Kept as its own type because the imagine views and tasks catch it to return
+    a specific "add a credential" message; it now wraps the shared
+    `CredentialUnavailable` rather than being raised from a private query.
+    """
 
 
 class OpenRouterService:
@@ -43,39 +64,24 @@ class OpenRouterService:
 
     @classmethod
     def for_user(cls, user) -> "OpenRouterService":
-        """Build an instance using the user's active OpenRouter credential."""
-        from credentials.models import Credential
-
-        cred = (
-            Credential.objects
-            .select_related('credential_type')
-            .filter(
-                user=user,
-                credential_type__slug='openrouter',
-                is_active=True,
-            )
-            .order_by('-updated_at')
-            .first()
-        )
-        if not cred:
+        """Build an instance using the user's OpenRouter credential."""
+        try:
+            api_key = resolve_api_key_sync('openrouter', user.id)
+        except CredentialUnavailable as exc:
             raise MissingOpenRouterCredentialError(
-                "No active OpenRouter credential found for this user. "
-                "Add one under Credentials (type: OpenRouter API)."
-            )
-
-        data = cred.get_credential_data()
-        # The seeded schema uses field name 'apiKey'; accept common variants
-        # in case credentials were stored via a different UI revision.
-        api_key = (
-            data.get('apiKey')
-            or data.get('api_key')
-            or data.get('token')
-        )
-        if not api_key:
-            raise MissingOpenRouterCredentialError(
-                "OpenRouter credential is missing the API key field."
-            )
+                f"{exc} Add an 'OpenRouter API' credential under Credentials."
+            ) from exc
         return cls(api_key=api_key)
+
+    @property
+    def api_key(self) -> str:
+        """The resolved key, for callers that drive their own HTTP client.
+
+        Exposed deliberately: the intent classifier needs the key to hand to
+        litellm and was reaching into `_api_key` to get it, which made a
+        private attribute part of the contract without saying so.
+        """
+        return self._api_key
 
     # ── transport ────────────────────────────────────────────────────────────
 
@@ -91,134 +97,106 @@ class OpenRouterService:
 
     # ── models catalog ───────────────────────────────────────────────────────
 
-    def fetch_models(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Fetch the model catalog and bucket by output modality."""
+    def _fetch_catalog(self, path: str) -> List[Dict[str, Any]]:
+        """GET a catalog endpoint, returning [] on any failure.
+
+        Each modality is fetched independently so that one endpoint being down
+        degrades a single tab rather than blanking the whole picker.
+        """
         try:
             response = requests.get(
-                f"{self.BASE_URL}/models",
+                f"{self.BASE_URL}/{path}",
                 headers=self._headers(json_body=False),
-                timeout=10,
+                timeout=15,
             )
             response.raise_for_status()
-            all_models = response.json().get("data", [])
-
-            # Video models carry extra resolution/aspect-ratio metadata.
-            video_meta: Dict[str, Dict[str, Any]] = {}
-            try:
-                v_resp = requests.get(
-                    f"{self.BASE_URL}/videos/models",
-                    headers=self._headers(json_body=False),
-                    timeout=10,
-                )
-                if v_resp.status_code == 200:
-                    video_meta = {m['id']: m for m in v_resp.json().get("data", [])}
-            except requests.RequestException as e:
-                logger.debug(f"Video model metadata fetch skipped: {e}")
-
-            capabilities: Dict[str, List[Dict[str, Any]]] = {
-                "image": [], "video": [], "audio": [],
-            }
-
-            for model in all_models:
-                model_id = model.get("id")
-                model_name = model.get("name")
-                output_modalities = model.get("output_modalities") or []
-
-                if "image" in output_modalities:
-                    capabilities["image"].append({
-                        "id": model_id,
-                        "name": model_name,
-                        "description": model.get("description", ""),
-                        "resolutions": ["1K", "2K", "4K"],
-                        "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4"],
-                        "parameters": model.get("supported_parameters", []),
-                    })
-
-                if "video" in output_modalities:
-                    meta = video_meta.get(model_id, {})
-                    capabilities["video"].append({
-                        "id": model_id,
-                        "name": model_name,
-                        "description": model.get("description", ""),
-                        "resolutions": meta.get(
-                            "supported_resolutions",
-                            ["480p", "720p", "1080p"],
-                        ),
-                        "aspect_ratios": meta.get(
-                            "supported_aspect_ratios",
-                            ["16:9", "9:16", "1:1"],
-                        ),
-                        "durations": meta.get("supported_durations", [5, 10]),
-                        "parameters": model.get("supported_parameters", []),
-                    })
-
-                if "audio" in output_modalities or (model_id and "tts" in model_id.lower()):
-                    capabilities["audio"].append({
-                        "id": model_id,
-                        "name": model_name,
-                        "description": model.get("description", ""),
-                        "voices": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
-                        "parameters": model.get("supported_parameters", []),
-                    })
-
-            return capabilities
+            data = response.json().get("data")
+            return data if isinstance(data, list) else []
         except Exception as e:
-            logger.error(f"Error fetching OpenRouter models: {e}")
-            return {"image": [], "video": [], "audio": []}
+            logger.error(f"OpenRouter catalog fetch failed for /{path}: {e}")
+            return []
+
+    def fetch_models(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Build the per-modality capability catalog.
+
+        Image and video come from their dedicated catalog endpoints, which
+        advertise each model's own resolution/aspect-ratio/duration enums — so
+        the UI can offer exactly what the selected model accepts instead of one
+        hardcoded list that was wrong for most of them. Audio is curated in
+        `catalog.TTS_MODELS`; OpenRouter exposes no TTS discovery endpoint.
+        """
+        images = [
+            catalog.normalize_image_model(m) for m in self._fetch_catalog("images/models")
+        ]
+        videos = [
+            catalog.normalize_video_model(m) for m in self._fetch_catalog("videos/models")
+        ]
+
+        return {
+            "image": catalog.sort_by_recommendation("image", images),
+            "video": catalog.sort_by_recommendation("video", videos),
+            "audio": catalog.sort_by_recommendation("audio", catalog.audio_catalog()),
+        }
 
     # ── image ────────────────────────────────────────────────────────────────
 
     def generate_image(
         self, prompt: str, model: str, config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Image generation via chat/completions with modalities=['image','text']."""
-        messages: List[Dict[str, str]] = []
+        """Image generation via the unified POST /images endpoint.
+
+        Only keys the caller actually set are sent. Omitting a parameter lets
+        OpenRouter apply the model's own default, which is strictly better than
+        guessing: models disagree about which resolutions they accept (Seedream
+        5.0 Lite is 2K/4K only), so a blanket default is wrong somewhere.
+        """
+        payload: Dict[str, Any] = {"model": model, "prompt": prompt}
+
+        # A negative prompt has no first-class field on this endpoint; models
+        # honour it inline, which is also how the chat path expressed it.
         if config.get("negative_prompt"):
-            messages.append({
-                "role": "system",
-                "content": f"Negative prompt: {config['negative_prompt']}",
-            })
-        messages.append({"role": "user", "content": prompt})
+            payload["prompt"] = (
+                f"{prompt}\n\nAvoid the following: {config['negative_prompt']}"
+            )
 
-        image_config: Dict[str, Any] = {
-            "aspect_ratio": config.get("aspect_ratio", "1:1"),
-            "image_size": config.get("image_size", "1K"),
-        }
-        if config.get("strength") is not None:
-            image_config["strength"] = config["strength"]
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "modalities": ["image", "text"],
-            "image_config": image_config,
-        }
+        for key in ("resolution", "aspect_ratio", "quality", "output_format", "background"):
+            if config.get(key):
+                payload[key] = config[key]
+        if config.get("seed") is not None:
+            payload["seed"] = config["seed"]
 
         try:
             response = requests.post(
-                f"{self.BASE_URL}/chat/completions",
+                f"{self.BASE_URL}/images",
                 headers=self._headers(),
                 json=payload,
-                timeout=60,
+                timeout=120,
             )
             response.raise_for_status()
             data = response.json()
 
-            choices = data.get("choices") or []
-            if not choices:
-                return {"error": "No response from model"}
-
-            message = choices[0].get("message") or {}
-            images = message.get("images") or []
+            images = data.get("data") or []
             if not images:
                 return {"error": "No images generated"}
 
-            # Response shape: images[].image_url.url is a base64 data URL.
             first = images[0]
-            url = (first.get("image_url") or {}).get("url") or first.get("url")
+            # Preferred shape is base64 + media type; some providers return a
+            # hosted url instead, so accept either rather than failing on a
+            # response that plainly contains an image.
+            b64 = first.get("b64_json")
+            if b64:
+                media_type = first.get("media_type") or "image/png"
+                url = f"data:{media_type};base64,{b64}"
+            else:
+                url = first.get("url")
             if not url:
-                return {"error": "Image response missing url"}
-            return {"status": "completed", "url": url}
+                return {"error": "Image response contained no image data"}
+
+            return {
+                "status": "completed",
+                "url": url,
+                "cost": (data.get("usage") or {}).get("cost"),
+            }
         except requests.HTTPError as e:
             body = getattr(e.response, "text", "")[:500]
             logger.error(f"OpenRouter image HTTP error: {e} | body: {body}")
@@ -233,13 +211,15 @@ class OpenRouterService:
         self, prompt: str, model: str, config: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Submit a POST /videos job. Returns id + polling_url."""
-        payload: Dict[str, Any] = {
-            "model": model,
-            "prompt": prompt,
-            "resolution": config.get("resolution", "720p"),
-            "aspect_ratio": config.get("aspect_ratio", "16:9"),
-            "duration": int(config.get("duration") or 5),
-        }
+        payload: Dict[str, Any] = {"model": model, "prompt": prompt}
+
+        for key in ("resolution", "aspect_ratio"):
+            if config.get(key):
+                payload[key] = config[key]
+        if config.get("duration"):
+            payload["duration"] = int(config["duration"])
+        if config.get("generate_audio") is not None:
+            payload["generate_audio"] = bool(config["generate_audio"])
         if config.get("seed") is not None:
             payload["seed"] = config["seed"]
 
@@ -312,9 +292,13 @@ class OpenRouterService:
         payload: Dict[str, Any] = {
             "model": model,
             "input": text,
-            "voice": config.get("voice", "alloy"),
             "response_format": "mp3",
         }
+        # Voice ids are provider-specific — `alloy` is an OpenAI name and is
+        # rejected by MiniMax/Voxtral/Kokoro. Send only what the caller chose
+        # and let the model fall back to its own default otherwise.
+        if config.get("voice"):
+            payload["voice"] = config["voice"]
         if config.get("speed") is not None:
             payload["speed"] = float(config["speed"])
 

@@ -77,8 +77,20 @@ def _database_config():
     }
 
 
-SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-default-key-change-in-production')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+
+# A missing SECRET_KEY must never silently fall back to a shared, well-known
+# value in production: that key signs JWTs and session cookies, so a known key
+# lets anyone forge either. In DEBUG we tolerate an ephemeral dev key; outside
+# DEBUG an unset key is a hard configuration error.
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'django-insecure-dev-only-key-not-for-production'
+    else:
+        raise RuntimeError(
+            'SECRET_KEY environment variable is required when DEBUG is False.'
+        )
 
 ALLOWED_HOSTS = [
     'localhost',
@@ -119,10 +131,9 @@ INSTALLED_APPS = [
     'dj_rest_auth',
     'dj_rest_auth.registration',
     'core',
-    'nodes',
-    'compiler',
+    'llm',
     'executor',
-    'orchestrator',
+    'agents',
     'credentials',
     'inference',
     'logs',
@@ -131,18 +142,13 @@ INSTALLED_APPS = [
     'mcp_integration',
     'skills',
     'chat',
-    'browserOS',
     'django_celery_beat',
-    'buddy',
-    # 'canvas_agent',  # DISABLED — Platform Copilot parked; app code kept in canvas_agent/
     'notifications',
     'imagine',
-    # The improve loop: corrections become datasets, datasets grade agents and
-    # tune models.
-    'datasets',
-    'evals',
-    'tuning',
-    'extraction',
+    # Evaluation of sub-agents. Label is `eval` (singular): the deleted `evals`
+    # app left inert `evals_*` tables and an `evals.0001_initial` row in dev
+    # databases, so the new tables must not be named the same thing.
+    'eval',
 ]
 
 SITE_ID = 1
@@ -161,9 +167,9 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'allauth.account.middleware.AccountMiddleware',
-    'core.middleware.RequestLoggingMiddleware',
-    'core.middleware.InputSanitizationMiddleware',
-    'core.middleware.RateLimitHeaderMiddleware',
+    'core.http.middleware.RequestLoggingMiddleware',
+    'core.http.middleware.InputSanitizationMiddleware',
+    'core.http.middleware.RateLimitHeaderMiddleware',
 ]
 
 ROOT_URLCONF = 'workflow_backend.urls'
@@ -260,7 +266,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'core.authentication.APIKeyAuthentication',
+        'core.auth.authentication.APIKeyAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
@@ -284,6 +290,7 @@ REST_FRAMEWORK = {
         'execute': '5/minute',
         'chat': '20/hour',
         'stream': '20/minute',
+        'imagine_generate': '30/hour',
         'password_reset': '10/hour',
         'password_change': '10/hour',
         'guest_chat_min': '3/minute',
@@ -292,15 +299,16 @@ REST_FRAMEWORK = {
     },
 }
 
-# --- Guest chat (anonymous NVIDIA NIM demo) ---
+# --- Guest chat (anonymous OpenRouter free-router demo) ---
+# NVIDIA_API_KEY is still read here: it remains the platform default key for
+# authenticated users with no credential of their own (PLATFORM_ENV_KEYS in
+# credentials/resolution.py). Guest chat no longer uses it.
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '')
-# Nemotron 3 Super is 120B total but 12B active per token, so it answers at
-# roughly small-model latency while reasoning like a much larger one — which is
-# what makes it worth serving to anonymous visitors.
-NVIDIA_GUEST_MODEL = os.environ.get(
-    'NVIDIA_GUEST_MODEL',
-    'nvidia/nemotron-3-super-120b-a12b',
-)
+# Which model guests get is NOT configurable here: it is pinned to OpenRouter's
+# free-models router in chat/guest/runtime.py (GUEST_PROVIDER/GUEST_MODEL), and
+# its key comes from OPENROUTER_API_KEY via platform_api_key(). An env override
+# of the *model* would let a deploy quietly serve anonymous visitors on a model
+# nobody chose to pay for, which is the opposite of what the pin is for.
 GUEST_CHAT_MAX_TOKENS = int(os.environ.get('GUEST_CHAT_MAX_TOKENS', '200000'))
 GUEST_USER_EMAIL = os.environ.get('GUEST_USER_EMAIL', 'guest@aiaas.local')
 
@@ -379,6 +387,48 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 
+# Periodic work. Run with:  celery -A workflow_backend beat -l info
+# The HITL sweep is also runnable without a broker as
+# `manage.py send_hitl_reminders`, which is how local dev and cron-only
+# deployments drive it — see notifications/reminders.py.
+HITL_REMINDER_SWEEP_SECONDS = int(os.environ.get('HITL_REMINDER_SWEEP_SECONDS', '300'))
+TRIGGER_SWEEP_SECONDS = int(os.environ.get('TRIGGER_SWEEP_SECONDS', '60'))
+RECYCLE_SWEEP_SECONDS = int(os.environ.get('RECYCLE_SWEEP_SECONDS', '3600'))
+CELERY_BEAT_SCHEDULE = {
+    'sweep-hitl-reminders': {
+        'task': 'notifications.sweep_hitl_reminders',
+        'schedule': HITL_REMINDER_SWEEP_SECONDS,
+    },
+    # Every minute: cron's own resolution is one minute, so a slower sweep
+    # would make `next_due_at` a suggestion rather than a schedule. Also
+    # runnable as `manage.py run_due_triggers` — see agents/sweep.py.
+    'sweep-due-triggers': {
+        'task': 'orchestrator.sweep_triggers',
+        'schedule': TRIGGER_SWEEP_SECONDS,
+    },
+    # Hourly: a 30-day retention has no use for minute resolution, and this
+    # sweep is the destructive one. Also runnable as
+    # `manage.py purge_recycle_bin` — see inference/recycle.py.
+    'sweep-recycle-bin': {
+        'task': 'inference.sweep_recycle_bin',
+        'schedule': RECYCLE_SWEEP_SECONDS,
+    },
+}
+
+# How long a trashed folder or document stays restorable before the sweep
+# purges it for good. Policy, not a shape cap, so it lives here and is
+# env-tunable — and the API reports it as `purges_after_days` rather than
+# letting any client hardcode 30.
+RECYCLE_BIN_RETENTION_DAYS = int(os.environ.get('RECYCLE_BIN_RETENTION_DAYS', '30'))
+
+# Default wall-clock time for the daily HITL digest, applied to new users.
+HITL_DIGEST_DEFAULT_TIME = os.environ.get('HITL_DIGEST_DEFAULT_TIME', '09:00')
+
+# A pending HITL request older than this is treated as abandoned and cancelled
+# by the same sweep, so it stops nudging and stops holding its run open. Not
+# `HITLRequest.timeout_seconds` — see notifications/reminders.py::ABANDON_AFTER.
+HITL_ABANDON_AFTER_DAYS = int(os.environ.get('HITL_ABANDON_AFTER_DAYS', '7'))
+
 RUN_WORKFLOWS_ASYNC = os.environ.get('RUN_WORKFLOWS_ASYNC', 'False') == 'True'
 
 CREDENTIAL_ENCRYPTION_KEY = os.environ.get('CREDENTIAL_ENCRYPTION_KEY')
@@ -437,7 +487,7 @@ LOGGING = {
     'disable_existing_loggers': False,
     'filters': {
         'sensitive_data': {
-            '()': 'core.security.SensitiveDataFilter',
+            '()': 'core.safety.security.SensitiveDataFilter',
         },
     },
     'handlers': {
@@ -450,6 +500,24 @@ LOGGING = {
         'handlers': ['console'],
         'level': 'INFO',
     },
+    'loggers': {
+        # Django's DEFAULT_LOGGING gives 'django' its own console handler and
+        # leaves propagate=True, so every record it handles was ALSO re-handled
+        # by root's console handler above — every request logged twice.
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # daphne's runserver access log ("HTTP GET /path 200 [0.01, ip]").
+        # RequestLoggingMiddleware already logs the same request with the user
+        # id attached, so this one is pure duplication in dev.
+        'django.channels.server': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+    },
 }
 
 CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'nvidia/nemotron-3-super-120b-a12b')
@@ -458,3 +526,13 @@ CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'nvidia/nemotron-3-sup
 # vault (slug 'openrouter'). Do not reintroduce an OPEN_ROUTER_KEY setting.
 IMAGINE_AGENT_MODEL = os.environ.get('IMAGINE_AGENT_MODEL', 'openrouter/openai/gpt-4o-mini')
 IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD', '0.10'))
+
+
+# ==================== Evaluation ====================
+# Default provider/model for the `llm_judge` grader when a case does not name
+# one. Left blank, `llm.access` resolves the provider's own default model. A
+# judge deliberately defaults to a *different* call than the agent under test:
+# same-model self-grading is the one configuration where a rubric failure and
+# an agent failure cannot be told apart.
+EVAL_JUDGE_PROVIDER = os.environ.get('EVAL_JUDGE_PROVIDER', 'openrouter')
+EVAL_JUDGE_MODEL = os.environ.get('EVAL_JUDGE_MODEL', '')

@@ -19,7 +19,7 @@ from rest_framework.permissions import IsAuthenticated
 from logs.models import ExecutionLog
 from .broadcaster import get_broadcaster, StreamEvent
 from .models import StreamEvent as StreamEventModel
-from core.throttling import StreamThrottle
+from core.http.throttling import StreamThrottle
 
 logger = logging.getLogger(__name__)
 

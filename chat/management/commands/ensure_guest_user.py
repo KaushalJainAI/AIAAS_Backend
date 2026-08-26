@@ -1,7 +1,7 @@
 """Idempotently create the shared guest chat user."""
 from django.core.management.base import BaseCommand
 
-from chat.guest import get_guest_user_sync
+from chat.guest.runtime import get_guest_user_sync
 
 
 class Command(BaseCommand):

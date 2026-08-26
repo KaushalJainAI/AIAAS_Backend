@@ -44,6 +44,40 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
+# Pre-warm the curated stdio connectors into the npx cache.
+#
+# Without this, `npx -y <pkg>` reaches the npm registry the first time each
+# connector is used, and resolve+install is far slower than any budget a
+# request can hold: measured 25 s+ cold against 2.4–3.7 s once npx has the
+# package cached. The first click on every connector would time out, and the
+# negative cache would then replay that timeout for a minute.
+#
+# Running each server once here is what populates `$NPM_CONFIG_CACHE/_npx`.
+# A global `npm install` would *not* do it: `npx -y <spec>` resolves by package
+# spec, not by binary name, so it would still consult the registry. The DB rows
+# keep saying `npx -y <pkg>` so local development — which has no image and no
+# pre-warm — works exactly the same way, just slower on first use.
+#
+# `</dev/null` gives each server EOF on stdin so it exits instead of waiting for
+# an MCP handshake; `timeout` bounds the ones that ignore it, and `|| true`
+# keeps a registry hiccup at build time from failing the whole image.
+# Keep this list in step with the curated catalogue in
+# `mcp_integration/migrations/0011_working_connector_catalogue.py`.
+ENV NPM_CONFIG_CACHE=/opt/npm-cache
+RUN mkdir -p /opt/npm-cache \
+    && for pkg in \
+        @modelcontextprotocol/server-filesystem \
+        @modelcontextprotocol/server-memory \
+        @modelcontextprotocol/server-sequential-thinking \
+        @modelcontextprotocol/server-slack \
+        @notionhq/notion-mcp-server \
+        @tokenizin/mcp-npx-fetch \
+    ; do \
+        echo "pre-warming $pkg" \
+        && timeout 300 npx -y "$pkg" </dev/null >/dev/null 2>&1 || true; \
+    done \
+    && chmod -R a+rX /opt/npm-cache
+
 WORKDIR /app
 
 # Application source. `.dockerignore` excludes static/, media/, data/, db, etc.

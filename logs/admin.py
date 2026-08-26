@@ -1,37 +1,57 @@
 from django.contrib import admin
-from .models import ExecutionLog, NodeExecutionLog, AuditEntry, OrchestratorThought
+
+from .models import AgentStep, AgentTurn, ExecutionLog, SubAgentRevision
 
 
-class NodeExecutionLogInline(admin.TabularInline):
-    model = NodeExecutionLog
+class AgentStepInline(admin.TabularInline):
+    model = AgentStep
+    fk_name = 'turn'
+    extra = 0
+    readonly_fields = ['call_id', 'tool', 'status', 'order', 'duration_ms']
+    fields = ['order', 'tool', 'call_id', 'status', 'duration_ms']
+    ordering = ['order']
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+class AgentTurnInline(admin.TabularInline):
+    model = AgentTurn
     fk_name = 'execution'
     extra = 0
-    readonly_fields = ['node_id', 'node_type', 'node_name', 'status', 
-                       'execution_order', 'started_at', 'completed_at', 'duration_ms']
-    fields = ['execution_order', 'node_id', 'node_type', 'status', 'duration_ms']
-    ordering = ['execution_order']
+    readonly_fields = ['index', 'decision', 'model_id', 'tokens', 'duration_ms']
+    fields = ['index', 'decision', 'model_id', 'tokens', 'duration_ms']
+    ordering = ['index']
     can_delete = False
-    
+    show_change_link = True
+
     def has_add_permission(self, request, obj=None):
         return False
 
 
 @admin.register(ExecutionLog)
 class ExecutionLogAdmin(admin.ModelAdmin):
-    list_display = ['execution_id', 'workflow', 'user', 'status', 'trigger_type',
-                    'nodes_executed', 'duration_ms', 'created_at']
-    list_filter = ['status', 'trigger_type', 'created_at']
-    search_fields = ['execution_id', 'workflow__name', 'user__username', 'user__email']
+    list_display = ['execution_id', 'subagent', 'user', 'status', 'caller',
+                    'trigger_type', 'depth', 'duration_ms', 'created_at']
+    list_filter = ['status', 'caller', 'trigger_type', 'created_at']
+    search_fields = ['execution_id', 'subagent__name', 'user__username', 'user__email']
     readonly_fields = ['execution_id', 'started_at', 'completed_at', 'duration_ms',
-                       'nodes_executed', 'tokens_used', 'credits_used', 
+                       'nodes_executed', 'tokens_used', 'credits_used',
                        'created_at', 'updated_at']
+    raw_id_fields = ['parent_step', 'revision', 'subagent']
     date_hierarchy = 'created_at'
     ordering = ['-created_at']
-    inlines = [NodeExecutionLogInline]
-    
+    inlines = [AgentTurnInline]
+
     fieldsets = (
-        ('Execution Info', {
-            'fields': ('execution_id', 'workflow', 'user', 'status', 'trigger_type')
+        ('Run', {
+            'fields': ('execution_id', 'subagent', 'revision', 'user',
+                       'status', 'caller', 'trigger_type')
+        }),
+        ('Delegation', {
+            'fields': ('parent_step', 'delegation_task', 'delegation_index', 'depth'),
+            'classes': ('collapse',)
         }),
         ('Timing', {
             'fields': ('started_at', 'completed_at', 'duration_ms')
@@ -54,82 +74,57 @@ class ExecutionLogAdmin(admin.ModelAdmin):
     )
 
 
-@admin.register(NodeExecutionLog)
-class NodeExecutionLogAdmin(admin.ModelAdmin):
-    list_display = ['node_name', 'node_type', 'execution', 'status', 
-                    'execution_order', 'duration_ms', 'retry_count']
-    list_filter = ['status', 'node_type', 'created_at']
-    search_fields = ['node_id', 'node_name', 'node_type', 'execution__execution_id']
+@admin.register(AgentTurn)
+class AgentTurnAdmin(admin.ModelAdmin):
+    list_display = ['execution', 'index', 'decision', 'provider', 'model_id',
+                    'tokens', 'duration_ms', 'created_at']
+    list_filter = ['decision', 'provider', 'created_at']
+    search_fields = ['execution__execution_id', 'reasoning', 'content', 'model_id']
     readonly_fields = ['created_at']
-    ordering = ['-created_at', 'execution_order']
-    
+    raw_id_fields = ['execution']
+    ordering = ['-created_at']
+    inlines = [AgentStepInline]
+
     fieldsets = (
-        ('Node Info', {
-            'fields': ('execution', 'node_id', 'node_type', 'node_name')
-        }),
-        ('Execution', {
-            'fields': ('status', 'execution_order', 'retry_count')
-        }),
-        ('Timing', {
-            'fields': ('started_at', 'completed_at', 'duration_ms')
-        }),
-        ('Data', {
-            'fields': ('input_data', 'output_data', 'config'),
-            'classes': ('collapse',)
-        }),
-        ('Error', {
-            'fields': ('error_message', 'error_stack'),
-            'classes': ('collapse',)
-        }),
+        ('Turn', {'fields': ('execution', 'index', 'decision')}),
+        ('Model', {'fields': ('provider', 'model_id', 'tokens', 'duration_ms')}),
+        ('Reasoning', {'fields': ('reasoning', 'reasoning_truncated')}),
+        ('Content', {'fields': ('content', 'content_truncated'),
+                     'classes': ('collapse',)}),
+        ('Timestamp', {'fields': ('created_at',)}),
     )
 
 
-@admin.register(AuditEntry)
-class AuditEntryAdmin(admin.ModelAdmin):
-    list_display = ['action_type', 'user', 'workflow', 'response_time_ms', 
-                    'ip_address', 'created_at']
-    list_filter = ['action_type', 'created_at']
-    search_fields = ['user__username', 'user__email', 'workflow__name', 
-                     'node_id', 'ip_address']
+@admin.register(AgentStep)
+class AgentStepAdmin(admin.ModelAdmin):
+    list_display = ['tool', 'execution', 'turn', 'status', 'order', 'duration_ms']
+    list_filter = ['status', 'tool', 'created_at']
+    search_fields = ['call_id', 'tool', 'execution__execution_id']
     readonly_fields = ['created_at']
-    date_hierarchy = 'created_at'
-    ordering = ['-created_at']
-    
+    raw_id_fields = ['execution', 'turn']
+    ordering = ['-created_at', 'order']
+
     fieldsets = (
-        ('Context', {
-            'fields': ('user', 'workflow', 'execution', 'node_id')
-        }),
-        ('Action', {
-            'fields': ('action_type', 'request_details', 'response', 'response_time_ms')
-        }),
-        ('Metadata', {
-            'fields': ('ip_address', 'user_agent'),
-            'classes': ('collapse',)
-        }),
-        ('Timestamp', {
-            'fields': ('created_at',)
-        }),
+        ('Step', {'fields': ('execution', 'turn', 'call_id', 'tool')}),
+        ('Execution', {'fields': ('status', 'order')}),
+        ('Timing', {'fields': ('started_at', 'completed_at', 'duration_ms')}),
+        ('Data', {'fields': ('args', 'result'), 'classes': ('collapse',)}),
+        ('Error', {'fields': ('error_message',), 'classes': ('collapse',)}),
     )
-@admin.register(OrchestratorThought)
-class OrchestratorThoughtAdmin(admin.ModelAdmin):
-    list_display = ['id', 'execution', 'node_id', 'node_name', 'thought_type', 'created_at']
-    list_filter = ['thought_type', 'category', 'created_at']
-    search_fields = ['node_id', 'node_name', 'content', 'reasoning', 'execution__execution_id']
+
+
+@admin.register(SubAgentRevision)
+class SubAgentRevisionAdmin(admin.ModelAdmin):
+    list_display = ['subagent', 'number', 'summary', 'source', 'user', 'created_at']
+    list_filter = ['source', 'created_at']
+    search_fields = ['subagent__name', 'summary']
     readonly_fields = ['created_at']
+    raw_id_fields = ['subagent', 'user']
     ordering = ['-created_at']
-    
+
     fieldsets = (
-        ('Context', {
-            'fields': ('user', 'workflow', 'execution', 'node_id', 'node_name', 'category')
-        }),
-        ('Content', {
-            'fields': ('thought_type', 'content', 'reasoning')
-        }),
-        ('Metadata', {
-            'fields': ('metadata',),
-            'classes': ('collapse',)
-        }),
-        ('Timestamp', {
-            'fields': ('created_at',)
-        }),
+        ('Revision', {'fields': ('subagent', 'number', 'source', 'user', 'summary')}),
+        ('Change', {'fields': ('diff',)}),
+        ('Snapshot', {'fields': ('config',), 'classes': ('collapse',)}),
+        ('Timestamp', {'fields': ('created_at',)}),
     )

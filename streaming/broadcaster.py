@@ -89,6 +89,10 @@ class SSEBroadcaster:
     EVENT_ORCHESTRATOR_THINKING = 'thinking'
     EVENT_ORCHESTRATOR_THOUGHT = 'thought'
     EVENT_WORKFLOW_CANCELLED = 'workflow_cancelled'
+    # One pass of the model: its reasoning, and what it decided to do next.
+    # A new event type on the existing channel rather than a second socket —
+    # two channels would have to agree forever about what a run looks like.
+    EVENT_AGENT_TURN = 'agent_turn'
     
     # In-memory subscribers (for single instance)
     # Format: {execution_id: [asyncio.Queue, ...]}
@@ -326,6 +330,33 @@ class SSEBroadcaster:
             }
         )
     
+    async def agent_turn(
+        self,
+        execution_id: str,
+        index: int,
+        reasoning: str = '',
+        decision: str = 'tools',
+        model_id: str = '',
+        tokens: int = 0,
+    ):
+        """Announce one turn of the agent loop.
+
+        Sent when the model has decided but before its tool calls run, so a
+        client can show *why* the calls that follow are about to happen rather
+        than reconstructing the reason from them afterwards.
+        """
+        await self.send_event(
+            execution_id,
+            self.EVENT_AGENT_TURN,
+            {
+                'index': index,
+                'reasoning': reasoning,
+                'decision': decision,
+                'model_id': model_id,
+                'tokens': tokens,
+            }
+        )
+
     async def node_started(
         self,
         execution_id: str,

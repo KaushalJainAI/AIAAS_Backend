@@ -20,7 +20,7 @@ import sys
 import django
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "workflow_backend.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "workflow_backend.settings.local")
 django.setup()
 
 from django.db import transaction

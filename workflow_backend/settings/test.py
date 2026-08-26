@@ -16,6 +16,11 @@ os.environ.setdefault('CREDENTIAL_ENCRYPTION_KEY', 'SG8t-4Tj4BlST1p7VD5OhRVXMUjd
 os.environ.setdefault('DEBUG', 'True')
 os.environ.setdefault('USE_REDIS_CHANNEL_LAYER', 'False')
 os.environ.setdefault('RUN_WORKFLOWS_ASYNC', 'False')
+# The platform key the server ships in production. Chat preflights the
+# credential before it will start a turn, so without one every pipeline
+# test fails on 'no verified credential' rather than on what it asserts.
+# The value is never sent anywhere: tests patch the provider call itself.
+os.environ.setdefault('NVIDIA_API_KEY', 'test-platform-key-not-a-real-key')
 
 from .base import *  # noqa: F401, F403
 

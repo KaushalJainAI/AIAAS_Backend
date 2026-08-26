@@ -22,11 +22,17 @@ User = get_user_model()
 
 
 def _make_cred_type(slug="github"):
-    return CredentialType.objects.create(
-        name=slug.title(),
+    # update_or_create, not create: `credentials.0005` seeds the real catalog when
+    # the test database migrates, so this slug may already exist. Overwriting pins
+    # the schema these tests assert against instead of inheriting the seeder's.
+    ctype, _ = CredentialType.objects.update_or_create(
         slug=slug,
-        fields_schema=[{"name": "token", "type": "password", "required": True}],
+        defaults={
+            "name": slug.title(),
+            "fields_schema": [{"name": "token", "type": "password", "required": True}],
+        },
     )
+    return ctype
 
 
 def _make_cred(user, ctype, *, name="default", data=None):

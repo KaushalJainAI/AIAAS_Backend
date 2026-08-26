@@ -14,176 +14,179 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 logger = logging.getLogger(__name__)
 
-def login_and_extract_tokens(url, username, password):
+#: Chrome flags for an unattended headless run.
+_CHROME_ARGS = (
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--window-size=1920,1080",
+)
+
+#: Tried in order; the first visible, enabled match wins. Ordered most to least
+#: specific, so a page carrying both an email field and a stray text input
+#: picks the email field rather than whichever the DOM happens to list first.
+_USER_FIELD_SELECTORS = (
+    "input[type='email']",
+    "input[name='email']",
+    "input[name*='user']",
+    "input[type='text']",
+    "#username",
+    "#email",
+)
+
+#: Phrases meaning the site rejected the credentials. Matched against rendered
+#: body text, because these forms rarely change status code or URL.
+_LOGIN_ERROR_PHRASES = (
+    "invalid password", "incorrect password", "invalid username",
+    "wrong credentials", "login failed", "incorrect email",
+    "bad credentials", "check your password",
+)
+
+#: Keys that are never an auth token on their own, however common.
+_IGNORED_KEYS = frozenset({
+    'id', 'uuid', 'uid', 'session', 'user', 'lang', 'preference', 'theme',
+})
+
+#: Substrings marking a key as telemetry unless it also says token/auth.
+_WEAK_SUBSTRINGS = ('device', 'track', 'analytic', 'pixel', 'ga', 'aws', 'optimizely')
+
+#: Substrings marking a key as worth keeping.
+_STRONG_SIGNALS = (
+    'access_token', 'refresh_token', 'id_token', 'auth', 'bearer', 'jwt',
+    'session_id', 'sessionid', 'token',
+)
+
+
+def looks_like_auth_token(key: str) -> bool:
+    """Whether a storage/cookie key is worth capturing as an auth token.
+
+    Keyed on the name alone -- the value is not inspected, which is why this
+    takes no value argument. The nested version this replaced declared one and
+    never read it.
+
+    Conservative in both directions on purpose: a false positive files
+    someone's analytics id in a credential vault, while a false negative only
+    means the connector asks them to sign in again.
     """
-    Automates login flow using Selenium and extracts tokens.
-    
+    k = key.lower()
+    if k in _IGNORED_KEYS:
+        return False
+    for weak in _WEAK_SUBSTRINGS:
+        if weak in k and 'token' not in k and 'auth' not in k:
+            return False
+    return any(signal in k for signal in _STRONG_SIGNALS)
+
+
+def login_error_in(page_text: str):
+    """The first rejection phrase present in the page text, or None."""
+    low = page_text.lower()
+    return next((phrase for phrase in _LOGIN_ERROR_PHRASES if phrase in low), None)
+
+
+def _build_driver():
+    options = Options()
+    for arg in _CHROME_ARGS:
+        options.add_argument(arg)
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()), options=options,
+    )
+    # Keep an unresponsive page from hanging the worker indefinitely.
+    driver.set_page_load_timeout(15)
+    driver.set_script_timeout(15)
+    return driver
+
+
+def _find_first_interactable(driver, selectors):
+    """First visible, enabled element matching any selector, in order."""
+    for selector in selectors:
+        try:
+            for el in driver.find_elements(By.CSS_SELECTOR, selector):
+                if el.is_displayed() and el.is_enabled():
+                    return el
+        except WebDriverException:
+            # This selector did not match on this page; try the next one.
+            continue
+    return None
+
+
+def _collect_tokens(driver) -> dict:
+    """Auth-looking values from localStorage, sessionStorage and cookies.
+
+    Prefixed by origin, so two stores holding the same key stay distinct.
+    """
+    tokens = {}
+    for prefix, store in (
+        ("ls", driver.execute_script("return window.localStorage;")),
+        ("ss", driver.execute_script("return window.sessionStorage;")),
+    ):
+        for k, v in (store or {}).items():
+            if looks_like_auth_token(k):
+                tokens[f"{prefix}_{k}"] = v
+    for cookie in driver.get_cookies():
+        if looks_like_auth_token(cookie['name']):
+            tokens[f"cookie_{cookie['name']}"] = cookie['value']
+    return tokens
+
+
+def login_and_extract_tokens(url, username, password):
+    """Drive a login form with Selenium and harvest the resulting auth tokens.
+
     Args:
         url (str): Login page URL
         username (str): Username/Email
         password (str): Password
-        
+
     Returns:
-        dict: Extracted tokens (access_token, refresh_token) or other relevant data found in storage.
+        dict: Extracted tokens keyed by origin (`ls_` / `ss_` / `cookie_`).
     """
     logger.info(f"Starting browser automation for {url}")
-    
-    options = Options()
-    options.add_argument("--headless=new") # Run in headless mode
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(15) # Prevent infinite hanging
-        driver.set_script_timeout(15)
-        
+        driver = _build_driver()
         try:
-            # 1. Navigate to Login Page
             driver.get(url)
-            
-            # 2. Wait for page load (rudimentary check)
             WebDriverWait(driver, 10).until(
                 lambda d: d.execute_script('return document.readyState') == 'complete'
             )
-            
-            # 3. Find and Fill Username
-            # Heuristic: Find first visible input of type text/email or name containing 'user'/'email'
-            user_input = None
-            possible_user_selectors = [
-                "input[type='email']",
-                "input[name='email']",
-                "input[name*='user']",
-                "input[type='text']",
-                "#username",
-                "#email"
-            ]
-            
-            for selector in possible_user_selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    for el in elements:
-                        if el.is_displayed() and el.is_enabled():
-                            user_input = el
-                            break
-                    if user_input:
-                        break
-                except WebDriverException:
-                    # This selector didn't match on this page; try the next one.
-                    continue
-            
+
+            user_input = _find_first_interactable(driver, _USER_FIELD_SELECTORS)
             if not user_input:
-                logger.error("Could not specific username input field")
-                # Fallback: try finding by label? Too complex for generic script v1.
+                logger.error("Could not find a username input field")
                 raise Exception("Could not find username field")
-                
             user_input.clear()
             user_input.send_keys(username)
-            
-            # 4. Find and Fill Password
-            pass_input = None
+
             try:
                 pass_input = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
             except NoSuchElementException:
-                # Handled two lines down, which raises with a clearer message.
-                pass
-
-
-            if not pass_input:
-                 raise Exception("Could not find password field")
-                 
+                raise Exception("Could not find password field")
             pass_input.clear()
             pass_input.send_keys(password)
-            
-            # 5. Submit
-            # Try finding a submit button or submit form
+
             try:
-                submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], input[type='submit']")
-                submit_btn.click()
+                driver.find_element(
+                    By.CSS_SELECTOR, "button[type='submit'], input[type='submit']"
+                ).click()
             except (NoSuchElementException, ElementNotInteractableException):
-                # No usable submit button — fall back to submitting the form
-                # from the password field.
+                # No usable submit button -- submit the form from the password field.
                 pass_input.submit()
-                
-            # 6. Wait for Login to Complete
-            # Heuristics: URL change, or specific token appearance in storage
+
+            # There is no known success URL to wait for, so the only option is
+            # to let the navigation settle.
             logger.info("Credentials submitted, waiting for navigation...")
-            
-            # Wait up to 10 seconds for URL to change OR storage to have items
-            # This is tricky because we don't know the success URL.
-            # Let's wait a bit for network idle
-            time.sleep(5) 
-            
-            # 7. Check for Login Error Messages on Page
-            page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-            error_keywords = [
-                "invalid password", "incorrect password", "invalid username", 
-                "wrong credentials", "login failed", "incorrect email", 
-                "bad credentials", "check your password"
-            ]
-            
-            for err in error_keywords:
-                if err in page_text:
-                    logger.warning(f"Login failure detected via text: {err}")
-                    raise Exception(f"Login failed: Site said '{err}'")
+            time.sleep(5)
 
-            # 8. Extract Tokens (STRICTER)
-            tokens = {}
-            
-            # Helper to check if a key looks like a strong auth token
-            def is_strong_token(key, value):
-                k = key.lower()
-                # Ignore generic 'id', 'session', 'user', 'tracking' unless combined with 'token'
-                if k in ['id', 'uuid', 'uid', 'session', 'user', 'lang', 'preference', 'theme']:
-                     return False
-                     
-                # Weak keywords that need to be skipped if they are standalone
-                weak_substrings = ['device', 'track', 'analytic', 'pixel', 'ga', 'aws', 'optimizely']
-                for weak in weak_substrings:
-                    if weak in k and 'token' not in k and 'auth' not in k:
-                        return False
-                
-                # Strong keywords
-                strong_signals = ['access_token', 'refresh_token', 'id_token', 'auth', 'bearer', 'jwt', 'session_id', 'sessionid', 'token']
-                
-                for signal in strong_signals:
-                    if signal in k:
-                        return True
-                return False
+            failure = login_error_in(driver.find_element(By.TAG_NAME, "body").text)
+            if failure:
+                logger.warning(f"Login failure detected via text: {failure}")
+                raise Exception(f"Login failed: Site said '{failure}'")
 
-            # Local Storage
-            local_storage = driver.execute_script("return window.localStorage;")
-            if local_storage:
-                for k, v in local_storage.items():
-                    if is_strong_token(k, v):
-                        tokens[f"ls_{k}"] = v
-                        
-            # Session Storage
-            session_storage = driver.execute_script("return window.sessionStorage;")
-            if session_storage:
-                for k, v in session_storage.items():
-                    if is_strong_token(k, v):
-                         tokens[f"ss_{k}"] = v
-                        
-            # Cookies
-            cookies = driver.get_cookies()
-            for cookie in cookies:
-                name = cookie['name']
-                if is_strong_token(name, cookie['value']):
-                    tokens[f"cookie_{name}"] = cookie['value']
-                    
+            tokens = _collect_tokens(driver)
             if not tokens:
-                # Maybe it was a failed login?
                 logger.warning("No potential auth tokens found in storage after login attempt")
-                
             return tokens
-
         finally:
             driver.quit()
-            
     except Exception as e:
         logger.error(f"Browser automation failed: {e}")
         raise e

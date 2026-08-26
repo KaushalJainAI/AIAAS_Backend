@@ -13,7 +13,6 @@ class Skill(models.Model):
     is_shared = models.BooleanField(default=False)
     category = models.CharField(max_length=100, blank=True)
     author_name = models.CharField(max_length=255, blank=True, help_text="Display name for the author")
-    embedding = models.BinaryField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

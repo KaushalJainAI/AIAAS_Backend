@@ -60,7 +60,7 @@ def check_module(module_name):
     """Import a module in a fresh subprocess with a timeout."""
     script = (
         "import os, django, importlib, sys;"
-        "os.environ.setdefault('DJANGO_SETTINGS_MODULE','workflow_backend.settings');"
+        "os.environ.setdefault('DJANGO_SETTINGS_MODULE','workflow_backend.settings.local');"
         "django.setup();"
         f"importlib.import_module('{module_name}')"
     )

@@ -1,7 +1,7 @@
 """
 Seeds execution history, notifications and MCP servers for one user.
 
-Complements seed_demo.py, which covers workflows, knowledge bases, chat and
+Complements seed_demo.py, which covers agents, knowledge bases, chat and
 skills but leaves Runs empty — so the trace view had nothing to show. Runs are
 back-dated across two weeks with a realistic mix of outcomes, including a
 failure with a node-level error, so the failure paths render too.
@@ -16,8 +16,8 @@ import uuid
 from django.contrib.auth.models import User
 from django.utils import timezone
 
-from orchestrator.models import Workflow
-from logs.models import ExecutionLog, NodeExecutionLog
+from agents.models import SubAgent
+from logs.models import AgentStep, ExecutionLog
 from notifications.models import Notification
 from mcp_integration.models import MCPServer
 
@@ -25,9 +25,9 @@ EMAIL = "kaushal@nidhimasala.com"
 user = User.objects.get(email=EMAIL)
 now = timezone.now()
 
-workflows = list(Workflow.objects.filter(user=user).order_by("id"))
+workflows = list(SubAgent.objects.filter(user=user).order_by("id"))
 if not workflows:
-    raise SystemExit("No workflows for this user — run seed_demo.py first.")
+    raise SystemExit("No agents for this user — run seed_demo.py first.")
 
 # ---- reset (this user only) ----------------------------------------------
 ExecutionLog.objects.filter(user=user).delete()
@@ -69,7 +69,7 @@ for i, (hours, status, trigger, dur, err, fail_idx) in enumerate(RUNS):
     started = now - timedelta(hours=hours)
     ex = ExecutionLog.objects.create(
         execution_id=str(uuid.uuid4()),
-        workflow=wf,
+        subagent=wf,
         user=user,
         status=status,
         trigger_type=trigger,
@@ -103,19 +103,17 @@ for i, (hours, status, trigger, dur, err, fail_idx) in enumerate(RUNS):
         else:
             nstatus = "completed"
 
-        NodeExecutionLog.objects.create(
+        AgentStep.objects.create(
             execution=ex,
-            node_id=f"n{n + 1}",
-            node_type=ntype,
-            node_name=nname,
+            call_id=f"call_{n + 1}",
+            tool=ntype,
             status=nstatus,
-            execution_order=n,
+            order=n,
             started_at=started + timedelta(milliseconds=offset),
             completed_at=started + timedelta(milliseconds=offset + nms),
             duration_ms=nms if nstatus == "completed" else (nms // 3 if nstatus == "failed" else 0),
-            input_data={},
-            output_data={},
-            config={},
+            args={},
+            result={},
             error_message=(err or "") if nstatus == "failed" else "",
         )
         offset += nms
@@ -147,7 +145,7 @@ MCPServer.objects.create(
 
 print()
 print("executions:  ", ExecutionLog.objects.filter(user=user).count())
-print("  node logs: ", NodeExecutionLog.objects.filter(execution__user=user).count())
+print("  steps:     ", AgentStep.objects.filter(execution__user=user).count())
 print("  failed:    ", ExecutionLog.objects.filter(user=user, status="failed").count())
 print("  running:   ", ExecutionLog.objects.filter(user=user, status="running").count())
 print("notifications:", Notification.objects.filter(user=user).count())

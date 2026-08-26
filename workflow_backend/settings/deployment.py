@@ -1,6 +1,12 @@
 """
-Deployment (server) settings.
-Loads Backend/.env.deployment — PostgreSQL, Redis channels, security headers on.
+Deployment (server) settings — Redis channels, security headers on.
+
+Config comes from the container environment, not a file: `.dockerignore` excludes
+`.env*` (bar the examples), so nothing named `.env.deployment` is ever in the
+image and the load_dotenv below is a no-op in production. The real values are
+injected by `env_file: .env` in docker-compose.ec2.yml. The loader is kept only
+so you can drop a `.env.deployment` beside manage.py to run these settings
+locally — if you do, remember the server will not see it.
 
 Usage:
     DJANGO_SETTINGS_MODULE=workflow_backend.settings.deployment python manage.py runserver

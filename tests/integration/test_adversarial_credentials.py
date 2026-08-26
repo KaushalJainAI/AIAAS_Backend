@@ -17,7 +17,11 @@ User = get_user_model()
 
 
 def _make_type(slug="openai"):
-    return CredentialType.objects.create(name=slug.title(), slug=slug)
+    # update_or_create: `credentials.0005` may already have seeded this slug.
+    ctype, _ = CredentialType.objects.update_or_create(
+        slug=slug, defaults={"name": slug.title()}
+    )
+    return ctype
 
 
 def _make_cred(user, ctype, data, name="default"):

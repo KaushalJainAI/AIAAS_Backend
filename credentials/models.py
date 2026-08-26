@@ -1,3 +1,5 @@
+import json
+
 from django.db import models
 from django.conf import settings
 from cryptography.fernet import Fernet
@@ -170,7 +172,6 @@ class Credential(models.Model):
 
     def encrypt_data(self, data: dict) -> bytes:
         """Encrypt credential data"""
-        import json
         fernet = Fernet(self._get_encryption_key())
         return fernet.encrypt(json.dumps(data).encode())
 
@@ -179,7 +180,6 @@ class Credential(models.Model):
         Decrypt credential data.
         Optionally logs access if user/context is provided.
         """
-        import json
         import logging
         
         logger = logging.getLogger(__name__)
@@ -232,6 +232,11 @@ class Credential(models.Model):
     def get_valid_access_token(self):
         """
         Get valid access token, refreshing if necessary.
+
+        OAuth on this platform is Google-only by design: the client credentials
+        come from Django settings (GOOGLE_OAUTH_CLIENT_ID/SECRET), so refreshing
+        any other type here would exchange with the wrong client and silently
+        break it. Non-Google types get None instead.
         """
         from datetime import timedelta
         from django.utils import timezone
@@ -239,6 +244,16 @@ class Credential(models.Model):
         import logging
         
         logger = logging.getLogger(__name__)
+
+        # Only Google OAuth credentials can refresh with settings-based client
+        # credentials. Refusing up front keeps the rest of this method from
+        # ever posting to Google with the wrong client.
+        if self.credential_type.slug != 'google-oauth2':
+            logger.warning(
+                f"OAuth refresh only supports 'google-oauth2' "
+                f"(credential {self.id} is '{self.credential_type.slug}')"
+            )
+            return None
 
         # 1. Decrypt current token
         try:
@@ -362,6 +377,11 @@ class CredentialAuditLog(models.Model):
     action = models.CharField(
         max_length=20,
         choices=ACTION_CHOICES
+    )
+    snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Name/type snapshot at event time; survives the credential being deleted'
     )
     timestamp = models.DateTimeField(auto_now_add=True)
     ip_address = models.GenericIPAddressField(

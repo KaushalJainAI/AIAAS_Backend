@@ -1,7 +1,7 @@
 """
 Idempotent demo seed for interview walkthrough.
 Creates a single `demo` user (email login) with curated data across the
-main product surfaces: Workflows, Knowledge Bases + Documents, AI Chat,
+main product surfaces: Agents, Knowledge Bases + Documents, AI Chat,
 and Skills. Re-running wipes ONLY the demo user's owned rows and recreates
 them, so it is safe to run repeatedly. It does not touch other users.
 
@@ -12,7 +12,7 @@ from django.core.files.base import ContentFile
 from django.utils import timezone
 from datetime import timedelta
 
-from orchestrator.models import Workflow
+from agents.models import SubAgent
 from inference.models import KnowledgeBase, Document
 from chat.models import ChatSession, ChatMessage
 from skills.models import Skill
@@ -39,7 +39,7 @@ if hasattr(user, "profile") and user.profile:
         print("profile tier skip:", e)
 
 # wipe prior demo-owned data so re-runs are clean
-for M in (Workflow, KnowledgeBase, Document, ChatSession, Skill):
+for M in (SubAgent, KnowledgeBase, Document, ChatSession, Skill):
     M.objects.filter(user=user).delete()
 
 now = timezone.now()
@@ -47,71 +47,38 @@ now = timezone.now()
 # Fast NVIDIA NIM model (server key fallback, no per-user credential needed).
 LLM_MODEL = "microsoft/phi-4-mini-instruct"
 
-def _llm(prompt, max_tokens=140):
-    return {"model": LLM_MODEL, "prompt": prompt, "temperature": 0.4,
-            "max_tokens": max_tokens}
-
-def graph(nodes_spec, edges_spec):
-    """nodes_spec: list of (id, nodeType, label, config)."""
-    nodes = [
-        {"id": nid, "type": "generic",
-         "position": {"x": 120 + i * 260, "y": 200},
-         "data": {"nodeType": nt, "label": label, "config": cfg}}
-        for i, (nid, nt, label, cfg) in enumerate(nodes_spec)
-    ]
-    edges = [
-        {"id": f"e{i}", "source": s, "target": t,
-         "sourceHandle": "output-0", "targetHandle": "input-0", "animated": True}
-        for i, (s, t) in enumerate(edges_spec)
-    ]
-    return nodes, edges
-
-# ---- workflows ------------------------------------------------------------
-# Every workflow is manual_trigger -> nvidia (real LLM call on the server key)
-# -> set, so clicking "Run" actually completes and shows real AI output.
-WF = [
-    ("Lead enrichment -> Slack", "active", "Summarizes a new lead and drafts the #sales notification. Works, still tuning the prompt.",
-     ["sales", "automation"], "Users", "#6366f1",
-     [("t1", "manual_trigger", "New lead", {}),
-      ("a1", "nvidia", "Summarize lead", _llm(
-          "Summarize this lead in one sentence and suggest a next step:\n"
-          "Jane Doe, VP Engineering at Acme (200 employees), downloaded the pricing page.")),
-      ("s1", "set", "Format for #sales", {"keep_input": True, "values": {"channel": "#sales"}})],
-     [("t1", "a1"), ("a1", "s1")]),
-    ("Daily standup digest", "active", "Turns yesterday's activity into a short digest for the team channel.",
-     ["productivity", "scheduled"], "Calendar", "#10b981",
-     [("t2", "manual_trigger", "Run", {}),
-      ("a2", "nvidia", "Write digest", _llm(
-          "Write a 3-line standup digest from these updates:\n"
-          "- shipped the billing page\n- fixed 2 login bugs\n- started the export feature")),
-      ("s2", "set", "Post to channel", {"keep_input": True, "values": {"channel": "#standup"}})],
-     [("t2", "a2"), ("a2", "s2")]),
-    ("Ticket triage (WIP)", "draft", "Classifies inbound tickets by urgency. Classifier works, routing still to do.",
-     ["support", "classification"], "LifeBuoy", "#f59e0b",
-     [("t3", "manual_trigger", "New ticket", {}),
-      ("a3", "nvidia", "Classify urgency", _llm(
-          "Classify this support ticket as low, medium, or high urgency and give one reason:\n"
-          "\"Checkout returns a 500 for all customers since this morning.\"", max_tokens=80)),
-      ("s3", "set", "Attach label", {"keep_input": True, "values": {"queue": "triage"}})],
-     [("t3", "a3"), ("a3", "s3")]),
-    ("Invoice OCR", "active", "Pulls the key fields off an invoice so they can be filed.",
-     ["finance", "documents"], "FileText", "#ef4444",
-     [("t4", "manual_trigger", "Run", {}),
-      ("a4", "nvidia", "Extract fields", _llm(
-          "Extract vendor, date and total as JSON from this invoice text:\n"
-          "\"ACME Cloud Services — Invoice #4471 — 12 Jun 2026 — Amount due: $1,240.00\"", max_tokens=80)),
-      ("s4", "set", "File record", {"keep_input": True, "values": {"kb": "Product Documentation"}})],
-     [("t4", "a4"), ("a4", "s4")]),
+# ---- agents ---------------------------------------------------------------
+# Seeded as `SubAgent` rows: a prompt, a model and the capabilities each one is
+# granted. The demo used to seed node graphs; there is no canvas to draw one on
+# and no runtime to execute one.
+AGENTS = [
+    ("Invoice chaser", "active",
+     "Reads incoming invoices, extracts vendor, date and total, and chases anything overdue.",
+     ["finance", "email"], "receipt", "#6366f1",
+     {"webSearch": False, "scrape": False, "rag": True, "codeExecution": True},
+     {"autonomy": "ask", "spendCapRupees": 500, "egress": "none"}),
+    ("Market researcher", "active",
+     "Researches a topic across several angles, reads the pages, and reports with sources.",
+     ["research"], "search", "#0ea5e9",
+     {"webSearch": True, "scrape": True, "rag": False, "codeExecution": False},
+     {"autonomy": "full", "spendCapRupees": 500, "egress": "none"}),
+    ("Docs librarian", "draft",
+     "Answers questions from the product documentation knowledge base, with citations.",
+     ["docs", "support"], "book", "#22c55e",
+     {"webSearch": False, "scrape": False, "rag": True, "codeExecution": False},
+     {"autonomy": "ask", "spendCapRupees": 200, "egress": "none"}),
 ]
-wf_objs = []
-for name, status, desc, tags, icon, color, nspec, espec in WF:
-    nodes, edges = graph(nspec, espec)
-    w = Workflow.objects.create(
-        user=user, name=name, description=desc, status=status,
-        nodes=nodes, edges=edges, tags=tags, icon=icon, color=color,
-    )
-    wf_objs.append(w)
-print(f"workflows: {len(wf_objs)}")
+
+agent_objs = []
+for name, status, desc, tags, icon, color, grants, guards in AGENTS:
+    agent_objs.append(SubAgent.objects.create(
+        user=user, name=name, description=desc, prompt=desc, status=status,
+        tags=tags, icon=icon, color=color,
+        llm_provider="nvidia", llm_model=LLM_MODEL,
+        tool_grants=grants, guardrails=guards,
+        agent_context={}, sandbox={}, output_schema={}, fanout={},
+    ))
+print(f"agents: {len(agent_objs)}")
 
 # ---- knowledge bases + documents -----------------------------------------
 kb1 = KnowledgeBase.objects.create(user=user, name="Product Documentation",

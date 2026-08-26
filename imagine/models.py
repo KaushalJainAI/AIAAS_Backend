@@ -23,14 +23,22 @@ class Generation(models.Model):
     
     # Common parameters
     resolution = models.CharField(max_length=20, blank=True, null=True)
-    aspect_ratio = models.CharField(max_length=10, blank=True, null=True)
+    # Wide enough for the long ratios the catalog advertises, e.g. '19.5:9'.
+    aspect_ratio = models.CharField(max_length=16, blank=True, null=True)
     duration = models.CharField(max_length=10, blank=True, null=True)
     seed = models.BigIntegerField(blank=True, null=True)
-    
-    # Video specific
+
+    # Image specific
+    quality = models.CharField(max_length=20, blank=True, null=True)
+    output_format = models.CharField(max_length=10, blank=True, null=True)
+
+    # Video specific. `motion_intensity` and `fps` are retained only because
+    # historical rows carry values; OpenRouter's video API accepts neither, so
+    # nothing writes them and the UI no longer offers them.
     motion_intensity = models.IntegerField(blank=True, null=True)
     fps = models.IntegerField(blank=True, null=True)
-    
+    generate_audio = models.BooleanField(blank=True, null=True)
+
     # Audio specific
     voice = models.CharField(max_length=50, blank=True, null=True)
     speed = models.FloatField(blank=True, null=True)

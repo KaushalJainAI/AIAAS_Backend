@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 import httpx
 
+from django.conf import settings
 from django.utils import timezone
 
 from .models import Credential, CredentialType
@@ -183,15 +184,24 @@ class CredentialManager:
             logger.error(f"No token URL configured for {credential.credential_type.name}")
             return False
         
+        # OAuth on this platform is Google-only: client credentials come from
+        # Django settings, never from credential data (a user cannot have their
+        # own GCP client to refresh with). Refuse anything else so we never
+        # exchange with the wrong client.
+        if credential.credential_type.slug != 'google-oauth2':
+            logger.warning(
+                f"OAuth refresh only supports 'google-oauth2' "
+                f"(credential {credential.id} is '{credential.credential_type.slug}')"
+            )
+            return False
+        
         try:
             # Decrypt refresh token
             fernet = Fernet(credential._get_encryption_key())
             refresh_token = fernet.decrypt(credential.refresh_token).decode()
             
-            # Get client credentials from the credential data
-            cred_data = credential.get_credential_data()
-            client_id = cred_data.get('client_id') or oauth_config.get('client_id')
-            client_secret = cred_data.get('client_secret') or oauth_config.get('client_secret')
+            client_id = settings.GOOGLE_OAUTH_CLIENT_ID
+            client_secret = settings.GOOGLE_OAUTH_CLIENT_SECRET
             
             async with httpx.AsyncClient() as client:
                 response = await client.post(

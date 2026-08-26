@@ -193,6 +193,7 @@ class GoogleLoginView(APIView):
         from django.conf import settings
         from django.contrib.auth import get_user_model
         from rest_framework_simplejwt.tokens import RefreshToken
+        from asgiref.sync import async_to_sync
         
         serializer = GoogleLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -203,7 +204,10 @@ class GoogleLoginView(APIView):
         provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
         
         try:
-            token_data = provider.exchange_code(code)
+            # The provider's methods are async (aiohttp); this sync view must
+            # bridge them, or token_data is a coroutine and `'error' in
+            # token_data` raises TypeError at runtime.
+            token_data = async_to_sync(provider.exchange_code)(code)
         except Exception as e:
              return Response({'error': f'Token exchange failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
              
@@ -214,7 +218,7 @@ class GoogleLoginView(APIView):
         
         # 2. Get User Info
         try:
-            user_info = provider.get_user_info(access_token)
+            user_info = async_to_sync(provider.get_user_info)(access_token)
         except Exception:
             return Response({'error': 'Failed to fetch user info'}, status=status.HTTP_400_BAD_REQUEST)
             

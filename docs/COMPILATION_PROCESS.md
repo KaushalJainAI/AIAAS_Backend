@@ -1,5 +1,13 @@
 # Workflow Compilation Process
 
+> ** Historical — the subsystem this describes was deleted 2026-08-17.**
+> The DAG compiler (`compiler/compiler.py`) and the King supervisor
+> (`executor/king.py`, `executor/engine.py`) were retired with the workflow
+> product. Kept because it explains design decisions still visible in
+> `compiler/schemas.py`, `llm/handlers/base.py` and `llm/handlers/registry.py`.
+> See [WORKFLOW_RETIREMENT.md](WORKFLOW_RETIREMENT.md) for what replaced it.
+
+
 This document details how the AIAAS backend transforms a user-defined workflow (JSON) into an executable runtime graph (**LangGraph**) in a single pass.
 
 ## Overview

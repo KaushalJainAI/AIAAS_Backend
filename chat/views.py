@@ -1,21 +1,21 @@
 """
 HTTP surface for standalone chat.
 
-These views do transport only: authenticate, parse, delegate to
-`pipeline.run_chat_turn`, serialise. The conversation logic lives in
-`pipeline` / `agent`, so the streaming and non-streaming endpoints cannot drift
-apart — they are the same call with a different `EventSink`.
+These views do transport only: authenticate, parse, delegate, serialise. The
+conversation logic lives in `pipeline` / `agent`, so the streaming and
+non-streaming endpoints cannot drift apart — they are the same call with a
+different `EventSink`. The plumbing they sit on is split out too:
+`streaming_http` owns request and response mechanics, `attachments` owns the
+file and RAG lifecycle.
 """
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 from uuid import UUID
 
 from adrf.decorators import api_view
-from asgiref.sync import sync_to_async
-from django.http import StreamingHttpResponse
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status, viewsets
@@ -34,72 +34,28 @@ from workflow_backend.thresholds import (
     LARGE_FILE_PREVIEW_LENGTH,
 )
 
-from .events import Event
+from chat.sources import attachments
+from chat.turn import runs
+from .turn.events import Event
 from .models import ChatAttachment, ChatMessage, ChatSession
-from .pipeline import TurnError, TurnRequest, run_chat_turn
-from .serializers import (
-    ChatAttachmentSerializer,
-    ChatMessageSerializer,
-    ChatSessionSerializer,
+from .turn.pipeline import (
+    TurnError,
+    TurnRequest,
+    persist_interrupted_answer,
+    run_chat_turn,
 )
-from .sse import SSEBridge, error_frame
+from .serializers import ChatAttachmentSerializer, ChatSessionSerializer
+from .transport.streaming_http import (
+    authenticate,
+    empty_stream,
+    get_session,
+    json_body,
+    serialize_message,
+    stream_response,
+    unauthenticated,
+)
 
 logger = logging.getLogger(__name__)
-
-
-serialize_message = sync_to_async(lambda m: ChatMessageSerializer(m).data)
-serialize_attachment = sync_to_async(lambda a: ChatAttachmentSerializer(a).data)
-
-
-# ── Shared helpers ───────────────────────────────────────────────────────────
-
-async def _get_session(session_id: str, user) -> ChatSession:
-    """Fetch the caller's session, or raise `TurnError` with a safe message."""
-    try:
-        session_uuid = UUID(session_id)
-    except (ValueError, AttributeError, TypeError):
-        raise TurnError("Invalid session id.") from None
-
-    session = await ChatSession.objects.filter(id=session_uuid, user=user).afirst()
-    if session is None:
-        raise TurnError("Chat session not found.")
-    return session
-
-
-def _json_body(request) -> dict[str, Any]:
-    """Parse a plain-Django request body. Streaming views have no `request.data`."""
-    try:
-        body = json.loads(request.body or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return {}
-    return body if isinstance(body, dict) else {}
-
-
-async def _authenticate(request):
-    """
-    Resolve the user for a view DRF's decorators cannot wrap.
-
-    `StreamingHttpResponse` bypasses DRF's authentication, so the bearer token
-    is verified here instead.
-    """
-    user = getattr(request, "user", None)
-    if user is not None and user.is_authenticated:
-        return user
-
-    header = request.META.get("HTTP_AUTHORIZATION", "")
-    if not header.startswith("Bearer "):
-        return None
-
-    from django.contrib.auth import get_user_model
-    from rest_framework_simplejwt.exceptions import TokenError
-    from rest_framework_simplejwt.tokens import AccessToken
-
-    try:
-        token = AccessToken(header.removeprefix("Bearer ").strip())
-        return await get_user_model().objects.aget(id=token["user_id"])
-    except (TokenError, KeyError, get_user_model().DoesNotExist) as exc:
-        logger.info("[Auth] Rejected streaming request: %s", exc)
-        return None
 
 
 # ── Sessions ─────────────────────────────────────────────────────────────────
@@ -118,28 +74,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance) -> None:
         """Delete the session along with its RAG documents and vector index."""
-        session_id = str(instance.id)
-
-        document_ids = list(
-            ChatAttachment.objects
-            .filter(session=instance, inference_document__isnull=False)
-            .values_list("inference_document_id", flat=True)
-        )
-        if document_ids:
-            try:
-                from inference.models import Document
-
-                Document.objects.filter(id__in=document_ids).delete()
-            except Exception:
-                logger.exception("[Session] RAG cleanup failed for %s", session_id)
-
-        try:
-            from inference.engine import get_session_kb_manager
-
-            get_session_kb_manager().clear_session_kb(session_id)
-        except Exception:
-            logger.exception("[Session] Vector index cleanup failed for %s", session_id)
-
+        attachments.purge_session(instance)
         instance.delete()
 
 
@@ -156,7 +91,7 @@ async def send_message(request, session_id: str):
     whole turn, tool calls included.
     """
     try:
-        session = await _get_session(session_id, request.user)
+        session = await get_session(session_id, request.user)
         turn = TurnRequest.parse(request.data)
         outcome = await run_chat_turn(session=session, user=request.user, request=turn)
     except TurnError as exc:
@@ -176,92 +111,156 @@ async def send_message_stream(request, session_id: str):
     Emits `status`, `thinking_chunk`, `content_chunk`, `agent_trace`,
     `sources_update`, `images_update`, `videos_update`, `html_artifact`,
     `ask_permission` and a final `done`; `error` on failure.
+
+    The response is only a view of the run: the turn is owned by `runs` and
+    keeps going if this connection drops. Re-attach with `attach_message_stream`
+    after a reload; `stop_message_stream` is the only thing that ends it early.
     """
-    user = await _authenticate(request)
+    user = await authenticate(request)
     if user is None:
-        return StreamingHttpResponse(
-            iter([error_frame("Authentication required.")]),
-            content_type="text/event-stream",
-        )
+        return unauthenticated()
 
-    payload = _json_body(request)
-    bridge = SSEBridge()
+    # A send while this session is already answering would interleave two
+    # transcripts. Attach to the turn in flight instead of starting a rival.
+    live = runs.get(session_id)
+    if live is not None and live.status == "running" and live.user_id == user.id:
+        return stream_response(live)
 
-    async def turn() -> None:
+    payload = json_body(request)
+
+    async def work(sink) -> None:
         try:
-            session = await _get_session(session_id, user)
+            session = await get_session(session_id, user)
             outcome = await run_chat_turn(
                 session=session,
                 user=user,
                 request=TurnRequest.parse(payload),
-                sink=bridge.sink,
+                sink=sink,
             )
         except TurnError as exc:
-            await bridge.emit(Event.ERROR, message=str(exc))
+            await sink(Event.ERROR, {"message": str(exc)})
             return
 
-        await bridge.emit(
-            Event.DONE,
-            user_message=await serialize_message(outcome.user_message),
-            ai_response=await serialize_message(outcome.assistant_message),
+        await sink(Event.DONE, {
+            "user_message": await serialize_message(outcome.user_message),
+            "ai_response": await serialize_message(outcome.assistant_message),
+        })
+
+    return stream_response(runs.start(session_id, user.id, work))
+
+
+@csrf_exempt
+async def attach_message_stream(request, session_id: str):
+    """
+    Re-attach to a turn already running for this session.
+
+    How a reload recovers: the transcript is fetched as usual, then this
+    replays every frame the turn has emitted and follows it live, so the
+    half-written answer paints in exactly as if the page had never left. A
+    `from` in the body skips frames the caller already has.
+
+    Closing the stream with no frames means there is no run to attach to — the
+    answer is in the database and the transcript already carries it.
+    """
+    user = await authenticate(request)
+    if user is None:
+        return unauthenticated()
+
+    run = runs.get(session_id)
+    if run is None or run.user_id != user.id:
+        return empty_stream()
+
+    from_index = json_body(request).get("from")
+    return stream_response(run, from_index if isinstance(from_index, int) else 0)
+
+
+@csrf_exempt
+async def stop_message_stream(request, session_id: str):
+    """
+    Stop the turn running for this session — the one thing that cancels work.
+
+    Whatever was streamed before the stop is persisted as the answer, flagged
+    `interrupted`, so the transcript keeps the partial reply rather than losing
+    the turn. Everyone still attached gets the closing `done` frame.
+    """
+    user = await authenticate(request)
+    if user is None:
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+
+    run = await runs.stop(session_id, user.id)
+    if run is None:
+        return JsonResponse({"detail": "No turn is running for this chat."}, status=404)
+
+    message = None
+    try:
+        session = await get_session(session_id, user)
+        message = await persist_interrupted_answer(
+            session, user, runs.partial_answer(run)
+        )
+    except TurnError:
+        logger.warning("[Stop] Session %s vanished mid-turn", session_id)
+
+    serialized = await serialize_message(message) if message is not None else None
+    await run.emit(Event.DONE, ai_response=serialized, stopped=True)
+    runs.finish(run, "stopped")
+
+    return JsonResponse({"stopped": True, "ai_response": serialized})
+
+
+@csrf_exempt
+async def steer_message_stream(request, session_id: str):
+    """
+    Say something to a turn that is already running.
+
+    Not a second turn: `runs.start` would attach to the live one anyway, and
+    two turns on one session interleave their frames into a single transcript.
+    The message goes in the mailbox and the running graph picks it up at its
+    next tool boundary — same run, same log, one continuous stream.
+
+    404 when nothing is running, because "your message was delivered" and "your
+    message went nowhere" must not look the same to the client.
+    """
+    from .turn import steering
+
+    if request.method != "POST":
+        return JsonResponse({"detail": "Method not allowed."}, status=405)
+
+    user = await authenticate(request)
+    if user is None:
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+
+    run = runs.get(session_id)
+    if run is None or run.status != "running" or run.user_id != user.id:
+        return JsonResponse(
+            {"detail": "No turn is running for this chat."}, status=404,
         )
 
-    response = StreamingHttpResponse(
-        bridge.stream(turn()), content_type="text/event-stream"
-    )
-    response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"  # let nginx pass chunks straight through
-    return response
+    try:
+        body = json.loads(request.body or b"{}")
+    except (json.JSONDecodeError, TypeError):
+        body = {}
+
+    message = str(body.get("message") or "").strip()
+    if not message:
+        return JsonResponse({"detail": "A message is required."}, status=400)
+
+    if not steering.post(session_id, message):
+        return JsonResponse({"detail": "A message is required."}, status=400)
+
+    return JsonResponse({"steered": True, **steering.stats(session_id)})
+
+
+@sync_api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def active_runs(request):
+    """
+    Session ids with a turn still running, so a freshly loaded page knows which
+    conversations to re-attach to and which to mark as still working.
+    """
+    return Response({"active": runs.active_keys(request.user.id)})
 
 
 # ── Deleting messages ────────────────────────────────────────────────────────
-
-def _release_attachment(session: ChatSession, message: ChatMessage) -> None:
-    """Delete the attachment a message owns, plus its file and RAG records."""
-    raw_id = (message.metadata or {}).get("attachment_id")
-    if not raw_id:
-        return
-
-    try:
-        attachment_id = UUID(raw_id)
-    except (ValueError, TypeError):
-        return
-
-    attachment = ChatAttachment.objects.filter(id=attachment_id, session=session).first()
-    if attachment is None:
-        return
-
-    if attachment.file:
-        try:
-            attachment.file.delete(save=False)
-        except OSError as exc:
-            logger.warning("[Delete] Could not remove file from disk: %s", exc)
-
-    if attachment.inference_document_id:
-        _purge_rag_document(str(session.id), attachment.inference_document_id)
-
-    attachment.delete()
-
-
-def _purge_rag_document(session_id: str, document_id) -> None:
-    """Remove a document from the session vector index and the database."""
-    try:
-        from asgiref.sync import async_to_sync
-
-        from inference.engine import get_session_knowledge_base
-        from inference.models import Document
-
-        try:
-            async_to_sync(get_session_knowledge_base(session_id).delete_document)(document_id)
-        except Exception:
-            # The SQL row must still go even if the index is unavailable —
-            # leaving it behind would resurrect the document on reindex.
-            logger.warning("[Delete] Vector index removal failed", exc_info=True)
-
-        Document.objects.filter(id=document_id).delete()
-    except Exception:
-        logger.exception("[Delete] RAG cleanup failed for document %s", document_id)
-
 
 @sync_api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
@@ -298,97 +297,13 @@ def delete_message(request, session_id: str, message_id: int):
     # Ids are sequential, so `id >=` is both cheaper and more precise than a
     # timestamp comparison when two messages share a creation second.
     for target in targets:
-        _release_attachment(session, target)
+        attachments.release_attachment(session, target)
     targets.delete()
 
     return Response({"status": detail}, status=status.HTTP_204_NO_CONTENT)
 
 
 # ── File upload ──────────────────────────────────────────────────────────────
-
-_FILE_TYPES = {
-    "image": (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"),
-    "pdf": (".pdf",),
-    "pptx": (".pptx", ".ppt"),
-    "text": (".txt", ".md", ".csv", ".json", ".xml", ".html"),
-}
-
-
-def _classify_file(filename: str) -> str:
-    lowered = filename.lower()
-    for kind, suffixes in _FILE_TYPES.items():
-        if lowered.endswith(suffixes):
-            return kind
-    return "other"
-
-
-def _extract_pdf_text(data: bytes, max_pages: int = 100) -> str:
-    import io
-
-    try:
-        from PyPDF2 import PdfReader
-    except ImportError:
-        return "[PDF extraction needs PyPDF2: pip install PyPDF2]"
-
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        return "\n\n".join(
-            text for page in reader.pages[:max_pages] if (text := page.extract_text())
-        )
-    except Exception:
-        logger.exception("[Upload] PDF extraction failed")
-        return ""
-
-
-def _extract_pptx_text(data: bytes) -> str:
-    import io
-
-    try:
-        from pptx import Presentation
-    except ImportError:
-        return "[PPTX extraction needs python-pptx: pip install python-pptx]"
-
-    try:
-        return "\n\n".join(
-            shape.text
-            for slide in Presentation(io.BytesIO(data)).slides
-            for shape in slide.shapes
-            if getattr(shape, "text", "")
-        )
-    except Exception:
-        logger.exception("[Upload] PPTX extraction failed")
-        return ""
-
-
-def _extract_text(data: bytes, file_type: str) -> str:
-    match file_type:
-        case "pdf":
-            return _extract_pdf_text(data)
-        case "pptx":
-            return _extract_pptx_text(data)
-        case "text":
-            return data.decode("utf-8", errors="ignore")
-        case _:
-            return ""
-
-
-def _index_for_rag(request, upload, attachment: ChatAttachment, text: str) -> None:
-    """Register the file in the user knowledge base and index it in background."""
-    import threading
-
-    from inference.models import Document
-    from inference.tasks import process_document
-
-    document = Document.objects.create(
-        user=request.user, name=upload.name, content_text=text, file=upload,
-        file_type=attachment.file_type, file_size=upload.size, status="pending",
-    )
-    attachment.inference_document = document
-    attachment.save(update_fields=["inference_document"])
-
-    # Indexed in-process: this deployment has no Celery broker.
-    threading.Thread(target=process_document, args=(document.id,), daemon=True).start()
-
 
 @sync_api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -407,10 +322,10 @@ def upload_file(request, session_id: str):
     if not upload:
         return Response({"error": "No file provided."}, status=400)
 
-    file_type = _classify_file(upload.name)
+    file_type = attachments.classify_file(upload.name)
     data = upload.read()
     upload.seek(0)
-    text = _extract_text(data, file_type)
+    text = attachments.extract_text(data, file_type)
 
     attachment = ChatAttachment.objects.create(
         session=session,
@@ -424,7 +339,7 @@ def upload_file(request, session_id: str):
 
     if file_type in ("pdf", "pptx", "text") and text:
         try:
-            _index_for_rag(request, upload, attachment, text)
+            attachments.index_for_rag(request.user, upload, attachment, text)
         except Exception:
             logger.exception("[Upload] RAG indexing failed for %s", upload.name)
 
@@ -462,7 +377,14 @@ async def execute_tool_view(request):
     Sensitive tools are refused here: they are gated by human approval inside
     the agent loop, and reaching them through this endpoint would be a way
     around that gate rather than a shortcut to it.
+
+    "Sensitive" means the same thing here as it does in the loop, which is why
+    this asks `chat.permissions` rather than only checking the name list. The
+    list holds built-ins; a credentialed MCP write is not on it and was reachable
+    through this endpoint with no gate at all — the loop would have paused for
+    exactly the call this endpoint ran.
     """
+    from chat.tools import permissions
     from .tools import SENSITIVE_TOOLS, execute_tool
 
     name = request.data.get("tool")
@@ -472,7 +394,9 @@ async def execute_tool_view(request):
         return Response({"error": "'tool' is required."}, status=400)
     if not isinstance(args, dict):
         return Response({"error": "'args' must be an object."}, status=400)
-    if name in SENSITIVE_TOOLS:
+
+    context = {"user_id": request.user.id}
+    if name in SENSITIVE_TOOLS or await permissions.default_policy(name, args, context):
         return Response(
             {
                 "error": "This tool requires human approval and cannot be run directly.",
@@ -482,7 +406,7 @@ async def execute_tool_view(request):
         )
 
     try:
-        raw = await execute_tool(name, args, {"user_id": request.user.id})
+        raw = await execute_tool(name, args, context)
     except Exception as exc:
         logger.exception("[Tools] Direct execution of %s failed", name)
         return Response({"error": str(exc)}, status=500)

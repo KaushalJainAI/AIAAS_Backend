@@ -9,7 +9,7 @@ anywhere to explain why. Seven connectors were already in that state before this
 was written (aws, serpapi, wolfram_alpha, openweathermap, bing_search, and two
 slug typos), which is exactly the failure mode this is meant to stop recurring.
 
-`test_every_connector_credential_type_is_seeded` in nodes/tests_connectors.py
+`test_every_connector_credential_type_is_seeded` in nodes/tests/test_connectors.py
 holds the two sides together, so a new connector with an unseeded credential
 type fails the suite instead of shipping broken.
 
@@ -261,92 +261,204 @@ CREDENTIAL_TYPES: list[dict] = [
                    placeholder="us21 (derived from the key if omitted)"),
         ],
     },
-]
 
-
-# Types this command does NOT own but connectors depend on. Google Drive and
-# Google Calendar both authenticate with the shared google-oauth2 credential,
-# which populate_credentials.py defines complete with its oauth_config.
-#
-# These are created only when absent, never updated: an update_or_create here
-# would overwrite that richer definition — silently dropping the OAuth client
-# configuration and breaking the consent flow for every Google node — purely as
-# a side effect of seeding connectors.
-EXTERNALLY_OWNED: list[dict] = [
+    # ---- Chat platforms ----------------------------------------------------
+    # These ten arrived with the REST connector pack, which has since been
+    # deleted. They are kept because the curated MCP servers reference them:
+    # `mcp_integration/tests/test_credential_bridge.py` is what fails if a
+    # curated mapping names a credential type that is missing here.
     {
-        "name": "Google OAuth2", "slug": "google-oauth2", "auth_method": "oauth2",
-        "description": "Google OAuth for Gmail, Drive, Sheets and Calendar",
-        "icon": "Cloud",
+        "name": "Slack", "slug": "slack", "auth_method": "bearer",
+        "description": "Slack bot token", "icon": "MessageSquare",
+        "fields_schema": [
+            _field("token", "Bot User OAuth Token", secret=True,
+                   placeholder="xoxb-..."),
+            # The Slack MCP server refuses to start without a workspace id:
+            # "Please set SLACK_BOT_TOKEN and SLACK_TEAM_ID environment
+            # variables". A token on its own could never connect.
+            _field("teamId", "Workspace ID", placeholder="T01234567"),
+        ],
+    },
+    {
+        "name": "Discord", "slug": "discord", "auth_method": "none",
+        "description": "Discord incoming webhook", "icon": "MessageCircle",
+        "fields_schema": [
+            _field("webhookUrl", "Webhook URL", secret=True,
+                   placeholder="https://discord.com/api/webhooks/..."),
+        ],
+    },
+    {
+        "name": "Telegram", "slug": "telegram", "auth_method": "api_key",
+        "description": "Telegram bot token", "icon": "Send",
+        "fields_schema": [
+            _field("token", "Bot Token", secret=True,
+                   placeholder="123456:ABC-DEF..."),
+        ],
+    },
+
+    # ---- Google Workspace --------------------------------------------------
+    {
+        # Shared by GoogleDriveNode and GoogleCalendarNode, which have been
+        # registered connectors for a while. It was only ever created by the
+        # standalone populate_credentials.py script, so a deployment that ran
+        # migrations and this seeder — but not that script — showed an empty
+        # credential picker on both nodes.
+        "name": "Google (OAuth2)", "slug": "google-oauth2", "auth_method": "oauth2",
+        "description": "Google account access for Drive and Calendar", "icon": "Chrome",
         "fields_schema": [
             _field("access_token", "Access Token", secret=True),
             _field("refresh_token", "Refresh Token", secret=True, required=False),
         ],
     },
+    {
+        "name": "Gmail", "slug": "gmail", "auth_method": "oauth2",
+        "description": "Gmail send and draft access", "icon": "Mail",
+        "fields_schema": [
+            _field("access_token", "Access Token", secret=True),
+            _field("refresh_token", "Refresh Token", secret=True, required=False),
+        ],
+    },
+    {
+        "name": "Google Sheets", "slug": "google-sheets", "auth_method": "oauth2",
+        "description": "Google Sheets read and write access", "icon": "Table",
+        "fields_schema": [
+            _field("access_token", "Access Token", secret=True),
+            _field("refresh_token", "Refresh Token", secret=True, required=False),
+        ],
+    },
+
+    # ---- Productivity ------------------------------------------------------
+    {
+        "name": "Notion", "slug": "notion", "auth_method": "bearer",
+        "description": "Notion internal integration token", "icon": "FileText",
+        "fields_schema": [
+            _field("token", "Integration Token", secret=True,
+                   placeholder="secret_..."),
+        ],
+    },
+    {
+        "name": "Airtable", "slug": "airtable", "auth_method": "bearer",
+        "description": "Airtable personal access token", "icon": "Grid",
+        "fields_schema": _api_key("Personal Access Token", "pat..."),
+    },
+    {
+        "name": "Trello", "slug": "trello", "auth_method": "api_key",
+        "description": "Trello API key and token", "icon": "Trello",
+        "fields_schema": [
+            _field("apiKey", "API Key", secret=True),
+            _field("token", "API Token", secret=True),
+        ],
+    },
+
+    # ---- Developer tooling (continued) -------------------------------------
+    {
+        "name": "GitHub", "slug": "github", "auth_method": "api_key",
+        "description": "GitHub personal access token", "icon": "Github",
+        "fields_schema": [
+            _field("token", "Personal Access Token", secret=True,
+                   placeholder="ghp_..."),
+        ],
+    },
+
+    # ---- Web scraping ------------------------------------------------------
+    {
+        "name": "Firecrawl", "slug": "firecrawl", "auth_method": "bearer",
+        "description": "Firecrawl scraping and crawling", "icon": "Globe",
+        "fields_schema": _api_key("API Key", "fc-..."),
+    },
+
+    # ---- LLM providers -----------------------------------------------------
+    # Referenced by the LLM nodes (nodes/llm*.py) and by the frontend node
+    # configs, but previously unseeded — same empty-dropdown failure as above.
+    {
+        "name": "OpenAI", "slug": "openai", "auth_method": "api_key",
+        "description": "OpenAI API key", "icon": "Brain",
+        "fields_schema": _api_key("API Key", "sk-..."),
+    },
+    {
+        "name": "OpenRouter", "slug": "openrouter", "auth_method": "api_key",
+        "description": "OpenRouter API key (multi-provider LLM gateway)",
+        "icon": "Brain",
+        "fields_schema": _api_key("API Key", "sk-or-..."),
+    },
+    {
+        "name": "NVIDIA NIM", "slug": "nvidia", "auth_method": "api_key",
+        "description": "NVIDIA NIM / build.nvidia.com API key", "icon": "Brain",
+        "fields_schema": _api_key("API Key", "nvapi-..."),
+    },
+
+    # ---- Search / research -------------------------------------------------
+    {
+        "name": "Tavily", "slug": "tavily", "auth_method": "api_key",
+        "description": "Tavily search API", "icon": "Search",
+        "fields_schema": _api_key("API Key", "tvly-..."),
+    },
+
+    # ---- Chat platforms (continued) ----------------------------------------
+    # `discord` (bot token) is seeded above; these are the two other shapes the
+    # nodes and the frontend node configs ask for by slug.
+    {
+        "name": "Discord Bot", "slug": "discord_bot", "auth_method": "bearer",
+        "description": "Discord bot token", "icon": "MessageSquare",
+        "fields_schema": [
+            _field("botToken", "Bot Token", secret=True),
+        ],
+    },
+    {
+        "name": "Discord Webhook", "slug": "discord_webhook", "auth_method": "custom",
+        "description": "Discord incoming webhook URL", "icon": "MessageSquare",
+        "fields_schema": [
+            _field("webhookUrl", "Webhook URL", secret=True,
+                   placeholder="https://discord.com/api/webhooks/..."),
+        ],
+    },
+
+    # ---- Email -------------------------------------------------------------
+    {
+        "name": "Email (SMTP)", "slug": "email", "auth_method": "basic",
+        "description": "SMTP server credentials for sending mail", "icon": "Mail",
+        "fields_schema": [
+            _field("host", "SMTP Host", placeholder="smtp.gmail.com"),
+            _field("port", "Port", required=False, placeholder="587"),
+            _field("username", "Username"),
+            _field("password", "Password", secret=True),
+            _field("fromEmail", "From Address", required=False),
+        ],
+    },
 ]
 
-
 class Command(BaseCommand):
-    help = "Create or update the CredentialTypes that connector nodes reference."
+    help = "Seed the CredentialType rows that connector nodes reference."
 
-    def add_arguments(self, parser):
-        parser.add_argument(
-            "--check", action="store_true",
-            help="Report what is missing without writing anything.",
-        )
-
+    @transaction.atomic
     def handle(self, *args, **options):
-        check_only = options["check"]
-        existing = set(CredentialType.objects.values_list("slug", flat=True))
+        verbosity = options.get("verbosity", 1)
+        created_count = 0
+        updated_count = 0
 
-        missing = [c for c in CREDENTIAL_TYPES + EXTERNALLY_OWNED
-                   if c["slug"] not in existing]
-
-        if check_only:
-            if missing:
-                self.stdout.write(self.style.WARNING(
-                    f"{len(missing)} credential type(s) missing: "
-                    + ", ".join(c["slug"] for c in missing)
-                ))
+        for spec in CREDENTIAL_TYPES:
+            _obj, created = CredentialType.objects.update_or_create(
+                slug=spec["slug"],
+                defaults={
+                    "name": spec["name"],
+                    # The frontend resolves a node's `credentialType` against this
+                    # column, so it must mirror the slug or the credential picker
+                    # on the node cannot narrow the list to the right type.
+                    "service_identifier": spec.get("service_identifier", spec["slug"]),
+                    "auth_method": spec.get("auth_method", "api_key"),
+                    "description": spec.get("description", ""),
+                    "icon": spec.get("icon", "Key"),
+                    "fields_schema": spec.get("fields_schema", []),
+                    "is_active": True,
+                },
+            )
+            if created:
+                created_count += 1
             else:
-                self.stdout.write(self.style.SUCCESS("All connector credential types present."))
-            return
+                updated_count += 1
 
-        created = updated = 0
-        with transaction.atomic():
-            for spec in CREDENTIAL_TYPES:
-                # service_identifier is unique and nullable; leaving it unset
-                # avoids colliding with the types populate_credentials.py owns.
-                _obj, was_created = CredentialType.objects.update_or_create(
-                    slug=spec["slug"],
-                    defaults={
-                        "name": spec["name"],
-                        "description": spec.get("description", ""),
-                        "icon": spec.get("icon", ""),
-                        "auth_method": spec.get("auth_method", "api_key"),
-                        "fields_schema": spec["fields_schema"],
-                    },
-                )
-                if was_created:
-                    created += 1
-                else:
-                    updated += 1
-
-            # Create-if-absent only — see EXTERNALLY_OWNED.
-            for spec in EXTERNALLY_OWNED:
-                _obj, was_created = CredentialType.objects.get_or_create(
-                    slug=spec["slug"],
-                    defaults={
-                        "name": spec["name"],
-                        "description": spec.get("description", ""),
-                        "icon": spec.get("icon", ""),
-                        "auth_method": spec.get("auth_method", "api_key"),
-                        "fields_schema": spec["fields_schema"],
-                    },
-                )
-                if was_created:
-                    created += 1
-
-        self.stdout.write(self.style.SUCCESS(
-            f"Connector credential types: {created} created, {updated} updated "
-            f"({len(CREDENTIAL_TYPES)} owned, {len(EXTERNALLY_OWNED)} shared)."
-        ))
+        if verbosity:
+            self.stdout.write(self.style.SUCCESS(
+                f"Credential types seeded: {created_count} created, "
+                f"{updated_count} updated ({len(CREDENTIAL_TYPES)} total)."
+            ))

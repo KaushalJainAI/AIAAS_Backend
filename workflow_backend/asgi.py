@@ -19,7 +19,7 @@ django_asgi_app = get_asgi_application()
 
 # Import routing after Django setup
 from streaming.routing import websocket_urlpatterns
-from core.channels_middleware import JWTAuthMiddleware
+from core.realtime.channels_middleware import JWTAuthMiddleware
 
 # NOTE: nothing here validates the WebSocket Origin header. channels ships
 # AllowedHostsOriginValidator for this and it was imported here at one point,

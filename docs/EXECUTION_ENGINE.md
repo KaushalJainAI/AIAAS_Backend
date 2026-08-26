@@ -1,5 +1,13 @@
 # Workflow Execution Engine
 
+> ** Historical — the subsystem this describes was deleted 2026-08-17.**
+> The DAG compiler (`compiler/compiler.py`) and the King supervisor
+> (`executor/king.py`, `executor/engine.py`) were retired with the workflow
+> product. Kept because it explains design decisions still visible in
+> `compiler/schemas.py`, `llm/handlers/base.py` and `llm/handlers/registry.py`.
+> See [WORKFLOW_RETIREMENT.md](WORKFLOW_RETIREMENT.md) for what replaced it.
+
+
 This document describes the runtime execution of workflows within AIAAS, focusing on the `ExecutionEngine` and its interaction with LangGraph.
 
 ## Overview

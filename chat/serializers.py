@@ -24,7 +24,7 @@ class ChatSessionSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatSession
         fields = [
-            'id', 'title', 'llm_provider', 'llm_model',
+            'id', 'title', 'intent', 'llm_provider', 'llm_model',
             'system_prompt', 'memory_enabled', 'total_tokens_used',
             'created_at', 'updated_at', 'messages'
         ]

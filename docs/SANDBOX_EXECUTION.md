@@ -38,7 +38,7 @@ This file defines the `WasmCodeSandbox` class. It manages all the messy C-level 
 * **Responsibilities:** Exposes the globally available `safe_execute(code, engine="in_process" | "wasm")` convenience wrapper. Retains all the AST parsing and whitelists (like `ALLOW_MODULES`) used by the in-process execution. 
 * **Design Purpose:** Ensures that regardless of what backend feature you use, as long as it imports `safe_execute`, it will automatically inherit the global security policy.
 
-### 4. `chat/tools.py` (MODIFIED)
+### 4. `chat/tools/sandbox.py` (MODIFIED)
 **The LLM Tool Interface.**
 * **Responsibilities:** Exposes the new `execute_python_code` tool JSON schema to the Chat Agent. 
 * **Design Purpose:** We strategically expose the `engine` parameter to the LLM (`"in_process"` or `"wasm"`). This allows the Advanced Agent to make an autonomous judgment: if the script is basic logic, it can request the fast in-process engine. If it is uncertain or dealing with a heavy recursive request, it enforces the WebAssembly CPU/RAM locks.

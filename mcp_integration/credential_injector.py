@@ -21,10 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 # Matches `{slug:field}` placeholders inside header values.
-_PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z0-9_\-]+):([a-zA-Z0-9_\-.]+)\}")
+_PLACEHOLDER_RE = re.compile(r"\{(@?[a-zA-Z0-9_\-]+):([a-zA-Z0-9_\-.]+)\}")
 
 # Matches `slug:field` used as a whole value (env var map format).
-_MAPPING_RE = re.compile(r"^([a-zA-Z0-9_\-]+):([a-zA-Z0-9_\-.]+)$")
+_MAPPING_RE = re.compile(r"^(@?[a-zA-Z0-9_\-]+):([a-zA-Z0-9_\-.]+)$")
+
+# Sentinel slug meaning "read this from Django settings, not from the user's
+# vault". Needed for values that belong to the *platform* rather than the user:
+# a Google OAuth client id/secret is ours, and asking every user to create their
+# own GCP project just to read their calendar is the single biggest reason a
+# curated connector goes unused.
+SETTINGS_SLUG = "@settings"
 
 
 class CredentialMissingError(Exception):
@@ -71,11 +78,37 @@ async def _resolve_slug(user_id: int, slug: str, server_name: str):
 
 def _decrypt(cred) -> dict[str, Any]:
     try:
-        return cred.get_credential_data()
+        data = dict(cred.get_credential_data() or {})
     except Exception as e:  # noqa: BLE001
         raise CredentialInvalidError(
             f"Failed to decrypt credential '{cred.name}' (id={cred.id}): {type(e).__name__}"
         ) from e
+
+    # Credentials created by the OAuth flow store their tokens in the dedicated
+    # `access_token` / `refresh_token` columns rather than in `encrypted_data`,
+    # which `get_credential_data()` reads. Without this merge, connecting Google
+    # by OAuth produced a credential the injector saw as empty — the server then
+    # failed with "missing field 'refresh_token'" on a connection the UI had just
+    # reported as connected. Blob values win, so a hand-entered field is never
+    # silently overridden by a stale token column.
+    from cryptography.fernet import Fernet
+
+    for field in ("access_token", "refresh_token"):
+        if data.get(field):
+            continue
+        raw = getattr(cred, field, None)
+        if not raw:
+            continue
+        try:
+            fernet = Fernet(type(cred)._get_encryption_key())
+            data[field] = fernet.decrypt(bytes(raw)).decode()
+        except Exception:  # noqa: BLE001
+            # A token we cannot decrypt is treated as absent: the caller then
+            # raises a precise "missing field" error naming what to reconnect.
+            logger.warning(
+                "Could not decrypt %s column on credential %s", field, cred.id
+            )
+    return data
 
 
 def _extract_field(data: dict[str, Any], field_path: str) -> Any:
@@ -85,6 +118,13 @@ def _extract_field(data: dict[str, Any], field_path: str) -> Any:
             return None
         cur = cur[part]
     return cur
+
+
+def _settings_value(name: str) -> Any:
+    """Read a platform-owned value out of Django settings."""
+    from django.conf import settings as django_settings
+
+    return getattr(django_settings, name, None) or None
 
 
 def _coerce_user_id(user) -> int | None:
@@ -128,6 +168,8 @@ class CredentialInjector:
 
         # Required types must exist regardless of whether they're mapped.
         for slug in server.required_credential_types or []:
+            if slug == SETTINGS_SLUG:
+                continue
             await _get(slug)
 
         env_vars: dict[str, str] = {}
@@ -140,6 +182,15 @@ class CredentialInjector:
                 logger.warning("Invalid env mapping %r on server %s", mapping, server_name)
                 continue
             slug, field_path = match.group(1), match.group(2)
+            if slug == SETTINGS_SLUG:
+                value = _settings_value(field_path)
+                if value is None:
+                    raise CredentialInvalidError(
+                        f"Platform setting '{field_path}' is not configured "
+                        f"(needed for env var {env_key} on {server_name})"
+                    )
+                env_vars[env_key] = str(value)
+                continue
             _, data = await _get(slug)
             value = _extract_field(data, field_path)
             if value is None:
@@ -164,6 +215,15 @@ class CredentialInjector:
                 slug, field_path = p.group(1), p.group(2)
                 key = f"{slug}:{field_path}"
                 if key in resolved:
+                    continue
+                if slug == SETTINGS_SLUG:
+                    setting = _settings_value(field_path)
+                    if setting is None:
+                        raise CredentialInvalidError(
+                            f"Platform setting '{field_path}' is not configured "
+                            f"(needed for header {header_key} on {server_name})"
+                        )
+                    resolved[key] = str(setting)
                     continue
                 _, data = await _get(slug)
                 value = _extract_field(data, field_path)

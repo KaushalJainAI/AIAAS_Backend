@@ -4,7 +4,6 @@ URL configuration for workflow_backend project.
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
-from orchestrator.views import receive_webhook
 from rest_framework.permissions import IsAdminUser
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
@@ -36,17 +35,16 @@ urlpatterns = [
     # Core (auth, users, API keys)
     path('api/', include('core.urls')),
     
-    # Nodes (node registry, schemas)
-    path('api/', include('nodes.urls')),
+    # AI provider vocabulary + the model registry the picker reads.
+    path('api/', include('llm.urls')),
+
     
-    # Compiler (workflow compile/validate)
-    path('api/', include('compiler.urls')),
     
     # Streaming (SSE, events)
     path('api/streaming/', include('streaming.urls')),
     
     # Orchestrator (workflows, executions, HITL, chat)
-    path('api/orchestrator/', include('orchestrator.urls')),
+    path('api/orchestrator/', include('agents.urls')),
     
     # Logs (insights, audit, executions)
     path('api/logs/', include('logs.urls')),
@@ -58,10 +56,7 @@ urlpatterns = [
     path('api/credentials/', include('credentials.urls')),
     
     # Templates
-    path('api/orchestrator/templates/', include('templates.urls')),
     
-    # Webhooks (Public)
-    path('api/webhooks/<int:user_id>/<path:webhook_path>', receive_webhook, name='webhook_receiver'),
     
     # MCP
     path('api/mcp/', include('mcp_integration.urls')),
@@ -71,15 +66,7 @@ urlpatterns = [
     
     # Standalone Chat
     path('api/chat/', include('chat.urls')),
-    
-    # Buddy (Help Assistant)
-    path('api/buddy/', include('buddy.urls')),
 
-    # BrowserOS
-    path('api/browseros/', include('browserOS.urls')),
-
-    # Canvas Agent — DISABLED, see canvas_agent/ (app also commented out of INSTALLED_APPS)
-    # path('api/canvas-agent/', include('canvas_agent.urls')),
 
     # Notifications
     path('api/notifications/', include('notifications.urls')),
@@ -87,22 +74,11 @@ urlpatterns = [
     # Imagine (Image/Video/Audio Generation)
     path('api/imagine/', include('imagine.urls')),
 
-    # Datasets (training and eval examples)
-    path('api/', include('datasets.urls')),
+    # Extract (document -> rows, owned by inference)
+    path('api/extraction/', include('inference.extraction_urls')),
 
-    # MVP: Evals and Tuning are routed out until their executors exist.
-    # Both apps accept work and record it as 'queued', but nothing consumes
-    # that queue — `POST /evals/suites/{id}/run/` never scores, and a TuningJob
-    # never leaves 'queued', which also makes `deploy` (completed-only)
-    # unreachable. Serving endpoints that silently accept work they will never
-    # do is worse than not serving them. The apps stay in INSTALLED_APPS so
-    # their models and migrations are untouched; restore these two lines with
-    # the workers.
-    # path('api/evals/', include('evals.urls')),
-    # path('api/tuning/', include('tuning.urls')),
-
-    # Extract (document -> rows)
-    path('api/extraction/', include('extraction.urls')),
+    # Eval (sub-agent evaluation + human supervision of the graders)
+    path('api/eval/', include('eval.urls')),
 ]
 
 

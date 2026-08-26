@@ -75,6 +75,23 @@ class UserProfile(models.Model):
         help_text='Default credential ID for King Orchestrator'
     )
 
+    # Vision witness — the model a text-only main agent interrogates about an
+    # image it cannot see. Separate from `llm_model` on purpose: the witness is
+    # picked for price and latency, the main model for reasoning, and forcing
+    # one field to serve both would make every text-only chat lose its eyes.
+    vision_provider = models.CharField(
+        max_length=50,
+        blank=True,
+        default='nvidia',
+        help_text='Provider for the vision witness model'
+    )
+    vision_model = models.CharField(
+        max_length=120,
+        blank=True,
+        default='nvidia/nemotron-nano-12b-v2-vl',
+        help_text='Vision model asked about images the main model cannot see'
+    )
+
     # Identity
     display_name = models.CharField(
         max_length=100,

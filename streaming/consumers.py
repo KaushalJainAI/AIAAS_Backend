@@ -110,24 +110,39 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
         """Send the current state of all nodes for this execution."""
         from logs.models import ExecutionLog
         
+        from workflow_backend.thresholds import EXECUTION_STREAM_LOG_LIMIT
+
         try:
-            # Fetch execution and its node logs
+            # Fetch execution and its most recent node logs.
+            #
+            # Bounded, and newest-first: this is a catch-up frame for a client
+            # that just connected, and the tail is what it is behind on. The
+            # unbounded version replayed every node of the run — each with its
+            # full output payload — in one socket message, so the cost of
+            # connecting grew with the length of the run being watched.
             exec_log = await ExecutionLog.objects.aget(execution_id=execution_id)
-            node_logs = exec_log.node_logs.all()
-            
+            steps = exec_log.steps.order_by('-order')[:EXECUTION_STREAM_LOG_LIMIT]
+
             initial_state = []
-            async for node_log in node_logs:
+            async for step in steps:
                 initial_state.append({
-                    'node_id': node_log.node_id,
-                    'status': node_log.status,
-                    'output': node_log.output_data,
-                    'error': node_log.error_message,
-                    'duration_ms': node_log.duration_ms,
-                    'started_at': node_log.started_at.isoformat() if node_log.started_at else None,
-                    'completed_at': node_log.completed_at.isoformat() if node_log.completed_at else None
+                    # The wire keys stay `node_*`: the canvas reducer switches
+                    # on them and ships its own build. What they carry is a
+                    # tool call, which is what they always carried.
+                    'node_id': step.call_id,
+                    'status': step.status,
+                    'output': step.result,
+                    'error': step.error_message,
+                    'duration_ms': step.duration_ms,
+                    'started_at': step.started_at.isoformat() if step.started_at else None,
+                    'completed_at': step.completed_at.isoformat() if step.completed_at else None
                 })
             
             if initial_state:
+                # Restore ascending order: the reducer applies these in
+                # sequence, and the query ordering was for the limit, not the
+                # client.
+                initial_state.reverse()
                 await self.send_json({
                     'type': 'execution.state_sync',
                     'data': {
@@ -307,7 +322,7 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _save_hitl_response(self, request_id: str, response: dict) -> bool:
         """Save HITL response to database."""
-        from orchestrator.models import HITLRequest
+        from agents.models import HITLRequest
         
         try:
             hitl_request = HITLRequest.objects.get(
@@ -354,7 +369,7 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _get_hitl_request(self, request_id: str):
         """Get HITL request from database."""
-        from orchestrator.models import HITLRequest
+        from agents.models import HITLRequest
         try:
             return HITLRequest.objects.get(request_id=request_id)
         except HITLRequest.DoesNotExist:
@@ -454,6 +469,18 @@ class HITLNotificationConsumer(AsyncWebsocketConsumer):
             'data': event.get('request', {})
         })
 
+    async def hitl_reminder(self, event):
+        """
+        Escalation / hourly / digest nudge.
+
+        Distinct from `hitl.new_request` because the client raises an OS-level
+        notification for these rather than only updating in-app state.
+        """
+        await self.send_json({
+            'type': 'reminder',
+            'data': event.get('reminder', {})
+        })
+
     async def notification(self, event):
         """Handle generic notifications (like orchestrator activities)."""
         await self.send_json({
@@ -464,7 +491,7 @@ class HITLNotificationConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _get_pending_requests(self) -> list:
         """Get pending HITL requests for user."""
-        from orchestrator.models import HITLRequest
+        from agents.models import HITLRequest
         
         requests = HITLRequest.objects.filter(
             user_id=self.user_id,
@@ -486,7 +513,7 @@ class HITLNotificationConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _save_hitl_response(self, request_id: str, response: dict) -> bool:
         """Save HITL response."""
-        from orchestrator.models import HITLRequest
+        from agents.models import HITLRequest
         
         try:
             hitl_request = HITLRequest.objects.get(

@@ -166,8 +166,7 @@ def main() -> None:
     probe("GET", "/api/mcp/servers/", headers=H)
     # Skills
     probe("GET", "/api/skills/", headers=H)
-    # Inference (real sub-paths)
-    probe("GET", "/api/inference/kbs/", headers=H)
+    # Inference (real sub-paths) — KB is internal, no HTTP CRUD
     probe("GET", "/api/inference/documents/", headers=H)
     # Notifications
     probe("GET", "/api/notifications/", headers=H)
@@ -182,12 +181,7 @@ def main() -> None:
         wf = minimal_nvidia_workflow(cred_id)
         r = requests.post(f"{base}/api/orchestrator/workflows/", headers={**H, "Content-Type": "application/json"}, json=wf, timeout=15)
         nid = r.json()["id"]
-        probe(
-            "POST", f"/api/orchestrator/workflows/{nid}/execute/",
-            headers={**H, "Content-Type": "application/json"},
-            json={"input_data": {}, "llm_provider": "nvidia",
-                  "llm_model": "nvidia/llama-3.3-nemotron-super-49b-v1", "llm_credential": cred_id},
-        )
+            # Workflow execute was deleted with the canvas; agents execute instead.
 
     # Print + write report
     md = ["# Stage 4 — Endpoint contract audit", "",

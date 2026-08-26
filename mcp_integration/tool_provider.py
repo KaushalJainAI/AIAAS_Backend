@@ -1,10 +1,11 @@
 """
 MCPToolProvider — bridges MCP servers into the platform's agent tool loops.
 
-This is the single integration surface used by:
-    * the chat agent  (chat/graph.py, chat/tools.py)
-    * the King orchestrator (executor/king.py), via MCPToolNode
-    * the "buddy" help agent (reuses the chat agent tool list)
+This is the single integration surface used by the chat agent and, through it,
+by agent runs (`chat/tools/`, dispatched via the `mcp` grant in
+`agents/agent/runtime.py::GRANT_TOOLS`). It is now the only such surface:
+the King orchestrator reached MCP through `MCPToolNode`, and both went with
+the DAG runtime.
 
 Tool names are namespaced so MCP tools never collide with built-in tools:
 
@@ -27,7 +28,7 @@ from typing import Any
 
 from django.core.exceptions import PermissionDenied
 
-from .client import MCPClientManager, get_servers_for_user, LIST_TOOLS_TIMEOUT
+from .client import MCPClientManager, get_servers_for_user, AGENT_LIST_TOOLS_TIMEOUT
 from .credential_injector import CredentialInvalidError, CredentialMissingError
 from .models import MCPServer
 
@@ -104,7 +105,7 @@ class MCPToolProvider:
             # whole agent turn. Query all servers concurrently.
             try:
                 manager = MCPClientManager(server.id, user=user)
-                tools = await asyncio.wait_for(manager.list_tools(), timeout=LIST_TOOLS_TIMEOUT)
+                tools = await asyncio.wait_for(manager.list_tools(), timeout=AGENT_LIST_TOOLS_TIMEOUT)
             except CredentialMissingError as e:
                 # Don't advertise a tool the user can't actually call.
                 logger.info("Skipping MCP server %s for user %s: %s", server.name, getattr(user, "id", None), e)
@@ -117,8 +118,14 @@ class MCPToolProvider:
                 return []
             return [_build_openai_descriptor(server, t) for t in tools]
 
-        results = await asyncio.gather(*(_descriptors_for(s) for s in servers))
-        return [d for group in results for d in group]
+        results = await asyncio.gather(
+            *(_descriptors_for(s) for s in servers), return_exceptions=True
+        )
+        return [
+            d for group in results
+            if not isinstance(group, BaseException)
+            for d in group
+        ]
 
     @staticmethod
     async def _resolve_binding(name: str, user) -> _ToolBinding | None:
