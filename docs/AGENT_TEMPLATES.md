@@ -62,7 +62,7 @@ Checked against the code on 2026-07-29, not assumed.
   deliberately and `chat/tests/test_rework.py::RemovedCapabilityTests` asserts they
   are neither advertised nor dispatchable. They are not reusable; re-adding any
   of them is a decision to reverse, not a wiring job.
-- `executor.sandbox.safe_execution`: the RestrictedPython sandbox the Code node
+- `sandbox.safe_execution`: the sandbox the Code node
   uses. This *is* reusable, and is what the agent runtime's `execute_python`
   wraps.
 - Frontend: the agent builder at `/agents/new` produces an `AgentConfig` already.
@@ -237,11 +237,16 @@ Three decisions worth recording from building it:
   `AgentToolbox.dispatch` re-checks the grant before running anything. A model
   can name a tool it was never offered, and "we didn't mention it" is not access
   control. §10's first risk is tested directly.
-- **`shell` and `fileOps` are refused, not faked.** Neither has an
-  implementation this runtime will serve (§9.1 for shell; the chat removal above
-  for file ops). The run reports them in `unserved_grants` and the system prompt
-  names them, so a configured-but-unavailable capability is visible rather than
+- **`shell` is refused, not faked.** It has no implementation this runtime will
+  serve (§9.1). The run reports it in `unserved_grants` and the system prompt
+  names it, so a configured-but-unavailable capability is visible rather than
   showing up as an agent that mysteriously cannot do its job.
+- **`fileOps` used to be refused alongside it, and is now served.** What it
+  unlocks is not the capability that was removed from chat: `inference/vfs.py`
+  addresses rows in the user's own `Folder`/`Document` tree and cannot name a
+  path on any disk. It takes two switches — the grant, plus
+  `sandbox['fileAccess']` deciding *which* files — and with `fileAccess='none'`
+  the tools are withheld rather than offered to refuse.
 - **`mcp` is a new grant key**, which is what finally makes the MCP client
   reachable from an agent rather than from chat alone. Off by default: those
   tools reach real systems under the user's own credentials.

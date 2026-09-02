@@ -209,6 +209,11 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
     timeout: float = 120.0
     #: Sampling temperature when config omits one.
     default_temperature: float = 0.7
+    #: Whether a streamed call may ask for `stream_options.include_usage`.
+    #: True for OpenAI, OpenRouter and NVIDIA NIM (all measured returning the
+    #: trailing usage frame). Set False on a subclass whose provider rejects
+    #: the field rather than ignoring it.
+    supports_stream_usage: bool = True
 
     # ── overridable hooks ──
 
@@ -240,6 +245,17 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
         }
         if stream:
             payload["stream"] = True
+            # Without this the provider sends no usage at all on a streamed
+            # call, and `ChatChunkParser` never sees the trailing frame it
+            # already knows how to read. Every token count downstream was
+            # therefore 0: AgentTurn.tokens, ExecutionLog.tokens_used,
+            # ChatSession.total_tokens_used — and since `agents/spend.py`
+            # derives rupees from tokens_used, `spendCapRupees` could never
+            # trip. A guardrail computed from a number nobody writes is not a
+            # guardrail. Opt-out is per subclass because it is a documented
+            # OpenAI extension, not part of the base protocol.
+            if self.supports_stream_usage:
+                payload["stream_options"] = {"include_usage": True}
         if tools := self._tools_for(config):
             payload["tools"] = tools
         if (fmt := config.get("response_format")) in ("json_object", "json_code"):

@@ -26,9 +26,15 @@ urlpatterns = [
     path('agents/<int:agent_id>/approve/', runs.agent_approve, name='agent_approve'),
     path('agents/<int:agent_id>/reject/', runs.agent_reject, name='agent_reject'),
     path('agents/<int:agent_id>/steer/', runs.agent_steer, name='agent_steer'),
+    path('agents/<int:agent_id>/autonomy/', runs.agent_autonomy, name='agent_autonomy'),
 
     # Triggers — how something other than the user starts a run.
     path('triggers/', triggers.trigger_list, name='trigger_list'),
+    # Dry-run a cron expression before it is saved. Sits above the
+    # `<int:trigger_id>` route only by convention — the converter would
+    # not match 'preview' anyway.
+    path('triggers/preview/', triggers.schedule_preview,
+         name='schedule_preview'),
     path('triggers/<int:trigger_id>/', triggers.trigger_detail, name='trigger_detail'),
     # Fire a schedule now, through the sweep's own path — the only way to find
     # out whether a schedule works without waiting for its next slot.

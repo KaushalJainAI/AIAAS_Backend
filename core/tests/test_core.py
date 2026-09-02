@@ -3,7 +3,6 @@ Tests for Security Components
 
 Tests for:
 - InputSanitizer prompt injection detection
-- ContentPolicyEnforcer
 - Tier-based throttling
 """
 from django.test import TestCase, RequestFactory
@@ -13,7 +12,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from core.models import PasswordOTP
-from core.safety.security import InputSanitizer, SanitizationResult, ContentPolicyEnforcer
+from core.safety.security import InputSanitizer, SanitizationResult
 from core.http.throttling import (
     CompileThrottle, ExecuteThrottle, StreamThrottle, ChatThrottle
 )
@@ -117,34 +116,6 @@ class TestInputSanitizer(TestCase):
         # In strict mode, even 'logged' violations should mark as unsafe
         # (the specific pattern may or may not trigger, but strict mode is stricter)
         self.assertIsInstance(result, SanitizationResult)
-
-
-class TestContentPolicyEnforcer(TestCase):
-    """Tests for ContentPolicyEnforcer class."""
-    
-    def setUp(self):
-        self.enforcer = ContentPolicyEnforcer()
-    
-    def test_normal_text_passes_repetition_check(self):
-        """Normal text should pass repetition check."""
-        text = "This is a normal sentence with varied words and characters."
-        
-        self.assertTrue(self.enforcer.check_repetition(text))
-    
-    def test_spam_text_blocked(self):
-        """Spammy repeated text should be blocked."""
-        # More extreme repetition to trigger the 50% threshold
-        spam = "buy " * 20  # 100% repetition of same word
-        
-        self.assertFalse(self.enforcer.check_repetition(spam))
-    
-    def test_encoding_attack_blocked(self):
-        """Encoding attacks should be blocked."""
-        # Null byte attack
-        self.assertFalse(self.enforcer.check_encoding_attack("test\x00attack"))
-        
-        # Normal text passes
-        self.assertTrue(self.enforcer.check_encoding_attack("normal text"))
 
 
 class TestTierBasedThrottling(TestCase):

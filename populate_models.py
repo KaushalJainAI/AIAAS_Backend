@@ -93,6 +93,17 @@ RETIRED_MODEL_VALUES = [
     "nvidia/llama-3.3-nemotron-super-49b-v1.5",
     "nvidia/llama-3.1-nemotron-ultra-253b-v1",
     "meta/llama-3.3-70b-instruct",           # superseded by llama-4 scout/maverick
+    # Retired 2026-09-01. Each verified against NIM with the platform key:
+    # 410 "reached its end of life" for the EOL block, 404 "not found for
+    # account" for the unentitled pair. They were all still is_active=True, so
+    # the model picker offered them and every pick failed at the first token.
+    "nvidia/nv-embedqa-e5-v5",               # 410 — RAG embedder, EOL 2026-08-25
+    "nvidia/nemotron-nano-12b-v2-vl",        # 410 — vision witness, EOL 2026-08-26
+    "nvidia/llama-3.1-nemotron-nano-vl-8b-v1",  # 410 — vision fallback, EOL 2026-08-26
+    "deepseek-ai/deepseek-v4-pro",           # 410 — EOL on NIM
+    "deepseek-ai/deepseek-v4-flash",         # 410 — EOL on NIM
+    "mistralai/mistral-medium-3.5-128b",     # 410 — EOL on NIM
+    "moonshotai/kimi-k2.6",                  # 404 — not entitled for this account
     # OpenAI direct — superseded by GPT-5.6 tiers
     "gpt-4o",                               # superseded by gpt-5.6-terra/sol
     "o3",                                   # superseded by o4-mini / gpt-5.6 reasoning
@@ -180,9 +191,9 @@ def populate():
                 m("Free Models Router", "openrouter/free", True, CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=0),
                 m("Pareto Code Router", "openrouter/pareto-code", caps=CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=0),
                 # --- OpenAI via OpenRouter (GPT-5.6 tiers: Sol > Terra > Luna) ---
-                # Pricing post July 30 cut: Sol $5/$30, Terra $2/$12 (was $2.50/$15), Luna $0.20/$1.20 (was $1/$6, 80% cut)
-                # Cache: 90% off input → Sol $0.50, Terra $0.20, Luna $0.02
-                m("OpenAI GPT-5.6 Sol", "openai/gpt-5.6-sol", caps={**VISION_CAPS, "document_input": True}, input_price="5.0000", output_price="30.0000", cached_price="0.5000", context=1500000),
+                # Pricing post Aug 21 promo: Sol $4/$20 (was $5/$30) through 2026-11-21, Terra $2/$12 (was $2.50/$15), Luna $0.20/$1.20 (was $1/$6, 80% cut Jul 30)
+                # Cache: 90% off input → Sol $0.40, Terra $0.20, Luna $0.02 — Sol promo verified 2026-08-21 against developers.openai.com
+                m("OpenAI GPT-5.6 Sol", "openai/gpt-5.6-sol", caps={**VISION_CAPS, "document_input": True}, input_price="4.0000", output_price="20.0000", cached_price="0.4000", context=1500000),
                 m("OpenAI GPT-5.6 Terra", "openai/gpt-5.6-terra", caps={**VISION_CAPS, "document_input": True}, input_price="2.0000", output_price="12.0000", cached_price="0.2000", context=1500000),
                 m("OpenAI GPT-5.6 Luna", "openai/gpt-5.6-luna", caps={**VISION_CAPS, "document_input": True}, input_price="0.2000", output_price="1.2000", cached_price="0.0200", context=1500000),
                 m("OpenAI GPT-4o Mini", "openai/gpt-4o-mini", caps=VISION_CAPS, input_price="0.1500", output_price="0.6000", cached_price="0.0750", context=128000),
@@ -203,9 +214,9 @@ def populate():
                 m("DeepSeek V4 Pro", "deepseek/deepseek-v4-pro", caps=REASONING_CAPS, input_price="0.6600", output_price="1.9800", cached_price="0.0220", context=1000000),
                 m("DeepSeek V4 Flash", "deepseek/deepseek-v4-flash", caps=REASONING_CAPS, input_price="0.2200", output_price="0.6600", cached_price="0.0070", context=1000000),
                 # --- xAI via OpenRouter ---
-                # Grok 4.6 $2/$6 500K, Grok 4.5 $2/$6 500K
-                m("xAI Grok 4.6", "x-ai/grok-4.6", caps={**VISION_CAPS, "document_input": True}, input_price="2.0000", output_price="6.0000", context=500000),
-                m("xAI Grok 4.5", "x-ai/grok-4.5", caps={**VISION_CAPS, "document_input": True}, input_price="2.0000", output_price="6.0000", context=500000),
+                # Grok 4.6 $2/$6 500K cached $0.50, Grok 4.5 $2/$6 cached $0.30 — verified 2026-08-27 against docs.x.ai
+                m("xAI Grok 4.6", "x-ai/grok-4.6", caps={**VISION_CAPS, "document_input": True}, input_price="2.0000", output_price="6.0000", cached_price="0.5000", context=500000),
+                m("xAI Grok 4.5", "x-ai/grok-4.5", caps={**VISION_CAPS, "document_input": True}, input_price="2.0000", output_price="6.0000", cached_price="0.3000", context=500000),
                 # --- Meta via OpenRouter ---
                 # Llama 4 Scout $0.10/$0.30 1.31M, Maverick $0.20/$0.80 1.05M
                 m("Meta Llama 4 Maverick", "meta-llama/llama-4-maverick", caps=VISION_CAPS, input_price="0.2000", output_price="0.8000", context=1050000),
@@ -224,6 +235,11 @@ def populate():
                 m("NVIDIA Nemotron 3 Super 120B Free", "nvidia/nemotron-3-super-120b-a12b:free", True, CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=1000000),
                 # --- Notable independents ---
                 m("Moonshot Kimi K3", "moonshotai/kimi-k3", caps=VISION_CAPS, input_price="3.0000", output_price="15.0000", context=1048576),
+                # --- Aug 2026 additions (verified 2026-08-27) ---
+                # Muse Spark 1.2: Meta 2026-08-05, $1.25/$4.25 cached $0.15 (contributor $0.10/$0.20), 1M ctx — docs: dev.meta.ai/docs/pricing-rate-limits
+                # GLM-5.3: Z.ai 2026-08-14, $1.40/$4.40 cached $0.26, 1M ctx 128K out — docs: docs.z.ai/guides/overview/pricing
+                m("Meta Muse Spark 1.2", "meta/muse-spark-1.2", caps=MULTIMODAL_CAPS, input_price="1.2500", output_price="4.2500", cached_price="0.1500", context=1048576),
+                m("Z.ai GLM-5.3", "z-ai/glm-5.3", caps=REASONING_CAPS, input_price="1.4000", output_price="4.4000", cached_price="0.2600", context=1000000),
             ],
         },
         {
@@ -239,19 +255,21 @@ def populate():
                 m("Nemotron 3 Ultra 550B", "nvidia/nemotron-3-ultra-550b-a55b", caps=REASONING_CAPS, input_price="0.5000", output_price="2.2000", context=1000000),
                 m("Nemotron 3 Super 120B", "nvidia/nemotron-3-super-120b-a12b", caps=CHAT_CAPS, input_price="0.3000", output_price="1.2000", context=1000000),
                 m("Nemotron 3 Nano 30B", "nvidia/nemotron-3-nano-30b-a3b", caps=CHAT_CAPS, input_price="0.1000", output_price="0.3000", context=1000000),
-                m("Nemotron Nano 12B VL", "nvidia/nemotron-nano-12b-v2-vl", caps=VISION_CAPS, input_price="0.1000", output_price="0.3000", context=128000),
-                m("Nemotron Nano VL 8B", "nvidia/llama-3.1-nemotron-nano-vl-8b-v1", caps=VISION_CAPS, input_price="0.0800", output_price="0.2400", context=128000),
+                # Vision — the witness chain in chat/vision/resolve.py. Both
+                # re-verified 2026-09-01 by sending a real PNG and reading the
+                # rendered number back; the previous two NIM VL models are EOL.
+                m("Llama 3.2 11B Vision", "meta/llama-3.2-11b-vision-instruct", caps=VISION_CAPS, input_price="0.0600", output_price="0.0600", context=128000),
+                m("Nemotron 3 Nano Omni 30B", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", caps=VISION_CAPS, input_price="0.1000", output_price="0.3000", context=128000),
+                m("Llama 3.2 90B Vision", "meta/llama-3.2-90b-vision-instruct", caps=VISION_CAPS, input_price="0.3500", output_price="0.4000", context=128000),
                 m("Nemotron Parse", "nvidia/nemotron-parse", caps={"image_input": True, "text_input": False, "structured_output": True}, input_price="0.0500", output_price="0.0500", context=128000),
                 # Open-weight models hosted on NIM (pruned older gens)
-                m("DeepSeek V4 Pro", "deepseek-ai/deepseek-v4-pro", caps=REASONING_CAPS, input_price="0.6600", output_price="1.9800", cached_price="0.0220", context=1000000),
-                m("DeepSeek V4 Flash", "deepseek-ai/deepseek-v4-flash", caps=REASONING_CAPS, input_price="0.2200", output_price="0.6600", cached_price="0.0070", context=1000000),
-                m("Moonshot Kimi K2.6", "moonshotai/kimi-k2.6", caps=VISION_CAPS, input_price="0.6000", output_price="2.4000", context=262144),
                 m("GPT-OSS 120B", "openai/gpt-oss-120b", caps=CHAT_CAPS, input_price="0.2000", output_price="0.8000", context=128000),
                 m("GPT-OSS 20B", "openai/gpt-oss-20b", caps=CHAT_CAPS, input_price="0.1000", output_price="0.3000", context=128000),
-                m("Mistral Medium 3.5", "mistralai/mistral-medium-3.5-128b", caps=CHAT_CAPS, input_price="0.2000", output_price="0.8000", context=128000),
                 m("Gemma 4 31B", "google/gemma-4-31b-it", caps=VISION_CAPS, input_price="0.1000", output_price="0.3000", context=256000),
-                # Embeddings — RAG pipeline model
-                m("NV EmbedQA E5 v5", "nvidia/nv-embedqa-e5-v5", caps={"embedding_generation": True}, input_price="0.0200", output_price="0.0000", context=8192),
+                # Embeddings — RAG pipeline model. 2048-dim; inference/engine.py
+                # pins EMBEDDING_DIM to match, and EMBEDDER_VERSION carries the
+                # pair so a swap re-indexes instead of mixing two vector spaces.
+                m("Nemotron 3 Embed 1B", "nvidia/nemotron-3-embed-1b", caps={"embedding_generation": True}, input_price="0.0200", output_price="0.0000", context=8192),
             ],
         },
         {
@@ -260,8 +278,9 @@ def populate():
             "description": "Direct connection to the OpenAI API.",
             "icon": "OA",
             "models": [
-                m("GPT-5.6 Sol", "gpt-5.6-sol", caps={**VISION_CAPS, "document_input": True}, input_price="5.0000", output_price="30.0000", cached_price="0.5000", context=1500000),
-                m("GPT-5.6 Sol Pro", "gpt-5.6-sol-pro", caps={**VISION_CAPS, "document_input": True}, input_price="5.0000", output_price="30.0000", cached_price="0.5000", context=1500000),
+                # Promo 2026-08-21: Sol $4/$20 cached $0.40 through 2026-11-21 (was $5/$30/$0.50)
+                m("GPT-5.6 Sol", "gpt-5.6-sol", caps={**VISION_CAPS, "document_input": True}, input_price="4.0000", output_price="20.0000", cached_price="0.4000", context=1500000),
+                m("GPT-5.6 Sol Pro", "gpt-5.6-sol-pro", caps={**VISION_CAPS, "document_input": True}, input_price="4.0000", output_price="20.0000", cached_price="0.4000", context=1500000),
                 m("GPT-5.6 Terra", "gpt-5.6-terra", caps={**VISION_CAPS, "document_input": True}, input_price="2.0000", output_price="12.0000", cached_price="0.2000", context=1500000),
                 m("GPT-5.6 Luna", "gpt-5.6-luna", caps={**VISION_CAPS, "document_input": True}, input_price="0.2000", output_price="1.2000", cached_price="0.0200", context=1500000),
                 m("GPT-4o Mini", "gpt-4o-mini", caps=VISION_CAPS, input_price="0.1500", output_price="0.6000", cached_price="0.0750", context=128000),

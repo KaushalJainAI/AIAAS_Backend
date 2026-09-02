@@ -412,9 +412,19 @@ class TranscriptThreadingTests(SimpleTestCase):
 # ─────────────────────────────────────────────────────────────────────────
 
 class RemovedCapabilityTests(SimpleTestCase):
+    """Capabilities that were removed and must not come back by any door.
+
+    `list_files` / `read_file` / `write_file` / `delete_file` used to be on this
+    list. They are not any more, and the distinction is the whole point: those
+    names reached the *host* filesystem from a chat turn. The tools carrying
+    those names now address rows in the caller's own Folder/Document tree
+    through `inference/vfs.py`, cannot name a path on any disk, and are
+    unreachable from chat at all. `AgentFileToolsAreNotChatToolsTests` pins the
+    half of the original decision that is still true.
+    """
+
     REMOVED = [
-        "execute_shell", "execute_python_code", "list_files", "read_file",
-        "write_file", "delete_file", "run_workflow", "list_workflows",
+        "execute_shell", "execute_python_code", "run_workflow", "list_workflows",
         "suggest_workflow",
         # Screen control belongs to the canvas agent. Chat's copies drove the
         # user's UI through an action channel that no longer exists, and
@@ -434,3 +444,39 @@ class RemovedCapabilityTests(SimpleTestCase):
         for gone in self.REMOVED:
             res = async_to_sync(execute_tool)(gone, {}, {"user_id": 1})
             self.assertIn("not recognized", res)
+
+
+class AgentFileToolsAreNotChatToolsTests(SimpleTestCase):
+    """The file tools exist, and chat cannot reach them.
+
+    This replaced `list_files` et al. sitting in `REMOVED`. The old assertion
+    was "these names do not exist"; the true one is "these names are not a chat
+    capability" — the host-filesystem tools they used to name are still gone,
+    and nothing here brings them back.
+    """
+
+    FILE_TOOLS = ["list_files", "read_file", "write_file", "make_directory",
+                  "delete_file"]
+
+    def test_not_offered_in_chat(self):
+        # `requires="files"` is unmet in chat by construction: a chat turn has
+        # no fileAccess setting, so there is no scope to build one from.
+        offered = {
+            t["function"]["name"]
+            for t in async_to_sync(get_available_tools)(None)
+        }
+        for name in self.FILE_TOOLS:
+            self.assertNotIn(name, offered)
+
+    def test_refuse_without_a_scope(self):
+        # Reachable through `execute_tool` — they are ordinary registrations —
+        # but with no scope in context they decline instead of defaulting to
+        # one. A default here would be access nobody granted.
+        for name in self.FILE_TOOLS:
+            res = async_to_sync(execute_tool)(name, {"path": "x"}, {"user_id": 1})
+            self.assertIn("no file access", res.lower())
+
+    def test_reachable_only_through_the_fileOps_grant(self):
+        from agents.agent.runtime import GRANT_TOOLS
+
+        self.assertEqual(set(GRANT_TOOLS["fileOps"]), set(self.FILE_TOOLS))

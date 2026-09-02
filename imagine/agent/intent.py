@@ -50,28 +50,35 @@ def _capabilities_summary(caps: Dict[str, List[Dict[str, Any]]]) -> str:
     Capped per modality because the live catalog runs to 40+ image models and
     23 video models; the list is already ordered with the recommended ones
     first, so the cap trims the tail rather than the models worth choosing.
+
+    Reduced to 12 per modality and stripped of display names / long extras to
+    keep the router prompt under ~4k tokens. The previous shape sent 20 per
+    modality with full names plus 6 aspect_ratios + 6 resolutions each — ~5k
+    tokens before the user's message — which pushed the model past the 98s
+    litellm timeout and produced a 49k truncated JSON that failed parsing.
+    The router only needs the ids to choose; parameter validation happens in
+    `_constrain_params` post-router.
     """
     lines: List[str] = []
     for kind in ("image", "video", "audio"):
         items = caps.get(kind) or []
-        shown = items[:20]
+        # 12 is enough to cover RECOMMENDED plus a few alternates; the router
+        # can still fall back to defaults for anything not shown.
+        shown = items[:12]
         lines.append(
             f"\n## {kind.upper()} models ({len(items)} available"
             + (f", showing first {len(shown)}" if len(items) > len(shown) else "")
             + ")"
         )
         for m in shown:
-            extras = []
-            if m.get("aspect_ratios"):
-                extras.append(f"ar={','.join(map(str, m['aspect_ratios'][:6]))}")
-            if m.get("resolutions"):
-                extras.append(f"res={','.join(map(str, m['resolutions'][:6]))}")
-            if m.get("durations"):
-                extras.append(f"dur={','.join(map(str, m['durations'][:8]))}")
-            if m.get("voices"):
-                extras.append(f"voices={','.join(m['voices'][:6])}")
-            extra = " " + " ".join(extras) if extras else ""
-            lines.append(f"- {m['id']}: {m.get('name', '')}{extra}")
+            # Only the id matters for the decision; extras are trimmed to one
+            # token each to hint at capabilities without bloating the prompt.
+            hint = ""
+            if kind == "video" and m.get("durations"):
+                hint = f" durations={','.join(map(str, m['durations'][:4]))}"
+            elif kind == "audio" and m.get("voices"):
+                hint = f" voices={len(m['voices'])}"
+            lines.append(f"- {m['id']}{hint}")
     return "\n".join(lines)
 
 
@@ -175,8 +182,55 @@ def _router_messages(message: str, caps: Dict[str, List[Dict[str, Any]]],
     ]
 
 
+def _extract_json(text: str) -> Dict[str, Any]:
+    """Parse JSON from a model reply that may be wrapped in markdown fences.
+
+    The router is instructed to return bare JSON, but litellm / OpenRouter
+    models occasionally wrap it in ```json``` fences or prepend commentary
+    when the prompt is long. We strip fences and fall back to extracting the
+    first {...} block before giving up — the caller turns any failure into
+    the heuristic fallback, so robustness here directly reduces `intent LLM
+    call failed` log spam and the 98 s user wait observed in prod.
+    """
+    import re
+
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("empty router response")
+
+    # Strip common markdown fencing: ```json\n{...}\n``` or ```\n{...}\n```
+    if raw.startswith("```"):
+        # Remove opening fence line
+        raw = re.sub(r"^```(?:json)?\s*\n?", "", raw, flags=re.IGNORECASE)
+        # Remove trailing fence
+        raw = re.sub(r"\n?```\s*$", "", raw)
+
+    # Direct parse first
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return obj
+        raise ValueError("intent JSON was not an object")
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: extract first balanced-looking { ... } block (greedy last })
+    m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+    if m:
+        try:
+            obj = json.loads(m.group())
+            if isinstance(obj, dict):
+                return obj
+            raise ValueError("intent JSON was not an object")
+        except json.JSONDecodeError as e:
+            # Include snippet for diagnostics before falling through
+            logger.warning("Router JSON extract failed (len=%d, snippet=%.200s): %s", len(text), raw[:200], e)
+
+    raise ValueError(f"could not parse router JSON (len={len(text)})")
+
+
 def _ask_router(model_id: str, messages: List[Dict[str, str]],
-                api_key: Optional[str]) -> Dict[str, Any]:
+                 api_key: Optional[str]) -> Dict[str, Any]:
     """Call the router model and return its parsed JSON object.
 
     Raises on anything that is not a JSON object -- the caller turns every
@@ -191,16 +245,20 @@ def _ask_router(model_id: str, messages: List[Dict[str, str]],
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
         "timeout": 30,
+        # Bound the completion so a model that tries to echo the catalog is
+        # cut short rather than streaming 49k of truncated JSON.
+        "max_tokens": 800,
     }
     if api_key and model_id.startswith("openrouter/"):
         kwargs["api_key"] = api_key
     resp = litellm.completion(**kwargs)
-    intent = json.loads(resp.choices[0].message.content or "{}")
-    # Syntactically valid but non-object JSON (`[]`, `"video"`, `123`) used to
-    # crash on `.setdefault` and 500 the endpoint.
-    if not isinstance(intent, dict):
-        raise ValueError("intent JSON was not an object")
-    return intent
+    content = resp.choices[0].message.content or "{}"
+    # Defensive: if the model returned >10k, it's not the shape we asked for;
+    # log and let the extractor attempt a rescue rather than feeding a huge
+    # truncated string straight to json.loads.
+    if len(content) > 10000:
+        logger.warning("Router returned large payload (%d chars, truncated to 500): %.500s", len(content), content[:500])
+    return _extract_json(content)
 
 
 def _with_defaults(intent: Dict[str, Any], message: str) -> Dict[str, Any]:
@@ -260,6 +318,23 @@ def classify(
     caps = capabilities_for(user)
     pinned_kind = _pinned_kind(caps, preferred_model)
     model_id = getattr(settings, "IMAGINE_AGENT_MODEL", "openrouter/openai/gpt-4o-mini")
+
+    # Short-circuit the LLM entirely when the user already pinned a model:
+    # the modality and model are decided, only the prompt needs refining and
+    # params defaulting. This avoids a 30 s LLM call on the 50% of agent
+    # requests where the user picked a model in the composer.
+    if pinned_kind and preferred_model:
+        return {
+            "type": pinned_kind,
+            "model": preferred_model,
+            "prompt": message,
+            "params": {},
+            "confidence": 0.85,
+            "missing_required": [],
+            "clarifying_question": None,
+            "estimated_cost_usd": 0.05,
+            "reasoning": "pinned model short-circuit (no router LLM)",
+        }
 
     try:
         intent = _ask_router(

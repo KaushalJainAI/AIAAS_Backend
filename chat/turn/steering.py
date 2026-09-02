@@ -12,6 +12,14 @@ is no interrupt, no resume protocol, no `Command`, and `run_turn` is untouched
 — which also means the pause-detection seam in `run_turn` still has exactly one
 reason to fire, instead of two it would have to tell apart.
 
+The slot carries a second thing for the same reason: the run's autonomy level.
+Both are messages from a watching human into a loop that is already going, both
+have to land between node boundaries, and both would otherwise need their own
+transport — so they share this one. They differ in one way that matters, and it
+is why `autonomy` is not simply an `extras` key: a steer is *drained* when
+delivered, because it is an instruction to act on once, while a mode is a
+standing answer that has to survive every subsequent batch.
+
 Scope: in-process and single-slot, like `ChatRun` and the `MemorySaver`
 checkpointer next to it. Production runs one ASGI process, so that is the whole
 application; under multiple workers a steer would have to reach the worker
@@ -38,6 +46,13 @@ class _Slot:
     replaced: int = 0
     delivered: int = 0
     extras: dict[str, Any] = field(default_factory=dict)
+    #: An autonomy level the user chose *while the run was going*, or ''.
+    #:
+    #: Unlike `message` this is not drained on read. A steer is an instruction
+    #: to act on once; a mode is a standing answer to "must I ask?", and one
+    #: that evaporated after the next tool call would leave the user approving
+    #: again three seconds after saying "stop asking".
+    autonomy: str = ''
 
 
 _slots: dict[str, _Slot] = {}
@@ -89,6 +104,53 @@ def take(key: str) -> str:
 def pending(key: str) -> bool:
     slot = _slots.get(key)
     return bool(slot and slot.message)
+
+
+#: Levels a run can be switched to while it is going. `plan` is deliberately
+#: absent: which tools exist is decided once, when the toolbox is built and
+#: handed to the frozen `TurnContext`, so "switch to plan" mid-run could only
+#: ever gate the mutating tools rather than withdraw them — which is `review`
+#: wearing the wrong name. A run that should not have been allowed to act is
+#: stopped, not relabelled.
+SWITCHABLE = frozenset({'review', 'ask', 'auto', 'full'})
+
+
+def set_autonomy(key: str, level: str) -> bool:
+    """
+    Change how much run `key` asks, from now on.
+
+    This is the mid-run half of the autonomy setting, and it exists because the
+    other half is build-time configuration: `SubAgent.guardrails['autonomy']`
+    is chosen before anyone knows what the run will actually do. A person
+    watching a run pause for the sixth time on the same recycled file write
+    could otherwise only stop it and edit the agent — so in practice they set
+    `full` once, in advance, and stopped being asked about anything ever.
+
+    Takes effect at the next `tools_node` pass, which reads it per batch rather
+    than capturing it. Deliberately *not* retroactive: a call already paused
+    stays paused, because the loosened setting arrived after the question and
+    answering a question the user did not answer is how consent gets laundered.
+    """
+    if level not in SWITCHABLE:
+        return False
+    slot = _slots.get(key)
+    if slot is None:
+        _slots[key] = _Slot(autonomy=level)
+    else:
+        slot.autonomy = level
+    logger.info('[Steer] Autonomy for %s set to %s', key, level)
+    return True
+
+
+def autonomy(key: str) -> str:
+    """The mid-run autonomy override for `key`, or '' if the user set none.
+
+    A plain dict lookup, so `tools_node` can afford to consult it on every
+    batch of every run — which is what makes the change take effect without a
+    resume protocol.
+    """
+    slot = _slots.get(key)
+    return slot.autonomy if slot else ''
 
 
 def stats(key: str) -> dict[str, int]:

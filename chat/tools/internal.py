@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
         }
     },
     sensitive=True,
+    effect="irreversible",
 )
 async def call_internal_api(args: Dict, context: Dict) -> str:
     from asgiref.sync import sync_to_async

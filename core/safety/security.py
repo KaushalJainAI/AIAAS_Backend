@@ -237,59 +237,6 @@ class InputSanitizer:
             )
 
 
-class ContentPolicyEnforcer:
-    """
-    Enforce content policies beyond prompt injection.
-    
-    Checks for:
-    - Excessive repetition (spam detection)
-    - Suspicious encoding patterns
-    - Policy violations
-    """
-    
-    MAX_REPETITION_RATIO = 0.5  # Max 50% repeated characters/words
-    
-    def check_repetition(self, text: str) -> bool:
-        """Check if text has excessive repetition (potential spam)."""
-        if len(text) < 50:
-            return True
-        
-        # Check character repetition
-        char_counts = {}
-        for char in text.lower():
-            char_counts[char] = char_counts.get(char, 0) + 1
-        
-        max_char_ratio = max(char_counts.values()) / len(text)
-        if max_char_ratio > self.MAX_REPETITION_RATIO:
-            return False
-        
-        # Check word repetition
-        words = text.lower().split()
-        if len(words) > 10:
-            word_counts = {}
-            for word in words:
-                word_counts[word] = word_counts.get(word, 0) + 1
-            
-            max_word_ratio = max(word_counts.values()) / len(words)
-            if max_word_ratio > self.MAX_REPETITION_RATIO:
-                return False
-        
-        return True
-    
-    def check_encoding_attack(self, text: str) -> bool:
-        """Check for encoding-based attacks."""
-        # Check for excessive escape sequences
-        escape_count = text.count('\\')
-        if escape_count > len(text) * 0.1:  # More than 10% escapes
-            return False
-        
-        # Check for null bytes (shouldn't appear in text)
-        if '\x00' in text:
-            return False
-        
-        return True
-
-
 # Singleton instance for easy access
 _default_sanitizer: Optional[InputSanitizer] = None
 
@@ -333,7 +280,6 @@ class SensitiveDataFilter(logging.Filter):
 # ============================================================
 
 from functools import lru_cache
-from django.conf import settings as _django_settings
 
 # ======================== Secret Patterns ========================
 
@@ -450,160 +396,9 @@ class LogSanitizer:
         return result
 
 
-# ======================== Security Headers ========================
-
-def get_security_headers() -> dict[str, str]:
-    """Get recommended security headers for responses."""
-    return {
-        'X-Content-Type-Options': 'nosniff',
-        'X-XSS-Protection': '1; mode=block',
-        'X-Frame-Options': 'DENY',
-        'Referrer-Policy': 'strict-origin-when-cross-origin',
-        'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
-        'Content-Security-Policy': (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: https:; "
-            "font-src 'self'; "
-            "connect-src 'self' wss: https:; "
-            "frame-ancestors 'none';"
-        ),
-    }
-
-
-def get_cors_settings() -> dict[str, any]:
-    """Get CORS configuration."""
-    allowed_origins = getattr(_django_settings, 'CORS_ALLOWED_ORIGINS', [
-        'http://localhost:3000',
-        'http://localhost:5173',
-        'http://127.0.0.1:3000',
-        'http://127.0.0.1:5173',
-    ])
-    
-    return {
-        'CORS_ALLOWED_ORIGINS': allowed_origins,
-        'CORS_ALLOW_CREDENTIALS': True,
-        'CORS_ALLOW_METHODS': ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        'CORS_ALLOW_HEADERS': [
-            'accept', 'accept-encoding', 'authorization', 'content-type',
-            'dnt', 'origin', 'user-agent', 'x-csrftoken',
-            'x-requested-with', 'x-api-key',
-        ],
-        'CORS_EXPOSE_HEADERS': [
-            'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
-        ],
-        'CORS_MAX_AGE': 86400,  # 24 hours
-    }
-
-
-def get_cookie_settings() -> dict[str, any]:
-    """Get secure cookie settings."""
-    is_production = not getattr(_django_settings, 'DEBUG', True)
-    
-    return {
-        'SESSION_COOKIE_SECURE': is_production,
-        'SESSION_COOKIE_HTTPONLY': True,
-        'SESSION_COOKIE_SAMESITE': 'Lax',
-        'SESSION_COOKIE_AGE': 86400 * 7,  # 7 days
-        'CSRF_COOKIE_SECURE': is_production,
-        'CSRF_COOKIE_HTTPONLY': True,
-        'CSRF_COOKIE_SAMESITE': 'Lax',
-    }
-
-
-# ======================== Abuse Detection ========================
-
-class AbuseDetector:
-    """
-    Detects and blocks abusive behavior patterns.
-    
-    Tracks:
-    - Failed login attempts
-    - Rate limit violations
-    - Suspicious request patterns
-    """
-    
-    def __init__(self):
-        # In-memory storage (use Redis in production)
-        self._failed_logins: dict[str, list] = {}
-        self._rate_violations: dict[str, int] = {}
-        self._blocked_ips: set[str] = set()
-        
-        # Thresholds
-        self.max_failed_logins = 5
-        self.max_rate_violations = 10
-        self.block_duration_hours = 24
-    
-    def record_failed_login(self, ip: str, user_identifier: str = "") -> bool:
-        """Record a failed login attempt. Returns True if IP should be blocked."""
-        from datetime import datetime, timedelta
-        
-        key = ip
-        now = datetime.utcnow()
-        
-        if key not in self._failed_logins:
-            self._failed_logins[key] = []
-        
-        # Remove old attempts (last hour)
-        cutoff = now - timedelta(hours=1)
-        self._failed_logins[key] = [
-            t for t in self._failed_logins[key] if t > cutoff
-        ]
-        
-        # Add new attempt
-        self._failed_logins[key].append(now)
-        
-        # Check threshold
-        if len(self._failed_logins[key]) >= self.max_failed_logins:
-            self.block_ip(ip)
-            return True
-        
-        return False
-    
-    def record_rate_violation(self, ip: str) -> bool:
-        """Record a rate limit violation. Returns True if IP should be blocked."""
-        self._rate_violations[ip] = self._rate_violations.get(ip, 0) + 1
-        
-        if self._rate_violations[ip] >= self.max_rate_violations:
-            self.block_ip(ip)
-            return True
-        
-        return False
-    
-    def block_ip(self, ip: str) -> None:
-        """Block an IP address."""
-        self._blocked_ips.add(ip)
-        logger.warning(f"Blocked IP due to abuse: {ip}")
-    
-    def unblock_ip(self, ip: str) -> None:
-        """Unblock an IP address."""
-        self._blocked_ips.discard(ip)
-    
-    def is_blocked(self, ip: str) -> bool:
-        """Check if IP is blocked."""
-        return ip in self._blocked_ips
-    
-    def get_blocked_ips(self) -> list[str]:
-        """Get list of blocked IPs."""
-        return list(self._blocked_ips)
-
-
 # ======================== Global Instances ========================
-
-_log_sanitizer: LogSanitizer | None = None
-_abuse_detector: AbuseDetector | None = None
-
 
 @lru_cache(maxsize=1)
 def get_log_sanitizer() -> LogSanitizer:
     """Get global log sanitizer."""
     return LogSanitizer()
-
-
-def get_abuse_detector() -> AbuseDetector:
-    """Get global abuse detector."""
-    global _abuse_detector
-    if _abuse_detector is None:
-        _abuse_detector = AbuseDetector()
-    return _abuse_detector

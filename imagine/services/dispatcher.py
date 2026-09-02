@@ -9,6 +9,10 @@ from ..models import Generation
 from .events import broadcast_generation
 from .openrouter import MissingOpenRouterCredentialError, OpenRouterService
 
+# Document persistence is imported lazily inside call sites to avoid
+# circular inference -> imagine imports at module load; but the name is
+# needed here for the post-completion hook.
+
 logger = logging.getLogger(__name__)
 
 
@@ -121,6 +125,13 @@ def run_image_generation(generation: Generation, service: OpenRouterService) -> 
                 "cost_usd": result["cost"],
             }
     generation.save()
+    if generation.status == "completed" and generation.output_url:
+        try:
+            from .documents import persist_generation_as_document
+
+            persist_generation_as_document(generation)
+        except Exception:
+            logger.exception("Failed to persist image generation %s as document", generation.id)
 
 
 def run_generation(generation: Generation) -> Generation:
@@ -174,6 +185,13 @@ def run_generation(generation: Generation) -> Generation:
                 generation.status = "completed"
                 generation.output_url = result["url"]
             generation.save()
+            if generation.status == "completed" and generation.output_url:
+                try:
+                    from .documents import persist_generation_as_document
+
+                    persist_generation_as_document(generation)
+                except Exception:
+                    logger.exception("Failed to persist audio generation %s as document", generation.id)
 
         else:
             generation.status = "failed"

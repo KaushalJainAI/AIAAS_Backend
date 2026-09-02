@@ -147,6 +147,15 @@ class CuratedPackageTests(TestCase):
         "@modelcontextprotocol/server-slack": 8,
         "@notionhq/notion-mcp-server": 24,
         "@tokenizin/mcp-npx-fetch": 4,
+        # Verified 2026-08-31 with a real MCP handshake (initialize +
+        # tools/list) and only CLIENT_ID / CLIENT_SECRET / REFRESH_TOKEN in the
+        # environment. `0011` recorded this package as hanging; that reading
+        # came from running the binary bare, which every stdio server does.
+        "@shinzolabs/gmail-mcp": 64,
+        # Verified 2026-08-31 by handshake. Both carry credential *files*
+        # rather than env vars — see `credential_file_map`.
+        "@isaacphi/mcp-gdrive": 4,        # Drive and Sheets share this package
+        "@cocal/google-calendar-mcp": 13,
     }
 
     # Packages proven not to exist or not to start. A row must never point here.

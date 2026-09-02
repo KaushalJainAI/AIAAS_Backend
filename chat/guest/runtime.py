@@ -5,11 +5,11 @@ The guest pipeline is intentionally narrow:
   - One shared Django user (settings.GUEST_USER_EMAIL) owns every guest
     ChatSession so existing FK constraints stay intact.
   - One provider and one model, pinned in code (GUEST_PROVIDER / GUEST_MODEL):
-    OpenRouter serving its free-models router. A guest has no picker and no
+    NVIDIA NIM serving Nemotron 3.5 Lightning. A guest has no picker and no
     credential of their own, so there is nothing for a second model to be
     chosen by — and an env knob that could point the demo somewhere else is a
     way for the pinning to stop being true without anyone noticing.
-  - The key is the platform OpenRouter key, resolved through the same
+  - The key is the platform NVIDIA key, resolved through the same
     `credentials.resolution.platform_api_key` funnel every other platform-paid
     call uses, bypassing the per-user credential vault.
   - Streaming uses the same SSE format the frontend already handles for the
@@ -29,17 +29,20 @@ from llm.handlers.llm_base import ChatChunkParser, iter_sse_chunks
 
 logger = logging.getLogger(__name__)
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
-# The whole of guest mode's model policy. `openrouter/free` is OpenRouter's
-# free-models router: it picks a currently-available zero-cost model per
-# request, so an anonymous demo costs the platform nothing and survives any one
-# free model being withdrawn — the failure that a single pinned model name
-# turns into a 410 and an apology nobody can act on.
+# The whole of guest mode's model policy. Nemotron 3.5 Lightning is free to
+# call on NIM, so an anonymous demo costs the platform nothing beyond the
+# platform key it already holds for authenticated fallback.
 # Pinned rather than read from settings: "guests only get this model" has to be
 # a property of the code, not of whichever .env the box happens to have.
-GUEST_PROVIDER = "openrouter"
-GUEST_MODEL = "openrouter/free"
+#
+# A single pinned name is one retirement away from a 410 the guest cannot act
+# on, which is exactly what happened to the previous pin — so the 410 branch in
+# `stream_guest_chat` logs the provider body for the operator and tells the
+# visitor to sign in, rather than rendering a model-voiced apology.
+GUEST_PROVIDER = "nvidia"
+GUEST_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 # Whitelist of tools a guest is allowed to invoke from the agentic loop.
 GUEST_ALLOWED_TOOLS: frozenset[str] = frozenset({
@@ -123,7 +126,7 @@ async def stream_guest_chat(
     max_tokens: int = 4096,
 ) -> AsyncIterator[dict]:
     """
-    Stream a chat completion from OpenRouter, always on GUEST_MODEL.
+    Stream a chat completion from NVIDIA NIM, always on GUEST_MODEL.
 
     There is deliberately no `model` argument: a caller able to name a model is
     a caller able to take guest mode off its one pinned model.
@@ -159,17 +162,11 @@ async def stream_guest_chat(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    # OpenRouter attributes usage to the calling app by these two headers. They
-    # are optional to the API and deliberately best-effort here: a missing
-    # PUBLIC_URL must not stop an anonymous visitor getting an answer.
-    if referer := getattr(settings, "PUBLIC_URL", "") or "":
-        headers["HTTP-Referer"] = referer
-    headers["X-Title"] = "AIAAS guest chat"
 
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             async with client.stream(
-                "POST", f"{OPENROUTER_BASE_URL}/chat/completions",
+                "POST", f"{NIM_BASE_URL}/chat/completions",
                 headers=headers, json=payload,
             ) as response:
                 if response.status_code == 429:

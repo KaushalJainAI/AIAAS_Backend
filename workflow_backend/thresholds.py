@@ -64,7 +64,29 @@ READ_URL_CHAR_LIMIT = 15_000  # Regular read_url tool character limit
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 SEARCH_TOP_K = 5
-SEARCH_MIN_SCORE = 0.3
+#: Cosine floor a chunk must clear to be returned at all.
+#:
+#: Retuned 0.30 → 0.15 on 2026-09-01, when the embedder moved to
+#: `nvidia/nemotron-3-embed-1b` (the previous model reached end of life). The
+#: old value was doubly stale: it was calibrated for a different model, and it
+#: was calibrated against scores `engine.py` computed *wrongly* — it squared an
+#: already-squared FAISS L2 distance, so every cosine it compared against this
+#: floor was understated.
+#:
+#: Measured against a real indexed chunk with the current model:
+#:
+#:     relevant queries    0.281 – 0.496   ("what was revenue" is the 0.281)
+#:     irrelevant queries  0.002 – 0.021   ("how do I bake sourdough bread")
+#:
+#: The two bands are more than an order of magnitude apart, and 0.30 sat
+#: *inside* the relevant one — a genuinely on-topic question returned nothing.
+#: 0.15 is ~7× the loudest irrelevant match and well under the quietest
+#: relevant one, so it separates the bands instead of splitting one.
+#:
+#: Re-measure this when the embedding model changes. Absolute cosine ranges are
+#: a property of the model, not of the corpus, and a floor carried across a
+#: model swap is exactly how retrieval goes quiet without erroring.
+SEARCH_MIN_SCORE = 0.15
 
 # ==================== File System Limits ====================
 # Shape caps for the per-user document tree (inference/filesystem.py). These
@@ -82,6 +104,25 @@ MAX_FOLDERS_PER_USER = 2_000
 FOLDER_CHILDREN_LIMIT = 500
 #: Ids accepted by one move or restore call.
 MAX_MOVE_BATCH = 200
+
+# Caps on what one agent run may do to that tree through the virtual filesystem
+# (inference/vfs.py). Separate from the shape caps above because they bound a
+# *run's* blast radius rather than the tree's shape: a human clicking "new
+# folder" is rate-limited by being a human, and an agent in a loop is not.
+#: Characters one `read_file` call returns. Paging is by explicit offset, and a
+#: truncated read says so and names the offset to resume from — a silent trim
+#: would let a model summarise half a document as if it were the whole one.
+AGENT_FILE_READ_CHARS = 30_000
+#: Characters one `write_file` call may store. Well under DOCUMENT_EXTRACT_CAP:
+#: a model emitting 200k characters has lost the plot, and the cheap failure is
+#: the refusal.
+AGENT_FILE_WRITE_CHARS = 200_000
+#: Entries (folders + documents) one `list_files` call returns.
+AGENT_FILE_LIST_LIMIT = 200
+#: Root-level folder under which `fileAccess='scoped'` agents get their homes.
+#: A real name rather than a hidden one: these files belong to the user, and a
+#: tree they cannot see in the UI is a tree they cannot clean up.
+AGENT_HOME_ROOT = 'Agents'
 
 # ==================== Execution & Workflow Limits ====================
 DEFAULT_HITL_TIMEOUT_SECONDS = 300  # Human-in-the-loop timeout
@@ -112,6 +153,40 @@ TOOL_OUTPUT_PREVIEW_CHARS = 6_000
 #: transcript is the durable record; this is only the window in which the model
 #: can still go and fetch the rest.
 TOOL_OUTPUT_RETENTION_HOURS = 24
+
+# ==================== Context Curation ====================
+# What keeps a long agent run inside its window. `clamp_input` is the byte guard
+# of last resort and drops whole segments blindly; curation is the deliberate
+# version that runs earlier, keeps a record of what it cut, and can be asked for
+# it back. See `chat/turn/curation.py`.
+#
+# Two marks, not one. Curating a little on every turn would rewrite the request
+# prefix on every single call and destroy provider prefix caching — the same
+# trap the clock-in-the-system-prompt fix documents. So nothing happens until
+# the high mark, and then enough is cut to reach the low mark in one pass; in
+# between, the prefix is byte-identical from turn to turn.
+CONTEXT_HIGH_WATER_RATIO = 0.70   # Of the input budget: start curating
+CONTEXT_LOW_WATER_RATIO = 0.45    # Of the input budget: cut back to here
+#: Never touched, whatever the ratios say. The model has to be able to see what
+#: it just did, or it repeats it.
+CONTEXT_KEEP_RECENT_SEGMENTS = 3
+#: How much of a collapsed tool result survives in the transcript. Enough to
+#: recognise what the result was, never enough to work from — working from it is
+#: what `recall_context` and `read_tool_output` are for.
+CONTEXT_TOOL_RECORD_CHARS = 400
+#: Target length of a recursive summary. Small on purpose: a summary that grows
+#: with the run is just the run again.
+CONTEXT_SUMMARY_TARGET_WORDS = 250
+#: Ceiling on what is fed to the summariser in one pass.
+CONTEXT_SUMMARY_INPUT_CHARS = 48_000
+
+# ==================== Context Recall ====================
+# `recall_context` reads back what curation archived. Capped harder than the
+# window it protects, for the same reason `search_conversation_history` is.
+RECALL_MAX_MATCHES = 3
+RECALL_SNIPPET_CHARS = 1_500
+RECALL_MAX_TOTAL_CHARS = 6_000
+RECALL_SCAN_LIMIT = 200  # Newest archived rows examined per query
 
 # ==================== Response Size Limits ====================
 # DRF's DEFAULT_PAGINATION_CLASS only reaches generic views and viewsets, and
@@ -189,3 +264,59 @@ EVAL_RESULT_ANSWER_CHAR_LIMIT = 16_000
 EVAL_RUN_LIST_LIMIT = 100
 EVAL_RESULT_LIST_LIMIT = 200
 EVAL_REVIEW_QUEUE_LIMIT = 100
+
+# ==================== Agent Time ====================
+# The resource an agent run actually contends for is *wall-clock time*, not CPU
+# and not memory. A run spends almost all of its life awaiting a provider, and
+# while it does so it holds an event-loop slot, a checkpointer thread, a DB
+# connection and a socket — none of which a CPU or memory number could bound,
+# and none of which this deployment could enforce anyway (the sandbox is `exec`
+# on a worker thread inside the Django process; there is no cgroup to hang a
+# quota off). So the knob is seconds, and unlike the two it replaces it is read.
+#
+# Denominated in seconds throughout and shown in minutes, for the same reason
+# the spend cap is stored in rupees: the stored unit should be the one the
+# runtime compares against, so no reader has to remember a conversion.
+DEFAULT_RUN_SECONDS = 15 * 60
+MIN_RUN_SECONDS = 30
+#: The ceiling a user may set. Above this a run is not "long", it is stuck, and
+#: the honest failure is the one that returns partial work while someone is
+#: still watching for it.
+MAX_RUN_SECONDS = 2 * 60 * 60
+
+#: Left for the run to write its answer once the clock is nearly out. The soft
+#: stop fires here rather than at zero: a run killed mid-tool-call has paid for
+#: everything and returns nothing, while one that stops *asking* for tools with
+#: this much left gets to summarise what it found. Withholding tools is exactly
+#: what `max_iterations` already does on its last pass, so the mechanism is
+#: shared rather than invented.
+RUN_WRAPUP_SECONDS = 45
+
+#: Of the parent's *remaining* time, the share one fan-out may consume. Time is
+#: not divided across workers the way money is — concurrent workers do not add
+#: up in wall-clock the way their spend does — so a worker is bounded by a
+#: shared deadline instead. What the reserve buys is the parent's own last turn:
+#: a worker allowed to run until the parent's clock hits zero returns eight
+#: answers into a run with no time left to read them, which is the one outcome
+#: worse than delegating nothing.
+WORKER_DEADLINE_SHARE = 0.8
+#: Below this there is no point starting a worker at all, so the delegation is
+#: refused with a message the model can act on rather than N runs that each die
+#: on their first model call.
+MIN_WORKER_SECONDS = 60
+
+# ==================== Agent Admission ====================
+# What stops one user's runs from being every run on the box. Per-process, so
+# these bound one ASGI worker rather than the cluster — which is the shape of
+# this deployment (a single box) and is stated rather than implied, because a
+# limit that silently means something else at two processes is worse than none.
+#
+# Only *top-level* runs are gated. A delegated worker must never queue behind
+# its own parent: the parent holds a slot while awaiting the worker, so gating
+# the worker on the same semaphore is a deadlock, not a limit.
+MAX_CONCURRENT_RUNS_PER_USER = 3
+MAX_CONCURRENT_RUNS_TOTAL = 12
+#: How long a run waits for a slot before it is refused. Bounded because the
+#: caller already has a 202 and an execution id: a run that waits for ever is
+#: indistinguishable, from the outside, from one that is running.
+ADMISSION_WAIT_SECONDS = 120

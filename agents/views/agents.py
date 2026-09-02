@@ -35,10 +35,20 @@ from skills.models import Skill
 
 from django.utils import timezone
 
+from agents import budget
 from agents.models import SubAgent
 from agents.serializers import SUSPICIOUS_WORKFLOW_NAME_RE
 from agents.spend import rupees_for
-from agents.triggers import is_valid as cron_is_valid, next_run_after
+from workflow_backend.thresholds import (
+    DEFAULT_RUN_SECONDS,
+    MAX_RUN_SECONDS,
+    MIN_RUN_SECONDS,
+)
+from agents.triggers import (
+    is_valid as cron_is_valid,
+    next_run_after,
+    zone_is_valid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,23 +61,54 @@ logger = logging.getLogger(__name__)
 # the user's credentials — see mcp_integration/credential_injector.py.
 TOOL_KEYS = {'codeExecution', 'shell', 'webSearch', 'scrape', 'fileOps', 'rag', 'mcp',
              'subAgents'}
-CONNECTOR_IDS = {'gdrive', 'gmail', 'sheets', 'photos', 'calendar', 'slack'}
-FILE_ACCESS = {'none', 'readonly', 'scoped', 'full'}
+# `connectors` holds `MCPServer` ids, validated against what the user can
+# actually see. It used to be a hardcoded set of six presentation slugs
+# ({'gdrive', 'gmail', 'sheets', 'photos', 'calendar', 'slack'}) that nothing
+# read: it had drifted from the connector catalogue in both directions —
+# `photos` names no server that has ever existed, while Notion and Fetch could
+# not be named at all — and the runtime resolved the whole of `mcp` regardless.
+# A closed list in code cannot work here for the same reason MCP tool names
+# cannot be allow-listed by name: a user's own server is a row, minted after
+# this file was written.
+# Two axes — what may be read, what may be written — collapsed into one field.
+# `read_all_write_own` is the combination the other four cannot express: read
+# the user's whole tree, write only the agent's own home. See inference/vfs.py.
+FILE_ACCESS = {'none', 'readonly', 'scoped', 'read_all_write_own', 'full'}
 TRIGGER_MODES = {'goal', 'maintenance', 'template'}
-AUTONOMY = {'full', 'ask', 'review'}
+# The autonomy ladder, loosest last. `plan` withholds every tool that could
+# change anything, so a run can only look and report; `auto` stops asking about
+# effects the user can undo (a file write lands in their recycle bin) while
+# still stopping on the ones they cannot. The runtime resolves each level into
+# a gate set and a policy — see `agents/agent/runtime.py::AUTONOMY_LADDER`,
+# which is the authority on what each one means.
+AUTONOMY = {'plan', 'review', 'ask', 'auto', 'full'}
 EGRESS = {'none', 'allowlist', 'full'}
 
-# Ceilings on what a single agent may reserve. Not a billing control — a blast
-# radius one, so a typo in a spinner cannot ask for 512 GB.
-MAX_CPU = 8
-MAX_MEMORY_MB = 8192
-MIN_MEMORY_MB = 256
+# What a single run may reserve. `cpu` and `memoryMb` used to live here and are
+# gone (2026-08-29): both were stored, validated, round-tripped to the builder
+# and read by nothing, and the panel said so in an orange "COMING SOON" badge.
+# Neither could have been honoured — `sandbox/safe_execution.py` runs user code
+# on a worker thread inside this process, where there is no cgroup to hang a CPU
+# quota off and no way to cap one thread's RSS — so they were a promise the
+# architecture could not keep. What a run actually contends for is wall-clock
+# time, and `maxRunSeconds` is that, enforced in `agents/budget.py`.
 
 # Autonomy is the agent-level word for the supervision vocabulary the HITL
 # path already reads. Map rather than duplicate, so that path keeps working
 # for agents unchanged.
-AUTONOMY_TO_SUPERVISION = {'full': 'none', 'ask': 'error_only', 'review': 'full'}
-SUPERVISION_TO_AUTONOMY = {v: k for k, v in AUTONOMY_TO_SUPERVISION.items()}
+AUTONOMY_TO_SUPERVISION = {
+    'plan': 'full',
+    'review': 'full',
+    'ask': 'error_only',
+    'auto': 'error_only',
+    'full': 'none',
+}
+# Written out rather than derived by inverting the map above. Five autonomy
+# levels do not fit into three supervision values, so an inversion would pick
+# whichever key happened to be inserted last and call it the answer. These are
+# the deliberate representatives: the loosest level that still means each
+# supervision setting.
+SUPERVISION_TO_AUTONOMY = {'none': 'full', 'error_only': 'ask', 'full': 'review'}
 
 
 class AgentSerializer(serializers.Serializer):
@@ -93,16 +134,16 @@ class AgentSerializer(serializers.Serializer):
     fileAccess = serializers.ChoiceField(choices=sorted(FILE_ACCESS), required=False, default='scoped')
     workdir = serializers.CharField(max_length=255, required=False, default='/workspace')
     venv = serializers.BooleanField(required=False, default=True)
-    cpu = serializers.IntegerField(required=False, default=1, min_value=1, max_value=MAX_CPU)
-    memoryMb = serializers.IntegerField(
-        required=False, default=1024, min_value=MIN_MEMORY_MB, max_value=MAX_MEMORY_MB
-    )
 
     # Tools
     tools = serializers.DictField(child=serializers.BooleanField(), required=False)
 
     # Context it is given
-    connectors = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    # Which connections this agent may reach — `MCPServer` ids, the second axis
+    # to the `mcp` grant just as `fileAccess` is to `fileOps`. Empty means "any
+    # the user has", which is what every agent saved before this was enforced
+    # has; see `agents.agent.runtime.mcp_scope_for`.
+    connectors = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     knowledgeBases = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     skills = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     useOrgContext = serializers.BooleanField(required=False, default=True)
@@ -111,6 +152,13 @@ class AgentSerializer(serializers.Serializer):
     # Invocation
     trigger = serializers.ChoiceField(choices=sorted(TRIGGER_MODES), required=False, default='goal')
     schedule = serializers.CharField(required=False, allow_blank=True, default='')
+    # The zone the cron fields are read in. Defaults to UTC so an agent saved
+    # by an older client keeps firing at exactly the instant it always did —
+    # this is a widening, and a widening that moves existing schedules by five
+    # and a half hours is not one.
+    scheduleTimezone = serializers.CharField(
+        required=False, allow_blank=True, default='UTC',
+    )
     # The gate every unattended caller is checked against. Declared here because
     # `apply` reads `validated_data`, so an undeclared field is silently dropped:
     # `to_config` emitted `allowUnattended`, nothing could ever set it, and a
@@ -124,11 +172,33 @@ class AgentSerializer(serializers.Serializer):
     notifyOnHitl = serializers.BooleanField(required=False, default=True)
     reviewAgent = serializers.BooleanField(required=False, default=False)
     spendCapRupees = serializers.IntegerField(required=False, default=500, min_value=0)
+    # The other half of the blast radius, and the one that was missing. The
+    # spend cap is monthly and per agent: it says nothing about how long a
+    # single run may hold an event-loop slot, a checkpointer and a DB
+    # connection, which is what actually decides whether everyone else's runs
+    # get served. Seconds because that is the unit the runtime compares
+    # against; the builder shows minutes.
+    maxRunSeconds = serializers.IntegerField(
+        required=False, default=DEFAULT_RUN_SECONDS,
+        min_value=MIN_RUN_SECONDS, max_value=MAX_RUN_SECONDS,
+    )
     # The knob the design note flagged as missing: an agent that can run code but
     # cannot reach the network is a very different thing to grant a stranger.
     egress = serializers.ChoiceField(choices=sorted(EGRESS), required=False, default='none')
 
     # Context lifecycle
+    #: Which model folds the run's earlier steps when the window fills. Empty
+    #: means the platform default (`CONTEXT_SUMMARY_MODEL`), which is a small
+    #: NVIDIA model the platform holds a key for — so the fold works for a user
+    #: who has connected nothing. Free-form rather than a choice field for the
+    #: same reason `model` is: the catalogue lives in `AIModel` and a hardcoded
+    #: enum here would go stale the first time a provider retires a name.
+    summaryModel = serializers.CharField(
+        required=False, allow_blank=True, default='', max_length=200
+    )
+    summaryProvider = serializers.CharField(
+        required=False, allow_blank=True, default='', max_length=30
+    )
     recursiveContext = serializers.BooleanField(required=False, default=True)
     compaction = serializers.BooleanField(required=False, default=True)
     indexing = serializers.BooleanField(required=False, default=True)
@@ -161,10 +231,26 @@ class AgentSerializer(serializers.Serializer):
         return value
 
     def validate_connectors(self, value):
-        unknown = set(value) - CONNECTOR_IDS
+        """Reject any connection the caller cannot see.
+
+        The mirror of `_owned_ids`, but it cannot use it: a curated connector is
+        a row with `user IS NULL` that everyone can see, so filtering on
+        `user=request.user` would reject every connection the platform ships and
+        accept only the user's own. `visible_server_ids_sync` is the same
+        predicate the runtime resolves through, which is the point — a selection
+        the builder accepts has to be one the toolbox will honour.
+        """
+        from mcp_integration.client import visible_server_ids_sync
+
+        ids = sorted(set(value))
+        if not ids:
+            return []
+        unknown = set(ids) - visible_server_ids_sync(self.context['request'].user.id)
         if unknown:
-            raise serializers.ValidationError(f"Unknown connectors: {', '.join(sorted(unknown))}.")
-        return sorted(set(value))
+            raise serializers.ValidationError(
+                f"Unknown connections: {', '.join(str(i) for i in sorted(unknown))}."
+            )
+        return ids
 
     def validate_workdir(self, value):
         # The workdir is handed to the sandbox as a path. Traversal out of it
@@ -203,14 +289,31 @@ class AgentSerializer(serializers.Serializer):
         # silent no-op the user discovers a week later.
         trigger = attrs.get('trigger', 'goal')
         schedule = (attrs.get('schedule') or '').strip()
+        tz = (attrs.get('scheduleTimezone') or 'UTC').strip() or 'UTC'
+        if not zone_is_valid(tz):
+            raise serializers.ValidationError(
+                {'scheduleTimezone': f'"{tz}" is not an IANA timezone name, '
+                                     f'e.g. "Asia/Kolkata".'}
+            )
+        attrs['scheduleTimezone'] = tz
+
         if trigger == 'maintenance':
             if not schedule:
                 raise serializers.ValidationError(
                     {'schedule': 'A maintenance agent needs a schedule, otherwise it never runs.'}
                 )
+        if schedule:
             if not cron_is_valid(schedule):
                 raise serializers.ValidationError(
                     {'schedule': 'Expected five cron fields, e.g. "0 9 * * 1".'}
+                )
+            # Valid syntax is not the same as a schedule that ever comes round;
+            # `0 0 30 2 *` parses and never fires. Caught here rather than left
+            # as a NULL `next_due_at` nobody can interpret.
+            if next_run_after(schedule, timezone.now(), tz) is None:
+                raise serializers.ValidationError(
+                    {'schedule': f'"{schedule}" has no next run — check the day '
+                                 f'and month fields.'}
                 )
 
         # Keyed off the schedule, not the trigger mode: `sync_schedule` creates
@@ -247,10 +350,12 @@ class AgentSerializer(serializers.Serializer):
         ctx = agent.agent_context or {}
         settings_ = agent.runtime_settings or {}
         # The cron lives on a `Trigger` row, because the schedule sweep queries
-        # `next_due_at` across every user.
-        schedule = next(
-            (t for t in agent.triggers.all() if t.mode == 'schedule'), None,
-        )
+        # `next_due_at` across every user. Only the *builder's* row round-trips
+        # through this flat field: an agent may now carry several schedules, and
+        # reading back whichever happened to sort first would let a save from
+        # this screen overwrite one added on the Schedules page.
+        triggers_ = [t for t in agent.triggers.all() if t.mode == 'schedule']
+        schedule = next((t for t in triggers_ if t.origin == 'builder'), None)
         workflow = agent  # local alias; the remaining lines read column-wise
         return {
             'id': agent.id,
@@ -262,8 +367,6 @@ class AgentSerializer(serializers.Serializer):
             'fileAccess': sandbox.get('fileAccess', 'scoped'),
             'workdir': sandbox.get('workdir', '/workspace'),
             'venv': sandbox.get('venv', True),
-            'cpu': sandbox.get('cpu', 1),
-            'memoryMb': sandbox.get('memoryMb', 1024),
             'tools': {k: bool((workflow.tool_grants or {}).get(k, False)) for k in sorted(TOOL_KEYS)},
             'connectors': ctx.get('connectors', []),
             'knowledgeBases': ctx.get('knowledgeBases', []),
@@ -272,12 +375,23 @@ class AgentSerializer(serializers.Serializer):
             'useEnvironment': ctx.get('useEnvironment', False),
             'trigger': settings_.get('invocationMode', 'goal'),
             'schedule': schedule.cron if schedule else '',
+            'scheduleTimezone': schedule.tz if schedule else 'UTC',
+            # How many *other* schedules this agent has, so the builder can say
+            # so and link out rather than pretending its one field is the whole
+            # picture.
+            'extraSchedules': max(len(triggers_) - (1 if schedule else 0), 0),
             'allowUnattended': agent.allow_unattended,
             'autonomy': guards.get('autonomy', 'ask'),
             'notifyOnHitl': guards.get('notifyOnHitl', True),
             'reviewAgent': guards.get('reviewAgent', False),
             'spendCapRupees': guards.get('spendCapRupees', 500),
+            # Read through `budget` rather than straight off the dict: an agent
+            # saved before this field existed has no key at all, and every one
+            # of them still has to run.
+            'maxRunSeconds': budget.limit_for(agent),
             'egress': guards.get('egress', 'none'),
+            'summaryModel': settings_.get('summaryModel', ''),
+            'summaryProvider': settings_.get('summaryProvider', ''),
             'recursiveContext': settings_.get('recursiveContext', True),
             'compaction': settings_.get('compaction', True),
             'indexing': settings_.get('indexing', True),
@@ -303,8 +417,6 @@ class AgentSerializer(serializers.Serializer):
             'fileAccess': data.get('fileAccess', 'scoped'),
             'workdir': data.get('workdir', '/workspace'),
             'venv': data.get('venv', True),
-            'cpu': data.get('cpu', 1),
-            'memoryMb': data.get('memoryMb', 1024),
         }
         # Store the full closed set, not just what was sent: an absent key must
         # read as "denied", never as "unset and therefore whatever the runtime
@@ -325,6 +437,9 @@ class AgentSerializer(serializers.Serializer):
             'notifyOnHitl': data.get('notifyOnHitl', True),
             'reviewAgent': data.get('reviewAgent', False),
             'spendCapRupees': data.get('spendCapRupees', 500),
+            'maxRunSeconds': budget.clamp_run_seconds(
+                data.get('maxRunSeconds', DEFAULT_RUN_SECONDS)
+            ),
             'egress': data.get('egress', 'none'),
         }
         if 'allowUnattended' in data:
@@ -333,6 +448,8 @@ class AgentSerializer(serializers.Serializer):
         settings_ = dict(workflow.runtime_settings or {})
         settings_.update({
             'temperature': data.get('temperature', 0.2),
+            'summaryModel': data.get('summaryModel', ''),
+            'summaryProvider': data.get('summaryProvider', ''),
             'recursiveContext': data.get('recursiveContext', True),
             'compaction': data.get('compaction', True),
             'indexing': data.get('indexing', True),
@@ -343,36 +460,59 @@ class AgentSerializer(serializers.Serializer):
 
     @staticmethod
     def sync_schedule(agent: SubAgent, data: dict) -> None:
-        """Reconcile the agent's schedule Trigger with the submitted config.
+        """Reconcile the *builder's* schedule Trigger with the submitted config.
 
         Called after save, because a Trigger needs the agent's primary key.
         A blank schedule removes the row rather than leaving a disabled one:
         a trigger that exists but never fires is the kind of state that shows
         up in a listing and makes someone wonder which of the two is true.
+
+        Scoped to `origin='builder'`. The builder carries one cron field and
+        reconciles it on every PATCH — and the builder PATCHes constantly — so
+        an unscoped reconcile means every save from this screen deletes or
+        overwrites a schedule the user added on the Schedules page. One field
+        cannot be the source of truth for a list; it can only own its own row.
+
+        Rows predating the column need no special case here: migration 0020
+        marks every one of them `builder`, which is what they were — until it
+        landed, `sync_schedule` was the only thing that created a schedule.
+        Guessing at read time instead ("adopt it if it is the only one") would
+        make an agent's single deliberately-manual schedule indistinguishable
+        from a legacy one, and quietly overwrite it.
         """
         from agents.models import Trigger
 
         cron = (data.get('schedule') or '').strip()
-        existing = agent.triggers.filter(mode='schedule').first()
+        tz = (data.get('scheduleTimezone') or 'UTC').strip() or 'UTC'
+        existing = agent.triggers.filter(mode='schedule', origin='builder').first()
 
         if not cron:
             if existing:
                 existing.delete()
             return
 
+        # Armed from the row's own start date where it has one, matching
+        # `views/triggers._arm`, so the builder and the Schedules page cannot
+        # arm the same schedule to two different instants.
+        now = timezone.now()
+
         if existing:
+            after = max(now, existing.starts_at) if existing.starts_at else now
             existing.config = {'cron': cron}
+            existing.timezone = tz
+            existing.origin = 'builder'
             existing.goal = agent.prompt or ''
-            existing.next_due_at = next_run_after(cron, timezone.now())
+            existing.next_due_at = next_run_after(cron, after, tz)
             existing.save(update_fields=[
-                'config', 'goal', 'next_due_at', 'updated_at',
+                'config', 'timezone', 'origin', 'goal', 'next_due_at',
+                'updated_at',
             ])
             return
 
         Trigger.objects.create(
             subagent=agent, mode='schedule', config={'cron': cron},
-            goal=agent.prompt or '',
-            next_due_at=next_run_after(cron, timezone.now()),
+            timezone=tz, origin='builder', goal=agent.prompt or '',
+            next_due_at=next_run_after(cron, now, tz),
         )
 
 

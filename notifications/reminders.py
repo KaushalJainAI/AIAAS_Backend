@@ -230,9 +230,45 @@ def _sweep_escalations(now: datetime) -> int:
 # optional hourly reminder
 # ---------------------------------------------------------------------------
 
-def _sweep_hourly(now: datetime) -> int:
+def pending_for_nudges(user):
+    """Pending requests the user has asked to be *pushed* about.
+
+    Excludes agents whose `guardrails['notifyOnHitl']` is off, and *only* those:
+    the key is absent on every agent saved before it was read, and absent has to
+    mean "yes" — it is the builder's default and the behaviour those agents
+    already have.
+
+    Spelled as three positive alternatives rather than the obvious
+    `exclude(...=False)`, which silently gets this backwards. On a JSON key
+    path, `NOT (key = False)` is SQL NULL when the key is missing, and NULL is
+    not TRUE — so the row is dropped. `exclude` would therefore have silenced
+    exactly the agents that never chose to be silent, which is the one outcome
+    this whole feature exists to avoid.
+
+    The digest deliberately does **not** use this. Escalation and the hourly
+    nudge are pushes, and "don't notify me about this agent" is exactly a
+    request not to be pushed; the digest is a once-a-day roll-up of everything
+    outstanding, and one that hid pending work would be worse than no digest.
+    """
+    from django.db.models import Q
+
     from agents.models import HITLRequest
 
+    return (
+        HITLRequest.objects
+        .filter(user=user, status='pending')
+        .filter(
+            Q(execution__subagent__guardrails__notifyOnHitl=True)
+            # Key absent — an agent that predates the setting.
+            | Q(execution__subagent__guardrails__notifyOnHitl__isnull=True)
+            # No agent behind the run at all (a deleted one, or a historical
+            # row): there is nothing to have opted out, so it still counts.
+            | Q(execution__subagent__isnull=True)
+        )
+    )
+
+
+def _sweep_hourly(now: datetime) -> int:
     from .models import NotificationPreference
 
     cutoff = now - HOURLY_TOLERANCE
@@ -251,7 +287,7 @@ def _sweep_hourly(now: datetime) -> int:
         if _in_quiet_hours(prefs, now):
             continue
 
-        pending = HITLRequest.objects.filter(user=prefs.user, status='pending')
+        pending = pending_for_nudges(prefs.user)
         count = pending.count()
         if not count:
             continue

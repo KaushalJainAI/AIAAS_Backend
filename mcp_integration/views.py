@@ -86,6 +86,14 @@ class MCPServerViewSet(viewsets.ModelViewSet):
                 MCPServerPreference.objects.filter(user=user, enabled=False)
                 .values_list("server_id", flat=True)
             )
+            # Same one-query-for-N reason as the line above: without this,
+            # `oauth_connected` would ask per row.
+            from .models import MCPOAuthToken
+
+            context["oauth_connected_ids"] = set(
+                MCPOAuthToken.objects.filter(user=user)
+                .values_list("server_id", flat=True)
+            )
         return context
 
     def list(self, request, *args, **kwargs):
@@ -140,6 +148,26 @@ class MCPServerViewSet(viewsets.ModelViewSet):
             return Response(
                 {"enabled": "Must be a boolean."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        if enabled and not server.enabled:
+            # A preference can only ever take a connection *away*:
+            # `_visible_servers_queryset` filters `enabled=True` first and then
+            # subtracts the user's "off" choices, so a preference of True over a
+            # platform-disabled row has nothing to add to. Storing it anyway is
+            # what made this endpoint answer 200 with `effective_enabled: false`
+            # — the UI showed a switch, the user flipped it on, and the toast
+            # read "turned off". Refusing says the true thing: this is not a
+            # choice the user has.
+            return Response(
+                {
+                    "error": (
+                        f"'{server.label}' is turned off by the platform and "
+                        f"cannot be switched on."
+                    ),
+                    "code": "server_unavailable",
+                    "detail": server.setup_notes or None,
+                },
+                status=status.HTTP_409_CONFLICT,
             )
         MCPServerPreference.objects.update_or_create(
             user=self.request.user,
@@ -248,6 +276,90 @@ class MCPServerViewSet(viewsets.ModelViewSet):
             logger.exception("Credential validation failed for server %s", server.id)
             return Response({"ok": False, "errors": [_message(e)]})
         return Response({"ok": not errors, "errors": errors})
+
+    # ---- OAuth for remote servers ---------------------------------------
+    #
+    # The redirect URI is supplied by the caller and checked against the same
+    # allowlist the Google flow uses, for the same reason: an unchecked
+    # redirect_uri is an open redirect, and here it would also be handed to a
+    # third-party authorization server as a place to send a code.
+
+    @staticmethod
+    def _check_redirect(redirect_uri: str) -> str | None:
+        """None when allowed, else the reason it is not."""
+        from urllib.parse import urlparse
+
+        from credentials.views import ALLOWED_REDIRECT_ORIGINS
+
+        if not redirect_uri:
+            return "redirect_uri is required."
+        parsed = urlparse(redirect_uri)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in ALLOWED_REDIRECT_ORIGINS:
+            return f"Redirect URI origin is not allowed: {origin}"
+        return None
+
+    @action(detail=True, methods=["get"], url_path="oauth/init")
+    def oauth_init(self, request, pk=None):
+        """Begin an authorization and return the URL to send the user to.
+
+        Discovery, dynamic client registration and PKCE all happen here, so a
+        server that cannot be connected says so now rather than after a round
+        trip through the browser.
+        """
+        from .oauth import MCPOAuthError, begin
+
+        server = self.get_object()
+        redirect_uri = request.query_params.get("redirect_uri", "")
+        if reason := self._check_redirect(redirect_uri):
+            return Response({"error": reason}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            url = begin(server, request.user, redirect_uri)
+        except MCPOAuthError as e:
+            return Response({"error": str(e), "code": "oauth_unavailable"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("OAuth init failed for server %s", server.id)
+            return Response({"error": _message(e), "code": "oauth_failed"},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        return Response({"url": url})
+
+    @action(detail=True, methods=["post"], url_path="oauth/callback")
+    def oauth_callback(self, request, pk=None):
+        """Exchange the code the provider redirected back with."""
+        from .oauth import MCPOAuthError, complete
+
+        server = self.get_object()
+        code = (request.data.get("code") or "").strip()
+        state = (request.data.get("state") or "").strip()
+        if not code or not state:
+            return Response({"error": "code and state are required."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            complete(state, code, request.user)
+        except MCPOAuthError as e:
+            return Response({"error": str(e), "code": "oauth_rejected"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("OAuth callback failed for server %s", server.id)
+            return Response({"error": _message(e), "code": "oauth_failed"},
+                            status=status.HTTP_502_BAD_GATEWAY)
+
+        # The tool list was cached against the unauthenticated state.
+        async_to_sync(MCPToolCache.invalidate)(server.id, request.user.id)
+        return Response({"connected": True, "server_id": server.id})
+
+    @action(detail=True, methods=["post"], url_path="oauth/disconnect")
+    def oauth_disconnect(self, request, pk=None):
+        """Forget this user's authorization for a server."""
+        from .oauth import disconnect
+
+        server = self.get_object()
+        removed = disconnect(server.id, request.user.id)
+        async_to_sync(MCPToolCache.invalidate)(server.id, request.user.id)
+        return Response({"connected": False, "removed": removed})
 
     @action(detail=False, methods=["get"], url_path="tools")
     def all_tools(self, request):

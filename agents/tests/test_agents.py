@@ -12,7 +12,18 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from inference.models import KnowledgeBase
+from mcp_integration.models import MCPServer
 from agents.models import SubAgent
+
+
+def curated(name):
+    """The id of a curated connection, which migrations guarantee exists.
+
+    Connectors are picked by `MCPServer` id now, not by a slug from a list in
+    code, so a test that names one has to name a row. `mcp_integration.0005`
+    seeds these and `test_fresh_install.py` is what fails if it stops doing so.
+    """
+    return MCPServer.objects.get(name=name, user__isnull=True).id
 
 
 def config(**overrides):
@@ -58,8 +69,9 @@ class AgentCrudTests(APITestCase):
 
     def test_round_trip_preserves_every_knob(self):
         sent = config(
-            fileAccess='readonly', workdir='/data', venv=False, cpu=4, memoryMb=2048,
-            connectors=['gmail', 'sheets'], useOrgContext=False, useEnvironment=True,
+            fileAccess='readonly', workdir='/data', venv=False, maxRunSeconds=1800,
+            connectors=sorted([curated('Gmail'), curated('Google Sheets')]),
+            useOrgContext=False, useEnvironment=True,
             trigger='maintenance', schedule='0 9 * * 1', allowUnattended=True,
             notifyOnHitl=False, reviewAgent=True, spendCapRupees=750, egress='allowlist',
             recursiveContext=False, compaction=False, indexing=False,
@@ -77,7 +89,9 @@ class AgentCrudTests(APITestCase):
 
     def test_patch_merges_rather_than_resetting_unsent_knobs(self):
         created = self.client.post(
-            self.list_url, config(spendCapRupees=900, connectors=['gmail']), format='json'
+            self.list_url,
+            config(spendCapRupees=900, connectors=[curated('Gmail')]),
+            format='json',
         )
         url = reverse('orchestrator:agent_detail', args=[created.data['id']])
 
@@ -86,7 +100,7 @@ class AgentCrudTests(APITestCase):
         self.assertEqual(r.data['temperature'], 0.7)
         # The knobs the caller did not send are still what they were.
         self.assertEqual(r.data['spendCapRupees'], 900)
-        self.assertEqual(r.data['connectors'], ['gmail'])
+        self.assertEqual(r.data['connectors'], [curated('Gmail')])
         self.assertEqual(r.data['tools']['codeExecution'], True)
 
     def test_delete(self):
@@ -160,7 +174,22 @@ class AgentValidationTests(APITestCase):
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_unknown_connector_is_refused(self):
-        r = self._post(connectors=['dropbox'])
+        r = self._post(connectors=[9_999_999])
+        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_another_users_connection_is_refused(self):
+        """A connection id is not a capability just because it is an integer.
+
+        The whole point of the selection is to narrow what an agent reaches, so
+        naming someone else's server has to be refused here — the runtime
+        intersects with the user's visible servers too, but a builder that
+        accepts a choice the toolbox will silently drop is its own bug.
+        """
+        stranger = User.objects.create_user(username='stranger', password='pw')
+        theirs = MCPServer.objects.create(
+            user=stranger, name='Their box', type='stdio', command='npx',
+        )
+        r = self._post(connectors=[theirs.id])
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_workdir_traversal_is_refused(self):
@@ -172,8 +201,14 @@ class AgentValidationTests(APITestCase):
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('egress', r.data)
 
-    def test_memory_above_the_ceiling_is_refused(self):
-        self.assertEqual(self._post(memoryMb=999_999).status_code, status.HTTP_400_BAD_REQUEST)
+    def test_run_limit_outside_the_range_is_refused(self):
+        # The ceiling that replaced `memoryMb`'s. Both directions: a run limit
+        # of two seconds is not a stricter agent, it is one that can never
+        # finish, and a limit of a week is not a limit.
+        self.assertEqual(self._post(maxRunSeconds=1).status_code,
+                         status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self._post(maxRunSeconds=999_999).status_code,
+                         status.HTTP_400_BAD_REQUEST)
 
     def test_blank_name_is_refused(self):
         self.assertEqual(self._post(name='   ').status_code, status.HTTP_400_BAD_REQUEST)

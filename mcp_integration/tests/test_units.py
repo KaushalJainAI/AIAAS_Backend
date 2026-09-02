@@ -10,6 +10,7 @@ Security focus:
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -97,6 +98,30 @@ def _fake_cred(cid: int, data: dict, name: str = "test"):
     return cred
 
 
+@contextmanager
+def _stub_credential(cred):
+    """
+    Stub the credentials-manager seam the injector reads through.
+
+    The injector no longer queries: it asks `credentials.manager` for the row
+    (to keep its id) and then for that row's decrypted fields, so a unit test
+    has to stand in for both halves. `None` means "this user has no credential
+    of that type", which is what raises CredentialMissingError.
+
+    Yields the lookup mock, so a test can still assert that a slug used twice
+    in one server's mappings is resolved once.
+    """
+    from credentials.manager import CredentialManager
+
+    lookup = MagicMock(return_value=cred)
+
+    async def _get_credential(self, credential_id, user_id, refresh_if_expired=True):
+        return None if cred is None else cred.get_credential_data()
+
+    with patch.object(CredentialManager, "lookup_by_slug_sync", lookup),          patch.object(CredentialManager, "get_credential", _get_credential):
+        yield lookup
+
+
 def _make_server(*, required=None, env_map=None, header_map=None, name="srv"):
     s = MagicMock()
     s.name = name
@@ -115,20 +140,14 @@ class CredentialInjectorResolveTests(SimpleTestCase):
 
     def test_missing_required_raises(self):
         server = _make_server(required=["github"])
-        with patch(
-            "mcp_integration.credential_injector._lookup_credential_sync",
-            return_value=None,
-        ):
+        with _stub_credential(None):
             with self.assertRaises(CredentialMissingError):
                 _run(CredentialInjector.resolve(server, 1))
 
     def test_env_map_resolves_field(self):
         server = _make_server(env_map={"GITHUB_TOKEN": "github:token"})
         cred = _fake_cred(99, {"token": "ghp_secret"})
-        with patch(
-            "mcp_integration.credential_injector._lookup_credential_sync",
-            return_value=cred,
-        ):
+        with _stub_credential(cred):
             result = _run(CredentialInjector.resolve(server, 1))
         self.assertEqual(result.env_vars, {"GITHUB_TOKEN": "ghp_secret"})
         self.assertIn(99, result.used_credential_ids)
@@ -138,10 +157,7 @@ class CredentialInjectorResolveTests(SimpleTestCase):
             header_map={"Authorization": "Bearer {github:token}"}
         )
         cred = _fake_cred(1, {"token": "abc"})
-        with patch(
-            "mcp_integration.credential_injector._lookup_credential_sync",
-            return_value=cred,
-        ):
+        with _stub_credential(cred):
             result = _run(CredentialInjector.resolve(server, 1))
         self.assertEqual(result.headers["Authorization"], "Bearer abc")
 
@@ -149,20 +165,14 @@ class CredentialInjectorResolveTests(SimpleTestCase):
         # Map references a field that doesn't exist on the credential.
         server = _make_server(env_map={"X": "github:does_not_exist"})
         cred = _fake_cred(1, {"token": "x"})
-        with patch(
-            "mcp_integration.credential_injector._lookup_credential_sync",
-            return_value=cred,
-        ):
+        with _stub_credential(cred):
             with self.assertRaises(CredentialInvalidError):
                 _run(CredentialInjector.resolve(server, 1))
 
     def test_skips_invalid_mapping_strings(self):
         # Non-matching shape (no colon) must be skipped without crashing.
         server = _make_server(env_map={"X": "no-colon-here"})
-        with patch(
-            "mcp_integration.credential_injector._lookup_credential_sync",
-            return_value=_fake_cred(1, {"token": "x"}),
-        ):
+        with _stub_credential(_fake_cred(1, {"token": "x"})):
             result = _run(CredentialInjector.resolve(server, 1))
         # Bad mapping skipped → empty env_vars but no exception.
         self.assertEqual(result.env_vars, {})
@@ -180,10 +190,7 @@ class CredentialInjectorResolveTests(SimpleTestCase):
             "B": "github:token",
         })
         cred = _fake_cred(1, {"token": "shared"})
-        with patch(
-            "mcp_integration.credential_injector._lookup_credential_sync",
-            return_value=cred,
-        ) as look:
+        with _stub_credential(cred) as look:
             _run(CredentialInjector.resolve(server, 1))
         self.assertEqual(look.call_count, 1)
 
@@ -191,19 +198,13 @@ class CredentialInjectorResolveTests(SimpleTestCase):
 class CredentialInjectorValidateTests(SimpleTestCase):
     def test_returns_empty_on_success(self):
         server = _make_server(env_map={"X": "github:token"})
-        with patch(
-            "mcp_integration.credential_injector._lookup_credential_sync",
-            return_value=_fake_cred(1, {"token": "ok"}),
-        ):
+        with _stub_credential(_fake_cred(1, {"token": "ok"})):
             errs = _run(CredentialInjector.validate(server, 1))
         self.assertEqual(errs, [])
 
     def test_returns_message_on_missing(self):
         server = _make_server(required=["github"])
-        with patch(
-            "mcp_integration.credential_injector._lookup_credential_sync",
-            return_value=None,
-        ):
+        with _stub_credential(None):
             errs = _run(CredentialInjector.validate(server, 1))
         self.assertEqual(len(errs), 1)
         self.assertIn("github", errs[0])

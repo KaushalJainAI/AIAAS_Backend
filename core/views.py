@@ -39,16 +39,29 @@ from .serializers import (
     PasswordResetConfirmSerializer,
 )
 from logs.models import ExecutionLog
+from core.http.throttling import TestClientExemptMixin
 
 
 # ==================== CUSTOM THROTTLES ====================
 
-class LoginRateThrottle(AnonRateThrottle):
+# The throttles below are the ones the auth views actually use.
+# `core/http/throttling.py` also defines `LoginThrottle` / `RegistrationThrottle`
+# on the same scopes, but no view references them -- so a change made there has
+# no effect on any request, which is exactly how the first attempt at the
+# test-client lane below appeared to do nothing.
+#
+# `TestClientExemptMixin` gives an automated E2E client its own lane: the rates
+# stay exactly as they are for every ordinary client, and a client presenting
+# the configured `X-E2E-Bypass-Token` skips the limit -- and only the limit;
+# authentication, permissions and ownership are untouched. The whole mechanism
+# is off unless `E2E_THROTTLE_BYPASS_TOKEN` is set, which it is not by default.
+
+class LoginRateThrottle(TestClientExemptMixin, AnonRateThrottle):
     """Throttle for login attempts - prevents brute force attacks"""
     scope = 'login'
 
 
-class RegisterRateThrottle(AnonRateThrottle):
+class RegisterRateThrottle(TestClientExemptMixin, AnonRateThrottle):
     """Throttle for registration - prevents mass account creation"""
     scope = 'register'
 

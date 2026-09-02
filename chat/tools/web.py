@@ -20,14 +20,16 @@ from workflow_backend.thresholds import (
     READ_URL_CHAR_LIMIT,
 )
 
+from tools_config.overlay import alimit
+
 from .registry import tool
 
 logger = logging.getLogger(__name__)
 
-#: Total extracted text handed back from one deep_research call. Past this
-#: the model starts losing the earlier sources anyway, and the context clamp
-#: would trim it blindly rather than by relevance.
-DEEP_RESEARCH_CHAR_BUDGET = 60_000
+#: Total extracted text handed back from one deep_research call is a user
+#: setting now (`tools_config.settings_schema`), because past some point the
+#: model starts losing the earlier sources anyway and where that point sits
+#: depends on the model the workspace runs. The declared default is 60k.
 
 
 @tool({
@@ -49,14 +51,16 @@ DEEP_RESEARCH_CHAR_BUDGET = 60_000
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def web_search(args: Dict, context: Dict) -> str:
     from chat.sources.search import web_search
 
     query = (args.get("query") or "").strip()
     if not query:
         return "Error: 'query' is required."
-    results = await web_search(query)
+    results = await web_search(
+        query, max_results=await alimit(context, "web_search", "maxResults"),
+    )
     return json.dumps({
         "type": "search_results",
         "text": (
@@ -97,7 +101,7 @@ async def web_search(args: Dict, context: Dict) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def deep_research(args: Dict, context: Dict) -> str:
     """
     Breadth-first research: fan out across queries, read the pages, return
@@ -117,10 +121,14 @@ async def deep_research(args: Dict, context: Dict) -> str:
     queries = [str(q).strip() for q in (args.get("queries") or []) if str(q).strip()]
     queries = queries[:4] or [topic]
 
+    # The model may name a page count; when it does not, the workspace
+    # setting decides rather than a constant, and the bounds below still
+    # clamp whatever the model asks for.
+    default_pages = await alimit(context, "deep_research", "maxPages")
     try:
-        max_pages = int(args.get("max_pages", 15))
+        max_pages = int(args.get("max_pages", default_pages))
     except (TypeError, ValueError):
-        max_pages = 15
+        max_pages = default_pages
     max_pages = max(5, min(max_pages, 50))
 
     results = await asyncio.gather(*(web_search(q, max_results=10) for q in queries))
@@ -144,7 +152,7 @@ async def deep_research(args: Dict, context: Dict) -> str:
             "sources": [],
         })
 
-    corpus = "\n\n".join(blocks)[:DEEP_RESEARCH_CHAR_BUDGET]
+    corpus = "\n\n".join(blocks)[:await alimit(context, 'deep_research', 'charLimit')]
     return json.dumps({
         "type": "deep_research",
         "text": (
@@ -175,14 +183,16 @@ async def deep_research(args: Dict, context: Dict) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def image_search(args: Dict, context: Dict) -> str:
     from chat.sources.search import image_search
 
     query = (args.get("query") or "").strip()
     if not query:
         return "Error: 'query' is required."
-    images = await image_search(query)
+    images = await image_search(
+        query, max_results=await alimit(context, "image_search", "maxResults"),
+    )
     return json.dumps({
         "type": "image_results",
         "text": f"Retrieved {len(images)} image(s) for '{query}'; they are shown in the UI.",
@@ -209,14 +219,16 @@ async def image_search(args: Dict, context: Dict) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def video_search(args: Dict, context: Dict) -> str:
     from chat.sources.search import video_search
 
     query = (args.get("query") or "").strip()
     if not query:
         return "Error: 'query' is required."
-    videos = await video_search(query)
+    videos = await video_search(
+        query, max_results=await alimit(context, "video_search", "maxResults"),
+    )
     return json.dumps({
         "type": "video_results",
         "text": f"Retrieved {len(videos)} video(s) for '{query}'; they are shown in the UI.",
@@ -243,7 +255,7 @@ async def video_search(args: Dict, context: Dict) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def read_url(args: Dict, context: Dict) -> str:
     url = args.get("url", "")
     if not url:
@@ -263,7 +275,8 @@ async def read_url(args: Dict, context: Dict) -> str:
         text = BeautifulSoup(html, 'html.parser').get_text(separator=' ', strip=True)
     except ImportError:
         text = html.decode('utf-8', errors='ignore')
-    return json.dumps({"url": url, "content": text[:READ_URL_CHAR_LIMIT]})
+    limit = await alimit(context, "read_url", "charLimit")
+    return json.dumps({"url": url, "content": text[:limit]})
 
 
 # -- scrape_webpage extractors ------------------------------------------------
@@ -390,7 +403,7 @@ _EXTRACTORS = {
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def scrape_webpage(args: Dict, context: Dict) -> str:
     url = args.get("url", "")
     if not url:

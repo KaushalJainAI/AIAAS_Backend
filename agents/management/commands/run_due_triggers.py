@@ -22,25 +22,24 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        from agents.models import Trigger
-        from agents.sweep import run_trigger_sweep
+        from agents.sweep import due_triggers, run_trigger_sweep
 
         now = timezone.now()
 
         if options['dry_run']:
-            due = (
-                Trigger.objects
-                .filter(enabled=True, mode='schedule',
-                        next_due_at__isnull=False, next_due_at__lte=now)
-                .select_related('subagent')
-            )
+            # `due_triggers` rather than a second copy of the filter: a dry run
+            # that asks a slightly different question than the sweep is worse
+            # than no dry run at all.
+            due = list(due_triggers(now))
             if not due:
                 self.stdout.write('Nothing due.')
                 return
             for trigger in due:
+                when = trigger.queued_for or trigger.next_due_at
+                owed = ' (queued)' if trigger.queued_for else ''
                 self.stdout.write(
-                    f'{trigger.subagent.name}: due {trigger.next_due_at:%Y-%m-%d %H:%M} '
-                    f'(cron "{trigger.cron}")'
+                    f'{trigger.subagent.name}: due {when:%Y-%m-%d %H:%M} UTC{owed} '
+                    f'(cron "{trigger.cron}" in {trigger.tz})'
                 )
             return
 

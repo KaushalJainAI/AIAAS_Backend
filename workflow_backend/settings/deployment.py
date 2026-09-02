@@ -36,6 +36,14 @@ SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 
 # ── CSRF trusted origins (required by Django 4+ for HTTPS POST requests) ─────
+# Read from the environment, because this used to be a single hardcoded origin:
+# deploying the same image behind any other hostname then failed CSRF on every
+# session-authenticated POST (admin login, the allauth OAuth callback) with no
+# clue in the response beyond "CSRF verification failed". Falling back to the
+# hosts we already trust keeps a deploy that sets only ALLOWED_HOSTS working.
 CSRF_TRUSTED_ORIGINS = [
-    'https://aiaas.kaushaljain.com',
+    o.strip() for o in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()
+] or [
+    f'https://{h}' for h in ALLOWED_HOSTS  # noqa: F405
+    if h and h not in ('localhost', '127.0.0.1', 'backend', '*')
 ]

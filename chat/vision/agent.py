@@ -48,10 +48,29 @@ WITNESS_ATTEMPTS = 2
 WITNESS_BACKOFF_SECONDS = 1.0
 MAX_ANSWER_CHARS = 4_000
 
-#: Substrings that mean "this account cannot call this model" rather than "this
-#: call failed". NIM answers 404 for models its own catalog advertises, so the
-#: chain has to walk past them instead of giving up on the first one.
-_UNENTITLED_MARKERS = ("404", "not found for account", "unknown model", "does not exist")
+#: Substrings that mean "this model is not callable" rather than "this call
+#: failed". NIM answers 404 for models its own catalog advertises, so the chain
+#: has to walk past them instead of giving up on the first one.
+#:
+#: 410 / "end of life" joined the list on 2026-09-01. A retired model is the
+#: one case where retrying is guaranteed to be wasted — it is permanent, and
+#: it is announced by a *different* status than the 404 this list was built
+#: for, so both chain entries burned their retries and then failed instead of
+#: falling through. Treat it exactly like unentitlement: walk to the next.
+_UNENTITLED_MARKERS = (
+    "404", "not found for account", "unknown model", "does not exist",
+    "410", "end of life", "no longer available",
+)
+
+#: Errors that say something about *this model* rather than about the account,
+#: so the chain should try the next candidate instead of giving up.
+#:
+#: "timeout" joined "unentitled" on 2026-09-01. A timeout was treated as
+#: account-wide and broke the loop, so one slow model blinded the agent
+#: entirely — measured: llama-3.2-90b-vision timed out at 60s while the 11B
+#: behind it in the chain answered the same image in 1.2s, and the fallback
+#: never ran. Capacity is per model; a key is not.
+_CHAIN_CONTINUES = frozenset({"unentitled", "timeout"})
 
 #: (turn_id, attachment_id) -> questions asked. Bounded because a chat process is
 #: long-lived: without the cap this is a slow leak of every turn ever run.
@@ -266,9 +285,10 @@ async def ask(
             used_model = model
             break
         last_error = error or ""
-        if error != "unentitled":
-            # A timeout or a rejected key will repeat on the next model in the
-            # chain; only an entitlement miss is worth walking past.
+        if error not in _CHAIN_CONTINUES:
+            # A rejected key or exhausted credit repeats on every model on the
+            # same account, so walking the chain just spends the user's turn
+            # re-learning it. Only per-model failures are worth walking past.
             break
 
     if answer is None:

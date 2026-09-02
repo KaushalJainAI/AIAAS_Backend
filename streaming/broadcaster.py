@@ -86,13 +86,16 @@ class SSEBroadcaster:
     EVENT_HITL_REQUEST = 'hitl_request'
     EVENT_PROGRESS = 'progress'
     EVENT_LOG = 'log'
-    EVENT_ORCHESTRATOR_THINKING = 'thinking'
-    EVENT_ORCHESTRATOR_THOUGHT = 'thought'
     EVENT_WORKFLOW_CANCELLED = 'workflow_cancelled'
     # One pass of the model: its reasoning, and what it decided to do next.
     # A new event type on the existing channel rather than a second socket —
     # two channels would have to agree forever about what a run looks like.
     EVENT_AGENT_TURN = 'agent_turn'
+    # The run cut its own transcript back to stay inside the context
+    # window. Announced because a run that silently forgets its first
+    # thirty steps and a run that was curated look identical from outside,
+    # and only one of them is working as designed.
+    EVENT_CONTEXT_CURATED = 'context_curated'
     
     # In-memory subscribers (for single instance)
     # Format: {execution_id: [asyncio.Queue, ...]}
@@ -298,21 +301,6 @@ class SSEBroadcaster:
             }
         )
     
-    async def workflow_cancelled(
-        self,
-        execution_id: str,
-        duration_ms: int = 0
-    ):
-        """Send workflow cancelled event."""
-        await self.send_event(
-            execution_id,
-            self.EVENT_WORKFLOW_CANCELLED,
-            {
-                'status': 'cancelled',
-                'duration_ms': duration_ms,
-            }
-        )
-
     async def workflow_error(
         self,
         execution_id: str,
@@ -354,6 +342,33 @@ class SSEBroadcaster:
                 'decision': decision,
                 'model_id': model_id,
                 'tokens': tokens,
+            }
+        )
+
+    async def context_curated(
+        self,
+        execution_id: str,
+        results_compacted: int = 0,
+        steps_folded: int = 0,
+        tokens_before: int = 0,
+        tokens_after: int = 0,
+        summary_tokens: int = 0,
+    ):
+        """Announce that the transcript was cut back.
+
+        Carries the before and after rather than only the saving, because "we
+        freed 40k tokens" says nothing about whether the run is now comfortable
+        or still one tool call from the ceiling.
+        """
+        await self.send_event(
+            execution_id,
+            self.EVENT_CONTEXT_CURATED,
+            {
+                'results_compacted': results_compacted,
+                'steps_folded': steps_folded,
+                'tokens_before': tokens_before,
+                'tokens_after': tokens_after,
+                'summary_tokens': summary_tokens,
             }
         )
 
@@ -455,46 +470,6 @@ class SSEBroadcaster:
                 'total': total_nodes,
                 'percentage': int((current_node / total_nodes) * 100) if total_nodes > 0 else 0,
                 'message': message,
-            }
-        )
-
-    async def orchestrator_thinking(
-        self,
-        execution_id: str,
-        content: str,
-        node_id: str = 'orchestrator'
-    ):
-        """Send orchestrator thinking status event."""
-        await self.send_event(
-            execution_id,
-            self.EVENT_ORCHESTRATOR_THINKING,
-            {
-                'content': content,
-                'node_id': node_id,
-                'category': 'orchestrator_activity',
-                'type': 'thinking',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        )
-
-    async def orchestrator_thought(
-        self,
-        execution_id: str,
-        content: str,
-        reasoning: str = '',
-        node_id: str = 'orchestrator'
-    ):
-        """Send orchestrator final thought event."""
-        await self.send_event(
-            execution_id,
-            self.EVENT_ORCHESTRATOR_THOUGHT,
-            {
-                'content': content,
-                'reasoning': reasoning,
-                'node_id': node_id,
-                'category': 'orchestrator_activity',
-                'type': 'thought',
-                'timestamp': datetime.utcnow().isoformat()
             }
         )
 

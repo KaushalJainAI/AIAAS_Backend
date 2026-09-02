@@ -7,7 +7,6 @@ validation, and OAuth token refresh.
 import logging
 from datetime import datetime, timedelta
 from typing import Any
-import httpx
 
 from django.conf import settings
 from django.utils import timezone
@@ -128,13 +127,45 @@ class CredentialManager:
         # Decrypt and return
         try:
             data = credential.get_credential_data()
-            
-            # Add access token for OAuth credentials
-            if credential.access_token:
-                from cryptography.fernet import Fernet
-                fernet = Fernet(credential._get_encryption_key())
-                token_bytes = bytes(credential.access_token)
-                data['access_token'] = fernet.decrypt(token_bytes).decode()
+
+            # Merge the dedicated token columns over the encrypted blob.
+            #
+            # `get_credential_data()` reads `encrypted_data` only, but the OAuth
+            # flow writes nothing there — it stores tokens in these two columns.
+            # Without this merge an OAuth-connected account looks *empty* to
+            # every caller, which is what made a freshly connected Google
+            # connection fail with "missing field 'refresh_token'".
+            #
+            # `refresh_token` is merged as well as `access_token` because MCP
+            # connectors are handed the refresh token and renew for themselves;
+            # reading only the access token would give them an hour of life.
+            #
+            # A value already in the blob WINS over the column: the blob is
+            # where a hand-entered credential lives, and shadowing it with a
+            # token column left over from an earlier OAuth connect is how a
+            # credential the user just typed in stops working. Pinned by
+            # `test_credential_bridge.py::test_a_blob_field_wins_over_the_column`
+            # — do not "unify" this to column-wins.
+            #
+            # A token that cannot be decrypted is treated as absent rather than
+            # fatal, so the caller reports a precise "missing field" naming what
+            # to reconnect instead of a decryption stack trace.
+            from cryptography.fernet import Fernet
+
+            for field in ('access_token', 'refresh_token'):
+                if data.get(field):
+                    continue
+                raw = getattr(credential, field, None)
+                if not raw:
+                    continue
+                try:
+                    fernet = Fernet(credential._get_encryption_key())
+                    data[field] = fernet.decrypt(bytes(raw)).decode()
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Could not decrypt %s column on credential %s",
+                        field, credential.id,
+                    )
             
             # Update last used
             credential.last_used_at = timezone.now()
@@ -162,94 +193,89 @@ class CredentialManager:
             logger.error(f"Failed to decrypt credential {credential_id}: {e}")
             return None
     
-    async def refresh_oauth_token(self, credential: Credential) -> bool:
+    @staticmethod
+    def lookup_by_slug_sync(slug: str, user_id: int) -> Credential | None:
         """
-        Refresh an expired OAuth token.
-        
-        Args:
-            credential: The Credential model instance
-            
-        Returns:
-            True if refresh succeeded
+        The user's best credential of a given type.
+
+        Ordering is load-bearing and was moved here verbatim from
+        `mcp_integration.credential_injector`: a verified credential beats an
+        unverified one, and the most recently updated wins the tie. That second
+        key is what makes "connect Gmail after Calendar keeps both working"
+        true — Google's `include_granted_scopes=true` means the newer token
+        carries the older scopes too, so the newest row is the most capable one,
+        not merely the newest.
+        """
+        return (
+            Credential.objects
+            .filter(user_id=user_id, credential_type__slug=slug, is_active=True)
+            .select_related("credential_type")
+            .order_by("-is_verified", "-updated_at")
+            .first()
+        )
+
+    async def get_credential_by_slug(
+        self,
+        slug: str,
+        user_id: int,
+        refresh_if_expired: bool = True,
+    ) -> dict[str, Any] | None:
+        """
+        Fetch and decrypt a user's credential of a given *type*.
+
+        `get_credential` answers "this exact credential"; callers that only know
+        a type — every MCP connector, whose wiring reads `"<slug>:<field>"` —
+        need this one. It resolves the row, then goes through `get_credential`
+        so there is a single path for the cache, the OAuth refresh, the audit
+        entry and `last_used_at`. The injector previously carried its own
+        lookup and its own decrypt, which is how it ended up with neither a
+        cache nor a refresh.
         """
         from asgiref.sync import sync_to_async
-        from cryptography.fernet import Fernet
-        
+
+        credential = await sync_to_async(self.lookup_by_slug_sync)(slug, user_id)
+        if credential is None:
+            return None
+        return await self.get_credential(
+            credential.id, user_id, refresh_if_expired=refresh_if_expired
+        )
+
+    async def refresh_oauth_token(self, credential: Credential) -> bool:
+        """
+        Refresh an expired OAuth token. Returns True if a token is now valid.
+
+        Delegates to `Credential.get_valid_access_token`, which is the same
+        exchange done properly: it takes a `select_for_update` lock and
+        re-checks expiry after acquiring it, so N concurrent callers perform one
+        refresh instead of N. Google issues a new refresh token on some
+        refreshes and invalidates the old one, so a lost race there does not
+        just waste a request — it can leave a credential holding a token Google
+        has already retired.
+
+        This method used to be a second, lock-free implementation of the same
+        exchange, which is how the two drifted: that one read `token_url` out of
+        `oauth_config` and bailed when it was absent (it was, on every install
+        until `credentials.0008`), while the model method defaulted the URL
+        inline and worked. One exchange, one lock, one place to fix.
+        """
+        from asgiref.sync import sync_to_async
+
         if not credential.refresh_token:
             logger.warning(f"No refresh token for credential {credential.id}")
             return False
-        
-        oauth_config = credential.credential_type.oauth_config
-        if not oauth_config.get('token_url'):
-            logger.error(f"No token URL configured for {credential.credential_type.name}")
-            return False
-        
-        # OAuth on this platform is Google-only: client credentials come from
-        # Django settings, never from credential data (a user cannot have their
-        # own GCP client to refresh with). Refuse anything else so we never
-        # exchange with the wrong client.
-        if credential.credential_type.slug != 'google-oauth2':
-            logger.warning(
-                f"OAuth refresh only supports 'google-oauth2' "
-                f"(credential {credential.id} is '{credential.credential_type.slug}')"
-            )
-            return False
-        
-        try:
-            # Decrypt refresh token
-            fernet = Fernet(credential._get_encryption_key())
-            refresh_token = fernet.decrypt(credential.refresh_token).decode()
-            
-            client_id = settings.GOOGLE_OAUTH_CLIENT_ID
-            client_secret = settings.GOOGLE_OAUTH_CLIENT_SECRET
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    oauth_config['token_url'],
-                    data={
-                        'grant_type': 'refresh_token',
-                        'refresh_token': refresh_token,
-                        'client_id': client_id,
-                        'client_secret': client_secret,
-                    },
-                )
-                
-                if response.status_code != 200:
-                    error_text = response.text
-                    logger.error(f"OAuth refresh failed for {credential.id}: {error_text}")
-                    credential.last_error = f"Token refresh failed: {error_text}"
-                    await sync_to_async(credential.save)(update_fields=['last_error'])
-                    return False
-                
-                data = response.json()
-                
-                # Update tokens
-                new_access_token = data.get('access_token')
-                new_refresh_token = data.get('refresh_token', refresh_token)
-                expires_in = data.get('expires_in', 3600)
 
-                if not new_access_token:
-                    logger.error(f"OAuth refresh for credential {credential.id} returned no access_token")
-                    credential.last_error = "Refresh response missing access_token"
-                    await sync_to_async(credential.save)(update_fields=['last_error'])
-                    return False
-
-                credential.access_token = fernet.encrypt(new_access_token.encode())
-                credential.refresh_token = fernet.encrypt(new_refresh_token.encode())
-                credential.token_expires_at = timezone.now() + timedelta(seconds=expires_in)
-                credential.last_error = ''
-                
-                await sync_to_async(credential.save)(
-                    update_fields=['access_token', 'refresh_token', 'token_expires_at', 'last_error']
-                )
-                
-                logger.info(f"OAuth token refreshed for credential {credential.id}")
-                return True
-                
-        except Exception as e:
-            logger.error(f"Failed to refresh OAuth token: {e}")
+        token = await sync_to_async(credential.get_valid_access_token)()
+        if token is None:
             return False
-    
+
+        # `get_valid_access_token` writes through a `select_for_update` re-fetch
+        # (that lock is the whole point), so the *caller's* instance still holds
+        # the pre-refresh column. Without this the next line to decrypt
+        # `credential.access_token` hands back the token we just replaced —
+        # a refresh that reports success and changes nothing the caller sees.
+        await sync_to_async(credential.refresh_from_db)()
+        return True
+
     def validate_against_schema(
         self,
         data: dict[str, Any],

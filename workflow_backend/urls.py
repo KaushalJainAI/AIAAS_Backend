@@ -63,7 +63,10 @@ urlpatterns = [
 
     # Skills
     path('api/', include('skills.urls')),
-    
+
+    # Tool library — read-only catalogue of standard tools (grouped by grant)
+    path('api/tools/', include('tools_config.urls')),
+
     # Standalone Chat
     path('api/chat/', include('chat.urls')),
 

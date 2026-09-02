@@ -27,11 +27,11 @@ from agents.agent.runtime import (
 from agents.models import SubAgent
 
 
-def toolbox(**grants) -> AgentToolbox:
+def toolbox(_file_scope=None, **grants) -> AgentToolbox:
     from agents.views.agents import TOOL_KEYS
 
     full = {k: bool(grants.get(k, False)) for k in TOOL_KEYS}
-    return AgentToolbox(grants=full, user_id=1)
+    return AgentToolbox(grants=full, user_id=1, file_scope=_file_scope)
 
 
 class GrantMappingTests(SimpleTestCase):
@@ -44,8 +44,19 @@ class GrantMappingTests(SimpleTestCase):
         self.assertEqual(set(GRANT_TOOLS) | UNSERVED_GRANTS, TOOL_KEYS)
 
     def test_no_grants_means_no_tools_beyond_the_harmless_ones(self):
+        # The retrieval pair is here for the same reason `get_current_time` is:
+        # neither reaches anything the user owns. They read back *this run's own
+        # transcript* — text the agent was already shown and has since had
+        # curated away — so gating them behind a grant would mean an agent could
+        # be told what it is missing and given no way to fetch it, which is what
+        # actually shipped before curation existed. They are still only
+        # *offered* once the run has stored something; see
+        # `RetrievalToolAdvertisementTests`.
         names = toolbox().allowed_names
-        self.assertEqual(names, frozenset({'get_current_time'}))
+        self.assertEqual(
+            names,
+            frozenset({'get_current_time', 'read_tool_output', 'recall_context'}),
+        )
 
     def test_a_grant_unlocks_exactly_its_own_tools(self):
         names = toolbox(webSearch=True).allowed_names
@@ -56,8 +67,58 @@ class GrantMappingTests(SimpleTestCase):
     def test_unserved_grants_are_reported_not_silently_dropped(self):
         agent = SubAgent(tool_grants={'shell': True, 'fileOps': True, 'rag': True})
         box = AgentToolbox.for_agent(agent, user_id=1)
-        self.assertEqual(box.unserved, ('fileOps', 'shell'))
+        # `fileOps` used to be here beside `shell`. It is served now — see
+        # `AgentFileAccessTests` — so `shell` is the only grant the runtime
+        # still declines to honour.
+        self.assertEqual(box.unserved, ('shell',))
         self.assertNotIn('shell', box.allowed_names)
+
+
+class AgentFileAccessTests(SimpleTestCase):
+    """The `fileOps` grant and the `fileAccess` setting are two switches, and
+    the tools appear only when both are on.
+
+    Splitting them is what lets one agent read the user's whole tree while
+    another only ever sees its own folder, without a second grant key for every
+    combination. The failure this pins is the quiet one: a grant left on while
+    access is 'none', which would otherwise advertise five tools that refuse
+    every call.
+    """
+
+    FILE_TOOLS = frozenset(GRANT_TOOLS['fileOps'])
+
+    def _scope(self):
+        # A scope object is all `allowed_names` inspects — it never dereferences
+        # it — so this stays a SimpleTestCase with no database.
+        return object()
+
+    def test_grant_without_a_scope_offers_nothing(self):
+        box = toolbox(fileOps=True)
+        self.assertFalse(self.FILE_TOOLS & box.allowed_names)
+
+    def test_grant_with_a_scope_offers_all_five(self):
+        box = toolbox(self._scope(), fileOps=True)
+        self.assertTrue(self.FILE_TOOLS <= box.allowed_names)
+
+    def test_a_scope_without_the_grant_offers_nothing(self):
+        box = toolbox(self._scope())
+        self.assertFalse(self.FILE_TOOLS & box.allowed_names)
+
+    def test_file_tools_are_refused_at_dispatch_without_the_grant(self):
+        result = async_to_sync(toolbox(self._scope()).dispatch)(
+            'write_file', {'path': 'x', 'content': 'y'}, {})
+        self.assertIn('not available to this agent', result)
+
+    def test_writes_and_deletes_are_sensitive_reads_are_not(self):
+        # An agent on 'ask' should pause before changing the user's files and
+        # not before looking at them, or the prompts become noise people click
+        # through — which is what makes the remaining ones worthless.
+        from chat.tools import SENSITIVE_TOOLS
+
+        for name in ('write_file', 'delete_file', 'make_directory'):
+            self.assertIn(name, SENSITIVE_TOOLS)
+        for name in ('read_file', 'list_files'):
+            self.assertNotIn(name, SENSITIVE_TOOLS)
 
 
 class DispatchEnforcementTests(SimpleTestCase):
@@ -105,6 +166,56 @@ class DispatchEnforcementTests(SimpleTestCase):
         self.assertIn("'code' is required", result)
 
 
+class RetrievalToolAdvertisementTests(TestCase):
+    """`read_tool_output` and `recall_context` are dispatchable always and
+    offered only once the run has actually stored something.
+
+    The split is deliberate. Advertising them on an empty run would put two
+    tools in front of the model that can only answer "there is nothing here",
+    and an advertised tool that cannot do anything is one the model plans
+    around. Refusing them at dispatch would be worse in the other direction: the
+    condition is a database read, and a model that names a tool it was offered a
+    moment ago must not be turned away because a row expired in between.
+    """
+
+    RETRIEVAL = {'read_tool_output', 'recall_context'}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user('retriever', 'r@example.com', 'x')
+
+    def _names(self, session_key):
+        box = AgentToolbox(grants={}, user_id=self.user.id, session_key=session_key)
+        return {d['function']['name']
+                for d in async_to_sync(box.descriptors)()}
+
+    def test_withheld_until_something_is_stored(self):
+        self.assertFalse(self.RETRIEVAL & self._names('run-empty'))
+
+    def test_offered_once_the_run_has_archived(self):
+        from django.utils import timezone
+        from chat.models import ToolOutput
+
+        ToolOutput.objects.create(
+            user=self.user, session_key='run-full',
+            tool_name='context:archive:web_search', content='x' * 100,
+            total_chars=100,
+            expires_at=timezone.now() + timezone.timedelta(hours=1),
+        )
+        self.assertTrue(self.RETRIEVAL <= self._names('run-full'))
+
+    def test_one_runs_archive_is_not_offered_to_another(self):
+        from django.utils import timezone
+        from chat.models import ToolOutput
+
+        ToolOutput.objects.create(
+            user=self.user, session_key='run-a', tool_name='context:archive:t',
+            content='x' * 100, total_chars=100,
+            expires_at=timezone.now() + timezone.timedelta(hours=1),
+        )
+        self.assertFalse(self.RETRIEVAL & self._names('run-b'))
+
+
 class DescriptorTests(SimpleTestCase):
     def test_descriptors_only_contain_granted_tools(self):
         names = {
@@ -123,7 +234,7 @@ class DescriptorTests(SimpleTestCase):
         self.assertIn('execute_python', names)
 
     def test_mcp_tools_appear_only_when_granted(self):
-        async def descriptors(_user):
+        async def descriptors(_user, _server_ids=None):
             return [{'type': 'function', 'function': {'name': 'mcp_1_send'}}]
 
         with patch('mcp_integration.tool_provider.MCPToolProvider.'
@@ -137,7 +248,7 @@ class DescriptorTests(SimpleTestCase):
         self.assertIn('mcp_1_send', with_grant)
 
     def test_a_dead_mcp_server_degrades_rather_than_fails_the_run(self):
-        async def boom(_user):
+        async def boom(_user, _server_ids=None):
             raise ConnectionError('server down')
 
         with patch('mcp_integration.tool_provider.MCPToolProvider.'

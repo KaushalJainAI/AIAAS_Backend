@@ -188,6 +188,16 @@ class Trigger(models.Model):
         ('cancel', 'Cancel the running one'),
     ]
 
+    #: Who owns this row's schedule. The agent builder carries a single cron
+    #: field and reconciles it on every save, which must not reach schedules
+    #: the user added on the Schedules page — otherwise adding a second slot in
+    #: one screen deletes it from the other. `builder` is the one row the
+    #: builder round-trips; every other schedule is `manual` and left alone.
+    ORIGIN_CHOICES = [
+        ('builder', 'Agent builder'),
+        ('manual', 'Added directly'),
+    ]
+
     subagent = models.ForeignKey(
         'SubAgent', on_delete=models.CASCADE, related_name='triggers',
     )
@@ -199,6 +209,26 @@ class Trigger(models.Model):
     goal = models.TextField(
         blank=True, default='',
         help_text='What the agent is asked to do when this fires.',
+    )
+    #: What the user calls this schedule. An agent may now have several, and
+    #: "the 06:00 one" is not something a cron string says out loud.
+    name = models.CharField(max_length=80, blank=True, default='')
+
+    #: The IANA zone the cron fields are read in. `next_due_at` stays UTC —
+    #: this is the zone the *expression* means, not the zone the column is
+    #: stored in, which is the distinction that lets one indexed column serve
+    #: users in different places. Defaults to UTC so existing rows keep firing
+    #: at exactly the instant they always did.
+    timezone = models.CharField(max_length=64, default='UTC')
+
+    #: The window the schedule is live in. Both optional: a schedule with
+    #: neither is the old behaviour, "for ever". `ends_at` is what makes a
+    #: schedule stoppable without deleting it and losing its history.
+    starts_at = models.DateTimeField(null=True, blank=True)
+    ends_at = models.DateTimeField(null=True, blank=True)
+
+    origin = models.CharField(
+        max_length=8, choices=ORIGIN_CHOICES, default='manual', db_index=True,
     )
 
     #: Path component for `mode='webhook'`. The endpoint is unauthenticated by
@@ -217,6 +247,22 @@ class Trigger(models.Model):
     next_due_at = models.DateTimeField(null=True, blank=True, db_index=True)
     consecutive_failures = models.IntegerField(default=0)
 
+    #: The slot a `queue` firing is still owed, set when the agent was busy at
+    #: its due time. Indexed because the sweep now asks two questions — what is
+    #: due, and what is owed — and the second must not become a table scan.
+    #: `overlap='queue'` was a choice the UI offered and the sweep never
+    #: implemented: a queued firing fell straight through to running
+    #: immediately, which is precisely what the other two policies exist to
+    #: avoid. This column is where "later" is written down.
+    queued_for = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    #: What happened last time, in the sweep's own vocabulary, and why. The
+    #: reason a firing was refused only ever reached the server log, so a user
+    #: watching a schedule fail five times and disable itself had no way to
+    #: find out it was the spend cap.
+    last_outcome = models.CharField(max_length=12, blank=True, default='')
+    last_error = models.TextField(blank=True, default='')
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -227,6 +273,7 @@ class Trigger(models.Model):
         indexes = [
             models.Index(fields=['enabled', 'mode', 'next_due_at']),
             models.Index(fields=['subagent', 'mode']),
+            models.Index(fields=['enabled', 'mode', 'queued_for']),
         ]
 
     def __str__(self):
@@ -243,6 +290,25 @@ class Trigger(models.Model):
     @property
     def cron(self) -> str:
         return (self.config or {}).get('cron', '')
+
+    @property
+    def tz(self) -> str:
+        """The zone the cron fields are read in; never blank."""
+        return self.timezone or 'UTC'
+
+    def window_state(self, now) -> str:
+        """Where `now` sits relative to this schedule's live window.
+
+        One of `pending` (not started yet), `live`, `expired`. The sweep acts
+        on all three differently, and a schedule that has not started is not
+        the same thing as one that is broken — which is what it looked like
+        before, when the only two states were "fires" and "does not".
+        """
+        if self.starts_at and now < self.starts_at:
+            return 'pending'
+        if self.ends_at and now > self.ends_at:
+            return 'expired'
+        return 'live'
 
 
 class HITLRequest(models.Model):

@@ -37,7 +37,7 @@ import shutil
 import tempfile
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import asyncio
@@ -48,6 +48,7 @@ from django.db.models import Q
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import CallToolResult
 
 from workflow_backend.background import spawn
@@ -86,6 +87,122 @@ CALL_TOOL_TIMEOUT: float = 120.0
 # connectors at the discovery budget would be half a minute of dead air.
 AGENT_LIST_TOOLS_TIMEOUT: float = 8.0
 
+# ---------------------------------------------------------------------------
+# Subprocess environment
+# ---------------------------------------------------------------------------
+
+# A stdio MCP server is a third-party program we spawn. It used to inherit the
+# whole of `os.environ`, which in a deployed container is `Backend/.env` — so
+# every curated npm package received `SECRET_KEY`, `POSTGRES_PASSWORD`, and
+# above all `CREDENTIAL_ENCRYPTION_KEY`, the master key for *every* user's
+# vault. That silently undid the entire point of the credentials app: resolve
+# per-user, inject only the mapped fields, never hand out the key.
+#
+# So the environment is now built rather than inherited. Only what a launcher
+# genuinely needs is passed through; everything else must come from
+# `server.env` (non-secret, operator-set) or `resolved.env_vars` (the
+# injector's per-user mapping). Adding a name here widens what third-party
+# code can read, so add one only with a reason.
+_ENV_PASSTHROUGH: frozenset[str] = frozenset({
+    # Process/exec basics.
+    "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE",
+    "TEMP", "TMP", "TMPDIR",
+    # Where npm/npx look for their cache and config.
+    "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "APPDATA", "LOCALAPPDATA", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
+    # Locale, so a server's own output is not mojibake.
+    "LANG", "LC_ALL", "LC_CTYPE",
+    # Egress through a corporate proxy, and the CA bundle that makes it work.
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+})
+
+# Prefixes passed through wholesale: node/npm read a long tail of these and
+# enumerating them would be a maintenance burden with no security gain — they
+# are the launcher's own configuration, not ours.
+_ENV_PASSTHROUGH_PREFIXES: tuple[str, ...] = ("NODE_", "NPM_", "NPM_CONFIG_", "UV_", "PYTHONIO")
+
+
+def _build_subprocess_env(server: "MCPServer", resolved: "ResolvedCredentials") -> dict[str, str]:
+    """
+    The environment a stdio MCP server is started with.
+
+    Precedence is passthrough < `server.env` < injected credentials, so an
+    operator can override a launcher variable and the injector always wins over
+    both. Windows reports env names in mixed case, so matching is done on the
+    upper-cased name while the original spelling is preserved in the result.
+    """
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper in _ENV_PASSTHROUGH or upper.startswith(_ENV_PASSTHROUGH_PREFIXES):
+            env[key] = value
+    env.update(server.env or {})
+    env.update(resolved.env_vars)
+    return env
+
+
+def _write_credential_files(
+    server: "MCPServer", user_id: int | None, resolved: "ResolvedCredentials"
+) -> tuple[str | None, dict[str, str]]:
+    """
+    Write a server's rendered credential files into a private directory.
+
+    Returns `(directory, extra_env)` — the directory so the caller can remove
+    it, and the env vars pointing at what was written. `(None, {})` when the
+    server asked for no files, which is every connector but the Google ones.
+
+    Two properties this has to hold, both of them about a plaintext refresh
+    token sitting on a disk:
+
+    * **One directory per (server, user).** `mkdtemp` gives a fresh path with
+      0700 permissions every call, so two users of the same curated row never
+      share one — the same isolation the session pool key already provides, and
+      the reason the caller passes `user_id` even though it does not appear in
+      the path. The pool holds one worker per key, so one live directory per
+      key follows.
+    * **Removed by whoever created it.** The caller is `_SessionWorker`, which
+      opens and unwinds in a single task; cleanup rides that same unwind. A
+      directory removed on a different task is the anyio bug this class was
+      written to avoid, and here it would leave the token behind.
+    """
+    if not resolved.files:
+        return None, {}
+
+    directory = tempfile.mkdtemp(prefix=f"mcpcred-{server.id}-")
+    extra_env: dict[str, str] = {}
+    try:
+        for spec in resolved.files:
+            path = os.path.join(directory, spec.filename)
+            # Opened 0600 *before* anything is written, so the secret is never
+            # briefly world-readable between create and chmod.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(spec.content)
+            extra_env[spec.env_var] = directory if spec.target == "dir" else path
+    except BaseException:
+        _remove_credential_dir(directory)
+        raise
+    return directory, extra_env
+
+
+def _remove_credential_dir(directory: str | None) -> None:
+    """Best-effort removal. Failing to clean up must not fail a run that has
+    already produced its answer — but it is logged, because a leftover
+    directory holds a usable refresh token."""
+    if not directory:
+        return
+    try:
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        # Already gone. Cleanup runs on every unwind including ones where the
+        # connect failed before anything was written, so this is the ordinary
+        # case and not worth a warning.
+        pass
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not remove MCP credential dir %s", directory, exc_info=True)
+
+
 _PoolKey = tuple[int, int | None]  # (server_id, user_id)
 
 
@@ -118,6 +235,7 @@ class _SessionWorker:
         self.session: ClientSession | None = None
         self.error: BaseException | None = None
         self.task: asyncio.Task | None = None
+        self._cred_dir: str | None = None
 
     async def _run(self) -> None:
         """
@@ -127,9 +245,23 @@ class _SessionWorker:
         that has to keep serving every other request.
         """
         try:
+            # Credential files are created here, in the task that will remove
+            # them, and before the transport opens — a server that reads its
+            # credentials at startup must find them already on disk.
+            self._cred_dir, file_env = await asyncio.to_thread(
+                _write_credential_files,
+                self._server, _coerce_user_id(self._manager.user), self._resolved,
+            )
+            if file_env:
+                self._resolved = replace(
+                    self._resolved,
+                    env_vars={**self._resolved.env_vars, **file_env},
+                )
             async with contextlib.AsyncExitStack() as stack:
                 if self._server.type == "stdio":
                     cm = self._manager._connect_stdio(self._server, self._resolved)
+                elif self._server.type == "http":
+                    cm = self._manager._connect_http(self._server, self._resolved)
                 elif self._server.type == "sse":
                     cm = self._manager._connect_sse(self._server, self._resolved)
                 else:
@@ -148,6 +280,11 @@ class _SessionWorker:
             )
         finally:
             self.session = None
+            # The subprocess is gone by now, so the tokens on disk have no
+            # further reader. Removed unconditionally — a failed connect leaves
+            # a directory just as readable as a successful one.
+            _remove_credential_dir(self._cred_dir)
+            self._cred_dir = None
             # Whether we connected, failed, or were cancelled, the opener must
             # stop waiting or it hangs for the full connect budget.
             self._ready.set()
@@ -452,7 +589,7 @@ class MCPClientManager:
         if not os.path.isabs(command):
             command = shutil.which(command) or command
 
-        merged_env = {**os.environ, **(server.env or {}), **resolved.env_vars}
+        merged_env = _build_subprocess_env(server, resolved)
         params = StdioServerParameters(command=command, args=server.args or [], env=merged_env)
 
         # The subprocess's stderr is where the useful diagnosis lives — npm's
@@ -479,10 +616,19 @@ class MCPClientManager:
         finally:
             errlog.close()
 
-    @asynccontextmanager
-    async def _connect_sse(self, server: MCPServer, resolved: ResolvedCredentials):
+    async def _prepare_remote(
+        self, server: MCPServer, resolved: ResolvedCredentials, client_fn,
+    ) -> dict[str, Any]:
+        """Shared setup for the two URL-based transports: guard, then headers.
+
+        Both `http` and `sse` reach out over the network with the user's
+        credentials in a header, so both need the same two things and neither
+        should get them by copy-paste.
+        """
         if not server.url:
-            raise ValueError(f"MCP server '{server.name}' is SSE but has no URL")
+            raise ValueError(
+                f"MCP server '{server.name}' is {server.type} but has no URL"
+            )
 
         # Re-validate at connection time, not just at registration: DNS for a
         # hostname that passed validation once can later resolve to a private
@@ -495,15 +641,47 @@ class MCPClientManager:
         if resolved.headers:
             # Newer versions of the mcp SDK accept a `headers=` kwarg; fall back
             # silently if this version doesn't, rather than crashing.
-            sig = inspect.signature(sse_client)
-            if "headers" in sig.parameters:
+            if "headers" in inspect.signature(client_fn).parameters:
                 kwargs["headers"] = resolved.headers
             else:
                 logger.warning(
-                    "sse_client in this mcp version does not accept headers; "
-                    "auth headers for server %s will not be sent.",
-                    server.name,
+                    "%s in this mcp version does not accept headers; auth "
+                    "headers for server %s will not be sent.",
+                    getattr(client_fn, "__name__", "client"), server.name,
                 )
+        return kwargs
+
+    @asynccontextmanager
+    async def _connect_http(self, server: MCPServer, resolved: ResolvedCredentials):
+        """MCP's streamable HTTP transport — what hosted connectors speak.
+
+        Distinct from `_connect_sse` in one way that matters and is easy to get
+        wrong by copying it: `streamablehttp_client` yields a **three**-tuple,
+        the third element being a callable returning the negotiated session id.
+        We do not need it — the pool keys sessions by (server, user) and holds
+        the `ClientSession` itself — but unpacking two names from three values
+        raises `ValueError` at connect time, which surfaces as an unexplained
+        connection failure rather than as the shape mismatch it is.
+        """
+        kwargs = await self._prepare_remote(server, resolved, streamablehttp_client)
+
+        try:
+            async with streamablehttp_client(server.url, **kwargs) as (read, write, _get_session_id):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+        except Exception as e:
+            logger.warning(
+                "Failed streamable-HTTP connection to MCP server %s: %s",
+                server.name, _describe(e), exc_info=True,
+            )
+            raise MCPConnectionError(_describe(e)) from e
+
+    @asynccontextmanager
+    async def _connect_sse(self, server: MCPServer, resolved: ResolvedCredentials):
+        """The deprecated remote transport. Kept for rows pointing at old
+        endpoints; new remote servers should be `http`."""
+        kwargs = await self._prepare_remote(server, resolved, sse_client)
 
         try:
             async with sse_client(server.url, **kwargs) as (read, write):
@@ -640,6 +818,21 @@ def _get_visible_server_sync(server_id: int, user_id: int | None, enabled_only: 
 def _servers_for_user_sync(user_id: int | None):
     """Servers visible to this user (their own + system-wide)."""
     return list(_visible_servers_queryset(user_id, enabled_only=True))
+
+
+def visible_server_ids_sync(user_id: int | None) -> set[int]:
+    """The ids of every connection this user could pick, for validating a choice.
+
+    `enabled_only=False` on purpose: this answers "may you name this server",
+    not "is it live right now". A user who switches a connection off on the
+    Connections page and saves an agent that referenced it should get their
+    agent saved, not a validation error about a row they still own — the
+    runtime already drops a switched-off server when it resolves the toolbox.
+    """
+    return set(
+        _visible_servers_queryset(user_id, enabled_only=False)
+        .values_list('id', flat=True)
+    )
 
 
 async def get_servers_for_user(user) -> list[MCPServer]:

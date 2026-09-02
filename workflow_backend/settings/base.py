@@ -70,14 +70,29 @@ def _database_config():
             'OPTIONS': options,
         }
 
+    # Resolve a relative SQLITE_PATH against BASE_DIR, never against the current
+    # working directory: manage.py runs from Backend/ while instance/scripts/ and
+    # the harnesses run from the repo root, and a cwd-relative path silently gives
+    # each of them a *different* database file.
+    sqlite_path = Path(os.environ.get('SQLITE_PATH', 'db.sqlite3'))
+    if not sqlite_path.is_absolute():
+        sqlite_path = BASE_DIR / sqlite_path
+
     return {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': Path(os.environ.get('SQLITE_PATH', str(BASE_DIR / 'db.sqlite3'))),
+        'NAME': sqlite_path,
         'OPTIONS': {'timeout': 20},
     }
 
 
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+
+#: Shared secret an automated E2E client presents (header `X-E2E-Bypass-Token`)
+#: to be exempted from the *rate limits only* -- see
+#: `core.http.throttling.is_test_client`. Blank disables the whole mechanism,
+#: which is the default and what production should keep: the throttles are a
+#: brute-force guard, and the adversarial harness asserts they still fire.
+E2E_THROTTLE_BYPASS_TOKEN = os.environ.get('E2E_THROTTLE_BYPASS_TOKEN', '')
 
 # A missing SECRET_KEY must never silently fall back to a shared, well-known
 # value in production: that key signs JWTs and session cookies, so a known key
@@ -145,6 +160,7 @@ INSTALLED_APPS = [
     'django_celery_beat',
     'notifications',
     'imagine',
+    'tools_config',
     # Evaluation of sub-agents. Label is `eval` (singular): the deleted `evals`
     # app left inert `evals_*` tables and an `evals.0001_initial` row in dev
     # databases, so the new tables must not be named the same thing.
@@ -261,11 +277,27 @@ else:
     STATIC_URL = '/static/'
     MEDIA_URL = '/media/'
 
+# ---------------------------------------------------------------------------
+# Code execution sandbox
+# ---------------------------------------------------------------------------
+# `service` runs the `execute_python` tool in the hardened sidecar container
+# (sandbox_service/) — real confinement, numpy/pandas available. `inprocess` is
+# the weaker AST-guarded dev fallback in sandbox/safe_execution.py. The deployed
+# image sets SANDBOX_ENGINE=service; a bare local runserver defaults to
+# inprocess so it works with no sidecar. There is no automatic fallback between
+# them — see sandbox/engine.py.
+SANDBOX_ENGINE = os.environ.get('SANDBOX_ENGINE', 'inprocess')
+SANDBOX_SERVICE_URL = os.environ.get('SANDBOX_SERVICE_URL', 'http://sandbox:8100')
+SANDBOX_WALL_SECONDS = int(os.environ.get('SANDBOX_WALL_SECONDS', '10'))
+SANDBOX_CPU_SECONDS = int(os.environ.get('SANDBOX_CPU_SECONDS', '8'))
+SANDBOX_MEM_MB = int(os.environ.get('SANDBOX_MEM_MB', '384'))
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'core.auth.query_param_jwt.QueryParamJWTAuthentication',
         'core.auth.authentication.APIKeyAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
@@ -536,3 +568,28 @@ IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD'
 # an agent failure cannot be told apart.
 EVAL_JUDGE_PROVIDER = os.environ.get('EVAL_JUDGE_PROVIDER', 'openrouter')
 EVAL_JUDGE_MODEL = os.environ.get('EVAL_JUDGE_MODEL', '')
+
+
+# ==================== Context curation ====================
+# The model that folds an agent run's earlier steps into a running note when the
+# transcript outgrows the window (`chat/turn/curation.py`, the agent's
+# `recursiveContext` toggle). Deliberately a small, cheap model and deliberately
+# not the agent's own: a forty-turn run on an expensive model would otherwise
+# pay full rate to compress itself, and the fold is an extractive job — keep
+# these figures, drop this prose — that a large model is not better at.
+#
+# Left blank, the run's own provider/model is used. That is the fallback rather
+# than the default because a fold that cannot run at all is worse than one that
+# costs a little: without it the transcript stays whole and `clamp_input` drops
+# the oldest segments with no summary behind them.
+# NVIDIA on purpose: it is the provider the platform ships a key for
+# (`credentials.resolution.PLATFORM_KEY_ENV`), so the fold works on a fresh
+# install and for a user who has connected nothing of their own. Every other
+# provider would make the fold depend on a credential the user may not have —
+# and a context mechanism that silently stops working when a key is missing is
+# worse than one that costs a little, because the run just starts losing its
+# oldest steps again with no summary behind them.
+CONTEXT_SUMMARY_PROVIDER = os.environ.get('CONTEXT_SUMMARY_PROVIDER', 'nvidia')
+CONTEXT_SUMMARY_MODEL = os.environ.get(
+    'CONTEXT_SUMMARY_MODEL', 'nvidia/nemotron-3.5-lightning-30b-a3b'
+)

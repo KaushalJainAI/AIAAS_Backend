@@ -96,7 +96,13 @@ class TurnRequest:
     reference_message_id: int | None = None
     approve_tool_call: str | None = None
     #: "and stop asking me about this tool". Only meaningful with an approval.
+    #: The retired spelling of `approval_scope='always'`, still accepted because
+    #: clients in the wild send it.
     remember_approval: bool = False
+    #: How long the approval lasts: 'once' | 'session' | 'always'. Empty means
+    #: the client did not say, and `approve_tool_call` falls back to reading
+    #: `remember_approval`.
+    approval_scope: str = ""
 
     @classmethod
     def parse(cls, payload: Mapping[str, Any]) -> TurnRequest:
@@ -119,6 +125,10 @@ class TurnRequest:
             ),
             approve_tool_call=approval,
             remember_approval=bool(payload.get("remember_approval")) and approval is not None,
+            approval_scope=(
+                (payload.get("approval_scope") or "").strip().lower()
+                if approval is not None else ""
+            ),
         )
 
 
@@ -403,7 +413,12 @@ async def run_chat_turn(
     if request.approve_tool_call:
         await agent.approve_tool_call(
             thread_id, request.approve_tool_call,
-            remember=request.remember_approval, user_id=user.id,
+            remember=request.remember_approval,
+            scope=request.approval_scope,
+            # Not `thread_id`: with memory off that is a throwaway id and the
+            # session-scoped allowance would be filed where nothing looks.
+            session_key=str(session.id),
+            user_id=user.id,
         )
 
     await sink(Event.STATUS, {"phase": "planning", "message": "Starting up..."})

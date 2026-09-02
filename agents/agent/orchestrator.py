@@ -51,6 +51,57 @@ MAX_PARALLEL_WORKERS = 8
 WORKER_ANSWER_CHAR_LIMIT = 20_000
 FANOUT_TOTAL_CHAR_LIMIT = 60_000
 
+#: What the parent may send *down*. Results were bounded from the start and
+#: instructions were not, which is the wrong way round to leave it: the answer
+#: comes back to one window, while a task is copied into every worker's window
+#: and paid for once per worker. A parent that restates a long briefing into six
+#: tasks pays for it six times.
+#:
+#: Refused rather than truncated. A trimmed instruction is a worker confidently
+#: doing the wrong job, and the parent is a model that can be told to shorten
+#: and try again — which is not true of a tool result arriving from outside.
+DELEGATION_TASK_CHAR_LIMIT = 8_000
+
+#: Shared context sent to every worker, once each. Larger than one task because
+#: it replaces the duplication rather than adding to it: the alternative is the
+#: same background pasted into all N tasks.
+DELEGATION_BRIEFING_CHAR_LIMIT = 16_000
+
+#: Workers one fan-out may start. `MAX_PARALLEL_WORKERS` caps how many run at
+#: the same moment, which bounds connections and nothing else — fifty tasks
+#: still meant fifty full model runs, eight at a time. Spend is divided N ways
+#: so the money was never the exposure; time and the parent's own window were.
+MAX_WORKERS_PER_FANOUT = 16
+
+
+def check_delegation_payload(tasks: list[str], briefing: str = "") -> None:
+    """Refuse a fan-out whose instructions are too large to be sensible.
+
+    Raises `DelegationRefused` with a message written for the model that wrote
+    the tasks: it says which task, how long it is, and what to do instead.
+    """
+    if len(tasks) > MAX_WORKERS_PER_FANOUT:
+        raise DelegationRefused(
+            f"{len(tasks)} workers is more than the {MAX_WORKERS_PER_FANOUT} one "
+            f"fan-out may start. Group the work into fewer, larger tasks."
+        )
+
+    if len(briefing) > DELEGATION_BRIEFING_CHAR_LIMIT:
+        raise DelegationRefused(
+            f"The briefing is {len(briefing):,} characters, over the "
+            f"{DELEGATION_BRIEFING_CHAR_LIMIT:,} limit. Send the workers what "
+            f"they need to act on, not everything you have read."
+        )
+
+    for index, task in enumerate(tasks):
+        if len(task) > DELEGATION_TASK_CHAR_LIMIT:
+            raise DelegationRefused(
+                f"Task {index + 1} is {len(task):,} characters, over the "
+                f"{DELEGATION_TASK_CHAR_LIMIT:,} limit. Put shared background in "
+                f"`briefing` — it is sent to every worker once — and keep each "
+                f"task to what that worker alone must do."
+            )
+
 
 class DelegationRefused(Exception):
     """The delegation was rejected before any model call."""

@@ -12,8 +12,9 @@ Tool names are namespaced so MCP tools never collide with built-in tools:
     mcp__<server_id>__<tool_name>
 
 The provider exposes two calls:
-    * `get_openai_tool_descriptors(user)` -> list of OpenAI-format function
-      specs ready to merge into `AVAILABLE_TOOLS`.
+    * `get_openai_tool_descriptors(user, server_ids=None)` -> list of
+      OpenAI-format function specs ready to merge into `AVAILABLE_TOOLS`,
+      optionally narrowed to a chosen few connections.
     * `execute(name, arguments, user)` -> JSON-serialisable result.
 """
 from __future__ import annotations
@@ -24,6 +25,7 @@ import logging
 import re
 from dataclasses import dataclass
 from hashlib import sha1
+from collections.abc import Iterable
 from typing import Any
 
 from django.core.exceptions import PermissionDenied
@@ -93,12 +95,29 @@ class MCPToolProvider:
     """Stateless facade. All methods take `user` explicitly — no hidden state."""
 
     @staticmethod
-    async def get_openai_tool_descriptors(user) -> list[dict[str, Any]]:
+    async def get_openai_tool_descriptors(
+        user, server_ids: Iterable[int] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Return OpenAI-format tool descriptors for every MCP tool visible to
         `user`. Safe to call on every chat turn — `list_tools` is cached.
+
+        `server_ids` narrows that to a chosen few connections. `None` means
+        "every one the user has", which is what chat passes: a human is typing
+        and watching, so the whole workspace is the right scope. An agent run
+        passes its own selection, because an agent is configuration that runs
+        unattended and "every connection this account owns" is not a blast
+        radius anyone chose.
+
+        Filtering here rather than in the caller keeps the narrowing on the
+        same side as `get_servers_for_user`, so a server the user has switched
+        off on Connections is excluded before the selection is even consulted —
+        a stale id in an agent's config can only ever take tools away.
         """
         servers = await get_servers_for_user(user)
+        if server_ids is not None:
+            allowed = set(server_ids)
+            servers = [s for s in servers if s.id in allowed]
 
         async def _descriptors_for(server) -> list[dict[str, Any]]:
             # Bound each server: a hung/absent stdio server must not stall the

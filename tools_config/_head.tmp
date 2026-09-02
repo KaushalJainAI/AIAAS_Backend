@@ -1,0 +1,96 @@
+"""
+Tool Library — read-only catalogue of standard tools.
+
+Tools are code (chat/tools/registry.py) and are not user-created. This module
+exposes *what exists* so the frontend can render a library, grouped by the
+grant that makes each tool reachable (agents/agent/runtime.py:GRANT_TOOLS).
+
+Connectors vs Plugins vs Tools:
+  Tool      = one callable function the model can invoke (registry Tool)
+  Connector = credential/connection info (credentials.Credential)
+  Plugin    = external MCP server that advertises mcp__* tools at runtime
+Skills are prompt injection, not callable — intentionally absent here.
+
+No DB table in V1. Absent row = code defaults (thresholds.py, tool-module
+constants). If per-user enabled/config is added later, it will filter the
+lists returned here, not change the catalogue itself.
+"""
+from __future__ import annotations
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+
+# Grant -> human presentation. Must match GRANT_TOOLS keys in
+# agents/agent/runtime.py:42 and the 8 bools in AgentBuilder. `shell` is
+# included so it can be documented as unserved (UNSERVED_GRANTS).
+GRANT_META: dict[str, dict[str, str]] = {
+    'webSearch': {
+        'label': 'Web Search',
+        'description': 'Search the open web — queries, research, images and video.',
+        'icon': 'search',
+    },
+    'scrape': {
+        'label': 'Web Scrape',
+        'description': 'Fetch and extract content from a URL.',
+        'icon': 'globe',
+    },
+    'rag': {
+        'label': 'Knowledge',
+        'description': 'Retrieve from your indexed documents and knowledge bases.',
+        'icon': 'book',
+    },
+    'codeExecution': {
+        'label': 'Code Execution',
+        'description': 'Run Python in the sandboxed interpreter.',
+        'icon': 'code',
+    },
+    'fileOps': {
+        'label': 'Files',
+        'description': 'Read and write your own files within the virtual filesystem.',
+        'icon': 'files',
+    },
+    'subAgents': {
+        'label': 'Delegation',
+        'description': 'Find and invoke other agents as sub-tasks.',
+        'icon': 'users',
+    },
+    'mcp': {
+        'label': 'Plugins',
+        'description': 'Tools from connected plugins (MCP servers) using your credentials.',
+        'icon': 'plug',
+    },
+    'shell': {
+        'label': 'Shell',
+        'description': 'Host shell access — not served. Leave off.',
+        'icon': 'terminal',
+    },
+    'system': {
+        'label': 'System',
+        'description': 'Always available — no grant needed, no side effects.',
+        'icon': 'clock',
+    },
+    'chat': {
+        'label': 'Chat & Memory',
+        'description': 'Conversation history and session context — chat-only, not grant-gated.',
+        'icon': 'message',
+    },
+    'vision': {
+        'label': 'Vision',
+        'description': 'Ask the vision witness about an image attachment.',
+        'icon': 'eye',
+    },
+    'artifacts': {
+        'label': 'Artifacts',
+        'description': 'Render HTML into a sandboxed iframe.',
+        'icon': 'layout',
+    },
+    'internal': {
+        'label': 'Internal',
+        'description': 'Call this platform as the user — sensitive, gated.',
+        'icon': 'shield',
+    },
+}
+
+

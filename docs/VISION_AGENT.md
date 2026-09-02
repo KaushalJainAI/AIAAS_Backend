@@ -101,12 +101,33 @@ base URL, `settings.NVIDIA_API_KEY` already backs guest chat (`chat/guest/runtim
 and `populate_models.py:186` already seeds a vision model. Almost nothing new is
 needed to reach it.
 
-### Candidate witnesses — all called with a real chart image
+> **The chain was repointed on 2026-09-01 — the table below is the original
+> 2026-08-13 measurement and its top two rows are now dead.**
+> `nvidia/nemotron-nano-12b-v2-vl` and `nvidia/llama-3.1-nemotron-nano-vl-8b-v1`
+> both reached end of life on 2026-08-26; NIM answers **410** for each, so the
+> whole chain was retired on the same day and `ask_vision` failed on every
+> call. The current chain is in `chat/vision/resolve.py`:
+>
+> | Model | Read the image | Latency | Notes |
+> |---|---|---|---|
+> | `meta/llama-3.2-11b-vision-instruct` | correct (`4.8`) | **~1.2s** | Current default |
+> | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | correct (`4.8`) | ~2.4s | Fallback; 503s when NIM is at capacity |
+> | `meta/llama-3.2-90b-vision-instruct` | — | **timed out ×4 at 90s** | Deliberately *not* in the chain. A witness answers up to six questions per turn; a model slower than the turn is no witness |
+>
+> Two rules changed with it, both because "every link retired at once" was
+> unhandled. `witness_available()` now checks the chain against models the
+> registry still lists as live, so a dead chain withholds `ask_vision` instead
+> of advertising it (see `resolve.py::_retired`); and a **timeout now advances
+> the chain** rather than aborting it (`agent.py::_CHAIN_CONTINUES`) — capacity
+> is per model, a key is not, and one slow entry used to blind the agent while
+> a working model sat behind it.
+
+### Candidate witnesses — all called with a real chart image (2026-08-13)
 
 | Model | Read the chart | Latency (warm) | Prompt tokens | Notes |
 |---|---|---|---|---|
-| `nvidia/nemotron-nano-12b-v2-vl` | correct | ~1.8–2.0s | ~805 | **Recommended default.** Already seeded with `VISION_CAPS`. Natural, witness-like prose |
-| `nvidia/llama-3.1-nemotron-nano-vl-8b-v1` | correct | ~1.8s | ~810 | Cheapest tier. Extremely terse ("4.8, USD Millions") |
+| `nvidia/nemotron-nano-12b-v2-vl` | correct | ~1.8–2.0s | ~805 | ~~Recommended default~~ **EOL 2026-08-26 — 410** |
+| `nvidia/llama-3.1-nemotron-nano-vl-8b-v1` | correct | ~1.8s | ~810 | ~~Cheapest tier~~ **EOL 2026-08-26 — 410** |
 | `meta/llama-3.2-11b-vision-instruct` | correct | ~1.8s | ~1632 | 2× the image tokens for no accuracy gain here |
 | `nvidia/nemotron-parse` | correct (small image) | ~1s | — | OCR/layout specialist. See below |
 | `google/gemma-3-4b-it`, `microsoft/phi-3-vision-128k-instruct`, `nvidia/vila`, `nvidia/neva-22b`, `google/deplot` | — | — | — | **HTTP 404 for this account** |

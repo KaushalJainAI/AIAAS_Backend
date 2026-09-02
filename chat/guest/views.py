@@ -3,12 +3,14 @@ Guest (unauthenticated) chat endpoints.
 
 Keeps the heavy authenticated chat pipeline untouched. Guests get:
   - One owner: the shared guest Django user (see chat/guest.py).
-  - One provider and one model: OpenRouter serving GUEST_MODEL (the free-models
-    router), with the platform OpenRouter key. Guests get no model picker, and
+  - One provider and one model: NVIDIA NIM serving GUEST_MODEL (Nemotron 3.5
+    Lightning), with the platform NVIDIA key. Guests get no model picker, and
     no request field can move them off it.
   - Plain chat only — no file uploads, workflow suggestions, KB / RAG, MCP,
     or canvas-agent routing. Web search and code execution are out of scope
     for the guest agentic loop; visitors must log in to use those.
+  - No conversation memory – guest chats do not remember previous turns.
+    Memory (history + searchable recall) is only for logged-in users.
   - IP-based rate limits via the three GuestChat* throttle classes.
   - A 200K token (input + output) budget enforced before the upstream call.
 """
@@ -77,6 +79,7 @@ def create_guest_session(request):
         llm_model=GUEST_MODEL,
         intent="chat",
         system_prompt=GUEST_SYSTEM_PROMPT,
+        memory_enabled=False,
     )
     return Response(ChatSessionSerializer(session).data, status=status.HTTP_201_CREATED)
 
@@ -142,14 +145,21 @@ async def guest_send_message_stream(request, session_id: str):
         session.llm_provider = GUEST_PROVIDER
         session.llm_model = GUEST_MODEL
         await session.asave(update_fields=["llm_provider", "llm_model"])
+    # Memory is only for logged-in users – guests always run with memory off.
+    # Correct stale rows that were created before this pin.
+    if session.memory_enabled:
+        session.memory_enabled = False
+        await session.asave(update_fields=["memory_enabled"])
 
     async def event_stream():
         try:
             # Build conversation history (oldest -> newest, last N).
+            # Memory is only for logged-in users – guest chats answer from the current message alone.
             history_msgs = []
-            async for msg in ChatMessage.objects.filter(session=session).order_by("-created_at")[:HISTORY_TURNS_FOR_GUEST]:
-                history_msgs.append(msg)
-            history_msgs.reverse()
+            if session.memory_enabled:
+                async for msg in ChatMessage.objects.filter(session=session).order_by("-created_at")[:HISTORY_TURNS_FOR_GUEST]:
+                    history_msgs.append(msg)
+                history_msgs.reverse()
 
             system_prompt = session.system_prompt or GUEST_SYSTEM_PROMPT
             messages = [{"role": "system", "content": system_prompt}]

@@ -68,7 +68,7 @@ chroma_data/
 *.faiss
 
 # WebAssembly binaries
-executor/sandbox/wasm/
+sandbox/wasm/
 
 # Local scratch / generated notes
 scratch/

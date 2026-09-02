@@ -18,7 +18,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from . import queries
-from .serializers import AnalyticsFilterSerializer, ExecutionListFilterSerializer
+from .serializers import (
+    AnalyticsFilterSerializer,
+    ExecutionListFilterSerializer,
+    RevisionListFilterSerializer,
+)
 
 
 def _validated(serializer_class, request) -> dict:
@@ -99,8 +103,16 @@ def execution_detail(request, execution_id: str):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def revision_list(request, agent_id: int):
-    """Every configuration change to an agent, newest first, with diffs."""
-    timeline = queries.revision_timeline(request.user, agent_id)
+    """One page of an agent's configuration changes, newest first, with diffs.
+
+    Paged rather than capped: the history grows for the life of the agent, so
+    the builder shows only the newest few and the full timeline has its own
+    page, which walks the rest with `cursor`.
+    """
+    params = _validated(RevisionListFilterSerializer, request)
+    timeline = queries.revision_timeline(
+        request.user, agent_id, limit=params['limit'], cursor=params.get('cursor')
+    )
     if timeline is None:
         return Response({"error": "Agent not found"}, status=404)
     return Response(timeline)

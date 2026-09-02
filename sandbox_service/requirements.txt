@@ -1,0 +1,14 @@
+# The sandbox sidecar's own dependencies. Kept deliberately small — this
+# process runs untrusted code, so every package here is attack surface.
+#
+# numpy/pandas are the whole reason the sandbox is a container and not a WASM
+# guest: they are C extensions WASM cannot load. Pin them so the image is
+# reproducible.
+numpy==2.2.1
+pandas==2.2.3
+
+# Optional inner layer: a seccomp filter that blocks socket creation in the
+# child. runner.py imports it best-effort and falls through if it is missing,
+# because the container's network already has no egress — this is defence in
+# depth, not the only control.
+pyseccomp==0.1.2

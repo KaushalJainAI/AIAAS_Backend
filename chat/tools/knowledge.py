@@ -47,7 +47,7 @@ def _kb_backend_label(backend: str) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def list_knowledge_bases(args: Dict, context: Dict) -> str:
     from asgiref.sync import sync_to_async
     from inference.models import KnowledgeBase
@@ -55,8 +55,16 @@ async def list_knowledge_bases(args: Dict, context: Dict) -> str:
     if not user_id:
         return json.dumps({"error": "No user context."})
     try:
+        scope = kb_scope(context)
+
         def _list():
-            kbs = KnowledgeBase.objects.filter(user_id=user_id).values(
+            rows = KnowledgeBase.objects.filter(user_id=user_id)
+            if scope:
+                # Listing every KB the *user* owns would hand a scoped agent the
+                # names and ids of corpora it may not search, which it will then
+                # try, and report the refusals to whoever reads the run.
+                rows = rows.filter(id__in=scope)
+            kbs = rows.values(
                 'id', 'name', 'description', 'backend', 'doc_count', 'vector_count',
                 'index_size_bytes', 'is_default', 'embedding_model',
             )
@@ -78,18 +86,70 @@ async def list_knowledge_bases(args: Dict, context: Dict) -> str:
         return json.dumps({"error": f"Failed to list KBs: {e}"})
 
 
-async def _resolve_kb(user_id: int, kb_id):
-    """(kb_model, error_json) — exactly one is non-None. Scoped to owner."""
+def kb_scope(context: Dict) -> tuple[int, ...] | None:
+    """The knowledge bases this caller may reach, or None for "any it owns".
+
+    None is unrestricted and an empty tuple is impossible by construction: the
+    agent runtime sends None when its selection is empty, because an agent built
+    before the selection was enforced must not have its corpus silently emptied.
+    Chat sends nothing at all, which reads the same way.
+    """
+    scope = context.get("kb_scope")
+    if not scope:
+        return None
+    return tuple(int(kb_id) for kb_id in scope)
+
+
+async def _resolve_kb(user_id: int, kb_id, context: Dict | None = None):
+    """(kb_model, error_json) — exactly one is non-None. Scoped to owner, and to
+    the caller's configured knowledge bases when it has any.
+
+    Ownership was the only filter here, so an agent configured for one KB could
+    search every other KB its owner had; the builder's selector narrowed the
+    prompt and nothing else. Out-of-scope answers the same way as not-found: a
+    distinct "exists but is not yours to search" would tell an agent what else
+    the user keeps.
+
+    The default-KB branch is where the old behaviour was quietly wrong rather
+    than merely wide. Omitting `kb_id` fell through to the user's *default* KB,
+    which need not be any of the ones this agent was given — and an answer from
+    the wrong corpus looks exactly like an answer from the right one.
+    """
     from asgiref.sync import sync_to_async
     from inference.models import KnowledgeBase
 
+    scope = kb_scope(context or {})
+
     if not kb_id:
-        kb_model = await sync_to_async(
-            lambda: KnowledgeBase.objects.filter(user_id=user_id, is_default=True).first()
-        )()
-        if kb_model is None:
-            return None, json.dumps({"error": "No knowledge base found for this user yet."})
-        return kb_model, None
+        if scope and len(scope) == 1:
+            kb_id = scope[0]
+        elif scope:
+            return None, json.dumps({
+                "error": (
+                    f"This agent can search {len(scope)} knowledge bases "
+                    f"({', '.join(str(i) for i in scope)}). Pass kb_id to say "
+                    f"which one — there is no default among them."
+                )
+            })
+        else:
+            kb_model = await sync_to_async(
+                lambda: KnowledgeBase.objects.filter(
+                    user_id=user_id, is_default=True
+                ).first()
+            )()
+            if kb_model is None:
+                return None, json.dumps(
+                    {"error": "No knowledge base found for this user yet."}
+                )
+            return kb_model, None
+
+    if scope and int(kb_id) not in scope:
+        return None, json.dumps({
+            "error": (
+                f"KB {kb_id} is not one this agent may search. Available: "
+                f"{', '.join(str(i) for i in scope)}."
+            )
+        })
 
     kb_model = await sync_to_async(
         lambda: KnowledgeBase.objects.filter(id=kb_id, user_id=user_id).first()
@@ -126,7 +186,7 @@ async def _resolve_kb(user_id: int, kb_id):
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def knowledge_base_search(args: Dict, context: Dict) -> str:
     query = args.get("query", "")
     if not query:
@@ -137,7 +197,7 @@ async def knowledge_base_search(args: Dict, context: Dict) -> str:
         return json.dumps({"error": "No user context for knowledge base search."})
 
     try:
-        kb_model, error = await _resolve_kb(user_id, args.get("kb_id"))
+        kb_model, error = await _resolve_kb(user_id, args.get("kb_id"), context)
         if error:
             return error
 
@@ -209,7 +269,7 @@ async def knowledge_base_search(args: Dict, context: Dict) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def keyword_search(args: Dict, context: Dict) -> str:
     query = args.get("query", "")
     if not query.strip():
@@ -219,7 +279,7 @@ async def keyword_search(args: Dict, context: Dict) -> str:
     if not user_id:
         return json.dumps({"error": "No user context for keyword search."})
     try:
-        kb_model, error = await _resolve_kb(user_id, args.get("kb_id"))
+        kb_model, error = await _resolve_kb(user_id, args.get("kb_id"), context)
         if error:
             return error
 
@@ -284,7 +344,7 @@ async def _keyword_search_impl(kb_model, query: str, top_k: int) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def list_documents(args: Dict, context: Dict) -> str:
     from asgiref.sync import sync_to_async
     from inference.models import Document
@@ -292,7 +352,7 @@ async def list_documents(args: Dict, context: Dict) -> str:
     if not user_id:
         return json.dumps({"error": "No user context."})
     try:
-        kb_model, error = await _resolve_kb(user_id, args.get("kb_id"))
+        kb_model, error = await _resolve_kb(user_id, args.get("kb_id"), context)
         if error:
             return error
 
@@ -349,7 +409,7 @@ async def list_documents(args: Dict, context: Dict) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def read_document(args: Dict, context: Dict) -> str:
     from asgiref.sync import sync_to_async
     from inference.models import Document
@@ -373,6 +433,21 @@ async def read_document(args: Dict, context: Dict) -> str:
         if doc is None:
             return json.dumps({
                 "error": f"Document {document_id} not found among your readable documents."
+            })
+
+        # A document is addressed by id here, not through its KB, so the scope
+        # the other four tools enforce would be one `read_document` call away
+        # from irrelevant — an agent given one knowledge base could walk the
+        # user's whole library by id. A document in no KB at all is out of scope
+        # too: files an agent may touch directly are the `fileOps` axis, with
+        # its own scope, not this one.
+        scope = kb_scope(context)
+        if scope and doc.knowledge_base_id not in scope:
+            return json.dumps({
+                "error": (
+                    f"Document {document_id} is not in a knowledge base this "
+                    f"agent may read."
+                )
             })
 
         text = doc.content_text or ''

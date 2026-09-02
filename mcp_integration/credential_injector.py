@@ -8,9 +8,10 @@ through this module. Do not re-implement credential resolution elsewhere.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from asgiref.sync import sync_to_async
@@ -50,65 +51,67 @@ class CredentialInvalidError(Exception):
     """A credential is present but cannot be decrypted or is missing a field."""
 
 
+@dataclass(frozen=True)
+class CredentialFile:
+    """
+    One credential file a server wants on disk, already rendered.
+
+    Deliberately *not* written here. `resolve()` is pure — it is called by
+    `validate()` on every Connections page load, and a dry run that scattered
+    plaintext refresh tokens across the filesystem would be a strange thing for
+    a diagnostic to do. The bytes are handed to `_SessionWorker`, which creates
+    the directory and removes it in the same task it opened the session in.
+    """
+    env_var: str
+    filename: str
+    content: str
+    #: "file" — the env var receives the file's own path.
+    #: "dir"  — it receives the containing directory, for servers that expect a
+    #: credentials *folder* and pick the filename themselves.
+    target: str = "file"
+
+
 @dataclass
 class ResolvedCredentials:
     """Materialised credential values keyed by the server's mapping target."""
     env_vars: dict[str, str]
     headers: dict[str, str]
     used_credential_ids: list[int]
+    files: list[CredentialFile] = field(default_factory=list)
 
 
-def _lookup_credential_sync(user_id: int, slug: str):
-    from credentials.models import Credential
+async def _resolve_slug(
+    user_id: int, slug: str, server_name: str
+) -> tuple[int, dict[str, Any]]:
+    """
+    The user's credential of this type, as `(id, decrypted fields)`.
 
-    qs = Credential.objects.filter(
-        user_id=user_id,
-        credential_type__slug=slug,
-        is_active=True,
-    ).select_related("credential_type").order_by("-is_verified", "-updated_at")
-    return qs.first()
+    Delegates to `credentials.manager` rather than querying here. This module
+    used to carry its own lookup and its own decrypt, and the cost of that
+    second implementation was everything the first one had: no 5-minute cache,
+    so every connector re-queried and re-decrypted on every turn, and no OAuth
+    refresh. The lookup's ordering (verified first, most recently updated
+    second) moved with it and is documented there.
 
+    The row is resolved separately from its data because the id is worth
+    keeping: `used_credential_ids` is what an audit entry would hang off, and a
+    dict of fields cannot say which row it came from.
+    """
+    from credentials.manager import get_credential_manager
 
-async def _resolve_slug(user_id: int, slug: str, server_name: str):
-    cred = await sync_to_async(_lookup_credential_sync)(user_id, slug)
+    manager = get_credential_manager()
+    cred = await sync_to_async(manager.lookup_by_slug_sync)(slug, user_id)
     if cred is None:
         raise CredentialMissingError(slug, server_name)
-    return cred
-
-
-def _decrypt(cred) -> dict[str, Any]:
-    try:
-        data = dict(cred.get_credential_data() or {})
-    except Exception as e:  # noqa: BLE001
+    data = await manager.get_credential(cred.id, user_id)
+    if data is None:
+        # The row exists but could not be decrypted at all — a different
+        # failure from "you have not connected this", and a different fix.
         raise CredentialInvalidError(
-            f"Failed to decrypt credential '{cred.name}' (id={cred.id}): {type(e).__name__}"
-        ) from e
-
-    # Credentials created by the OAuth flow store their tokens in the dedicated
-    # `access_token` / `refresh_token` columns rather than in `encrypted_data`,
-    # which `get_credential_data()` reads. Without this merge, connecting Google
-    # by OAuth produced a credential the injector saw as empty — the server then
-    # failed with "missing field 'refresh_token'" on a connection the UI had just
-    # reported as connected. Blob values win, so a hand-entered field is never
-    # silently overridden by a stale token column.
-    from cryptography.fernet import Fernet
-
-    for field in ("access_token", "refresh_token"):
-        if data.get(field):
-            continue
-        raw = getattr(cred, field, None)
-        if not raw:
-            continue
-        try:
-            fernet = Fernet(type(cred)._get_encryption_key())
-            data[field] = fernet.decrypt(bytes(raw)).decode()
-        except Exception:  # noqa: BLE001
-            # A token we cannot decrypt is treated as absent: the caller then
-            # raises a precise "missing field" error naming what to reconnect.
-            logger.warning(
-                "Could not decrypt %s column on credential %s", field, cred.id
-            )
-    return data
+            f"Credential '{slug}' could not be read (id={cred.id}). "
+            f"Try reconnecting it."
+        )
+    return cred.id, data
 
 
 def _extract_field(data: dict[str, Any], field_path: str) -> Any:
@@ -162,15 +165,32 @@ class CredentialInjector:
 
         async def _get(slug: str) -> tuple[int, dict[str, Any]]:
             if slug not in cred_cache:
-                cred = await _resolve_slug(user_id, slug, server_name)
-                cred_cache[slug] = (cred.id, _decrypt(cred))
+                cred_cache[slug] = await _resolve_slug(user_id, slug, server_name)
             return cred_cache[slug]
 
+        # An OAuth authorization, when the user has completed one, satisfies a
+        # remote server on its own: it *is* the credential, and requiring a
+        # separately-pasted token alongside it would be asking twice for the
+        # same access. Checked before `required_credential_types` so a curated
+        # row can declare a token type as its manual fallback without that
+        # declaration blocking the users who connected instead.
+        # `getattr`, not attribute access: `resolve` is called with lightweight
+        # stand-ins for a server (tests use SimpleNamespace, and an unsaved row
+        # has no pk). Neither can have an authorization, so "no id" and "not
+        # remote" are the same answer — no bearer — rather than an AttributeError.
+        from .oauth import access_token_for
+
+        oauth_bearer = None
+        server_id = getattr(server, "id", None)
+        if server_id and getattr(server, "type", None) in MCPServer.REMOTE_TYPES:
+            oauth_bearer = await sync_to_async(access_token_for)(server_id, user_id)
+
         # Required types must exist regardless of whether they're mapped.
-        for slug in server.required_credential_types or []:
-            if slug == SETTINGS_SLUG:
-                continue
-            await _get(slug)
+        if not oauth_bearer:
+            for slug in server.required_credential_types or []:
+                if slug == SETTINGS_SLUG:
+                    continue
+                await _get(slug)
 
         env_vars: dict[str, str] = {}
         for env_key, mapping in (server.credential_env_map or {}).items():
@@ -239,10 +259,84 @@ class CredentialInjector:
 
             headers[header_key] = _PLACEHOLDER_RE.sub(_sub, template)
 
+        async def _fill(text: str) -> str:
+            """Substitute every {slug:field} in one string. Same grammar as a
+            header template, so a connector author learns one syntax."""
+            out = text
+            for p in list(_PLACEHOLDER_RE.finditer(text)):
+                slug, field_path = p.group(1), p.group(2)
+                if slug == SETTINGS_SLUG:
+                    value = _settings_value(field_path)
+                    if value is None:
+                        raise CredentialInvalidError(
+                            f"Platform setting '{field_path}' is not configured "
+                            f"(needed by a credential file on {server_name})"
+                        )
+                else:
+                    _, data = await _get(slug)
+                    value = _extract_field(data, field_path)
+                    if value is None:
+                        raise CredentialInvalidError(
+                            f"Credential '{slug}' is missing field '{field_path}' "
+                            f"(needed by a credential file on {server_name})"
+                        )
+                out = out.replace(p.group(0), str(value))
+            return out
+
+        async def _render(node):
+            """Walk the content tree, substituting inside string leaves only.
+            Keys are left alone: a placeholder in a key would produce a JSON
+            document whose shape depends on a secret, which no server expects."""
+            if isinstance(node, str):
+                return await _fill(node)
+            if isinstance(node, dict):
+                return {k: await _render(v) for k, v in node.items()}
+            if isinstance(node, list):
+                return [await _render(v) for v in node]
+            return node
+
+        files: list[CredentialFile] = []
+        for env_key, spec in (server.credential_file_map or {}).items():
+            if not isinstance(spec, dict):
+                logger.warning(
+                    "Skipping non-object file spec %r on server %s", spec, server_name
+                )
+                continue
+            filename = spec.get("filename")
+            if not filename or "/" in filename or "\\" in filename or filename.startswith("."*2):
+                # The filename lands inside a directory we create; a separator
+                # or a parent reference would let a catalogue row write outside
+                # it. Curated rows are ours, but this map is also editable on a
+                # user's own server.
+                raise CredentialInvalidError(
+                    f"Credential file for {env_key} on {server_name} has an "
+                    f"unusable filename {filename!r}"
+                )
+            content = spec.get("content")
+            if content is None:
+                raise CredentialInvalidError(
+                    f"Credential file for {env_key} on {server_name} has no content"
+                )
+            rendered = await _render(content)
+            files.append(CredentialFile(
+                env_var=env_key,
+                filename=filename,
+                content=rendered if isinstance(rendered, str) else json.dumps(rendered),
+                target=spec.get("target", "file"),
+            ))
+
+        if oauth_bearer:
+            # `setdefault`, not assignment: an explicit `credential_header_map`
+            # entry is configuration someone wrote deliberately, and silently
+            # overwriting it would make a hand-set Authorization header
+            # impossible to use on a server the user had also connected.
+            headers.setdefault("Authorization", f"Bearer {oauth_bearer}")
+
         return ResolvedCredentials(
             env_vars=env_vars,
             headers=headers,
             used_credential_ids=[cid for cid, _ in cred_cache.values()],
+            files=files,
         )
 
     @staticmethod

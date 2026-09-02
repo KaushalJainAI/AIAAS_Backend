@@ -434,13 +434,25 @@ def _revision_summary(revision: SubAgentRevision | None) -> dict[str, Any] | Non
     }
 
 
-def revision_timeline(user, agent_id: int) -> dict[str, Any] | None:
-    """Every configuration change to an agent, newest first, with its diff.
+def revision_timeline(
+    user,
+    agent_id: int,
+    *,
+    limit: int = REVISION_TIMELINE_LIMIT,
+    cursor: str | None = None,
+) -> dict[str, Any] | None:
+    """One page of an agent's configuration changes, newest first, with diffs.
 
     Returns None when the agent does not exist or is not theirs — an id is not
-    a permission. Capped like the execution detail: a heavily-tuned agent
-    accumulates revisions without limit, and `truncated` says when the cap bit,
-    because a cut timeline and a short one must not look alike.
+    a permission.
+
+    This used to answer with a single capped list and a `truncated` flag, which
+    made a heavily-tuned agent's history unreadable: everything past the cap was
+    simply unreachable, and the timeline was rendered inline in the builder
+    where it grew without end. It is paged now, keyset on `number` — the column
+    is monotonic per agent and already the sort key, so a save landing between
+    two pages cannot make the next page repeat a row the way an offset would.
+    `count` is on the first (uncursored) page only, matching the execution list.
     """
     from agents.models import SubAgent
 
@@ -452,10 +464,9 @@ def revision_timeline(user, agent_id: int) -> dict[str, Any] | None:
         .filter(subagent_id=agent_id)
         .select_related('user')
         .annotate(run_count=Count('executions'))
-        .order_by('-number')
     )
-    total = base.count()
-    rows = base[:REVISION_TIMELINE_LIMIT]
+    limit = min(limit, REVISION_TIMELINE_LIMIT)
+    page = paginate_keyset(base, limit=limit, cursor=cursor, sort_field='number')
     return {
         "results": [
             {
@@ -470,11 +481,12 @@ def revision_timeline(user, agent_id: int) -> dict[str, Any] | None:
                 "run_count": row.run_count,
                 "created_at": row.created_at,
             }
-            for row in rows
+            for row in page.items
         ],
-        "count": total,
-        "limit": REVISION_TIMELINE_LIMIT,
-        "truncated": total > len(rows),
+        "count": None if cursor else base.count(),
+        "limit": limit,
+        "next_cursor": page.next_cursor,
+        "has_more": page.has_more,
     }
 
 

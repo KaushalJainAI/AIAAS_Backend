@@ -6,8 +6,6 @@ worse last Tuesday". These tests pin the two facts that make the answer
 possible: a save that changes something writes a revision, and a run records
 which revision it executed under.
 """
-from unittest import mock
-
 from django.contrib.auth.models import User
 from django.urls import reverse
 from django.utils import timezone
@@ -15,9 +13,12 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from agents.models import SubAgent
-from logs import queries, revisions
+from logs import revisions
 from logs.models import ExecutionLog, SubAgentRevision
-from workflow_backend.thresholds import REVISION_VALUE_CHAR_LIMIT
+from workflow_backend.thresholds import (
+    REVISION_TIMELINE_LIMIT,
+    REVISION_VALUE_CHAR_LIMIT,
+)
 
 
 def _config_payload(**overrides):
@@ -200,18 +201,53 @@ class RevisionEndpointTests(APITestCase):
         self.assertEqual(rows[0]['run_count'], 1)
         self.assertEqual(rows[1]['run_count'], 0)
         self.assertEqual(response.data['count'], 2)
-        self.assertFalse(response.data['truncated'])
+        self.assertFalse(response.data['has_more'])
+        self.assertIsNone(response.data['next_cursor'])
 
-    def test_a_long_timeline_is_capped_and_says_so(self):
-        """A tuned agent accumulates revisions without limit, and a cut
-        timeline and a short one must not look alike."""
+    def test_a_long_timeline_is_walked_a_page_at_a_time(self):
+        """A tuned agent accumulates revisions without limit. The history used
+        to be one capped list, so everything past the cap was unreachable; now
+        the caller pages to it, and `has_more` is what a "show more" reads."""
         url = reverse('logs:revision_list', args=[self.agent.id])
-        with mock.patch.object(queries, 'REVISION_TIMELINE_LIMIT', 1):
-            response = self.client.get(url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['count'], 2)
-        self.assertEqual([r['number'] for r in response.data['results']], [2])
-        self.assertTrue(response.data['truncated'])
+
+        first = self.client.get(url, {'limit': 1})
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual([r['number'] for r in first.data['results']], [2])
+        self.assertEqual(first.data['count'], 2)
+        self.assertTrue(first.data['has_more'])
+        self.assertIsNotNone(first.data['next_cursor'])
+
+        second = self.client.get(
+            url, {'limit': 1, 'cursor': first.data['next_cursor']}
+        )
+        self.assertEqual([r['number'] for r in second.data['results']], [1])
+        self.assertFalse(second.data['has_more'])
+        # Only the first page carries a total — a later page counting again
+        # would re-run the aggregate for a number the caller already has.
+        self.assertIsNone(second.data['count'])
+
+    def test_a_page_cannot_ask_for_more_than_the_cap(self):
+        """`limit` is a page size, not an escape hatch: the ceiling that used
+        to truncate the timeline still bounds one response."""
+        url = reverse('logs:revision_list', args=[self.agent.id])
+        response = self.client.get(url, {'limit': REVISION_TIMELINE_LIMIT + 1})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_save_between_pages_does_not_repeat_a_row(self):
+        """Keyset, not offset. A revision recorded while someone is reading
+        the history shifts every offset by one and makes the next page repeat
+        the row the first page ended on."""
+        url = reverse('logs:revision_list', args=[self.agent.id])
+        first = self.client.get(url, {'limit': 1})
+
+        self.agent.name = 'Renamed mid-read'
+        self.agent.save()
+        revisions.record(self.agent, user=self.user)
+
+        second = self.client.get(
+            url, {'limit': 1, 'cursor': first.data['next_cursor']}
+        )
+        self.assertEqual([r['number'] for r in second.data['results']], [1])
 
     def test_one_revision_carries_its_full_config(self):
         url = reverse('logs:revision_detail', args=[self.agent.id, 2])

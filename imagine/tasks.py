@@ -42,6 +42,14 @@ def poll_video_generation(self, generation_id):
             gen.status = "completed"
             gen.output_url = result["url"]
             gen.save()
+            # Persist to Documents (Images/Videos/Audio per user)
+            try:
+                from .services.documents import persist_generation_as_document
+
+                # Need a fresh user relation after save; generation already has user
+                persist_generation_as_document(gen)
+            except Exception:
+                logger.exception("Failed to persist video generation %s as document", generation_id)
             broadcast_generation(gen, "generation.completed")
         elif result["status"] == "failed":
             gen.status = "failed"

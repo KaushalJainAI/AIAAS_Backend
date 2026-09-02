@@ -305,6 +305,18 @@ CREDENTIAL_TYPES: list[dict] = [
         # credential picker on both nodes.
         "name": "Google (OAuth2)", "slug": "google-oauth2", "auth_method": "oauth2",
         "description": "Google account access for Drive and Calendar", "icon": "Chrome",
+        # Both `verification._verify_oauth2` and `manager.refresh_oauth_token`
+        # refuse to act on an oauth2 type with no `token_url`, reporting it as a
+        # bad credential rather than as missing configuration. Seeded here so a
+        # fresh install is correct without depending on migration `0008`.
+        "oauth_config": {
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_url": "https://oauth2.googleapis.com/token",
+            "userinfo_url": "https://www.googleapis.com/oauth2/v3/userinfo",
+            "revoke_url": "https://oauth2.googleapis.com/revoke",
+            "access_type": "offline",
+            "prompt": "consent",
+        },
         "fields_schema": [
             _field("access_token", "Access Token", secret=True),
             _field("refresh_token", "Refresh Token", secret=True, required=False),
@@ -437,20 +449,26 @@ class Command(BaseCommand):
         updated_count = 0
 
         for spec in CREDENTIAL_TYPES:
+            defaults = {
+                "name": spec["name"],
+                # The frontend resolves a node's `credentialType` against this
+                # column, so it must mirror the slug or the credential picker
+                # on the node cannot narrow the list to the right type.
+                "service_identifier": spec.get("service_identifier", spec["slug"]),
+                "auth_method": spec.get("auth_method", "api_key"),
+                "description": spec.get("description", ""),
+                "icon": spec.get("icon", "Key"),
+                "fields_schema": spec.get("fields_schema", []),
+                "is_active": True,
+            }
+            # Only written when the spec declares one. Listing it
+            # unconditionally would blank the column on every other type each
+            # time this command is re-run, which is the failure this seeder
+            # exists to prevent rather than cause.
+            if spec.get("oauth_config"):
+                defaults["oauth_config"] = spec["oauth_config"]
             _obj, created = CredentialType.objects.update_or_create(
-                slug=spec["slug"],
-                defaults={
-                    "name": spec["name"],
-                    # The frontend resolves a node's `credentialType` against this
-                    # column, so it must mirror the slug or the credential picker
-                    # on the node cannot narrow the list to the right type.
-                    "service_identifier": spec.get("service_identifier", spec["slug"]),
-                    "auth_method": spec.get("auth_method", "api_key"),
-                    "description": spec.get("description", ""),
-                    "icon": spec.get("icon", "Key"),
-                    "fields_schema": spec.get("fields_schema", []),
-                    "is_active": True,
-                },
+                slug=spec["slug"], defaults=defaults,
             )
             if created:
                 created_count += 1

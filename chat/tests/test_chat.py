@@ -182,12 +182,20 @@ class GuestStreamViewTests(TransactionTestCase):
         self.assertIn("Content is required", body)
 
     async def test_stream_reports_missing_api_key_via_sse(self):
-        # The guest key is the *platform* OpenRouter key, read from the
-        # environment by platform_api_key() — not a Django setting, so this
-        # clears the env names rather than using override_settings.
+        # The guest key is the *platform* key for whichever provider guest mode
+        # is pinned to, read from the environment by platform_api_key() — not a
+        # Django setting, so this clears the env names rather than using
+        # override_settings. The names are derived from the pin instead of
+        # repeated: this test hardcoded OpenRouter's, so when guest mode moved
+        # to NVIDIA it stopped clearing the key that mattered, sailed past the
+        # "not configured" branch it exists to check, and made a real network
+        # call to the provider from the test suite.
+        from chat.guest.runtime import GUEST_PROVIDER
+        from credentials.resolution import PLATFORM_ENV_KEYS
+
         with mock.patch.dict(
             "os.environ",
-            {"OPENROUTER_API_KEY": "", "OPEN_ROUTER_KEY": ""},
+            {name: "" for name in PLATFORM_ENV_KEYS[GUEST_PROVIDER]},
             clear=False,
         ):
             resp = await self.async_client.post(

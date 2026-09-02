@@ -188,20 +188,22 @@ Agents are `SubAgent` rows — see
 
 | URL | Method | What | Access | Complexity | Tested | Serializer | DB tables | Notes |
 |-----|--------|------|--------|-----------|--------|-----------|-----------|-------|
-| `/api/orchestrator/hitl/pending/` | GET | Pending human-in-the-loop requests | Auth | O(n) |  | `HITLRequestSerializer` | HITLRequest | Security-tested. Joins `execution__subagent`; it selected `execution__workflow` until 2026-08-24 and 500'd on every call — `agents/tests/test_regressions.py::RenamedColumnTests` |
+| `/api/orchestrator/hitl/pending/` | GET | Pending human-in-the-loop requests | Auth | O(n) |  | `HITLRequestSerializer` | HITLRequest | Security-tested. Joins `execution__subagent`; it selected `execution__workflow` until 2026-08-24 and 500'd on every call — `agents/tests/test_regressions.py::RenamedColumnTests`. **Returned an empty list on every call until 2026-09-01**: nothing outside the test suite had created a `HITLRequest` since the DAG supervisor was retired, so this endpoint, the escalation ladder and the daily digest were all unreachable. `agents/agent/hitl.py::open_request` is the missing write, called from `stream._approval_requested` when an agent run pauses; `resolve_request` closes the row on approve/reject. Tests: `notifications/tests/test_agent_notifications.py` |
 | `/api/orchestrator/hitl/{request_id}/respond/` | POST | Answer a HITL request | Auth | O(1) | ~ | — | HITLRequest | |
 | `/api/orchestrator/chat/` `…/{cid}/` `…/{cid}/messages/{mid}/` | GET/POST/DELETE | Builder chat threads | Auth | O(n) |  | — | ConversationMessage, SubAgent | POST persists the user message only; reply generation is not wired up (202, no assistant turn). The body's `workflow_id` (or `subagent_id`) maps to the `subagent` column and is **re-scoped to the caller** — an unowned or unparseable id stores null. It was passed as `workflow_id=` to `.create()` until 2026-08-24 and 500'd on every POST — `agents/tests/test_regressions.py::RenamedColumnTests` |
 | `/api/orchestrator/settings/update/` | POST | Update orchestrator settings | Auth | O(1) | ~ | — | UserProfile/settings | |
-| `/api/orchestrator/agents/` | GET/POST | List / create agent (a `Workflow` with `kind='agent'`) | Auth | O(n) |  | `AgentSerializer` | Workflow, ExecutionLog, Trigger | `agents/tests/test_agents.py`; stats counted from the log, not stored — `runs`/`unattended` are **distinct** counts (the `hitl_requests` filter forces a LEFT JOIN that multiplied both, and the spend, by the approval count) and `spend` is rupees derived from `tokens_used` via `agents/spend.py`, the same number the spend cap refuses on. A non-blank `schedule` reconciles a `Trigger` row via `AgentSerializer.sync_schedule` **after** save, and is refused unless `allowUnattended` is also on — the runtime rejects every unattended firing otherwise |
+| `/api/orchestrator/agents/` | GET/POST | List / create agent (a `Workflow` with `kind='agent'`) | Auth | O(n) |  | `AgentSerializer` | Workflow, ExecutionLog, Trigger | `agents/tests/test_agents.py`, `agents/tests/test_run_limits.py`; stats counted from the log, not stored — `runs`/`unattended` are **distinct** counts (the `hitl_requests` filter forces a LEFT JOIN that multiplied both, and the spend, by the approval count) and `spend` is rupees derived from `tokens_used` via `agents/spend.py`, the same number the spend cap refuses on. A non-blank `schedule` reconciles a `Trigger` row via `AgentSerializer.sync_schedule` **after** save, and is refused unless `allowUnattended` is also on — the runtime rejects every unattended firing otherwise. `cpu` and `memoryMb` were **removed from the wire** (2026-08-29): they were stored, validated and read by nothing, and could not be enforced by a sandbox that `exec`s on a thread in this process. `maxRunSeconds` replaces them and *is* enforced — `agents/budget.py`, clamped to `MIN_RUN_SECONDS`..`MAX_RUN_SECONDS`. The three context-lifecycle booleans (`compaction`, `recursiveContext`, `indexing`) are **read at run time** as of 2026-09-01 — `chat/turn/curation.py` — and `summaryModel`/`summaryProvider` were added beside them: which model folds a long run's earlier steps, blank meaning the platform default (`CONTEXT_SUMMARY_MODEL`, a small NVIDIA model the platform holds a key for). `agent_context['knowledgeBases']` is likewise enforced now rather than merely printed into the prompt: it becomes `TurnContext.kb_scope`, and every KB tool filters on it — an empty selection still means *unrestricted*, since agents predating enforcement never had one applied. **`connectors` is enforced as of 2026-09-01 and now holds `MCPServer` ids**, validated against the connections the caller can actually see (`mcp_integration.client.visible_server_ids_sync`, curated rows included). It was a hardcoded set of six presentation slugs that nothing on the run path read, so the `mcp` grant resolved *every* connection the account owned; it is now the second axis to that grant, the way `fileAccess` is to `fileOps`. Empty means *unrestricted* for the same reason `knowledgeBases` does. Enforced at both doors — `AgentToolbox.descriptors` narrows what is offered and `AgentToolbox.mcp_server_allowed` re-checks at dispatch, since a model names tools it saw in an earlier turn. Legacy slug values are cleared by `orchestrator.0021` and skipped at read time. Tests: `agents/tests/test_connector_scope.py` |
 | `/api/orchestrator/agents/{id}/` | GET/PUT/PATCH/DELETE | Agent detail | Auth (owner) | O(1) |  | `AgentSerializer` | Workflow, Trigger | PATCH **merges** onto the stored config — a partial save must not reset an unsent grant, `allowUnattended` included. PUT omits nothing: an unsent `allowUnattended` reads as False. `sync_schedule` runs **before** `revisions.record`, so the revision snapshots the schedule as saved rather than the one it replaced |
-| `/api/orchestrator/agents/{id}/execute/` | POST | Start an agent run against a goal | Auth (owner) | Heavy |  | `AgentExecuteSerializer` | Workflow, ExecutionLog | **202 + `execution_id`**, run is detached via `background.spawn()`. Guardrails **and the provider credential** are checked *before* responding, so 402 reaches the caller rather than killing a run that looked started — no credential for the agent's `llm_provider` → 402 naming the provider; a provider with no handler → 400. Steps stream to `ws/execution/{id}/` — [agents/agent/stream.py](../agents/agent/stream.py). A `thread_id` naming a paused run **resumes** it on its original `execution_id` rather than opening a second log against the same checkpointer key; an unknown one falls through to a normal start |
-| `/api/orchestrator/agents/{id}/approve/` | POST | Approve a paused tool call **and resume the run** | Auth (owner) | Heavy |  | `AgentApproveSerializer` (`thread_id`, `call_id`, `remember`) | ExecutionLog, AgentTurn, AgentStep, ToolPermission | Ownership re-checked: a thread id is not an authorisation. Resumes on the *original* `execution_id` so the trace stays one run |
+| `/api/orchestrator/agents/{id}/execute/` | POST | Start an agent run against a goal | Auth (owner) | Heavy |  | `AgentExecuteSerializer` | Workflow, ExecutionLog | **202 + `execution_id`**, run is detached via `background.spawn()`. Guardrails **and the provider credential** are checked *before* responding, so 402 reaches the caller rather than killing a run that looked started — no credential for the agent's `llm_provider` → 402 naming the provider; a provider with no handler → 400. Steps stream to `ws/execution/{id}/` — [agents/agent/stream.py](../agents/agent/stream.py). A `thread_id` naming a paused run **resumes** it on its original `execution_id` rather than opening a second log against the same checkpointer key; an unknown one falls through to a normal start. The spawned run then takes an **admission slot** (`agents/admission.py`, per-user and global, per process) before doing any work, so the 202 is "accepted", not "started" — a queued run sits at `running` with no steps, and one that never gets a slot within `ADMISSION_WAIT_SECONDS` closes as `failed` saying so. A run that outlives `guardrails['maxRunSeconds']` closes as **`timeout`**, a status distinct from `cancelled`: the first is a limit the owner can raise, the second is a person having pressed stop |
+| `/api/orchestrator/agents/{id}/approve/` | POST | Approve a paused tool call **and resume the run** | Auth (owner) | Heavy |  | `AgentApproveSerializer` (`thread_id`, `call_id`, `scope`, `remember`) | ExecutionLog, AgentTurn, AgentStep, ToolPermission | Ownership re-checked: a thread id is not an authorisation. Resumes on the *original* `execution_id` so the trace stays one run. `scope` is `once` \| `session` \| `always`; `session` files the allowance against `ToolPermission.session_key` so it expires with the run, which is the rung users actually want and had to grant `always` to get. `remember: true` is the retired spelling of `always` and still works — blank `scope` is what lets the two be told apart. Also closes the run's `HITLRequest` (`agents/agent/hitl.py::resolve_request`) **before** resuming, which is what cancels the escalation ladder — `resume_agent_run` reopens the log, so closing afterwards would race it and leave an answered question nudging |
 | `/api/orchestrator/agents/{id}/steer/` | POST | Send a mid-run instruction to a run already going | Auth (owner) | Light |  | `AgentSteerSerializer` (`message`) | SubAgent, ExecutionLog | Lands in the in-process steer mailbox keyed by the run's `thread_id`; the graph's `steering` node picks it up at its next tool boundary. Same run, same log, same stream — no restart. 404 when nothing is running |
-| `/api/orchestrator/triggers/` | GET/POST | List / create triggers (schedule, webhook, event) | Auth (owner) | Light |  | `TriggerSerializer` | Trigger, SubAgent | Cron validated by `agents/triggers.py`; creating a schedule arms `next_due_at`. `subagent` ownership checked in `validate_subagent` |
-| `/api/orchestrator/triggers/{id}/` | GET/PATCH/DELETE | One trigger | Auth (owner) | Light |  | `TriggerSerializer` | Trigger | Re-enabling clears `consecutive_failures`, else it fires once and self-disables again. `webhook_url` exposes the secret to the owner only |
-| `/api/orchestrator/triggers/{id}/run/` | POST | Fire a schedule now, through the sweep's own path | Auth (owner) | Light | `agents/tests/test_triggers.py::RunNowTests` | `TriggerSerializer` | Trigger, ExecutionLog | Calls `sweep.fire`, **not** `start_agent_run` — a manual fire must exercise the overlap policy, the unattended gate and the failure counter, or it proves nothing about the scheduled path. Returns the sweep's one-word `outcome` (`fired`/`busy`/`late`/`skipped`/`refused`/`failed`). Schedule mode only; webhook and disabled triggers answer 400 |
+| `/api/orchestrator/agents/{id}/autonomy/` | POST | Change how much a running agent asks, mid-run | Auth (owner) | Light |  | `AgentAutonomySerializer` (`level`) | SubAgent, ExecutionLog | The counterpart to `steer/`, sharing its mailbox and its run lookup. `level` is `review` \| `ask` \| `auto` \| `full` — **not `plan`**, because which tools exist is settled when the toolbox is built, so a mid-run `plan` could only gate the mutating tools rather than withdraw them. Takes effect at the next tool batch and is *not* retroactive: a call already paused still needs an answer, since the looser setting arrived after the question. 404 when nothing is running, 409 when the run has no thread id |
+| `/api/orchestrator/triggers/` | GET/POST | List / create triggers (schedule, webhook, event) | Auth (owner) | Light | `agents/tests/test_schedules.py::TriggerRepresentationTests` | `TriggerSerializer` | Trigger, SubAgent | Cron validated by `agents/triggers.py` **in the row's own `timezone`**; creating a schedule arms `next_due_at` (UTC) from `starts_at` where set. `subagent` ownership checked in `validate_subagent`. Refuses a syntactically valid expression with no next run (`0 0 30 2 *`) and a backwards `starts_at`/`ends_at` window. Each row carries `description` (the cron in words) and `upcoming` (next 3 firings) so a listing shows meaning, not syntax. `origin` is read-only and forced to `manual` on create — only `AgentSerializer.sync_schedule` may claim the `builder` row. `?agent=<id>` filters; capped at `TRIGGER_LIST_LIMIT` (200) and says `truncated` in the body when cut |
+| `/api/orchestrator/triggers/preview/` | POST | Dry-run a cron expression: what it says in words, and its next firings | Auth | Light | `agents/tests/test_schedules.py::SchedulePreviewTests` | `SchedulePreviewSerializer` (input only) | — | Saves nothing. Answers **200 with `valid: false`** for a bad expression rather than 400 — the caller is a field the user is still typing in, and a 400 per keystroke is an error report, not feedback. Body: `{cron, timezone, count<=10, starts_at, ends_at}` → `{valid, error, description, upcoming[]}`. Deliberately the *server's* cron reader, not a mirror of the client's: the only reading that matters is the one `agents/sweep.py` will act on |
+| `/api/orchestrator/triggers/{id}/` | GET/PATCH/DELETE | One trigger | Auth (owner) | Light |  | `TriggerSerializer` | Trigger | Re-enabling clears `consecutive_failures`, else it fires once and self-disables again. `webhook_url` exposes the secret to the owner only. PATCHing `cron`/`timezone`/`starts_at` re-arms through `_arm`; `origin` cannot be set over the wire |
+| `/api/orchestrator/triggers/{id}/run/` | POST | Fire a schedule now, through the sweep's own path | Auth (owner) | Light | `agents/tests/test_triggers.py::RunNowTests` | `TriggerSerializer` | Trigger, ExecutionLog | Calls `sweep.fire`, **not** `start_agent_run` — a manual fire must exercise the overlap policy, the unattended gate and the failure counter, or it proves nothing about the scheduled path. Returns the sweep's one-word `outcome` (`fired`/`queued`/`dropped`/`busy`/`late`/`waiting`/`expired`/`stopped`/`skipped`/`refused`/`failed`), which is also persisted to `last_outcome`/`last_error`. Schedule mode only; webhook and disabled triggers answer 400 |
 | `/api/orchestrator/hooks/{secret}/` | POST | **Public** webhook receiver — starts an unattended run | **AllowAny** | Heavy |  | — | Trigger, SubAgent, ExecutionLog |  The only unauthenticated route. Secret in the path is the whole credential. Requires `SubAgent.allow_unattended` (enforced again in the runtime, not just here). Body is capped at 64 KB and passed as *context*, never as the goal. Answers 202 with an empty body, and **404 for every refusal** — wrong secret, disabled, and not-cleared must be indistinguishable or it becomes an oracle. A refused or failed firing increments `consecutive_failures` and self-disables at `sweep.MAX_CONSECUTIVE_FAILURES`, like the schedule sweep — until 2026-08-24 only success touched the counter, so a permanently refused hook retried for ever |
-| `/api/orchestrator/agents/{id}/reject/` | POST | Decline a paused tool call **and resume the run past it** | Auth (owner) | Heavy |  | `AgentRejectSerializer` (`thread_id`, `call_id`, `reason`) | ExecutionLog, AgentTurn, AgentStep | The mirror of `approve/`, and the fix for an asymmetry that was a bug: approving resumed the run, declining recorded nothing, so a refused call left the run paused for ever. The model is told what was refused (and why, if a `reason` is given) and continues without it. 404 when no paused run holds that thread |
+| `/api/orchestrator/agents/{id}/reject/` | POST | Decline a paused tool call **and resume the run past it** | Auth (owner) | Heavy |  | `AgentRejectSerializer` (`thread_id`, `call_id`, `reason`) | ExecutionLog, AgentTurn, AgentStep | The mirror of `approve/`, and the fix for an asymmetry that was a bug: approving resumed the run, declining recorded nothing, so a refused call left the run paused for ever. The model is told what was refused (and why, if a `reason` is given) and continues without it. Closes the `HITLRequest` as `rejected`, the mirror of `approve/`. 404 when no paused run holds that thread |
 
 ---
 
@@ -226,7 +228,7 @@ rename is done in `queries.py` rather than across three repos.
 | `/api/logs/insights/costs/` | GET | Cost breakdown | Auth | Aggregate |  | `AnalyticsFilterSerializer` (input only) | ExecutionLog, AgentStep | `by_workflow` rows use the same `workflow_id` / `workflow_name` wire names as everywhere else — never the `subagent__*` column keys. `by_tool` replaced `by_node_type` |
 | `/api/logs/executions/` | GET | Execution history | Auth | O(limit) |  | `ExecutionListFilterSerializer` (input only) | ExecutionLog | Keyset cursor; `count` only on the uncursored first page. `?caller=` filters chat/orchestrator/trigger/api and 400s on an unknown value |
 | `/api/logs/executions/{id}/` | GET | Run detail | Auth (owner) | O(steps + turns) |  | — | ExecutionLog, AgentTurn, AgentStep, SubAgentRevision | Turns nesting their steps, each turn's full reasoning, the revision used, `delegated_by`, and per-step `delegated_runs`. Steps capped at `EXECUTION_NODE_LOG_LIMIT` and turns at `EXECUTION_TURN_LIMIT` (`steps_truncated` / `turns_truncated`); steps with no turn appear under `unattributed_steps`. A malformed UUID is a 404, not a 500 |
-| `/api/logs/agents/{id}/revisions/` | GET | Config change timeline | Auth (owner) | O(revisions) |  | — | SubAgentRevision, ExecutionLog | Newest first, with diffs and per-revision `run_count`. Capped at `REVISION_TIMELINE_LIMIT`; the body reports the real `count` and `truncated` so a cut timeline and a short one are distinguishable. 404 for another user's agent |
+| `/api/logs/agents/{id}/revisions/` | GET | Config change timeline | Auth (owner) | O(revisions) |  | — | SubAgentRevision, ExecutionLog | Newest first, with diffs and per-revision `run_count`. **Keyset paged** on `number` (`?limit=&cursor=`), because the history grows for the life of the agent — the builder shows the newest few, `/agents/:id/history` walks the rest. `limit` is capped at `REVISION_TIMELINE_LIMIT` (400 above it); `count` on the uncursored page only, `has_more`/`next_cursor` drive "show more". 404 for another user's agent |
 | `/api/logs/agents/{id}/revisions/{n}/` | GET | One revision's full config | Auth (owner) | O(1) |  | — | SubAgentRevision, ExecutionLog | Full `AgentConfig` snapshot |
 
 Retired 2026-08-19: `/api/logs/audit/`, `/api/logs/audit/export/`,
@@ -360,13 +362,44 @@ read-only (403 via `_assert_owner`), but any user may enable/disable one for
 themselves — that choice is a `MCPServerPreference` row, and `effective_enabled`
 on the serializer is the value a UI should render. `enabled` is the shared flag.
 
+**Transports (`MCPServer.type`).** `stdio` spawns a subprocess and receives
+secrets through `credential_env_map`; `http` and `sse` dial a URL and receive
+them through `credential_header_map`. `http` is MCP's **streamable HTTP**
+transport, added 2026-09-01 — it is what every hosted connector speaks
+(`https://mcp.notion.com/mcp`), and without it such a row could not be created,
+let alone connected. `sse` is its deprecated predecessor, kept so existing rows
+stay editable; the modal never creates one.
+
+Three things a reviewer should check when touching this:
+
+- **`MCPServer.REMOTE_TYPES` is what the SSRF guard keys on**, in both
+  `serializers.py::validate` and `client.py::_prepare_remote`. It was previously
+  `== 'sse'`, which meant an `http` row skipped URL validation entirely — a
+  user-supplied URL with no guard. A new URL-based transport must join that set.
+- **`streamablehttp_client` yields a three-tuple** (`read, write, get_session_id`)
+  where `sse_client` yields two, so `_connect_http` cannot be a copy of
+  `_connect_sse` with the function swapped.
+- **The URL is re-validated at connect time**, not only at registration: DNS for
+  a host that passed once can later resolve to a private address.
+
+Both hosted endpoints answer **401** to an unauthenticated handshake, which
+`_describe` flattens out of the anyio `ExceptionGroup` into a readable
+`connection_failed`. Measured 2026-09-01: `mcp.notion.com` validates a bearer
+token against Notion's own API (a bad one returns Notion's native
+`"API token is invalid."`), so a static integration token in
+`credential_header_map` is a plausible path there; `mcp.slack.com` answers only
+the MCP-level `invalid_token` and advertises OAuth resource metadata, so Slack
+hosted needs a real OAuth flow the app does not yet have. The stdio Slack
+connector (`@modelcontextprotocol/server-slack`, `xoxb-` + team id) is the
+working path today.
+
 | URL | Method | What | Access | Complexity | Tested | Serializer | DB tables | Notes |
 |-----|--------|------|--------|-----------|--------|-----------|-----------|-------|
-| `/api/mcp/servers/` | GET/POST | List/create MCP servers | Auth (owner) | O(1) |  | `MCPServerSerializer` | MCPServer, MCPServerPreference | `tests_services` (73). Serves presentation metadata (`label`, `category`, `tagline`, `icon_slug`, `help_url`) so the catalog is data, not frontend code. One extra query resolves `effective_enabled` for the whole page via `disabled_server_ids` in serializer context |
+| `/api/mcp/servers/` | GET/POST | List/create MCP servers | Auth (owner) | O(1) |  | `MCPServerSerializer` | MCPServer, MCPServerPreference | `tests_services` (73). Serves presentation metadata (`label`, `category`, `tagline`, `icon_slug`, `help_url`) so the catalog is data, not frontend code. One extra query resolves `effective_enabled` for the whole page via `disabled_server_ids` in serializer context. `env` and `credential_file_map` are **write-only** — the latter renders to a file holding a refresh token, and echoing the template back would disclose which credential fields a server receives |
 | `/api/mcp/servers/{pk}/` | GET/PUT/PATCH/DELETE | Server CRUD | Auth (owner) | O(1) |  | `MCPServerSerializer` | MCPServer, MCPServerPreference | A PATCH whose body is **exactly** `{enabled}` on a system server writes a preference and returns 200; any other field on a system server ⇒ 403, including `{enabled, command}` together. `tests_connections` |
-| `/api/mcp/servers/{pk}/set-enabled/` | POST | Turn a connection on/off for the current user | Auth | O(1) |  | `MCPServerSerializer` | MCPServer, MCPServerPreference | Preferred over PATCH; works uniformly for system (preference row) and owned (row's own `enabled`) servers, so the UI needs one control. Invalidates `MCPToolCache`. Non-boolean ⇒ 400. `tests_connections` |
+| `/api/mcp/servers/{pk}/set-enabled/` | POST | Turn a connection on/off for the current user | Auth | O(1) |  | `MCPServerSerializer` | MCPServer, MCPServerPreference | Preferred over PATCH; works uniformly for system (preference row) and owned (row's own `enabled`) servers, so the UI needs one control. Invalidates `MCPToolCache`. Non-boolean ⇒ 400. Enabling a curated row the platform has disabled (`user IS NULL`, `enabled=False`) ⇒ **409** `server_unavailable` with the row's `setup_notes` as `detail`, and no preference row is written — a preference can only ever *subtract*, so storing one there was a 200 for a write that could not take effect. `tests_connections` |
 | `/api/mcp/servers/{pk}/tools/` | GET | Capabilities of one server | Auth | External | ✓ | — | MCPServer | `LIST_TOOLS_TIMEOUT` (30s) — `npx -y` installs before the server prints a byte (~8.5s measured), so the old 5s budget timed out on *healthy* connectors too. Powers the "What it can do" disclosure, so it deliberately ignores the enable toggle: listing is how a user decides whether to turn a connection on. Every failure carries a `code` and a non-empty `error`: `credential_missing`/`credential_invalid` ⇒ 400, lost access ⇒ 403, `connection_timeout` ⇒ 504, `connection_failed` ⇒ 502 (message includes the child's stderr, e.g. npm's 404). `tests_tool_discovery` |
-| `/api/mcp/servers/{pk}/validate_credentials/` | GET | Dry-run credential resolution | Auth | O(1) | ~ | — | MCPServer, Credential | Returns `{ok, errors}`; a resolver that throws is reported as `{ok: false, errors: [reason]}` rather than 500 — a diagnostic that crashes diagnoses nothing |
+| `/api/mcp/servers/{pk}/validate_credentials/` | GET | Dry-run credential resolution | Auth | O(1) | ~ | — | MCPServer, Credential | Returns `{ok, errors}`; a resolver that throws is reported as `{ok: false, errors: [reason]}` rather than 500 — a diagnostic that crashes diagnoses nothing. Resolution is a **dry run**: it renders `credential_file_map` but writes nothing to disk, since this endpoint is called per server on every page load |
 | `/api/mcp/servers/tools/` | GET | Aggregate tools from all servers | Auth | External | ~ | — | MCPServer | Per-server `LIST_TOOLS_TIMEOUT`, queried concurrently (`get_all_tools_from_all_servers`); one failing connector degrades to an empty list for that server rather than emptying the response. Unused by any frontend (the Connections page fetches per-server tools) |
 
 **Credential mapping sources** (`credential_env_map` / `credential_header_map`): a value
@@ -392,6 +425,26 @@ Model: `Skill`. Router ViewSet.
 
 ---
 
+## 11b. Tool library — app: `tools_config` — [tools_config/views.py](../tools_config/views.py)
+
+Model: `ToolConfig` (one row per user+tool; **absent row = code default**, so a fresh
+install has none). The catalogue itself is code — `chat/tools/registry.py` grouped by
+`agents/agent/runtime.py:GRANT_TOOLS` — and this app only serves it and lays the user's
+overlay on top.
+
+| URL | Method | What | Access | Complexity | Tested | Serializer | DB tables | Notes |
+|-----|--------|------|--------|-----------|--------|-----------|-----------|-------|
+| `/api/tools/` | GET | Catalogue grouped by grant, with this user's `enabled`/`config` and the `settings` schema for each knob | Auth | O(N tools) | Y | none (hand-built dict) | tools_config_toolconfig (read, cached 60s per user) | No MCP tools — their names are minted at runtime; the `mcp` category carries a note instead |
+| `/api/tools/` | PATCH | Switch tools on/off and set their budgets. `{"tool_name": ..., "enabled": ...}` or bulk `{"tools": {name: {enabled, config}}}` | Auth | O(N changed) | Y | `ToolConfigWriteSerializer` | tools_config_toolconfig (write, atomic) | Answers with the whole catalogue. Unknown tool → 400; `LOCKED_TOOLS` (`get_current_time`, `read_tool_output`, `recall_context`) refuse `enabled:false` → 400; unknown config keys dropped and values clamped; a row equal to the defaults is **deleted**, not stored |
+| `/api/tools/usage/` | GET | Agents-per-grant counts for the "granted to N agents" chips | Auth | O(agents) | ~ | none | orchestrator_subagent | Reads `tool_grants` only; exposes no agent rows |
+
+Enforcement is not in this app: `chat/tools/__init__.py::disabled_tools_for` is the single
+read, consulted by `get_available_tools` (chat), `AgentToolbox.descriptors` (agents) and
+`execute_tool` (both, at dispatch — a model can name a tool it was not offered). A failed
+read means "nothing is switched off", never "everything is".
+
+---
+
 ## 12. Chat (standalone agent + guest) — app: `chat` — [chat/views.py](../chat/views.py), [chat/guest/views.py](../chat/guest/views.py)
 
 Models: `ChatSession`, `ChatMessage`, `ChatAttachment`. Native tool-calling agent
@@ -405,7 +458,7 @@ differ only in their event sink, so their behaviour cannot drift.
 | `/api/chat/sessions/{pk}/` | GET/PUT/PATCH/DELETE | Session CRUD | Auth (owner) | O(1) |  | `ChatSessionSerializer` | ChatSession, ChatMessage | |
 | `/api/chat/sessions/{sid}/message/` | POST | Send message, wait for full reply | Auth | External |  | — | ChatMessage, ChatSession | Same pipeline as the stream, events discarded |
 | `/api/chat/sessions/{sid}/message/steer/` | POST | Say something to a chat turn already running | Auth (owner) | Light |  | — (JSON `message`) | — (in-process mailbox) | Not a second turn: two turns on one session interleave into one transcript. 404 when no turn is running, so "delivered" and "went nowhere" cannot look alike |
-| `/api/chat/sessions/{sid}/message/stream/` | POST | Send message (SSE stream) | Auth | Stream/External |  | — | ChatMessage, ChatSession, ToolOutput, ToolPermission | Body also takes `approve_tool_call` and `remember_approval` (the latter stores a standing allowance for that tool — see `chat/tools/permissions.py`). Streams `content_chunk` token-by-token; auth is manual (DRF cannot wrap `StreamingHttpResponse`). The turn is owned by `chat/turn/runs.py`, **not** by this response — dropping the connection does not cancel it. A send while the session is already answering attaches to the running turn instead of starting a second one |
+| `/api/chat/sessions/{sid}/message/stream/` | POST | Send message (SSE stream) | Auth | Stream/External |  | — | ChatMessage, ChatSession, ToolOutput, ToolPermission | Body also takes `approve_tool_call`, `approval_scope` (`once` \| `session` \| `always`) and the retired `remember_approval` (equivalent to `always`) — see `chat/tools/permissions.py`. A `session`-scoped allowance is keyed on the chat session id, **not** the thread id: with memory off the thread is a throwaway `<id>:nomem:<uuid>` and the row would match nothing. Streams `content_chunk` token-by-token; auth is manual (DRF cannot wrap `StreamingHttpResponse`). The turn is owned by `chat/turn/runs.py`, **not** by this response — dropping the connection does not cancel it. A send while the session is already answering attaches to the running turn instead of starting a second one |
 | `/api/chat/sessions/{sid}/message/attach/` | POST | Re-attach to a running turn (SSE) | Auth (run owner) | Stream |  | — | — | Replays every buffered frame, then follows live; body `{from: n}` skips frames the caller has. Closes with no frames when no run exists (answer is already in the DB). Read-only: never starts work |
 | `/api/chat/sessions/{sid}/message/stop/` | POST | Stop the running turn | Auth (run owner) | O(1) |  | — | ChatMessage | The **only** thing that cancels a turn. Persists whatever streamed as an answer with `metadata.interrupted`; emits a closing `done` to everyone attached. 404 when nothing is running |
 | `/api/chat/runs/` | GET | Session ids with a turn still running | Auth | O(n) in live runs |  | — | — | In-memory, scoped to the caller. Drives re-attach after a reload and the "still working" marker. Per-process — see the multi-worker note in `chat/turn/runs.py` |
@@ -418,14 +471,24 @@ differ only in their event sink, so their behaviour cannot drift.
 
 ---
 
-## 13-14. Buddy + BrowserOS — **REMOVED 2026-08-16**
+## 13. Buddy — BrowserOS desktop assistant — **REMOVED 2026-09-02, to be rebuilt**
 
-`api/buddy/` and `api/browseros/` are gone, along with the `ws/buddy/` socket.
-They were one subsystem: `buddy/views.py` drove `browserOS`'s `OSWorkspace` /
-`OSAppWindow` models, and the BrowserOS frontend's only backend call was
-`POST /api/buddy/commands/`. BrowserOS now runs disconnected. Chat lost the
-screen-context block that `ws/buddy/` warmed; the `screen_context` field the
-chat POST body carried was never read by anything.
+The `buddy` backend app (`api/buddy/commands/`) was removed again on 2026-09-02.
+It had been briefly restored 2026-09-01 as a single stateless command endpoint,
+but the desktop assistant is being redesigned against the agent model rather
+than kept as a bespoke one-shot decision endpoint. The **BrowserOS frontend was
+deliberately kept** — `components/os/BuddyPanel.tsx` and
+`components/apps/ChatbotApp.tsx` still POST `/api/buddy/commands/`, so those
+calls 404 until the backend is rebuilt. No models or sockets were involved, so
+removal was a clean deletion (app package + `INSTALLED_APPS` + URL include); no
+migration.
+
+### 14. BrowserOS workspace models — **REMOVED 2026-08-16, not restored**
+
+`api/browseros/` and the `ws/buddy/` socket stay gone. `OSWorkspace` /
+`OSAppWindow` persisted desktop layout server-side; BrowserOS keeps that in its
+own contexts. Chat also lost the screen-context block `ws/buddy/` warmed — the
+`screen_context` field the chat POST body carried was never read by anything.
 
 ---
 
@@ -538,6 +601,17 @@ Views are thin sync `@api_view`s; reads live in `eval/queries.py`. Only
 `suite_run` is async (adrf), because it preflights the provider before
 answering. Every route is scoped to `request.user` through the query layer — a
 suite, case, run or result belonging to someone else is a **404**, never a 403.
+
+**A UI landed 2026-09-01** (`pages/Evals.tsx`, `api/evals.ts`, route `/evals`).
+Until then this was the one app with a complete backend and no caller in the
+frontend at all — the feature existed and was unreachable. Two contract details
+the page had to be corrected on, worth knowing before writing another client:
+the review body takes `verdict: 'pass' | 'fail' | 'unsure'` (a **choice, not a
+boolean** — `unsure` is a real third answer, because forcing a coin-flip would
+corrupt the `grader_agreement` the feature exists to produce) alongside
+`comment` / `corrected_answer`; and `EvalRun.passed` is `null` while `status` is
+`awaiting_review`, which is a provisional score rather than a missing one and
+must not be rendered as a failure.
 
 A sweep runs the agent once per case through the same `run_agent` door as every
 other run, so a suite's size is a bill: `EVAL_MAX_CASES_PER_SUITE` (200) and

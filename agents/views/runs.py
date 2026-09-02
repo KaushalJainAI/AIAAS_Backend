@@ -44,9 +44,29 @@ class AgentExecuteSerializer(serializers.Serializer):
 class AgentApproveSerializer(serializers.Serializer):
     thread_id = serializers.CharField(max_length=200)
     call_id = serializers.CharField(max_length=200)
-    #: "and stop asking me about this tool" — stores a standing allowance for
-    #: the tool this call was for, across every future run and conversation.
+    #: The retired spelling of `scope='always'`. Kept because clients already
+    #: send it; `scope` wins when both are present.
     remember = serializers.BooleanField(required=False, default=False)
+    #: How long this approval lasts. `session` is the rung that was missing:
+    #: a user who wants to stop being asked for the rest of *this run* used to
+    #: have to grant a permanent allowance to get it.
+    scope = serializers.ChoiceField(
+        choices=['once', 'session', 'always'], required=False, default='',
+        allow_blank=True,
+    )
+
+    def validate(self, attrs):
+        """Resolve the two spellings into one answer.
+
+        `scope` cannot simply default to `'once'`: that default is
+        indistinguishable from a client that asked for `'once'`, so an older
+        client sending `remember: true` and no scope would have its standing
+        allowance silently downgraded to a single call. Blank means "did not
+        say", and only then does `remember` get a vote.
+        """
+        if not attrs.get('scope'):
+            attrs['scope'] = 'always' if attrs.get('remember') else 'once'
+        return attrs
 
 
 class AgentRejectSerializer(serializers.Serializer):
@@ -169,6 +189,7 @@ async def agent_approve(request, agent_id: int):
     """
     from chat.turn.agent import approve_tool_call
 
+    from agents.agent.hitl import resolve_request
     from agents.agent.runtime import resume_agent_run
 
     agent = await SubAgent.objects.filter(
@@ -184,7 +205,20 @@ async def agent_approve(request, agent_id: int):
     await approve_tool_call(
         thread_id, serializer.validated_data['call_id'],
         remember=serializer.validated_data.get('remember', False),
+        scope=serializer.validated_data.get('scope', 'once'),
+        # An agent run's thread id *is* its session id, so a session-scoped
+        # allowance keys correctly on either. Passed explicitly anyway, because
+        # relying on them coinciding is what breaks the chat path.
+        session_key=thread_id,
         user_id=request.user.id,
+    )
+    # Close the queue entry before resuming. The reminder ladder stops on any
+    # status but `pending`, so a row left open would go on nudging the user
+    # about a question they have just answered — and `resume_agent_run` reopens
+    # the log, so anything that waited until after it would be racing that.
+    await resolve_request(
+        thread_id=thread_id, call_id=serializer.validated_data['call_id'],
+        user_id=request.user.id, status='approved',
     )
     execution_id = await resume_agent_run(agent, user=request.user, thread_id=thread_id)
 
@@ -211,6 +245,7 @@ async def agent_reject(request, agent_id: int):
     """
     from chat.turn.agent import reject_tool_call
 
+    from agents.agent.hitl import resolve_request
     from agents.agent.runtime import resume_agent_run
 
     agent = await SubAgent.objects.filter(
@@ -231,6 +266,10 @@ async def agent_reject(request, agent_id: int):
         return Response({'error': 'No paused run for that thread'},
                         status=status.HTTP_404_NOT_FOUND)
 
+    await resolve_request(
+        thread_id=thread_id, call_id=serializer.validated_data['call_id'],
+        user_id=request.user.id, status='rejected',
+    )
     execution_id = await resume_agent_run(agent, user=request.user, thread_id=thread_id)
 
     return Response({'rejected': True, 'execution_id': execution_id,
@@ -294,3 +333,71 @@ async def agent_steer(request, agent_id: int):
     steering.post(thread_id, serializer.validated_data['message'])
     return Response({'steered': True, 'execution_id': str(log.execution_id),
                      **steering.stats(thread_id)})
+
+
+class AgentAutonomySerializer(serializers.Serializer):
+    #: `plan` is absent deliberately — see `chat.turn.steering.SWITCHABLE`.
+    #: Which tools exist is settled when the toolbox is built, so switching to
+    #: `plan` mid-run could only gate the mutating tools rather than withdraw
+    #: them, which is `review` under a name that promises more.
+    level = serializers.ChoiceField(choices=['review', 'ask', 'auto', 'full'])
+
+
+@extend_schema(
+    methods=['POST'],
+    request=AgentAutonomySerializer,
+    responses={200: OpenApiResponse(description='Autonomy changed for the rest of the run')},
+    description='Change how much a running agent asks, without restarting it.',
+)
+@async_api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def agent_autonomy(request, agent_id: int):
+    """Loosen or tighten a run's approvals while it is going.
+
+    The counterpart to `agent_steer`, and it exists for the same reason: the
+    other place autonomy can be set is `SubAgent.guardrails`, which is chosen
+    before anyone knows what the run will actually do. A user watching a run
+    stop for the sixth time on the same recycled file write could otherwise
+    only kill it and edit the agent — so in practice they set `full` once, in
+    advance, and stopped being asked about anything at all. That is the outcome
+    this endpoint exists to make unnecessary.
+
+    Not retroactive. A call already paused stays paused and still needs an
+    answer: the looser setting arrived after the question, and treating it as
+    an answer would approve something the user never looked at.
+    """
+    from chat.turn import steering
+
+    agent = await SubAgent.objects.filter(
+        id=agent_id, user=request.user
+    ).afirst()
+    if agent is None:
+        return Response({'error': 'Agent not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    serializer = AgentAutonomySerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    # Same run lookup as `agent_steer`: the checkpointer key is the thread id,
+    # which is also the mailbox key — the graph and the mailbox have to agree
+    # on what identifies a run.
+    log = await (
+        ExecutionLog.objects
+        .filter(subagent=agent, user=request.user, status__in=('running', 'paused'))
+        .order_by('-started_at')
+        .afirst()
+    )
+    if log is None:
+        return Response({'error': 'No run is going for this agent.'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    thread_id = (log.input_data or {}).get('thread_id') or ''
+    if not thread_id:
+        return Response({'error': 'That run cannot be steered.'},
+                        status=status.HTTP_409_CONFLICT)
+
+    level = serializer.validated_data['level']
+    if not steering.set_autonomy(thread_id, level):
+        return Response({'error': f'{level} cannot be set on a running agent.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({'autonomy': level, 'execution_id': str(log.execution_id)})

@@ -32,6 +32,14 @@ class OAuthTokenColumnBridgeTests(TestCase):
     """
 
     def setUp(self):
+        # The credential manager is a process-global singleton with a 5-minute
+        # decrypted-data cache, and the injector now reads through it. Test
+        # databases restart ids from 1, so `{user_id}:{credential_id}` collides
+        # across tests and one case sees the previous case's plaintext. Cleared
+        # here rather than in a pytest fixture because this suite runs under
+        # `manage.py test` too.
+        from credentials.manager import get_credential_manager
+        get_credential_manager().clear_cache()
         self.user = User.objects.create_user(username='ollie', password='x')
         # update_or_create: `credentials.0005` seeds a real `google-oauth2` row
         # when the test database migrates, and these tests need its schema pinned
@@ -101,6 +109,14 @@ class PlatformSettingsSourceTests(TestCase):
     """
 
     def setUp(self):
+        # The credential manager is a process-global singleton with a 5-minute
+        # decrypted-data cache, and the injector now reads through it. Test
+        # databases restart ids from 1, so `{user_id}:{credential_id}` collides
+        # across tests and one case sees the previous case's plaintext. Cleared
+        # here rather than in a pytest fixture because this suite runs under
+        # `manage.py test` too.
+        from credentials.manager import get_credential_manager
+        get_credential_manager().clear_cache()
         self.user = User.objects.create_user(username='pia', password='x')
         # update_or_create: `credentials.0005` seeds a real `google-oauth2` row
         # when the test database migrates, and these tests need its schema pinned
@@ -178,6 +194,14 @@ class CuratedCatalogIntegrityTests(TestCase):
     OAUTH_COLUMNS = {'access_token', 'refresh_token'}
 
     def setUp(self):
+        # The credential manager is a process-global singleton with a 5-minute
+        # decrypted-data cache, and the injector now reads through it. Test
+        # databases restart ids from 1, so `{user_id}:{credential_id}` collides
+        # across tests and one case sees the previous case's plaintext. Cleared
+        # here rather than in a pytest fixture because this suite runs under
+        # `manage.py test` too.
+        from credentials.manager import get_credential_manager
+        get_credential_manager().clear_cache()
         # Migrations seed credential types too (credentials.0005), so this is
         # belt-and-braces. It is kept deliberately: seeding explicitly here means
         # this class only ever fails for a genuine *mapping* mistake, while
@@ -212,3 +236,89 @@ class CuratedCatalogIntegrityTests(TestCase):
                         f"that type only defines {sorted(known)}"
                     )
         self.assertEqual(problems, [], '\n'.join(problems))
+
+
+class GmailConnectorEndToEndTests(TestCase):
+    """
+    The real curated Gmail row, resolved the way a connection actually resolves.
+
+    Everything below this test is a unit: a fake server, a mocked lookup, a
+    stubbed manager. This one uses the migration-seeded `Gmail` row and a
+    credential shaped the way the Google OAuth callback writes one — tokens in
+    the dedicated columns, nothing in the blob — because that combination is
+    what broke before (`get_credential_data()` reads only the blob, so an
+    OAuth-connected account looked empty) and it is the combination no unit
+    test can catch.
+    """
+
+    def setUp(self):
+        from credentials.manager import get_credential_manager
+        get_credential_manager().clear_cache()
+        self.user = User.objects.create_user(username='gmail-e2e', password='x')
+        self.server = MCPServer.objects.get(name='Gmail', user__isnull=True)
+        cred_type = CredentialType.objects.get(slug='google-oauth2')
+        cred = Credential(
+            user=self.user,
+            credential_type=cred_type,
+            name='Google Account',
+            refresh_token=_encrypt('1//real-refresh-token'),
+            access_token=_encrypt('ya29.real-access-token'),
+            is_verified=True,
+        )
+        cred.set_credential_data({})
+        cred.save()
+
+    @override_settings(
+        GOOGLE_OAUTH_CLIENT_ID='platform-id',
+        GOOGLE_OAUTH_CLIENT_SECRET='platform-secret',
+    )
+    def test_the_curated_row_resolves_to_what_the_package_reads(self):
+        """
+        `@shinzolabs/gmail-mcp` reads exactly CLIENT_ID / CLIENT_SECRET /
+        REFRESH_TOKEN and falls back to an interactive browser flow if any is
+        missing. Getting the *names* wrong is silent: the server starts, waits
+        for an auth it will never get, and the run times out.
+        """
+        resolved = async_to_sync(CredentialInjector.resolve)(self.server, self.user)
+        self.assertEqual(resolved.env_vars, {
+            'CLIENT_ID': 'platform-id',
+            'CLIENT_SECRET': 'platform-secret',
+            'REFRESH_TOKEN': '1//real-refresh-token',
+        })
+
+    @override_settings(
+        GOOGLE_OAUTH_CLIENT_ID='platform-id',
+        GOOGLE_OAUTH_CLIENT_SECRET='platform-secret',
+    )
+    def test_validate_reports_the_connection_as_usable(self):
+        """What the Connections page calls to decide Connected vs Not connected."""
+        errors = async_to_sync(CredentialInjector.validate)(self.server, self.user)
+        self.assertEqual(errors, [])
+
+    def test_a_user_without_the_credential_is_told_which_one(self):
+        other = User.objects.create_user(username='gmail-none', password='x')
+        errors = async_to_sync(CredentialInjector.validate)(self.server, other)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('google-oauth2', errors[0])
+
+    def test_one_users_token_is_never_resolved_for_another(self):
+        """
+        The per-user property, asserted rather than assumed: resolution is keyed
+        on the user, and the session pool is keyed on (server_id, user_id), so
+        two accounts sharing a curated row never share a token.
+        """
+        other = User.objects.create_user(username='gmail-other', password='x')
+        cred_type = CredentialType.objects.get(slug='google-oauth2')
+        cred = Credential(
+            user=other, credential_type=cred_type, name='Google Account',
+            refresh_token=_encrypt('1//OTHER-USERS-TOKEN'), is_verified=True,
+        )
+        cred.set_credential_data({})
+        cred.save()
+
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID='i', GOOGLE_OAUTH_CLIENT_SECRET='s'):
+            mine = async_to_sync(CredentialInjector.resolve)(self.server, self.user)
+            theirs = async_to_sync(CredentialInjector.resolve)(self.server, other)
+
+        self.assertEqual(mine.env_vars['REFRESH_TOKEN'], '1//real-refresh-token')
+        self.assertEqual(theirs.env_vars['REFRESH_TOKEN'], '1//OTHER-USERS-TOKEN')

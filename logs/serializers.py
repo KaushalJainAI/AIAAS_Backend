@@ -10,6 +10,8 @@ module docstring in `views.py`.
 """
 from rest_framework import serializers
 
+from workflow_backend.thresholds import REVISION_TIMELINE_LIMIT
+
 
 class AnalyticsFilterSerializer(serializers.Serializer):
     """Filters for the insights endpoints."""
@@ -36,4 +38,19 @@ class ExecutionListFilterSerializer(serializers.Serializer):
         required=False, allow_null=True,
     )
     limit = serializers.IntegerField(default=20, min_value=1, max_value=100)
+    cursor = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+
+
+class RevisionListFilterSerializer(serializers.Serializer):
+    """Page controls for the configuration timeline.
+
+    Keyset, not offset: `SubAgentRevision.number` is monotonic per agent and is
+    already the sort key, so a cursor stays correct even when a save lands
+    between two pages. An offset would silently repeat a row there — and the
+    page that reads this is the one someone opens *while* tuning the agent.
+    """
+
+    limit = serializers.IntegerField(
+        default=20, min_value=1, max_value=REVISION_TIMELINE_LIMIT
+    )
     cursor = serializers.CharField(required=False, allow_null=True, allow_blank=True)

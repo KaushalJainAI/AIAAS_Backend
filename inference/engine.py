@@ -3,7 +3,7 @@ Inference Engine — Persistent HNSW Knowledge Base
 
 Key design decisions:
 - Embedding model: API-backed, OpenAI-compatible /embeddings endpoint
-  (default nvidia/nv-embedqa-e5-v5 via NVIDIA NIM, text-only, 1024-dim;
+  (default nvidia/nemotron-3-embed-1b via NVIDIA NIM, text-only, 2048-dim;
   overridable with EMBEDDING_MODEL / EMBEDDING_API_BASE)
 - Quantization: PyTorch dynamic int8 on CPU — no CUDA required, ~4x memory reduction
 - Index type: FAISS IndexHNSWFlat (approx NN, much faster search than flat for large corpora)
@@ -36,8 +36,14 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Global embedder singleton
-# Model : nvidia/nv-embedqa-e5-v5  (served via NVIDIA NIM, OpenAI-compatible)
-# Dim   : 1024
+# Model : nvidia/nemotron-3-embed-1b  (served via NVIDIA NIM, OpenAI-compatible)
+# Dim   : 2048
+#
+# Repointed 2026-09-01: nv-embedqa-e5-v5 reached end of life on 2026-08-25 and
+# NIM answers 410 for it, which took document ingestion and every KB search
+# down with it. A model name is a perishable dependency — EMBEDDER_VERSION
+# below is what turns a swap into an automatic re-index rather than a corpus
+# of embeddings silently in the wrong space.
 #
 # Embeddings are produced by an external API rather than a local model — the
 # 912MB box cannot hold sentence-transformers/torch in RAM. The same
@@ -50,8 +56,8 @@ logger = logging.getLogger(__name__)
 
 _global_embedder = None
 _embedder_lock = asyncio.Lock()
-EMBEDDING_DIM = int(os.environ.get('EMBEDDING_DIM', '1024'))
-EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'nvidia/nv-embedqa-e5-v5')
+EMBEDDING_DIM = int(os.environ.get('EMBEDDING_DIM', '2048'))
+EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'nvidia/nemotron-3-embed-1b')
 EMBEDDING_API_BASE = os.environ.get(
     'EMBEDDING_API_BASE', 'https://integrate.api.nvidia.com/v1'
 )
@@ -103,7 +109,27 @@ class RemoteEmbedder:
                 'truncate': 'END',  # never fail on long chunks
             },
         )
-        resp.raise_for_status()
+        # The one HTTP site every embedding passes through, so it is the one
+        # place worth translating at. A raw HTTPStatusError escaping from here
+        # reached `rag_search` as an unhandled 500 — the view catches
+        # KnowledgeBaseUnavailable and answers 503 precisely so a broken
+        # embedder is distinguishable from an empty corpus, and an untyped
+        # error walked straight past that. A retired model is the case that
+        # matters: it is not transient, and the message has to name the model
+        # because only an operator editing EMBEDDING_MODEL can fix it.
+        if resp.status_code >= 400:
+            detail = resp.text[:300].replace('\n', ' ')
+            if resp.status_code in (404, 410):
+                raise KnowledgeBaseUnavailable(
+                    f'The embedding model {self._model!r} is no longer served by '
+                    f'{self._base_url} ({resp.status_code}). Set EMBEDDING_MODEL '
+                    f'(and EMBEDDING_DIM) to a current model and re-index. '
+                    f'Provider said: {detail}'
+                )
+            raise KnowledgeBaseUnavailable(
+                f'The embedding endpoint returned {resp.status_code} for model '
+                f'{self._model!r}: {detail}'
+            )
         # Preserve request order — the API tags each row with its index.
         rows = sorted(resp.json()['data'], key=lambda d: d.get('index', 0))
         return [r['embedding'] for r in rows]
@@ -698,8 +724,18 @@ class HNSWKnowledgeBase:
         for dist, idx in zip(distances[0], indices[0]):
             if idx < 0:
                 continue
-            # Convert L2 distance → cosine similarity (for unit vectors: cos = 1 - d²/2)
-            cosine = float(1.0 - (dist ** 2) / 2.0)
+            # Convert L2 distance → cosine similarity. For unit vectors
+            # d² = 2 - 2·cos, so cos = 1 - d²/2 — and FAISS METRIC_L2 already
+            # returns the *squared* distance, so `dist` is d², not d.
+            #
+            # This squared `dist` again (`1 - dist**2/2`), which understated
+            # every score in the corpus and silently cost recall: a chunk whose
+            # true cosine was 0.398 scored 0.276 and fell under the 0.3 floor in
+            # `SEARCH_MIN_SCORE`, so a document that was indexed, present and
+            # relevant came back as "no results". Verified against the stored
+            # vector: 1 - 1.2030/2 = 0.39849913 and the true cosine is
+            # 0.39849922, while the old formula gave 0.27639.
+            cosine = float(1.0 - dist / 2.0)
             if cosine < min_score:
                 continue
 

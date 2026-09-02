@@ -61,8 +61,12 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # `</dev/null` gives each server EOF on stdin so it exits instead of waiting for
 # an MCP handshake; `timeout` bounds the ones that ignore it, and `|| true`
 # keeps a registry hiccup at build time from failing the whole image.
-# Keep this list in step with the curated catalogue in
-# `mcp_integration/migrations/0011_working_connector_catalogue.py`.
+# Keep this list in step with the curated catalogue — currently
+# `mcp_integration/migrations/0011_working_connector_catalogue.py` as amended
+# by `0012_enable_gmail_connector.py`. An enabled connector missing from this
+# list is one that times out on its first use in production: cold `npx -y` is
+# ~21 s and `client.CONNECT_TIMEOUT` is 25 s, so it is a coin flip, not a
+# margin.
 ENV NPM_CONFIG_CACHE=/opt/npm-cache
 RUN mkdir -p /opt/npm-cache \
     && for pkg in \
@@ -72,6 +76,9 @@ RUN mkdir -p /opt/npm-cache \
         @modelcontextprotocol/server-slack \
         @notionhq/notion-mcp-server \
         @tokenizin/mcp-npx-fetch \
+        @shinzolabs/gmail-mcp \
+        @isaacphi/mcp-gdrive \
+        @cocal/google-calendar-mcp \
     ; do \
         echo "pre-warming $pkg" \
         && timeout 300 npx -y "$pkg" </dev/null >/dev/null 2>&1 || true; \

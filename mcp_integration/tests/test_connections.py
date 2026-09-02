@@ -85,6 +85,13 @@ class SystemServerToggleTests(TestCase):
         self.assertIn(self.system.id, self._live_ids(self.user))
 
     def test_a_globally_disabled_server_stays_disabled_for_everyone(self):
+        """
+        The property is unchanged; the way it is reported is not. This used to
+        answer 200 with `effective_enabled: false` — a success code for a write
+        that could not take effect, which the page rendered as a switch flipping
+        back with a toast saying "turned off". It is now a 409, and the
+        preference row is not written at all. See PlatformDisabledRowTests.
+        """
         self.system.enabled = False
         self.system.save(update_fields=['enabled'])
         res = self.client.post(
@@ -92,7 +99,7 @@ class SystemServerToggleTests(TestCase):
             {'enabled': True},
             format='json',
         )
-        self.assertFalse(res.data['effective_enabled'])
+        self.assertEqual(res.status_code, 409)
         self.assertNotIn(self.system.id, self._live_ids(self.user))
 
     # ---- the 403 must survive for everything that is genuinely an edit ----
@@ -206,3 +213,64 @@ class ConnectionPresentationTests(TestCase):
         res = self.client.get('/api/mcp/servers/')
         row = next(s for s in res.data['servers'] if s['name'] == 'Secretive')
         self.assertNotIn('env', row)
+
+
+class PlatformDisabledRowTests(TestCase):
+    """
+    A curated row the platform turned off is not a switch the user has.
+
+    `_visible_servers_queryset` filters `enabled=True` before it subtracts the
+    user's "off" preferences, so a preference of True over a disabled row can
+    never make the connection live. The endpoint used to store it anyway and
+    answer 200 with `effective_enabled: false` — which the page rendered as a
+    switch that snapped back under a toast reading "turned off".
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='carol', password='x')
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.server = MCPServer.objects.create(
+            name='Platform Off',
+            display_name='Platform Off',
+            type='stdio',
+            command='npx',
+            args=['-y', 'nope'],
+            user=None,
+            enabled=False,
+            setup_notes='No server for this exists yet.',
+        )
+        self.url = f'/api/mcp/servers/{self.server.id}/set-enabled/'
+
+    def test_turning_on_a_platform_disabled_row_is_refused(self):
+        response = self.client.post(self.url, {'enabled': True}, format='json')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['code'], 'server_unavailable')
+
+    def test_the_refusal_carries_the_reason_the_row_gives(self):
+        """The note is the only thing that tells a user why the card is dead."""
+        response = self.client.post(self.url, {'enabled': True}, format='json')
+        self.assertEqual(response.data['detail'], 'No server for this exists yet.')
+
+    def test_no_unreachable_preference_row_is_written(self):
+        self.client.post(self.url, {'enabled': True}, format='json')
+        self.assertFalse(
+            MCPServerPreference.objects.filter(
+                user=self.user, server=self.server
+            ).exists(),
+            'A preference that cannot take effect must not be stored.',
+        )
+
+    def test_turning_it_off_is_still_allowed(self):
+        """
+        Off-over-off is redundant but harmless, and refusing it would make the
+        endpoint's contract depend on state the caller cannot see.
+        """
+        response = self.client.post(self.url, {'enabled': False}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['effective_enabled'])
+
+    def test_a_disabled_row_never_reaches_the_runtime(self):
+        """The whole reason the preference is pointless — pinned here so the
+        refusal above cannot be 'fixed' by making the queryset looser."""
+        self.assertNotIn(self.server, _servers_for_user_sync(self.user.id))

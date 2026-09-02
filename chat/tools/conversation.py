@@ -1,10 +1,11 @@
 """
 Tools that read back from this conversation's own record.
 
-All four answer "what was already said or attached here" — transcript search,
-an untruncated message, an attachment's text, a spilled tool result. They are
-gated rather than always offered: two need memory to be on, and
-`read_tool_output` needs something to have actually spilled.
+All five answer "what was already said or attached here" — transcript search,
+an untruncated message, an attachment's text, a spilled tool result, and
+whatever the context curator removed from this run. They are gated rather than
+always offered: two need memory to be on, and `read_tool_output` and
+`recall_context` need something to have actually been stored.
 """
 from __future__ import annotations
 
@@ -81,9 +82,17 @@ def _snippet(text: str, position: int) -> str:
 logger = logging.getLogger(__name__)
 
 
-async def has_spilled_output(user_id: int | None, session_key: str | None) -> bool:
-    """Whether this conversation has any unexpired oversized result stored."""
-    if not session_key:
+async def has_spilled_output(user_id: int | None, session_key) -> bool:
+    """Whether this caller has any unexpired stored output it may read.
+
+    Takes one key or several: a delegated worker may read its parent's archive
+    as well as its own, and the tools have to be *offered* whenever either has
+    something — otherwise a worker sent to work on text its parent curated away
+    is never shown the tool that would fetch it.
+    """
+    keys = [session_key] if isinstance(session_key, str) else list(session_key or ())
+    keys = [str(k)[:64] for k in keys if k]
+    if not keys:
         return False
     try:
         from django.utils import timezone
@@ -91,7 +100,7 @@ async def has_spilled_output(user_id: int | None, session_key: str | None) -> bo
 
         return await ToolOutput.objects.filter(
             user_id=user_id,
-            session_key=str(session_key)[:64],
+            session_key__in=keys,
             expires_at__gt=timezone.now(),
         ).aexists()
     except Exception as e:  # noqa: BLE001
@@ -140,6 +149,8 @@ async def has_spilled_output(user_id: int | None, session_key: str | None) -> bo
         }
     },
     requires="memory",
+    parallel=True,
+    effect="read",
 )
 async def search_conversation_history(args: Dict, context: Dict) -> str:
     """
@@ -274,6 +285,8 @@ async def search_conversation_history(args: Dict, context: Dict) -> str:
         }
     },
     requires="memory",
+    parallel=True,
+    effect="read",
 )
 async def get_chat_message_full_text(args: Dict, context: Dict) -> str:
     from ..models import ChatMessage
@@ -313,7 +326,7 @@ async def get_chat_message_full_text(args: Dict, context: Dict) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def read_attachment_text(args: Dict, context: Dict) -> str:
     from uuid import UUID
     from ..models import ChatAttachment
@@ -369,6 +382,8 @@ async def read_attachment_text(args: Dict, context: Dict) -> str:
         }
     },
     requires="spill",
+    parallel=True,
+    effect="read",
 )
 async def read_tool_output(args: Dict, context: Dict) -> str:
     from .tool_output import read
@@ -381,3 +396,36 @@ async def read_tool_output(args: Dict, context: Dict) -> str:
     except (TypeError, ValueError):
         offset = 0
     return await read(output_id, offset, context)
+
+
+@tool({
+        "type": "function",
+        "function": {
+            "name": "recall_context",
+            "description": "Search everything that was removed from your visible context in this run — earlier steps the context curator collapsed, and tool results that were too large to show in full. Long runs are curated: older work is replaced by a short record, and the full text is kept here. Use this whenever you need a detail from earlier that you can no longer see, instead of re-running the tool that produced it or answering without it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Words you expect to appear in the removed text — a filename, an identifier, a phrase from the result."
+                    }
+                },
+                "required": [
+                    "query"
+                ],
+                "additionalProperties": False
+            }
+        }
+    },
+    requires="spill",
+    parallel=True,
+    effect="read",
+)
+async def recall_context(args: Dict, context: Dict) -> str:
+    from .tool_output import recall
+
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "Error: 'query' is required."
+    return await recall(query, context)

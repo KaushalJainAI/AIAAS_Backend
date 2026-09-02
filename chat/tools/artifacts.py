@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
                 "additionalProperties": False
             }
         }
-    })
+    }, effect="read")
 async def render_html_artifact(args: Dict, context: Dict) -> str:
     """
     Hand a self-contained HTML snippet to the client for sandboxed rendering.

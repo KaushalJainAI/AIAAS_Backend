@@ -148,7 +148,6 @@ referencing==0.37.0
 regex==2026.5.9
 requests==2.34.0
 requests-toolbelt==1.0.0
-RestrictedPython==8.1
 rich==15.0.0
 rpds-py==0.30.0
 s3transfer==0.17.0
@@ -191,7 +190,6 @@ urllib3==2.7.0
 uuid_utils==0.15.0
 uvicorn==0.46.0
 vine==5.1.0
-wasmtime==44.0.0
 wcwidth==0.7.0
 webdriver-manager==4.0.2
 webencodings==0.5.1

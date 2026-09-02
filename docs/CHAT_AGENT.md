@@ -120,7 +120,7 @@ ahead of the model on a keyword guess; as a tool the model decides when the
 question warrants it and can follow up on what comes back.
 
 **Code execution** is `execute_python`, running the same
-`executor.sandbox` the Code node and the agent runtime use — AST-validated, no
+the `sandbox` package the Code node and the agent runtime use — AST-validated, no
 network, no filesystem, no imports outside a safe standard subset. It is not the
 `execute_python_code` tool that was removed: that one ran `exec` against the
 process and stays unreachable (`tests_rework.RemovedCapabilityTests`). Failures

@@ -156,9 +156,21 @@ class ImagineAgentResumeView(APIView):
         return Response(result)
 
 
-class ImagineConversationViewSet(viewsets.ReadOnlyModelViewSet):
-    """List/retrieve agent conversations with embedded messages."""
+class ImagineConversationViewSet(viewsets.ModelViewSet):
+    """List/retrieve agent conversations with embedded messages.
+
+    Multiple conversations = independent history. Each conversation's
+    `history` in `agent/graph.py` loads only its own 20 messages, so
+    splitting work across conversations prevents context pollution
+    and saves tokens (shorter `history` → fewer input tokens per turn).
+
+    Like `chat`'s `ChatSession` list, this is the UI for that isolation:
+    new chat, switch, delete. Create is via `agent/chat/` (which mints
+    a conversation when `conversation_id` is absent), so POST here is
+    disallowed. `destroy` cascades messages (`on_delete=CASCADE`).
+    """
     permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'delete', 'head', 'options']
 
     def get_queryset(self):
         # `last_message` on the list serializer reads these annotations; the

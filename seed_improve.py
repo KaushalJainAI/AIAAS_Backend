@@ -39,6 +39,24 @@ kb = KnowledgeBase.objects.filter(user=user).first()
 
 # ---------------------------------------------------------------- agents
 
+def connector_ids(*names):
+    """Curated connector ids by name — ids are per-install, so never literals.
+
+    `agent_context['connectors']` holds `MCPServer` ids and is enforced by the
+    runtime, so a seed that wrote the old presentation slugs ('gmail', 'gdrive')
+    would produce agents whose selection is skipped and which therefore run
+    unrestricted — the opposite of what these demo rows are meant to show.
+    A name that is not seeded is dropped rather than faked.
+    """
+    from mcp_integration.models import MCPServer
+
+    return list(
+        MCPServer.objects.filter(name__in=names, user__isnull=True)
+        .values_list("id", flat=True)
+    )
+
+
+
 AGENTS = [
     {
         "name": "Finance agent",
@@ -48,14 +66,13 @@ AGENTS = [
         "llm_model": "anthropic/claude-sonnet-5",
         "tool_grants": {"codeExecution": True, "fileOps": True, "rag": True,
                         "shell": False, "webSearch": True, "scrape": False},
-        "agent_context": {"connectors": ["gmail", "sheets"],
+        "agent_context": {"connectors": connector_ids("Gmail", "Google Sheets"),
                           "knowledgeBases": [kb.id] if kb else [],
                           "skills": [], "useOrgContext": True, "useEnvironment": False},
         "trigger": {"mode": "maintenance", "cron": "0 9 * * 1"},
         "guardrails": {"autonomy": "ask", "notifyOnHitl": True, "reviewAgent": False,
-                       "spendCapRupees": 500, "egress": "none"},
-        "sandbox": {"fileAccess": "scoped", "workdir": "/workspace", "venv": True,
-                    "cpu": 1, "memoryMb": 1024},
+                       "spendCapRupees": 500, "maxRunSeconds": 900, "egress": "none"},
+        "sandbox": {"fileAccess": "scoped", "workdir": "/workspace", "venv": True},
     },
     {
         "name": "Support agent",
@@ -65,13 +82,12 @@ AGENTS = [
         "llm_model": "openai/gpt-5.6-luna",
         "tool_grants": {"codeExecution": False, "fileOps": False, "rag": True,
                         "shell": False, "webSearch": True, "scrape": True},
-        "agent_context": {"connectors": ["slack"], "knowledgeBases": [],
+        "agent_context": {"connectors": connector_ids("Slack"), "knowledgeBases": [],
                           "skills": [], "useOrgContext": True, "useEnvironment": False},
         "trigger": {"mode": "goal", "cron": ""},
         "guardrails": {"autonomy": "ask", "notifyOnHitl": True, "reviewAgent": False,
-                       "spendCapRupees": 400, "egress": "none"},
-        "sandbox": {"fileAccess": "none", "workdir": "/workspace", "venv": True,
-                    "cpu": 1, "memoryMb": 1024},
+                       "spendCapRupees": 400, "maxRunSeconds": 900, "egress": "none"},
+        "sandbox": {"fileAccess": "none", "workdir": "/workspace", "venv": True},
     },
     {
         "name": "Data agent",
@@ -87,9 +103,8 @@ AGENTS = [
         # Unattended is defensible here: everything it does is read-only and
         # reversible — it computes and reports, it never writes back or sends.
         "guardrails": {"autonomy": "full", "notifyOnHitl": False, "reviewAgent": False,
-                       "spendCapRupees": 200, "egress": "none"},
-        "sandbox": {"fileAccess": "readonly", "workdir": "/workspace", "venv": True,
-                    "cpu": 2, "memoryMb": 2048},
+                       "spendCapRupees": 200, "maxRunSeconds": 900, "egress": "none"},
+        "sandbox": {"fileAccess": "readonly", "workdir": "/workspace", "venv": True},
     },
     {
         # Never run, so the "Not run yet" branch on the card is exercised.
@@ -100,13 +115,12 @@ AGENTS = [
         "llm_model": "openai/gpt-5.6-terra",
         "tool_grants": {"codeExecution": False, "fileOps": True, "rag": False,
                         "shell": False, "webSearch": False, "scrape": False},
-        "agent_context": {"connectors": ["gdrive", "sheets"], "knowledgeBases": [],
+        "agent_context": {"connectors": connector_ids("Google Drive", "Google Sheets"), "knowledgeBases": [],
                           "skills": [], "useOrgContext": True, "useEnvironment": True},
         "trigger": {"mode": "maintenance", "cron": "0 9 1 * *"},
         "guardrails": {"autonomy": "ask", "notifyOnHitl": True, "reviewAgent": False,
-                       "spendCapRupees": 1000, "egress": "none"},
-        "sandbox": {"fileAccess": "scoped", "workdir": "/workspace", "venv": True,
-                    "cpu": 1, "memoryMb": 1024},
+                       "spendCapRupees": 1000, "maxRunSeconds": 900, "egress": "none"},
+        "sandbox": {"fileAccess": "scoped", "workdir": "/workspace", "venv": True},
     },
 ]
 

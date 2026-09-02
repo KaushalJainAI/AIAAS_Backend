@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
         }
     },
     requires="vision",
+    effect="read",
 )
 async def ask_vision(args: Dict, context: Dict) -> str:
     """Put a question about an attachment to a model that can see it.

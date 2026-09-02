@@ -26,7 +26,13 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Awaitable, Callable, Sequence, TypedDict
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphInterrupt
@@ -131,6 +137,33 @@ class TurnContext:
     tool_dispatch: ToolDispatch | None = None
     sensitive_tools: frozenset[str] | None = None
 
+    #: Which knowledge bases the KB tools may reach this turn, or None for "any
+    #: the user owns". The agent runtime sets it from the builder's KB selection
+    #: — which until now was read only to print names into the system prompt,
+    #: while `knowledge_base_search` happily resolved any KB the user owned. A
+    #: selector that narrows nothing is the permissions screen lying.
+    #:
+    #: None, not an empty tuple, is unrestricted: chat has no selection to make,
+    #: and an agent whose selection is empty never had one enforced, so
+    #: enforcing it now as "nothing" would silently empty its corpus.
+    kb_scope: tuple[int, ...] | None = None
+
+    #: Archives from *other* runs this turn may read, on top of its own. Set to
+    #: the parent's session id for a delegated worker, and empty everywhere
+    #: else. Read-only and one hop: a worker never writes into its parent's
+    #: archive, and never sees a grandparent's.
+    #:
+    #: It exists because curation and delegation otherwise work against each
+    #: other — a parent that curated a detail away cannot restate it in the
+    #: task, and the worker, being a fresh thread, could not reach it either.
+    archive_scopes: tuple[str, ...] = ()
+
+    #: The `inference.vfs.FileScope` the file tools address this turn, or None.
+    #: Chat always leaves it None — a chat turn has no `fileAccess` setting to
+    #: build one from, which is why the file tools' `requires="files"` is never
+    #: met there. The agent runtime sets it from `sandbox['fileAccess']`.
+    file_scope: Any = None
+
     #: How many agents deep this turn already is. 0 is a run the user started;
     #: a worker spawned by `invoke_subagent` gets its parent's depth plus one.
     #: Delegation is refused past `MAX_DELEGATION_DEPTH` — without a counter,
@@ -138,11 +171,32 @@ class TurnContext:
     #: `subAgents` grant, and the cost of that is multiplicative.
     depth: int = 0
 
+    #: `agents.budget.Deadline`, or None in chat. The instant this run must be
+    #: finished by. Read in two places and nowhere else: `agent_node` stops
+    #: asking for tools once it is `wrapping_up`, and `tools_node` passes it to
+    #: delegating tools so a worker cannot outlive the run that asked for it.
+    #: Typed `Any` for the same reason `file_scope` is — chat has no concept of
+    #: an agent budget, and importing one here to name it would invert the
+    #: dependency between this module and `agents/`.
+    deadline: Any = None
+
     #: Consulted for calls `sensitive_tools` does not already name. Left None,
     #: chat's own policy applies. The agent runtime supplies a stricter one for
     #: unattended runs and an empty one for `autonomy='full'`, where the user
     #: has explicitly asked not to be interrupted.
     approval_policy: ApprovalPolicy | None = None
+
+    #: What each autonomy level means, for the levels a user may switch to
+    #: while the run is going: level -> (names that gate on sight, policy for
+    #: the calls no name list can contain).
+    #:
+    #: Precomputed by the agent runtime and passed in, rather than resolved in
+    #: `tools_node`, because working out a level's gate set needs the run's
+    #: toolbox — `review` means "every tool *this agent* has" — and the toolbox
+    #: is an agent concept this module knows nothing about. Left None (chat,
+    #: and any caller that has not opted in), a mid-run switch is ignored and
+    #: the fixed `sensitive_tools` / `approval_policy` above stand.
+    approval_modes: dict[str, tuple[frozenset[str], ApprovalPolicy]] | None = None
 
     #: Called after every tool call finishes, with keywords:
     #: `call_id`, `name`, `args`, `output`, `status` ('completed' | 'failed'),
@@ -165,6 +219,35 @@ class TurnContext:
     #: `{iteration, thought}` blob on each step, so the grouping could not be
     #: queried and the reasoning was a 150-character slice of it.
     on_model_turn: TurnObserver | None = None
+
+    #: What `curate_node` is allowed to remove from the transcript when the run
+    #: grows past its window. The default is disabled, so chat is untouched:
+    #: chat's history is already bounded by `HISTORY_WINDOW` and its long
+    #: answers by `context_summary`, and its transcript is one turn deep. The
+    #: agent runtime builds a real policy from `SubAgent.runtime_settings`,
+    #: where the three context-lifecycle toggles live — a long run is the case
+    #: where the transcript, not the conversation, is what overflows.
+    curation: Any = None
+
+    #: Called once per curation pass, with keywords: `results_compacted`,
+    #: `steps_folded`, `tokens_before`, `tokens_after`, `summary_tokens`,
+    #: `archived_ids`. The agent runtime records it as a turn and streams it, so
+    #: a user reading the run can see that the transcript was cut and by how
+    #: much. Curation that leaves no trace is indistinguishable from a model
+    #: that quietly forgot.
+    on_curation: TurnObserver | None = None
+
+    #: Whether a paused call is recorded in the HITL approval queue by this
+    #: run's observer, which then owns telling the user about it.
+    #:
+    #: Set by the agent runtime; chat leaves it False because a chat turn has no
+    #: `ExecutionLog` to hang a `HITLRequest` on — and needs none, since the
+    #: person who typed the message is watching the stream that carries the
+    #: prompt. Without the flag both paths would notify: `_require_approval`
+    #: would write its own ad-hoc row *and* the queue's escalation ladder would
+    #: write another, so one pause would reach the Inbox twice and one of the
+    #: two would ignore the agent's `notifyOnHitl` setting entirely.
+    approval_queue: bool = False
 
     @property
     def max_tokens(self) -> int:
@@ -233,11 +316,17 @@ def to_wire(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
                     "tool_call_id": message.tool_call_id,
                     "content": str(message.content),
                 })
+            case SystemMessage():
+                # Only the curator puts one of these in state, and it has to
+                # reach the model: a summary of the work that was removed is
+                # worthless if it is dropped on the way out, and the model would
+                # then see a run that simply forgot its first thirty steps.
+                wire.append({"role": "system", "content": str(message.content)})
     return wire
 
 
 def _split_transcript(
-    messages: Sequence[BaseMessage], *, at_limit: bool
+    messages: Sequence[BaseMessage], *, at_limit: bool, out_of_time: bool = False
 ) -> tuple[list[dict[str, Any]], str]:
     """
     Split the turn transcript into (wire history, trailing prompt).
@@ -251,7 +340,12 @@ def _split_transcript(
     if messages and isinstance(messages[-1], HumanMessage):
         return to_wire(messages[:-1]), str(messages[-1].content)
 
-    nudge = prompts.CONTINUE_AT_LIMIT if at_limit else prompts.CONTINUE
+    if out_of_time:
+        nudge = prompts.CONTINUE_OUT_OF_TIME
+    elif at_limit:
+        nudge = prompts.CONTINUE_AT_LIMIT
+    else:
+        nudge = prompts.CONTINUE
     return to_wire(messages), nudge
 
 
@@ -435,14 +529,25 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     """One model turn: answer, or ask for tools."""
     turn = _context(config)
     iteration = _turn_number(state["messages"])
-    at_limit = iteration >= turn.max_iterations - 1
+    # Two ways to reach the last pass, one mechanism. Running out of *steps* and
+    # running out of *time* both mean "answer now with what you have", and both
+    # are served by withholding tools below — a run stopped any other way has
+    # paid for every tool call it made and returns none of what they found.
+    out_of_time = turn.deadline is not None and turn.deadline.wrapping_up
+    at_limit = iteration >= turn.max_iterations - 1 or out_of_time
 
     await turn.sink(Event.STATUS, {
         "phase": "thinking",
-        "message": "Thinking..." if not iteration else f"Reasoning (step {iteration + 1})...",
+        "message": (
+            "Wrapping up — time limit reached..." if out_of_time
+            else "Thinking..." if not iteration
+            else f"Reasoning (step {iteration + 1})..."
+        ),
     })
 
-    prior, prompt = _split_transcript(state["messages"], at_limit=at_limit)
+    prior, prompt = _split_transcript(
+        state["messages"], at_limit=at_limit, out_of_time=out_of_time,
+    )
     history = list(turn.history) + prior
 
     # Withholding tools on the last permitted iteration is what forces an answer
@@ -708,25 +813,31 @@ async def _require_approval(call: ToolCall, turn: TurnContext, meta: dict) -> No
         return
 
     logger.info("[Tools] Pausing for approval of %s", call.name)
-    try:
-        from asgiref.sync import sync_to_async
-        from django.contrib.auth import get_user_model
-        from notifications.utils import create_notification
+    # An agent run queues the pause as a `HITLRequest` instead (see
+    # `agents/agent/hitl.py`), and the reminder ladder hanging off that row is
+    # what notifies — honouring the agent's `notifyOnHitl`, the user's device
+    # preference and their quiet hours, none of which this call knows about.
+    # Writing one here as well would put the same pause in the Inbox twice.
+    if not turn.approval_queue:
+        try:
+            from asgiref.sync import sync_to_async
+            from django.contrib.auth import get_user_model
+            from notifications.utils import create_notification
 
-        @sync_to_async
-        def notify() -> None:
-            create_notification(
-                user=get_user_model().objects.get(id=turn.user_id),
-                type="hitl_request",
-                title="Permission required",
-                message=f"The assistant wants to run: {call.name}",
-                data={"tool": call.name, "args": call.arguments,
-                      "thread_id": turn.session_id},
-            )
+            @sync_to_async
+            def notify() -> None:
+                create_notification(
+                    user=get_user_model().objects.get(id=turn.user_id),
+                    type="hitl_request",
+                    title="Permission required",
+                    message=f"The assistant wants to run: {call.name}",
+                    data={"tool": call.name, "args": call.arguments,
+                          "thread_id": turn.session_id},
+                )
 
-        await notify()
-    except Exception:
-        logger.exception("[Tools] HITL notification failed")
+            await notify()
+        except Exception:
+            logger.exception("[Tools] HITL notification failed")
 
     await turn.sink(Event.ASK_PERMISSION, {
         "tool": call.name, "args": call.arguments, "call_id": call.id,
@@ -768,6 +879,19 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         "session_id": turn.session_id,
         "turn_id": turn.turn_id,
         "depth": turn.depth,
+        # The run's own clock, so a tool that starts *other* runs can bound
+        # them by what is left of it. Only `invoke_subagent` reads it; every
+        # other tool is bounded by its own timeout and by the loop stopping.
+        "deadline": turn.deadline,
+        # None in chat. The file tools read it to find the subtree they may
+        # address, and answer "no file access" rather than guessing a default —
+        # a default here would be a scope nobody granted.
+        "file_scope": turn.file_scope,
+        # Same shape, same reasoning, for the knowledge bases: the KB tools
+        # filter on it rather than resolving anything the user owns.
+        "kb_scope": turn.kb_scope,
+        # Extra archives the retrieval tools may read — a worker's parent.
+        "archive_scopes": turn.archive_scopes,
     }
     # Per-call, filled in just before dispatch below. A tool that starts other
     # runs (`invoke_subagent`, `run_agent`) needs to name the step that invoked
@@ -780,6 +904,18 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     )
     dispatch = turn.tool_dispatch or tool_registry.execute_tool
     policy = turn.approval_policy or permissions.default_policy
+
+    # A user watching the run may have loosened (or tightened) how much it asks
+    # since the last batch. Read here, per batch, rather than captured with the
+    # rest of the turn: `TurnContext` is frozen, and a mode that could only be
+    # chosen before the run started is the thing this is fixing. The override
+    # is not drained — it stands for the rest of the run.
+    if turn.approval_modes:
+        from . import steering
+
+        chosen = steering.autonomy(turn.session_id)
+        if chosen and chosen in turn.approval_modes:
+            sensitive, policy = turn.approval_modes[chosen]
 
     calls = [
         ToolCall(id=raw["id"], name=raw["name"], arguments=dict(raw.get("args") or {}))
@@ -810,7 +946,12 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         if call.name in sensitive or await policy(call.name, call.arguments, tool_context):
             await _require_approval(call, turn, meta)
 
-    # ── Pass 2: run them ──
+    # ── Pass 2: plan every call, in call order ──
+    #
+    # Arguments, trace entries and the AGENT_TRACE frames are all built here,
+    # before anything is dispatched, so what the UI is told never depends on
+    # which tool happens to finish first.
+    planned: list[tuple[Any, dict]] = []
     for call in calls:
         refusal = rejected.get(call.id)
         if refusal is not None:
@@ -823,10 +964,6 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
                           "iteration": iteration, "thought": reasoning,
                           "summary": "declined by user", "call_id": call.id,
                           "status": "rejected"})
-            results.append(ToolMessage(
-                content=_refusal_text(call.name, refusal),
-                tool_call_id=call.id, name=call.name,
-            ))
             continue
 
         # web_search with no query is the one omission worth repairing rather
@@ -839,21 +976,79 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
                  "thought": reasoning, "summary": reasoning, "call_id": call.id}
         trace.append(entry)
         await turn.sink(Event.AGENT_TRACE, {"sub_type": "tool", **entry})
+        planned.append((call, arguments))
 
-        logger.info("[Tools] iter=%d %s(%s)", iteration, call.name, sorted(arguments))
-        tool_context["call_id"] = call.id
+    async def _dispatch_one(call, arguments) -> tuple[str, str, int]:
+        """Run one call. Returns (output, status, duration_ms); never raises."""
+        # Its own copy of the context. `call_id` used to be written onto the
+        # single shared dict immediately before each dispatch, which is exactly
+        # the field a concurrent sibling would overwrite — and
+        # `invoke_subagent` reads it to record which tool call spawned a
+        # worker, so a race there misattributes whole runs.
+        ctx = {**tool_context, "call_id": call.id}
         started = time.monotonic()
-        status = "completed"
         try:
             async with asyncio.timeout(TOOL_CALL_TIMEOUT):
-                output = await dispatch(call.name, arguments, tool_context)
+                output = await dispatch(call.name, arguments, ctx)
+            status = "completed"
         except asyncio.TimeoutError:
             status = "failed"
             output = f"Error: {call.name} timed out after {TOOL_CALL_TIMEOUT}s."
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.exception("[Tools] %s raised", call.name)
             status = "failed"
             output = f"Error running {call.name}: {exc}"
+        return output, status, int((time.monotonic() - started) * 1000)
+
+    # ── Pass 3: dispatch — the read-only calls together, the rest one by one ──
+    #
+    # A model issues every call in a turn before seeing any result, so nothing
+    # in this batch can depend on anything else in it and overlapping is safe
+    # by construction. Only for tools that say so: `PARALLEL_TOOLS` is an
+    # allow-list, so an unknown name — every MCP tool, since theirs are minted
+    # at runtime — stays serial. Sensitive calls are excluded whatever they
+    # declare, because a tool worth pausing a human for is a tool with a side
+    # effect, and two of those in one turn may well be ordered.
+    def _may_overlap(call) -> bool:
+        return call.name in tool_registry.PARALLEL_TOOLS and call.name not in sensitive
+
+    concurrent = [(c, a) for c, a in planned if _may_overlap(c)]
+    serial = [(c, a) for c, a in planned if not _may_overlap(c)]
+
+    outcomes: dict[str, tuple[str, str, int]] = {}
+    if len(concurrent) > 1:
+        logger.info("[Tools] iter=%d dispatching %d calls in parallel: %s",
+                    iteration, len(concurrent), [c.name for c, _ in concurrent])
+        gathered = await asyncio.gather(
+            *(_dispatch_one(c, a) for c, a in concurrent)
+        )
+        outcomes.update({c.id: o for (c, _), o in zip(concurrent, gathered)})
+    else:
+        serial = concurrent + serial      # a lone call gains nothing from gather
+
+    for call, arguments in serial:
+        logger.info("[Tools] iter=%d %s(%s)", iteration, call.name, sorted(arguments))
+        outcomes[call.id] = await _dispatch_one(call, arguments)
+
+    # ── Pass 4: observe and record, in call order ──
+    #
+    # Deliberately not inside the dispatch above. `_apply_side_effects` does a
+    # read-modify-write on the shared `meta` (see `_collect_media`), and the
+    # observer writes one `AgentStep` row per call — doing either in completion
+    # order would make the transcript, the step rows and the UI's search
+    # results reshuffle between runs of the same turn.
+    args_by_id = {call.id: arguments for call, arguments in planned}
+    for call in calls:
+        refusal = rejected.get(call.id)
+        if refusal is not None:
+            results.append(ToolMessage(
+                content=_refusal_text(call.name, refusal),
+                tool_call_id=call.id, name=call.name,
+            ))
+            continue
+
+        output, status, duration_ms = outcomes[call.id]
+        arguments = args_by_id[call.id]
 
         if turn.on_tool_result is not None:
             # Never let an observer break a tool call that already succeeded —
@@ -861,8 +1056,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             try:
                 await turn.on_tool_result(
                     call_id=call.id, name=call.name, args=arguments,
-                    output=output, status=status,
-                    duration_ms=int((time.monotonic() - started) * 1000),
+                    output=output, status=status, duration_ms=duration_ms,
                     iteration=iteration, thought=reasoning,
                 )
             except Exception:  # noqa: BLE001
@@ -875,7 +1069,8 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # drive the UI. Both are done with it by this point, so the only reader
         # left is the model — which is the one that has to pay for every
         # character. Anything trimmed is stored and named in what comes back.
-        model_output = await tool_output.bound(call.name, output, tool_context)
+        model_output = await tool_output.bound(
+            call.name, output, {**tool_context, "call_id": call.id})
         results.append(
             ToolMessage(content=model_output, tool_call_id=call.id, name=call.name)
         )
@@ -911,6 +1106,131 @@ async def steering_node(state: AgentState, config: RunnableConfig) -> dict[str, 
     return {"messages": [HumanMessage(content=message)]}
 
 
+# ── Curation node ────────────────────────────────────────────────────────────
+
+async def _summariser_for(turn: TurnContext):
+    """The `async (text) -> (summary, tokens)` the curator folds with.
+
+    A pinned cheap model by default rather than the run's own: a forty-turn run
+    on an expensive model would otherwise pay full rate to compress itself, and
+    the fold is an extractive job that does not need the model the user chose
+    the agent for. Falls back to the run's model when nothing is pinned, because
+    a fold that cannot run at all is worse than one that costs a little.
+    """
+    from . import curation
+
+    policy = turn.curation
+    provider = policy.summary_provider or turn.provider
+    model = policy.summary_model or turn.model
+
+    async def _call(provider_: str, model_: str, text: str) -> tuple[str, int]:
+        completion = await llm.complete(
+            provider=provider_,
+            model=model_,
+            prompt=text,
+            system_message=curation.SUMMARY_INSTRUCTION,
+            user_id=turn.user_id,
+            temperature=0,
+            max_tokens=1_024,
+        )
+        return completion.content or "", completion.tokens
+
+    async def summarise(text: str) -> tuple[str, int]:
+        try:
+            return await _call(provider, model, text)
+        except LLMUserActionable:
+            # No credential for the pinned model, no credit, or it has been
+            # retired. The run's own model is known to work — this turn has been
+            # using it — so falling back keeps the note rather than losing the
+            # steps behind it. Only worth trying when it is a *different* call.
+            if (provider, model) == (turn.provider, turn.model):
+                raise
+            logger.warning(
+                "[Curation] Fold model %s/%s unusable; folding with the run's own",
+                provider, model,
+            )
+            return await _call(turn.provider, turn.model, text)
+
+    return summarise
+
+
+async def curate_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Cut the transcript back when it has grown past the model's window.
+
+    A node rather than a step inside `agent_node` because the cut has to reach
+    graph state: replacements carry the ids they replace, so `add_messages`
+    substitutes them in the checkpoint and the next turn starts from the curated
+    transcript. Doing it on the outgoing copy would re-do — and re-archive — the
+    same work on every remaining turn of the run.
+
+    It sits on the tools -> agent path because that is the only place the
+    transcript grows. Returning `{}` when there is nothing to do is the common
+    case and costs one token estimate.
+    """
+    turn = _context(config)
+    if turn.curation is None or not getattr(turn.curation, "enabled", False):
+        return {}
+
+    from . import curation
+
+    try:
+        result = await curation.curate(
+            state["messages"],
+            policy=turn.curation,
+            model=turn.model,
+            reserve_output=turn.max_tokens,
+            # The system message and any conversation outside the run are
+            # already spoken for; the watermark has to be measured against the
+            # whole request, not against the part that lives in graph state.
+            baseline_tokens=(
+                llm.estimate_tokens(turn.system_message)
+                + sum(llm.estimate_tokens(str(e.get("content") or "")) for e in turn.history)
+            ),
+            context={
+                "user_id": turn.user_id,
+                "session_id": turn.session_id,
+                "turn_id": turn.turn_id,
+            },
+            summarise=await _summariser_for(turn),
+        )
+    except Exception:  # noqa: BLE001
+        # Curation is a cost control, not a correctness one — `clamp_input` is
+        # still behind it. A run must never fail because the thing that keeps it
+        # cheap broke.
+        logger.exception("[Agent] Curation failed; transcript left as it was")
+        return {}
+
+    if not result.curated:
+        return {}
+
+    await turn.sink(Event.STATUS, {
+        "phase": "curating",
+        "message": "Condensing earlier steps to stay inside the context window...",
+    })
+
+    if turn.on_curation is not None:
+        try:
+            await turn.on_curation(
+                results_compacted=result.results_compacted,
+                steps_folded=result.steps_folded,
+                tokens_before=result.tokens_before,
+                tokens_after=result.tokens_after,
+                summary_tokens=result.summary_tokens,
+                archived_ids=result.archived_ids,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("[Agent] on_curation observer raised")
+
+    return {
+        "messages": result.updates,
+        # The fold is a real model call and is charged for like one: it counts
+        # against the run's token total, and therefore against the spend cap.
+        # A summariser that spent money invisibly would be a hole in the
+        # guardrail it is meant to serve.
+        "total_tokens": state.get("total_tokens", 0) + result.summary_tokens,
+    }
+
+
 # ── Graph ────────────────────────────────────────────────────────────────────
 
 def _next_step(state: AgentState) -> str:
@@ -923,18 +1243,58 @@ def _build_graph():
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tools_node)
     graph.add_node("steering", steering_node)
+    graph.add_node("curate", curate_node)
     graph.set_entry_point("agent")
     graph.add_conditional_edges("agent", _next_step, {"tools": "tools", END: END})
     # tools -> steering -> agent, rather than tools -> agent. The steer lands
     # *after* the tool results are threaded and *before* the model reads them,
     # which is the only boundary where a new user message cannot separate an
     # assistant turn from the `tool` messages answering its call ids.
-    graph.add_edge("tools", "steering")
+    # Curation goes between them, not after: it is the tool results that make a
+    # transcript outgrow its window, so this is the only edge where cutting is
+    # ever needed — and it must run *before* the steer so the steer stays the
+    # last message in state. `_split_transcript` peels a trailing `HumanMessage`
+    # off as the turn's prompt, which is exactly where a new instruction
+    # belongs; a summary note appended after it would take that place instead.
+    graph.add_edge("tools", "curate")
+    graph.add_edge("curate", "steering")
     graph.add_edge("steering", "agent")
     return graph.compile(checkpointer=MemorySaver())
 
 
 chat_agent_graph = _build_graph()
+
+
+async def forget_thread(thread_id: str) -> bool:
+    """Drop one thread's checkpoints from the in-process saver.
+
+    `MemorySaver` has no eviction: no `maxsize`, no TTL, nothing that ever
+    expires. Every super-step of every run it has ever checkpointed stays
+    resident for the life of the process, and a run's transcript grows
+    quadratically in its own iteration count — so the process grows without
+    bound while nothing is leaking in the ordinary sense. Agent runs made it
+    sharpest, because each one gets a fresh uuid thread id and every fanout
+    worker gets another: once a run is finished, its thread can never be
+    reached again, and nothing was deleting it.
+
+    Only ever call this on a run that has actually ended. A *paused* run is
+    exactly the case that needs its checkpoint kept — the approval resumes from
+    it, and dropping it would strand the run the user is being asked about.
+
+    Best-effort by design: failing to free memory must not fail a run that has
+    already produced its answer.
+    """
+    try:
+        checkpointer = getattr(chat_agent_graph, "checkpointer", None)
+        deleter = getattr(checkpointer, "adelete_thread", None)
+        if deleter is None:
+            return False
+        await deleter(thread_id)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("[Agent] Could not drop checkpoints for %s", thread_id,
+                       exc_info=True)
+        return False
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -1002,17 +1362,52 @@ def _pending_tool_name(snapshot, call_id: str) -> str | None:
 
 
 async def approve_tool_call(
-    thread_id: str, call_id: str, *, remember: bool = False, user_id: int | None = None,
+    thread_id: str, call_id: str, *, remember: bool = False,
+    scope: str = "", session_key: str = "", user_id: int | None = None,
 ) -> None:
     """
     Record a user's approval so the paused run can resume past it.
 
-    `remember` stores a standing allowance for the same tool so the user is not
-    asked again. It is deliberately keyed on the tool, not on this call's
-    arguments: a decision the user could only make about one exact argument set
-    would never match twice, and they would keep answering the same prompt while
-    believing they had settled it.
+    `scope` says how long the approval lasts, and it is the whole reason this
+    is not a boolean any more:
+
+    * `once` — this call only. The default, and the only answer that cannot be
+      regretted.
+    * `session` — this tool, for the rest of this conversation or run. Written
+      against `ToolPermission.session_key`, a column that has existed since the
+      model was added and that nothing ever wrote a non-empty value into.
+    * `always` — this tool, in every conversation, until revoked.
+
+    Before this there were two rungs, `once` and `always`, and the button
+    offering the second said "remember". A user who wants to stop being asked
+    about the next twenty calls in the run they are watching had no way to say
+    that, so they said `always` and granted a standing allowance over their own
+    mailbox to get through the afternoon. The middle rung is the one people
+    actually want, and it expires on its own.
+
+    Still keyed on the tool rather than on this call's arguments: a decision the
+    user could only make about one exact argument set would never match twice,
+    and they would keep answering the same prompt while believing they had
+    settled it. Narrowing it further needs a way to *show* the user what they
+    are agreeing to, which is a question about the prompt, not about storage.
+
+    `remember` is the retired spelling of `scope='always'`, kept because
+    `chat/turn/pipeline.py` speaks it over the wire. `scope` wins when both
+    are given.
+
+    `session_key` is what a `session`-scoped allowance is filed under, and it
+    has to be passed rather than taken from `thread_id` because the two are the
+    same string only *sometimes*. An agent run uses its thread id as its
+    session id, so they agree; a chat turn with memory off gets a throwaway
+    thread (`<id>:nomem:<uuid>`) while `TurnContext.session_id` stays the real
+    session id — and `permissions.is_remembered` matches against the latter. Key
+    it on the thread there and the row is written, matches nothing, and the user
+    is asked again having been told they would not be.
     """
+    scope = scope or ("always" if remember else "once")
+    if scope not in ("once", "session", "always"):
+        logger.warning("[HITL] Unknown approval scope %r; treating as once", scope)
+        scope = "once"
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     snapshot = await chat_agent_graph.aget_state(config)
     if not snapshot.values:
@@ -1026,7 +1421,7 @@ async def approve_tool_call(
     meta["approved_tool_calls"] = approved
     await chat_agent_graph.aupdate_state(config, {"metadata": meta})
 
-    if not remember or user_id is None:
+    if scope == "once" or user_id is None:
         return
 
     tool_name = _pending_tool_name(snapshot, call_id)
@@ -1036,9 +1431,14 @@ async def approve_tool_call(
 
     from chat.models import ToolPermission
 
+    # `session` scopes the allowance to the run or conversation the user is
+    # actually watching; `always` leaves the key empty, which is what
+    # `permissions.is_remembered` matches in every session.
+    stored_key = (session_key or thread_id)[:64] if scope == "session" else ""
+
     try:
         await ToolPermission.objects.aget_or_create(
-            user_id=user_id, tool_name=tool_name[:160], session_key="",
+            user_id=user_id, tool_name=tool_name[:160], session_key=stored_key,
         )
     except Exception:  # noqa: BLE001
         # The approval itself already landed. Failing to file it must not undo

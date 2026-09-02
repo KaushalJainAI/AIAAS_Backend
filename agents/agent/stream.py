@@ -95,6 +95,13 @@ class AgentRunStream:
         #: call, or if writing that turn's row failed — a step with no turn is
         #: still recorded, just unattributed (`queries.unattributed_steps`).
         self._turn_id: int | None = None
+        #: What context curation did across the whole run, folded into
+        #: `output_data` at close. A per-pass row would be a lot of noise
+        #: for a number the user only ever reads as a total.
+        self.curation: dict[str, Any] = {
+            'passes': 0, 'results_compacted': 0, 'steps_folded': 0,
+            'summary_tokens': 0, 'tokens_saved': 0, 'archived_ids': [],
+        }
         if broadcaster is None:
             from streaming.broadcaster import get_broadcaster
 
@@ -172,16 +179,32 @@ class AgentRunStream:
         Sent as a `hitl_request` so the existing approval UI applies unchanged;
         `call_id` rides along because that — not a fresh id — is what
         `chat.agent.approve_tool_call` needs to resume the run.
+
+        The socket frame reaches whoever is watching *now*. The queue row
+        written alongside it is what reaches someone who is not: it is what the
+        Inbox lists, and what arms the reminder ladder that eventually emails a
+        digest. Both are needed — a run that pauses at 02:00 has no watcher, and
+        one whose tab is open should not have to wait for a sweep.
         """
+        call_id = payload.get('call_id', '')
+        tool = payload.get('tool', 'this tool')
+        message = (
+            f"The agent wants to call {tool}. "
+            'It will not run until you approve it.'
+        )
+
+        from .hitl import open_request
+
+        await open_request(
+            self._log, call_id=call_id, tool=tool, message=message,
+        )
+
         await self._broadcaster.hitl_request(
             self.execution_id,
-            request_id=payload.get('call_id', ''),
+            request_id=call_id,
             request_type='tool_approval',
-            title=f"Approve {payload.get('tool', 'this tool')}?",
-            message=(
-                f"The agent wants to call {payload.get('tool')}. "
-                'It will not run until you approve it.'
-            ),
+            title=f'Approve {tool}?',
+            message=message,
             options=[{'label': 'Approve', 'value': 'approve'},
                      {'label': 'Reject', 'value': 'reject'}],
         )
@@ -254,6 +277,40 @@ class AgentRunStream:
             },
         )
         return turn.id
+
+    async def on_curation(self, *, results_compacted: int, steps_folded: int,
+                          tokens_before: int, tokens_after: int,
+                          summary_tokens: int, archived_ids: tuple = ()) -> None:
+        """A curation observer. Announce the cut and keep a running total.
+
+        Deliberately not an `AgentTurn` row: `(execution, index)` is unique on
+        that table and a curation has no place in the model's turn numbering —
+        inventing an index for it would either collide with a real turn or
+        renumber the ones after it. The run-level totals are folded into
+        `output_data` when the run closes, which is where a fact about the whole
+        run belongs.
+
+        Must never raise, for the same reason the other observers must not:
+        watching a run may not break it.
+        """
+        self.curation['passes'] += 1
+        self.curation['results_compacted'] += results_compacted
+        self.curation['steps_folded'] += steps_folded
+        self.curation['summary_tokens'] += summary_tokens
+        self.curation['tokens_saved'] += max(tokens_before - tokens_after, 0)
+        self.curation['archived_ids'].extend(archived_ids)
+
+        try:
+            await self._broadcaster.context_curated(
+                self.execution_id,
+                results_compacted=results_compacted,
+                steps_folded=steps_folded,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
+                summary_tokens=summary_tokens,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception('[AgentStream] Failed to broadcast curation')
 
     # ── the observer half: what actually happened when the tool returned ─────
 

@@ -257,6 +257,36 @@ def split_think_tags(text: str, in_thinking: bool) -> tuple[list[tuple[str, str]
     return events, splitter.in_thinking
 
 
+def _stream_error_message(error: Any) -> str:
+    """The readable sentence out of an in-band stream error frame."""
+    if isinstance(error, str):
+        return error.strip() or "Unknown provider error"
+    if isinstance(error, dict):
+        for key in ("message", "detail", "error_description", "title"):
+            if isinstance(value := error.get(key), str) and value.strip():
+                return value.strip()
+    return "Unknown provider error"
+
+
+def _stream_error_status(error: Any) -> int | None:
+    """The HTTP-ish status an in-band error frame reports, when it reports one.
+
+    Kept because it is what `classify_provider_error` reads to tell a 401 the
+    user must fix from a 503 they can only retry.
+    """
+    if not isinstance(error, dict):
+        return None
+    for key in ("code", "status", "status_code"):
+        value = error.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
 class ChatChunkParser:
     """
     Turns OpenAI-compatible stream chunks into the node event dicts the
@@ -279,6 +309,24 @@ class ChatChunkParser:
         self.splitter = ReasoningSplitter()
 
     def feed(self, chunk: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        # A provider may report a failure *inside* a 200 SSE body rather than
+        # as an HTTP status: NVIDIA answers an overloaded model with
+        # `data: {"error": {"message": "Service temporarily overloaded",
+        # "code": 503}}` followed by `[DONE]`. Such a frame carries no
+        # `choices`, so without this branch it fell through and the whole
+        # stream yielded nothing -- and an empty stream is indistinguishable
+        # from a model that chose to say nothing. The run was then recorded as
+        # `completed` with an empty answer, which is the one failure mode that
+        # never reaches whoever has to fix it. Yield it as the error frame the
+        # accumulator already knows how to classify.
+        if (error := chunk.get("error")) is not None:
+            yield {
+                "type": "error",
+                "message": _stream_error_message(error),
+                "status": _stream_error_status(error),
+            }
+            return
+
         choices = chunk.get("choices") or []
         choice = choices[0] if choices else {}
         delta = choice.get("delta") or {}

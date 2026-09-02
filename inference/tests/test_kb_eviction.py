@@ -101,7 +101,13 @@ class ReloadAfterEvictionTests(SimpleTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             stub_embedder = mock.Mock()
-            vec = np.ones(1024, dtype='float32')
+            # Read the live dimension rather than repeating a literal: the stub
+            # feeds a real FAISS index, which asserts on `d`, so a hardcoded
+            # width turns every embedding-model swap into a test failure that
+            # says "AssertionError" and nothing about the actual change.
+            from inference.engine import EMBEDDING_DIM
+
+            vec = np.ones(EMBEDDING_DIM, dtype='float32')
             stub_embedder.encode.return_value = [vec / np.linalg.norm(vec)]
 
             with mock.patch.object(settings, 'FAISS_INDEX_DIR', Path(tmp)), \

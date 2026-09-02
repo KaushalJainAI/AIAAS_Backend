@@ -27,12 +27,22 @@ from typing import Any
 from django.utils import timezone
 
 from workflow_backend.thresholds import (
+    RECALL_MAX_MATCHES,
+    RECALL_MAX_TOTAL_CHARS,
+    RECALL_SCAN_LIMIT,
+    RECALL_SNIPPET_CHARS,
     TOOL_OUTPUT_CHAR_LIMIT,
     TOOL_OUTPUT_PREVIEW_CHARS,
     TOOL_OUTPUT_RETENTION_HOURS,
 )
 
 logger = logging.getLogger(__name__)
+
+#: `tool_name` on rows written by the curator rather than by a tool. The store
+#: is shared deliberately: "what did this run drop" and "what did a tool return
+#: too much of" are the same question to a model that has lost the text, and one
+#: store means one retention policy, one ownership check and one reader.
+ARCHIVE_TOOL_NAME = "context:archive"
 
 #: How much of one stored output `read_tool_output` hands back per call. Smaller
 #: than the spill threshold on purpose: paging exists so the model can choose
@@ -156,7 +166,7 @@ async def read(output_id: str, offset: int, context: dict[str, Any]) -> str:
     row = await ToolOutput.objects.filter(
         id=output_id,
         user_id=context.get("user_id"),
-        session_key=str(context.get("session_id") or "")[:64],
+        session_key__in=readable_scopes(context),
     ).afirst()
 
     if row is None:
@@ -189,3 +199,155 @@ async def read(output_id: str, offset: int, context: dict[str, Any]) -> str:
         )
     )
     return window + footer
+
+
+# ── Archived context ─────────────────────────────────────────────────────────
+
+def readable_scopes(context: dict[str, Any]) -> list[str]:
+    """Every archive this caller may read: its own, plus any it was handed.
+
+    A delegated worker gets its parent's scope in `archive_scopes`, one hop and
+    read-only. Without it the two halves of this design work against each other:
+    the parent curates a detail away into an archive keyed by *its* thread, then
+    delegates a task that needs it, and the worker — a fresh thread — cannot
+    reach the very text the parent could no longer restate.
+
+    Writing still goes to the caller's own scope alone (`archive`, `_spill`),
+    so a worker can never put anything into its parent's archive. Ownership is
+    still checked separately on every query: a scope is a session key, not a
+    permission.
+    """
+    own = str(context.get("session_id") or "")[:64]
+    scopes = [own] if own else []
+    for extra in context.get("archive_scopes") or ():
+        key = str(extra or "")[:64]
+        if key and key not in scopes:
+            scopes.append(key)
+    return scopes
+
+
+
+async def archive(
+    label: str, text: str, context: dict[str, Any]
+) -> str | None:
+    """
+    Store text the curator is about to remove from a transcript.
+
+    Same table, same retention and same ownership rules as a tool spill, because
+    the model's question is identical in both cases — "there is something I was
+    shown and can no longer see; where is it?" — and a second store would mean a
+    second expiry, a second scope check and a second reader to keep in step.
+
+    Best-effort, like `_spill`: failing to archive must not fail the run. The
+    caller checks the return value, and says nothing about recall when it is
+    None rather than pointing the model at an id that was never written.
+    """
+    from chat.models import ToolOutput
+
+    try:
+        row = await ToolOutput.objects.acreate(
+            user_id=context.get("user_id"),
+            session_key=str(context.get("session_id") or "")[:64],
+            turn_id=str(context.get("turn_id") or "")[:64],
+            tool_name=f"{ARCHIVE_TOOL_NAME}:{label}"[:160],
+            content=text,
+            total_chars=len(text),
+            expires_at=timezone.now() + timedelta(hours=TOOL_OUTPUT_RETENTION_HOURS),
+        )
+        return row.id
+    except Exception:  # noqa: BLE001
+        logger.exception("[ToolOutput] Could not archive curated context (%s)", label)
+        return None
+
+
+def _score(haystack: str, terms: list[str]) -> tuple[int, int]:
+    """(distinct terms present, position of the first hit).
+
+    Distinct terms first so a row mentioning three of the query's words beats
+    one repeating a single word thirty times, which is what a raw frequency
+    count would prefer.
+    """
+    lowered = haystack.lower()
+    hits = [lowered.find(term) for term in terms]
+    found = [position for position in hits if position >= 0]
+    if not found:
+        return 0, -1
+    return len(found), min(found)
+
+
+def _window(text: str, position: int) -> str:
+    """A readable slice around a hit, with the ends marked when they are cut."""
+    half = RECALL_SNIPPET_CHARS // 2
+    start = max(0, position - half)
+    end = min(len(text), start + RECALL_SNIPPET_CHARS)
+    snippet = text[start:end]
+    if start:
+        snippet = f"...{snippet}"
+    if end < len(text):
+        snippet = f"{snippet}..."
+    return snippet
+
+
+async def recall(query: str, context: dict[str, Any]) -> str:
+    """
+    Search everything stored for this run — archived context and tool spills
+    alike — and return the best few windows, each with the id that pages it.
+
+    Scanned in Python over a capped number of rows for the same reason
+    `search_conversation_history` is: the store is small per session, the match
+    is a scoring function rather than a predicate, and SQLite has no ranking to
+    push it down to.
+    """
+    from chat.models import ToolOutput
+
+    terms = [t for t in {w.lower() for w in query.split()} if len(t) > 2]
+    if not terms:
+        return (
+            "Error: 'query' needs at least one word of three characters or more. "
+            "Search for a term you expect to appear in the dropped text."
+        )
+
+    rows = [
+        row async for row in ToolOutput.objects.filter(
+            user_id=context.get("user_id"),
+            session_key__in=readable_scopes(context),
+            expires_at__gt=timezone.now(),
+        ).order_by("-created_at")[:RECALL_SCAN_LIMIT]
+    ]
+    if not rows:
+        return (
+            "Nothing has been archived in this run yet, so there is nothing "
+            "recall_context can return. Everything you were shown is still visible."
+        )
+
+    scored = []
+    for row in rows:
+        count, position = _score(row.content, terms)
+        if count:
+            scored.append((count, -row.total_chars, row, position))
+    if not scored:
+        return (
+            f"No archived text in this run matches {query!r}. "
+            f"{len(rows)} archived item(s) were searched."
+        )
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+
+    parts: list[str] = []
+    used = 0
+    for _, _, row, position in scored[:RECALL_MAX_MATCHES]:
+        snippet = _window(row.content, position)
+        block = (
+            f"[archived: {row.tool_name} · id '{row.id}' · "
+            f"{row.total_chars:,} chars total]\n{snippet}"
+        )
+        if used + len(block) > RECALL_MAX_TOTAL_CHARS:
+            break
+        parts.append(block)
+        used += len(block)
+
+    footer = (
+        "\n\n[These are windows, not the whole text. Call read_tool_output with "
+        "an id above and an offset to read any part of one in full.]"
+    )
+    return "\n\n---\n\n".join(parts) + footer

@@ -267,6 +267,49 @@ def create_folder(user, name: str, parent: Folder | None) -> Folder:
     return Folder.objects.create(user=user, parent=parent, name=name)
 
 
+def children(user, parent: Folder | None):
+    """Live child folders of `parent`, by name. `parent` must already have come
+    from `resolve_folder` (or be None, the root)."""
+    return Folder.objects.filter(user=user, parent=parent).order_by('name')
+
+
+def child_by_name(user, parent: Folder | None, name: str) -> Folder | None:
+    """One live child folder by exact name, or None.
+
+    This is what lets a *path* be walked without a path ever becoming a
+    locator. A caller holding a folder it already resolved steps one segment at
+    a time, so every hop is an ownership-checked parent/child edge and an
+    unknown segment simply ends the walk. Matching a slash-joined string
+    against `Folder.path` would instead let one crafted segment address any row
+    in the table — which is the reason the module docstring says no route
+    accepts a path as a locator. `inference/vfs.py` is built on this function
+    for exactly that reason.
+    """
+    return Folder.objects.filter(user=user, parent=parent, name=name).first()
+
+
+def ensure_folder(user, name: str, parent: Folder | None) -> Folder:
+    """`child_by_name`, creating the folder if it is not there yet.
+
+    Idempotent on purpose: an agent's home folder is created on demand by
+    whichever run gets there first, and two concurrent runs of the same agent
+    (or a fanout of workers sharing one home) must not race into a duplicate or
+    a 400. `create_folder` refuses duplicates — that is right for a human who
+    typed a name and wrong for a caller that only wants "the folder called
+    this" — so a loser of the race re-reads instead of failing.
+    """
+    existing = child_by_name(user, parent, name)
+    if existing is not None:
+        return existing
+    try:
+        return create_folder(user, name, parent)
+    except FilesystemError:
+        existing = child_by_name(user, parent, name)
+        if existing is None:
+            raise          # a real cap or a bad name, not a lost race
+        return existing
+
+
 def rename_folder(folder: Folder, name: str) -> Folder:
     """Rename in place. One column write — descendants are untouched, because
     `path` holds ids and none of them changed."""

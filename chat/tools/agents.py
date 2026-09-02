@@ -197,7 +197,7 @@ def _agent_search_limit(args: Dict) -> int:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def search_agents(args: Dict, context: Dict) -> str:
     """List the caller's saved agents, optionally filtered by terms.
 
@@ -281,6 +281,7 @@ async def search_agents(args: Dict, context: Dict) -> str:
         }
     },
     sensitive=True,
+    effect="irreversible",
 )
 async def run_agent(args: Dict, context: Dict) -> str:
     """Start one of the caller's agents and wait briefly for its answer.
@@ -387,7 +388,7 @@ async def run_agent(args: Dict, context: Dict) -> str:
                 "additionalProperties": False
             }
         }
-    })
+    }, parallel=True, effect="read")
 async def get_agent_run(args: Dict, context: Dict) -> str:
     """Report where an agent run got to, for a run that outlived its call."""
     from asgiref.sync import sync_to_async
@@ -444,9 +445,20 @@ async def get_agent_run(args: Dict, context: Dict) -> str:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "One self-contained instruction per worker. State each "
-                        "in full: a worker sees only its own task, never the "
-                        "conversation it came from."
+                        "One instruction per worker, stating what that worker "
+                        "alone must do. A worker sees only its own task and the "
+                        "shared `briefing`, never the conversation it came from."
+                    ),
+                },
+                "briefing": {
+                    "type": "string",
+                    "description": (
+                        "Background every worker needs — findings so far, "
+                        "constraints, definitions, the format you want back. "
+                        "Sent to each worker once. Put shared context here "
+                        "rather than repeating it in every task: a task is paid "
+                        "for in one worker's context window, this is paid for "
+                        "once."
                     ),
                 },
             },
@@ -454,7 +466,7 @@ async def get_agent_run(args: Dict, context: Dict) -> str:
             "additionalProperties": False,
         },
     },
-}, sensitive=True)
+}, sensitive=True, effect="irreversible")
 async def invoke_subagent(args: Dict, context: Dict) -> str:
     """Fan work out to N workers and return their answers, in order.
 
@@ -468,6 +480,7 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
     from agents.agent.orchestrator import (
         DelegationRefused,
         WorkerResult,
+        check_delegation_payload,
         check_depth,
         divide_budget,
         run_fanout,
@@ -488,6 +501,17 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
     tasks = [str(t).strip() for t in (args.get("tasks") or []) if str(t).strip()]
     if not tasks:
         return "Error: 'tasks' must contain at least one instruction."
+
+    briefing = str(args.get("briefing") or "").strip()
+    try:
+        # Refused, not truncated, and refused *before* any worker starts: a
+        # trimmed instruction is a worker doing the wrong job confidently, and
+        # the model that wrote the tasks can be told to shorten them and try
+        # again. Results have been bounded since the fan-out existed; what goes
+        # down was not, and it is the direction that multiplies by worker count.
+        check_delegation_payload(tasks, briefing)
+    except DelegationRefused as exc:
+        return json.dumps({"error": str(exc), "refused": True})
 
     user = await get_user_model().objects.filter(id=user_id).afirst()
     if user is None:
@@ -520,6 +544,7 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
         })
 
     from agents.agent.runtime import check_guardrails, run_agent
+    from agents import budget
 
     # Reserved and divided before any worker starts. `check_guardrails` reads
     # the spend so far and then permits a run; with N workers starting at once
@@ -530,6 +555,25 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
         share = divide_budget(cap, len(tasks))
         worker_agent.guardrails = dict(worker_agent.guardrails or {},
                                        spendCapRupees=share)
+
+    # The same reservation for time, made the other way round. Money is
+    # *divided* because N concurrent workers' spend adds up; wall-clock is
+    # *shared*, because eight workers running for a minute cost one minute and
+    # dividing it would cripple each of them while protecting nothing. What the
+    # parent does have to keep back is its own last turn — see
+    # `Deadline.child`, which is where the reserve lives.
+    #
+    # Refused up front when there is not enough left, rather than started: N
+    # workers that each die on their first model call is a worse answer for the
+    # model to read than one sentence telling it to wrap up. A caller with no
+    # deadline at all (chat) delegates unbounded, exactly as before.
+    parent_deadline = context.get("deadline")
+    worker_deadline = None
+    if parent_deadline is not None:
+        try:
+            worker_deadline = parent_deadline.child(budget.limit_for(worker_agent))
+        except budget.OutOfTime as exc:
+            return json.dumps({"error": str(exc), "refused": True})
 
     parent_step_id = await _parent_step_id(context)
 
@@ -544,6 +588,18 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
             parent_step_id=parent_step_id,
             delegation_task=task,
             delegation_index=index,
+            # Shared background, sent once per worker rather than pasted into
+            # every task.
+            briefing=briefing,
+            # The parent's archive, readable by the worker. Without it a parent
+            # that curated a detail away can neither restate it in the task nor
+            # point the worker at it.
+            parent_session_key=str(context.get("session_id") or ""),
+            # One deadline object shared by every worker, not one each: they
+            # run concurrently against the same instant, which is what makes
+            # the fan-out as a whole bounded rather than each worker bounded
+            # and the fan-out unbounded in their number.
+            deadline=worker_deadline,
         )
         return WorkerResult(
             index=index, task=task, answer=run.answer or "",

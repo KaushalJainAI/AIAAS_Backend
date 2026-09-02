@@ -30,7 +30,13 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from agents.models import SubAgent, Trigger
-from agents.triggers import is_valid as cron_is_valid, next_run_after
+from agents.triggers import (
+    describe as cron_describe,
+    is_valid as cron_is_valid,
+    next_run_after,
+    next_runs,
+    zone_is_valid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +44,56 @@ logger = logging.getLogger(__name__)
 #: context, so it is charged for by the token.
 MAX_WEBHOOK_BODY_BYTES = 64 * 1024
 
+#: How many upcoming firings a trigger carries in its own representation, and
+#: the ceiling on what `/preview/` will compute. Small on purpose: the list is
+#: there to confirm the user read the schedule the way the server does, and
+#: `next_runs` walks minute by minute inside an hour.
+UPCOMING_RUNS = 3
+MAX_PREVIEW_RUNS = 10
+
+#: `Nothing returns an unbounded list` — a user with a trigger per agent and a
+#: hundred agents would otherwise serialize the lot, each with its own cron
+#: walk. The body says when it has been cut.
+TRIGGER_LIST_LIMIT = 200
+
 
 class TriggerSerializer(serializers.ModelSerializer):
+    """The wire shape of a trigger, plus the three things a schedule needs to
+    be *checkable*: what it says in words, when it fires next, and what
+    happened last time.
+
+    `cron` is write-only into `config`; `schedule_cron` reads it back out. The
+    round trip used to be asymmetric — a client had to write `cron` and read
+    `config.cron` — which is the kind of seam a form binds to wrongly once and
+    then silently stops saving.
+    """
+
     cron = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    schedule_cron = serializers.CharField(source='cron', read_only=True)
     webhook_url = serializers.SerializerMethodField()
     agent_name = serializers.CharField(source='subagent.name', read_only=True)
+    #: Whether the agent is cleared to run unattended. A schedule on an agent
+    #: without it is refused at every firing, and until this was surfaced the
+    #: only evidence was five failures and a self-disabled row.
+    agent_allows_unattended = serializers.BooleanField(
+        source='subagent.allow_unattended', read_only=True,
+    )
+    description = serializers.SerializerMethodField()
+    upcoming = serializers.SerializerMethodField()
 
     class Meta:
         model = Trigger
         fields = (
-            'id', 'subagent', 'agent_name', 'mode', 'config', 'cron', 'goal',
-            'enabled', 'overlap', 'last_fired_at', 'next_due_at',
-            'consecutive_failures', 'webhook_url', 'created_at', 'updated_at',
+            'id', 'subagent', 'agent_name', 'agent_allows_unattended', 'mode',
+            'config', 'cron', 'schedule_cron', 'timezone', 'name', 'goal',
+            'enabled', 'overlap', 'origin', 'starts_at', 'ends_at',
+            'last_fired_at', 'next_due_at', 'queued_for', 'consecutive_failures',
+            'last_outcome', 'last_error', 'description', 'upcoming',
+            'webhook_url', 'created_at', 'updated_at',
         )
         read_only_fields = (
-            'last_fired_at', 'next_due_at', 'consecutive_failures',
+            'origin', 'last_fired_at', 'next_due_at', 'queued_for',
+            'consecutive_failures', 'last_outcome', 'last_error',
             'created_at', 'updated_at',
         )
 
@@ -61,6 +102,31 @@ class TriggerSerializer(serializers.ModelSerializer):
         if obj.mode != 'webhook' or not obj.secret:
             return None
         return f'/api/orchestrator/hooks/{obj.secret}/'
+
+    def get_description(self, obj) -> str:
+        """The cron expression in words. See `triggers.describe` for why."""
+        return cron_describe(obj.cron, obj.tz) if obj.mode == 'schedule' else ''
+
+    def get_upcoming(self, obj) -> list[str]:
+        """The next few firings, so a listing shows the schedule's meaning and
+        not just its syntax. Empty for a disabled or non-schedule trigger —
+        showing times for something that will not fire is a lie the UI would
+        have to undo."""
+        if obj.mode != 'schedule' or not obj.enabled or not obj.cron:
+            return []
+        after = max(timezone.now(), obj.starts_at or timezone.now())
+        runs = next_runs(obj.cron, after, obj.tz, count=UPCOMING_RUNS)
+        if obj.ends_at:
+            runs = [r for r in runs if r <= obj.ends_at]
+        return [r.isoformat() for r in runs]
+
+    def validate_timezone(self, value):
+        value = (value or 'UTC').strip() or 'UTC'
+        if not zone_is_valid(value):
+            raise serializers.ValidationError(
+                f'"{value}" is not an IANA timezone name, e.g. "Asia/Kolkata".'
+            )
+        return value
 
     def validate(self, attrs):
         mode = attrs.get('mode') or getattr(self.instance, 'mode', None)
@@ -78,8 +144,23 @@ class TriggerSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {'cron': 'Expected five cron fields, e.g. "0 9 * * 1".'}
                 )
+            tz = attrs.get('timezone') or getattr(self.instance, 'tz', 'UTC')
+            # A syntactically valid expression that never comes round — the
+            # classic is 30 February — would otherwise be saved with a NULL
+            # `next_due_at` and simply never fire, with nothing to look at.
+            if next_run_after(cron, timezone.now(), tz) is None:
+                raise serializers.ValidationError(
+                    {'cron': f'"{cron}" has no next run — check the day and '
+                             f'month fields.'}
+                )
             attrs['config'] = dict(attrs.get('config') or {}, cron=cron)
 
+        starts = attrs.get('starts_at', getattr(self.instance, 'starts_at', None))
+        ends = attrs.get('ends_at', getattr(self.instance, 'ends_at', None))
+        if starts and ends and ends <= starts:
+            raise serializers.ValidationError(
+                {'ends_at': 'The end of the window must be after its start.'}
+            )
         return attrs
 
     def validate_subagent(self, value):
@@ -89,9 +170,19 @@ class TriggerSerializer(serializers.ModelSerializer):
 
 
 def _arm(trigger: Trigger) -> None:
-    if trigger.mode == 'schedule':
-        trigger.next_due_at = next_run_after(trigger.cron, timezone.now())
-        trigger.save(update_fields=['next_due_at', 'updated_at'])
+    """Point a saved schedule at its first firing.
+
+    Armed from `starts_at` when the window has not opened yet, so a schedule
+    created today to begin next month is not repeatedly woken and re-armed by
+    every sweep in between.
+    """
+    if trigger.mode != 'schedule':
+        return
+    now = timezone.now()
+    after = max(now, trigger.starts_at) if trigger.starts_at else now
+    trigger.next_due_at = next_run_after(trigger.cron, after, trigger.tz)
+    trigger.queued_for = None
+    trigger.save(update_fields=['next_due_at', 'queued_for', 'updated_at'])
 
 
 @extend_schema(methods=['GET'], responses={200: TriggerSerializer(many=True)})
@@ -107,11 +198,27 @@ def trigger_list(request):
             .select_related('subagent')
             .order_by('-updated_at')
         )
-        return Response(TriggerSerializer(rows, many=True).data)
+        # ?agent=<id> so the builder can show one agent's schedules without
+        # pulling every trigger the user owns.
+        agent_id = request.query_params.get('agent')
+        if agent_id:
+            rows = rows.filter(subagent_id=agent_id)
+
+        page = list(rows[:TRIGGER_LIST_LIMIT + 1])
+        truncated = len(page) > TRIGGER_LIST_LIMIT
+        data = TriggerSerializer(page[:TRIGGER_LIST_LIMIT], many=True).data
+        if truncated:
+            # A capped list and a complete one must not look alike.
+            return Response({'results': data, 'truncated': True,
+                             'limit': TRIGGER_LIST_LIMIT})
+        return Response(data)
 
     serializer = TriggerSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
-    trigger = serializer.save()
+    # `origin` is read-only over the wire: only `AgentSerializer.sync_schedule`
+    # may claim the builder's row, or a client could take ownership of it and
+    # have the next agent save silently overwrite its schedule.
+    trigger = serializer.save(origin='manual')
     _arm(trigger)
     return Response(
         TriggerSerializer(trigger).data, status=status.HTTP_201_CREATED,
@@ -147,6 +254,82 @@ def trigger_detail(request, trigger_id: int):
         trigger.save(update_fields=['consecutive_failures', 'updated_at'])
     _arm(trigger)
     return Response(TriggerSerializer(trigger).data)
+
+
+class SchedulePreviewSerializer(serializers.Serializer):
+    """What the editor asks before anything is saved."""
+
+    cron = serializers.CharField()
+    timezone = serializers.CharField(required=False, allow_blank=True, default='UTC')
+    count = serializers.IntegerField(
+        required=False, default=UPCOMING_RUNS, min_value=1, max_value=MAX_PREVIEW_RUNS,
+    )
+    starts_at = serializers.DateTimeField(required=False, allow_null=True)
+    ends_at = serializers.DateTimeField(required=False, allow_null=True)
+
+
+@extend_schema(
+    methods=['POST'],
+    request=SchedulePreviewSerializer,
+    responses={200: OpenApiResponse(description='Reading and upcoming firings')},
+    description='Validate a cron expression and say, in words and in dates, what it means.',
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def schedule_preview(request):
+    """Answer "what does this schedule actually do" before it is saved.
+
+    Deliberately not a mirror of the client's own cron reader: the client can
+    render a guess instantly, but the only reading that matters is the one the
+    sweep will act on, and that is this code. A preview computed by a second
+    implementation would agree right up until the day it did not.
+
+    Answers 200 with `valid: false` for a bad expression rather than 400. The
+    caller is a field the user is still typing in; a 400 per keystroke is an
+    error report, not feedback.
+    """
+    form = SchedulePreviewSerializer(data=request.data)
+    form.is_valid(raise_exception=True)
+    data = form.validated_data
+
+    cron = (data['cron'] or '').strip()
+    tz = (data.get('timezone') or 'UTC').strip() or 'UTC'
+
+    if not zone_is_valid(tz):
+        return Response({
+            'valid': False,
+            'error': f'"{tz}" is not an IANA timezone name, e.g. "Asia/Kolkata".',
+            'description': '', 'upcoming': [],
+        })
+    if not cron_is_valid(cron):
+        return Response({
+            'valid': False,
+            'error': 'Expected five cron fields, e.g. "0 9 * * 1".',
+            'description': '', 'upcoming': [],
+        })
+
+    now = timezone.now()
+    starts_at = data.get('starts_at')
+    runs = next_runs(cron, max(now, starts_at) if starts_at else now, tz,
+                     count=data['count'])
+    ends_at = data.get('ends_at')
+    if ends_at:
+        runs = [r for r in runs if r <= ends_at]
+
+    if not runs:
+        return Response({
+            'valid': False,
+            'error': ('This schedule has no next run. Check the day and month '
+                      'fields — and the end date, if you set one.'),
+            'description': cron_describe(cron, tz), 'upcoming': [],
+        })
+
+    return Response({
+        'valid': True,
+        'error': '',
+        'description': cron_describe(cron, tz),
+        'upcoming': [r.isoformat() for r in runs],
+    })
 
 
 @extend_schema(

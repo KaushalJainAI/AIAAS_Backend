@@ -22,6 +22,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable
 
+from . import budget
 from .providers import PROVIDER_LABELS, SUPPORTED_PROVIDERS
 from credentials.resolution import (
     KEYLESS_PROVIDERS,
@@ -259,35 +260,19 @@ def classify_provider_error(
 
 # ── Token budgeting ──────────────────────────────────────────────────────────
 
-def estimate_tokens(text: str | None) -> int:
-    """Approximate token count. ~4 chars per token for English prose."""
-    return len(text) // 4 if text else 0
-
-
-def truncate_middle(text: str, max_tokens: int) -> str:
-    """
-    Cut the middle out of an oversized string, keeping both ends.
-
-    Head-only truncation is the obvious approach and the wrong one here: the tail
-    of a user turn is usually the actual question ("...given all that, which
-    should I pick?"). Losing it leaves the model a pile of context and no task.
-    """
-    max_chars = max_tokens * 4
-    if len(text) <= max_chars:
-        return text
-    keep = max_chars // 2
-    return (
-        f"{text[:keep]}\n\n"
-        f"[... {len(text) - 2 * keep} characters trimmed to fit the context window ...]\n\n"
-        f"{text[-keep:]}"
-    )
+#: The arithmetic itself lives in `llm.budget`, because `chat.turn.curation`
+#: needs the identical numbers and the identical notion of a segment. Re-exported
+#: here so the long-standing `from llm.access import estimate_tokens` imports —
+#: and the reading of this module as *the* funnel — both still hold.
+estimate_tokens = budget.estimate_tokens
+truncate_middle = budget.truncate_middle
 
 
 _TRIM_NOTICE = (
     "[CONTEXT NOTICE: {n} earlier message(s) were trimmed from this window to fit "
-    "the model's limit. They are still stored. If the user refers to something you "
-    "cannot see, call search_conversation_history to retrieve it rather than saying "
-    "you do not remember.]"
+    "the model's limit. They are still stored. If something referred to is not "
+    "visible above, retrieve it (recall_context in an agent run, "
+    "search_conversation_history in chat) rather than saying you do not remember.]"
 )
 
 
@@ -307,9 +292,17 @@ def clamp_input(
     This runs on the assembled request, the first point the real total is known.
 
     Sacrificial order is deliberate. Old history goes first because it is the
-    only recoverable part — it stays in the DB and `search_conversation_history`
-    can fetch it back. The system message and the current prompt go last,
-    because dropping either changes what the model was asked to do.
+    only recoverable part — it stays in the DB, and `search_conversation_history`
+    or `recall_context` can fetch it back. The system message and the current
+    prompt go last, because dropping either changes what the model was asked to
+    do.
+
+    History is dropped a *segment* at a time — an assistant tool-call turn and
+    the `tool` results answering it leave together. Popping one message at a
+    time, which is what this used to do, routinely left a `tool` entry whose
+    `tool_call_id` no longer appeared anywhere in the request; providers answer
+    that with a 400, so a long agent run did not degrade gracefully, it failed
+    outright at the moment its transcript grew past the budget.
     """
     history = [dict(entry) for entry in (history or [])]
 
@@ -323,22 +316,19 @@ def clamp_input(
 
     fixed_tokens = estimate_tokens(system_message) + estimate_tokens(prompt)
 
-    def history_tokens(entries: Iterable[dict]) -> int:
-        return sum(
-            estimate_tokens(e.get("content") if isinstance(e.get("content"), str) else "")
-            for e in entries
-        )
-
-    # 2. Drop history oldest-first until the whole thing fits.
+    # 2. Drop history oldest-first, whole segments at a time, until it fits.
+    segments = budget.split_segments(history)
     dropped = 0
-    while history and fixed_tokens + history_tokens(history) > max_total_tokens:
-        history.pop(0)
-        dropped += 1
+    while segments and fixed_tokens + budget.history_tokens(
+        budget.flatten(segments)
+    ) > max_total_tokens:
+        dropped += len(segments.pop(0).entries)
+    history = budget.flatten(segments)
 
     if dropped:
         logger.info(
             "[Context] Dropped %d oldest history message(s) to fit %d tokens; "
-            "they remain reachable via search_conversation_history.",
+            "they remain reachable via the retrieval tools.",
             dropped, max_total_tokens,
         )
         # Without this the model cannot distinguish "never happened" from
@@ -348,8 +338,8 @@ def clamp_input(
 
     # 3. Still over with no history left: the prompt itself is the problem.
     if fixed_tokens > max_total_tokens:
-        budget = max_total_tokens - estimate_tokens(system_message)
-        prompt = truncate_middle(prompt, max(budget, 1000))
+        room = max_total_tokens - estimate_tokens(system_message)
+        prompt = truncate_middle(prompt, max(room, 1000))
         logger.warning("[Context] Prompt exceeded the input budget on its own; trimmed.")
 
     return prompt, system_message, history
@@ -416,7 +406,25 @@ async def _build_request(
     # every chat LLM call goes through. Clamping per call site would mean
     # remembering it in nine places, and the one that got forgotten would be the
     # one that 400s in production.
-    prompt, system_message, history = clamp_input(prompt, system_message, history)
+    #
+    # The budget comes from the model rather than from a flat constant: 96k was
+    # applied identically to a 200k model and an 8k one, so for the small ones
+    # the guard passed and the provider rejected the request anyway. A declared
+    # window can only lower the ceiling — `MAX_LLM_INPUT_TOKENS` is a cost
+    # control, not a capability claim.
+    # The budget comes from the model rather than from a flat constant: 96k was
+    # applied identically to a 200k model and an 8k one, so for the small ones
+    # the guard passed and the provider rejected the request anyway. A declared
+    # window can only lower the ceiling — `MAX_LLM_INPUT_TOKENS` is a cost
+    # control, not a capability claim.
+    #
+    # Read from cache, never queried here: this function is on every model call,
+    # and an await added inside it is a suspension point in the request path.
+    # `preflight` fills the cache once per turn.
+    prompt, system_message, history = clamp_input(
+        prompt, system_message, history,
+        budget.cached_input_budget(model, reserve_output=max_tokens),
+    )
 
     credential_id: str | None = None
     api_key_override: str | None = None
@@ -467,6 +475,14 @@ async def preflight(*, provider: str, model: str, user_id: int) -> None:
     node_type = PROVIDER_NODE_TYPES.get(provider)
     if node_type is None or not get_registry().has_handler(node_type):
         raise LLMUnavailable(f"Provider '{provider}' is not available.")
+
+    # Also where the model's context window is fetched and cached, so
+    # `_build_request` can size the request without a query of its own. Here
+    # because this already runs once per turn, before any work, and its whole
+    # job is answering what has to be known before the first token. Failing to
+    # learn the window is not a reason to refuse the turn — `prime` swallows its
+    # own errors and the request falls back to the flat ceiling.
+    await budget.prime(model)
 
     if provider in _KEYLESS_PROVIDERS:
         return

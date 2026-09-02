@@ -10,13 +10,58 @@ Usage:
         ...
 """
 from rest_framework.throttling import UserRateThrottle, SimpleRateThrottle
+from django.conf import settings
 from django.core.cache import cache
+import hmac
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class TierBasedThrottle(UserRateThrottle):
+#: Header an automated test client presents to be judged as a test client.
+THROTTLE_BYPASS_HEADER = 'HTTP_X_E2E_BYPASS_TOKEN'
+
+
+def is_test_client(request) -> bool:
+    """True when this request carries the configured end-to-end test token.
+
+    The rates below are tuned for a person: `login` at 5/minute is a brute-force
+    guard, and it is *correct* -- `simulate_suspicious_user.py` asserts the 429
+    and must keep asserting it. But an E2E suite signing three personas into
+    nineteen scenarios is not a brute-force attempt, and forcing it to sleep out
+    the limiter made the browser suite take minutes and fail on timing rather
+    than on what it tests.
+
+    So the two get different lanes, separated by something a real client cannot
+    accidentally hold:
+
+    - The feature is **off unless a token is configured**. `E2E_THROTTLE_BYPASS_TOKEN`
+      defaults to empty, so an untouched deployment throttles everything exactly
+      as before; there is no way to reach this path by omission.
+    - Comparison is constant-time, so the token cannot be recovered a byte at a
+      time by timing the endpoint it protects.
+    - It exempts **throttling only**. Authentication, permissions and ownership
+      checks are untouched, so a leaked token buys request volume and nothing
+      else -- it can never turn into access to somebody's data.
+    """
+    token = getattr(settings, 'E2E_THROTTLE_BYPASS_TOKEN', '') or ''
+    if not token:
+        return False
+    presented = request.META.get(THROTTLE_BYPASS_HEADER, '')
+    return bool(presented) and hmac.compare_digest(str(presented), str(token))
+
+
+class TestClientExemptMixin:
+    """Skips the throttle for a verified test client. Mix in *before* the
+    throttle class so this `allow_request` runs first."""
+
+    def allow_request(self, request, view):
+        if is_test_client(request):
+            return True
+        return super().allow_request(request, view)
+
+
+class TierBasedThrottle(TestClientExemptMixin, UserRateThrottle):
     """
     Base throttle that adjusts rates based on user subscription tier.
     
@@ -215,7 +260,7 @@ class ChatThrottle(TierBasedThrottle):
     }
 
 
-class LoginThrottle(SimpleRateThrottle):
+class LoginThrottle(TestClientExemptMixin, SimpleRateThrottle):
     """
     Rate limiting for login attempts to prevent brute force.
     
@@ -230,7 +275,7 @@ class LoginThrottle(SimpleRateThrottle):
         return f'throttle_login_{self.get_ident(request)}'
 
 
-class RegistrationThrottle(SimpleRateThrottle):
+class RegistrationThrottle(TestClientExemptMixin, SimpleRateThrottle):
     """
     Rate limiting for registration attempts.
     
@@ -245,7 +290,7 @@ class RegistrationThrottle(SimpleRateThrottle):
         return f'throttle_register_{self.get_ident(request)}'
 
 
-class GuestChatMinuteThrottle(SimpleRateThrottle):
+class GuestChatMinuteThrottle(TestClientExemptMixin, SimpleRateThrottle):
     """Per-IP minute bucket for anonymous guest chat."""
     scope = 'guest_chat_min'
 
@@ -253,7 +298,7 @@ class GuestChatMinuteThrottle(SimpleRateThrottle):
         return f'throttle_guest_chat_min_{self.get_ident(request)}'
 
 
-class GuestChatHourThrottle(SimpleRateThrottle):
+class GuestChatHourThrottle(TestClientExemptMixin, SimpleRateThrottle):
     """Per-IP hourly bucket for anonymous guest chat."""
     scope = 'guest_chat_hour'
 
@@ -261,7 +306,7 @@ class GuestChatHourThrottle(SimpleRateThrottle):
         return f'throttle_guest_chat_hour_{self.get_ident(request)}'
 
 
-class GuestChatDayThrottle(SimpleRateThrottle):
+class GuestChatDayThrottle(TestClientExemptMixin, SimpleRateThrottle):
     """Per-IP daily bucket for anonymous guest chat."""
     scope = 'guest_chat_day'
 

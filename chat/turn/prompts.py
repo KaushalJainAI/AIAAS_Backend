@@ -154,6 +154,16 @@ CONTINUE_AT_LIMIT = (
     "any more tools."
 )
 
+# The other way a run reaches its last pass. Separate wording because the two
+# are separate facts and the model relays them: telling a user their agent hit
+# a "tool-call limit" when it actually ran out of clock sends them to the wrong
+# setting, and they raise the one knob that was never the constraint.
+CONTINUE_OUT_OF_TIME = (
+    "This run has reached its time limit. Answer now using what you already "
+    "have, state plainly what you did not get to, and do not call any more "
+    "tools."
+)
+
 
 # ── Follow-up questions ──────────────────────────────────────────────────────
 # A small, cheap second call rather than a field the main answer must carry.

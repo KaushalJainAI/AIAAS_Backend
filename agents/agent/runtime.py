@@ -42,8 +42,22 @@ logger = logging.getLogger(__name__)
 GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     'webSearch': ('web_search', 'deep_research', 'image_search', 'video_search'),
     'scrape': ('scrape_webpage', 'read_url'),
-    'rag': ('list_knowledge_bases', 'knowledge_base_search'),
+    # All five, not two. `list_knowledge_bases` tells the model to use
+    # `keyword_search` on a keyword KB and `list_documents` + `read_document` on
+    # a raw one — tools this grant did not unlock, so the catalogue was
+    # instructing the agent to call things it would then be refused, and an
+    # agent whose KB was keyword- or raw-backed could not read it at all.
+    'rag': ('list_knowledge_bases', 'knowledge_base_search', 'keyword_search',
+            'list_documents', 'read_document'),
     'codeExecution': ('execute_python',),
+    # The virtual filesystem over the user's own Folder/Document tree
+    # (`inference/vfs.py`). What the agent may actually do with these is a
+    # second axis — `sandbox['fileAccess']` decides read-only vs. its own
+    # folder vs. the whole tree, and `none` means the tools are never offered
+    # even with the grant on. The grant says "may touch files at all"; the
+    # scope says "which files".
+    'fileOps': ('list_files', 'read_file', 'write_file', 'make_directory',
+                'delete_file'),
     # Delegation. There is no 'orchestrator' kind of agent — an agent that
     # fans out to other agents is one holding this grant, so composition is
     # checked by the same mechanism as every other capability instead of by a
@@ -57,16 +71,35 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
 }
 
 #: Granted in the builder but with no implementation the runtime is willing to
-#: serve. `shell` has no sandbox at all (AGENT_TEMPLATES.md §9.1) and the chat
-#: file tools were deliberately removed — see chat/tests/test_rework.py's
-#: `RemovedCapabilityTests`. Re-adding either through the back door of an agent
-#: grant would undo that decision silently, so the runtime refuses and says so
-#: rather than pretending the grant was honoured.
-UNSERVED_GRANTS = frozenset({'shell', 'fileOps'})
+#: serve. `shell` has no sandbox at all (AGENT_TEMPLATES.md §9.1), so the
+#: runtime refuses and says so rather than pretending the grant was honoured.
+#:
+#: `fileOps` was here too, because the chat file tools that were deliberately
+#: removed reached the *host* filesystem and re-adding them through an agent
+#: grant would have undone that decision silently. It is served now because
+#: what it unlocks is a different capability: `inference/vfs.py` addresses rows
+#: in the user's own document tree and cannot name a path on any disk. The half
+#: of that decision that is still true — no host filesystem from a chat turn —
+#: is still pinned by `chat/tests/test_rework.py::RemovedCapabilityTests`.
+UNSERVED_GRANTS = frozenset({'shell'})
 
 #: Available whatever the grants say: no side effects, no egress, no reads of
 #: anything the user owns.
 ALWAYS_AVAILABLE = ('get_current_time',)
+
+#: Offered only once this run has actually stored something — a tool result too
+#: large to replay, or a step the curator removed. Both read back the run's own
+#: transcript, so neither is a capability a grant should have to unlock: the
+#: text was already shown to this agent, in this run, and the only question is
+#: whether it can still see it.
+#:
+#: They were unreachable before curation existed, which made the notices that
+#: name them dishonest — `tool_output.bound` has always told the model to "call
+#: read_tool_output with that id", and no agent could, because the toolbox
+#: filters `AVAILABLE_TOOLS` by the names its grants unlock and no grant named
+#: it. An escape hatch nobody can open is worse than none, because the model
+#: stops looking for another way out.
+RETRIEVAL_TOOLS = ('read_tool_output', 'recall_context')
 
 
 class AgentRunRefused(Exception):
@@ -76,7 +109,7 @@ class AgentRunRefused(Exception):
 # ── Tools ────────────────────────────────────────────────────────────────────
 #
 # Code execution (`execute_python`) is declared and implemented in the chat
-# tool registry, where it runs the same `executor.sandbox` as every other
+# tool registry, where it runs the same `sandbox` package as every other
 # caller. This module keeps only what is actually its own: the grant that
 # decides whether an agent may reach it.
 
@@ -91,30 +124,137 @@ class AgentToolbox:
     #: caller can tell the user, instead of the agent silently lacking a tool
     #: its brief assumes it has.
     unserved: tuple[str, ...] = ()
+    #: The `inference.vfs.FileScope` this run may address, or None when
+    #: `fileAccess` is 'none'. Built outside this class because it touches the
+    #: database (a scoped agent's home folder is created on demand) and this
+    #: constructor is called from async code.
+    file_scope: Any = None
+
+    #: `plan` autonomy: withhold everything that could change anything, so the
+    #: run can only look and report. Enforced by *removing the tools* rather
+    #: than by gating them, because a gate the user can approve is not a plan
+    #: mode — it is `review` with a different label. With nothing mutating left
+    #: to offer there is also nothing to approve, which is why
+    #: `approval_policy_for('plan')` is `never`.
+    read_only: bool = False
+
+    #: The run's thread id, which is also the scope key the archive is written
+    #: under. Needed because whether the retrieval tools are offered is a
+    #: question about *this run's* stored text, not about the user.
+    session_key: str = ''
+
+    #: Archives from other runs this one may read — a worker's parent. Part of
+    #: the toolbox because it decides whether the retrieval tools are *offered*:
+    #: a worker whose own archive is empty but whose parent's is not still needs
+    #: them.
+    archive_scopes: tuple[str, ...] = ()
+
+    #: Which connections (`MCPServer` ids) this agent may reach, or None for
+    #: "any the user has". The second axis to the `mcp` grant, exactly as
+    #: `file_scope` is the second axis to `fileOps`: the grant says *may it
+    #: reach connectors at all*, this says *which ones*.
+    #:
+    #: None rather than "all of them" is load-bearing for the same reason it is
+    #: in `kb_scope_for`: this selection existed in the builder long before
+    #: anything read it, so turning enforcement on must not silently empty the
+    #: toolbox of every agent that never made a choice. An empty selection is
+    #: therefore *unrestricted*, and only a deliberate non-empty one narrows.
+    mcp_servers: tuple[int, ...] | None = None
 
     @classmethod
-    def for_agent(cls, agent, user_id: int) -> AgentToolbox:
+    def for_agent(cls, agent, user_id: int, *, file_scope: Any = None,
+                  read_only: bool = False, session_key: str = '',
+                  archive_scopes: tuple[str, ...] = ()) -> AgentToolbox:
         grants = {k: bool(v) for k, v in (agent.tool_grants or {}).items()}
         unserved = tuple(sorted(g for g in UNSERVED_GRANTS if grants.get(g)))
-        return cls(grants=grants, user_id=user_id, unserved=unserved)
+        return cls(grants=grants, user_id=user_id, unserved=unserved,
+                   file_scope=file_scope, read_only=read_only,
+                   session_key=session_key, archive_scopes=archive_scopes,
+                   mcp_servers=mcp_scope_for(agent))
 
     @property
     def allowed_names(self) -> frozenset[str]:
-        names = set(ALWAYS_AVAILABLE)
+        # `RETRIEVAL_TOOLS` are always dispatchable and only conditionally
+        # *offered* (see `descriptors`). The split matters: the condition is a
+        # database read, and a model that names a tool it saw a moment ago must
+        # not be refused because a row expired between the two.
+        names = set(ALWAYS_AVAILABLE) | set(RETRIEVAL_TOOLS)
         for grant, tools in GRANT_TOOLS.items():
             if self.grants.get(grant):
                 names.update(tools)
+        if self.read_only:
+            from chat.tools import READ_ONLY_TOOLS
+            names &= set(READ_ONLY_TOOLS)
+        if self.file_scope is None:
+            # Granted `fileOps` but `fileAccess='none'` — the two settings
+            # disagree, and the safe reading is the narrower one. Withheld
+            # rather than left to refuse at call time: an advertised tool that
+            # cannot run is worse than one never offered, because the model
+            # plans around it and then has to explain the failure.
+            names -= set(GRANT_TOOLS['fileOps'])
         return frozenset(names)
 
     @property
     def mcp_allowed(self) -> bool:
+        # Withheld wholesale under `plan`. An MCP tool's name is minted at
+        # runtime from a third-party catalogue, so nothing here can tell a
+        # read from a write on that server — and `looks_read_only` is a claim
+        # the server makes about itself, which is thin evidence to offer a
+        # mode whose entire promise is that nothing will change. This is read
+        # by `descriptors` and by `dispatch`, so the withdrawal covers both
+        # advertising the tools and running one the model named anyway.
+        if self.read_only:
+            return False
         return bool(self.grants.get('mcp'))
+
+    def mcp_server_allowed(self, name: str) -> bool:
+        """Whether a namespaced MCP tool belongs to a connection this agent may use.
+
+        Separate from `mcp_allowed` because they answer different questions and
+        both have to be asked at dispatch: the grant says whether connectors are
+        reachable at all, this says whether *this* one was chosen. Withholding
+        the descriptor is not access control — the model can name a tool it saw
+        in an earlier turn, or one a sibling agent mentioned.
+
+        An unparseable name is refused rather than allowed. The only way to get
+        here with one is a name that passed `is_mcp_tool` (so it starts `mcp__`)
+        but does not carry a server id, which is not a tool that exists; letting
+        it through would make the prefix alone enough to escape the selection.
+        """
+        if self.mcp_servers is None:
+            return True
+        from mcp_integration.tool_provider import decode_tool_name
+
+        decoded = decode_tool_name(name)
+        return decoded is not None and decoded[0] in self.mcp_servers
 
     async def descriptors(self) -> list[dict[str, Any]]:
         """The tool list the model is offered this turn."""
         from chat.tools import AVAILABLE_TOOLS
 
-        allowed = self.allowed_names
+        allowed = set(self.allowed_names)
+
+        # Withheld until this run has archived something, exactly as chat's
+        # `requires="spill"` does it and through the same predicate. An
+        # advertised tool that cannot run is worse than one never offered: the
+        # model plans around it and then has to explain the failure.
+        from chat.tools.conversation import has_spilled_output
+
+        if not await has_spilled_output(
+            self.user_id, (self.session_key, *self.archive_scopes)
+        ):
+            allowed -= set(RETRIEVAL_TOOLS)
+
+        # The workspace-wide switch from the tool library (`tools_config`).
+        # It is a *second* subtraction rather than part of `allowed_names`
+        # because it is a database read and that property is sync and called
+        # from everywhere; `chat.tools.execute_tool` re-checks it at dispatch,
+        # so a tool switched off between the listing and the call is refused
+        # rather than run.
+        from chat.tools import disabled_tools_for
+
+        allowed -= set(await disabled_tools_for(self.user_id))
+
         descriptors = [
             t for t in AVAILABLE_TOOLS
             if t.get('function', {}).get('name') in allowed
@@ -124,7 +264,9 @@ class AgentToolbox:
             try:
                 from mcp_integration.tool_provider import MCPToolProvider
                 descriptors.extend(
-                    await MCPToolProvider.get_openai_tool_descriptors(self.user_id)
+                    await MCPToolProvider.get_openai_tool_descriptors(
+                        self.user_id, self.mcp_servers,
+                    )
                 )
             except Exception:
                 # A dead MCP server must degrade the agent, not fail the run.
@@ -144,6 +286,8 @@ class AgentToolbox:
         if is_mcp_tool(name):
             if not self.mcp_allowed:
                 return _denied(name, 'MCP tools')
+            if not self.mcp_server_allowed(name):
+                return _denied(name, 'that connection')
             from mcp_integration.tool_provider import MCPToolProvider
             return await MCPToolProvider.execute(name, args, self.user_id)
 
@@ -157,12 +301,77 @@ class AgentToolbox:
         return await execute_tool(name, args, context)
 
 
+async def build_file_scope(agent, user):
+    """The virtual-filesystem scope for this run, or None.
+
+    Two settings have to agree before an agent touches files: the `fileOps`
+    grant (may it at all) and `sandbox['fileAccess']` (which files). This
+    resolves the second. It is async because a `scoped` agent's home folder is
+    created on demand, which is a write.
+
+    A failure here degrades the run to no file access rather than killing it —
+    the same rule MCP follows a few lines below. An agent that cannot reach its
+    folder should say so, not 500.
+    """
+    if not (agent.tool_grants or {}).get('fileOps'):
+        return None
+
+    file_access = (agent.sandbox or {}).get('fileAccess', 'scoped')
+    try:
+        from inference.vfs import build_scope
+
+        return await sync_to_async(build_scope)(
+            user, file_access, agent_name=agent.name or '',
+        )
+    except Exception:
+        logger.warning('[AgentRuntime] Could not build a file scope for agent %s',
+                       agent.id, exc_info=True)
+        return None
+
+
+def mcp_scope_for(agent) -> tuple[int, ...] | None:
+    """Which connections this agent may reach, or None for "any of the user's".
+
+    The companion to `build_file_scope`, and sync because it reads a stored
+    list rather than resolving anything: ownership is checked on write (the
+    serializer refuses an id the user cannot see) and again on read, since
+    `get_openai_tool_descriptors` intersects this with the servers actually
+    visible to the user. A revoked or switched-off connection therefore drops
+    out on its own, which is why this does not need a query of its own.
+
+    Non-integer entries are skipped rather than rejected. Until this was
+    enforced the field held presentation slugs (`'gdrive'`, `'photos'`) chosen
+    from a hardcoded list that never matched the connector catalogue; migration
+    `0021` clears them, and skipping here means a row that migration did not
+    reach degrades to "unrestricted" — the behaviour it has always had — rather
+    than to an agent with no connectors and no explanation.
+    """
+    raw = (agent.agent_context or {}).get('connectors') or []
+    ids = tuple(sorted({v for v in raw if isinstance(v, int) and not isinstance(v, bool)}))
+    return ids or None
+
+
 def _denied(name: str, capability: str) -> str:
     return (
         f"Error: '{name}' is not available to this agent — {capability} was not "
         f"granted. Do not try it again; solve the task with the tools you have, "
         f"or say what you would need."
     )
+
+
+#: The autonomy ladder, strictest first. Each level is a *pair* — the tool
+#: names that pause on sight, and the policy that judges the calls no name list
+#: could contain — because MCP names are minted at runtime and a level defined
+#: by names alone would silently exempt exactly the tools holding the user's
+#: real credentials.
+#:
+#: `plan` and `auto` are the two rungs that make the ladder usable rather than
+#: merely present. Without `plan` the only way to learn what an agent will do
+#: is to let it do it; without `auto` the choice is between approving recycled
+#: file writes one at a time and approving nothing at all, and a user faced
+#: with that picks `full` and stops reading the prompts — which is the failure
+#: this whole module is trying to avoid.
+AUTONOMY_LADDER: tuple[str, ...] = ('plan', 'review', 'ask', 'auto', 'full')
 
 
 def approval_policy_for(autonomy: str):
@@ -175,14 +384,22 @@ def approval_policy_for(autonomy: str):
     call here, including reads that chat lets through on the strength of a human
     being present.
 
+    `auto` is where that exemption comes back, and only there: it is the level
+    that means "stop asking about things I can undo", so a credentialed *read*
+    goes through while a credentialed write still stops. `plan` needs no policy
+    at all because the toolbox has already withheld everything that could
+    mutate — a gate over a set of pure reads would only ever say no to nothing.
+
     `full` opts out entirely: the user said no interruptions, and a gate they
     did not ask for would be this module deciding it knows better than the
     setting it was given.
     """
     from chat.tools import permissions
 
-    if autonomy == 'full':
+    if autonomy in ('full', 'plan'):
         return permissions.never
+    if autonomy == 'auto':
+        return permissions.default_policy
     return permissions.unattended_policy
 
 
@@ -192,14 +409,45 @@ def sensitive_tools_for(autonomy: str, toolbox: AgentToolbox) -> frozenset[str]:
     `review` pausing on *everything* is what the word has to mean — a review
     setting that quietly exempted some calls would be the permissions screen
     lying again, just in the other direction.
+
+    `auto` gates on the tools' own `effect="irreversible"` rather than on
+    `sensitive`, because those answer different questions. `write_file` is
+    sensitive and yet recoverable — a delete goes through `recycle.trash` into
+    the user's own recycle bin — so it is exactly what this level exists to
+    stop asking about. An unregistered name (every MCP tool) reports as
+    irreversible, so the looser level never gets looser by accident.
     """
-    if autonomy == 'full':
+    if autonomy in ('full', 'plan'):
         return frozenset()
     if autonomy == 'review':
         return toolbox.allowed_names | {'execute_python'}
+    if autonomy == 'auto':
+        from chat.tools import names_with_effect
+        return names_with_effect('irreversible')
     # 'ask': the calls with side effects outside our own walls.
     from chat.tools import SENSITIVE_TOOLS
     return frozenset(SENSITIVE_TOOLS) | {'execute_python'}
+
+
+def switchable_modes(toolbox: AgentToolbox) -> dict:
+    """Every level a running agent can be switched to, resolved against its toolbox.
+
+    Handed to `TurnContext.approval_modes` so `tools_node` can apply a mid-run
+    change without knowing what an agent or a grant is. Resolved once, here,
+    because `review` means "every tool this agent has" — a question only the
+    toolbox can answer, and one whose answer does not change during the run.
+
+    `plan` is absent by construction: it is enforced by withholding tools when
+    the toolbox is built, and the toolbox is already inside the frozen
+    `TurnContext` by the time anyone could ask to switch. See
+    `chat.turn.steering.SWITCHABLE`.
+    """
+    from chat.turn.steering import SWITCHABLE
+
+    return {
+        level: (sensitive_tools_for(level, toolbox), approval_policy_for(level))
+        for level in SWITCHABLE
+    }
 
 
 # ── Who is asking ────────────────────────────────────────────────────────────
@@ -255,14 +503,46 @@ def _gather_context(agent, user) -> dict[str, Any]:
         Skill.objects.filter(user=user, id__in=ctx.get('skills') or [])
         .values_list('title', 'content')
     )
+    # Ids and backends, not just names. The name alone was all the prompt ever
+    # carried, so an agent had to spend a turn on `list_knowledge_bases`
+    # rediscovering ids the configuration already knew — and the backend decides
+    # which search tool even works, so a model told only the name would reach
+    # for semantic search on a keyword-only KB and get nothing.
     kbs = list(
         KnowledgeBase.objects.filter(user=user, id__in=ctx.get('knowledgeBases') or [])
-        .values_list('name', flat=True)
+        .values('id', 'name', 'backend', 'doc_count')
+        .order_by('name')
     )
     return {'skills': skills, 'knowledge_bases': kbs, 'ctx': ctx}
 
 
-def build_system_prompt(agent, gathered: dict[str, Any]) -> str:
+def kb_scope_for(gathered: dict[str, Any]) -> tuple[int, ...] | None:
+    """Which knowledge bases this run may touch, or None for "any of the user's".
+
+    None rather than "all of them" is load-bearing twice over. It is what an
+    agent built before this setting was enforced keeps — its selection was only
+    ever decorative, and turning enforcement on must not silently empty its
+    corpus. And it is what chat passes, which is why the KB tools treat a
+    missing scope as unrestricted rather than as a scope of nothing.
+    """
+    ids = tuple(kb['id'] for kb in gathered['knowledge_bases'])
+    return ids or None
+
+
+#: What to call for each KB backend. Stated in the prompt because the choice is
+#: not guessable from the name and a wrong guess returns nothing rather than an
+#: error — a semantic search against a keyword-only index is simply empty, which
+#: a model reads as "the KB has nothing on this".
+_KB_SEARCH_ADVICE = {
+    'vector': 'semantic: knowledge_base_search',
+    'fulltext': 'exact terms: keyword_search',
+    'hybrid': 'semantic: knowledge_base_search, or exact terms: keyword_search',
+    'raw': 'not indexed: list_documents then read_document',
+}
+
+
+def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
+                        *, briefing: str = '') -> str:
     """Assemble the agent's standing instructions.
 
     Guardrails are stated to the model as well as enforced in code. Enforcement
@@ -284,11 +564,35 @@ def build_system_prompt(agent, gathered: dict[str, Any]) -> str:
             parts.append(f'\n## {title}\n{content}')
 
     if gathered['knowledge_bases']:
-        names = ', '.join(gathered['knowledge_bases'])
-        parts += ['', f'KNOWLEDGE BASES you can search: {names}.']
+        # id, backend and size, not just the name. The id is what the search
+        # tools take, so listing names alone forced a `list_knowledge_bases`
+        # turn to learn what this line already had in hand; the backend is what
+        # decides which tool can read it at all.
+        parts += ['', 'KNOWLEDGE BASES you can search (and only these):']
+        for kb in gathered['knowledge_bases']:
+            how = _KB_SEARCH_ADVICE.get(kb['backend'], _KB_SEARCH_ADVICE['vector'])
+            parts.append(
+                f"- id {kb['id']} · {kb['name']} · {kb['doc_count']} document(s) · {how}"
+            )
 
     if gathered['ctx'].get('useEnvironment'):
         parts += ['', f'The current time is {timezone.now().isoformat()}.']
+
+    if briefing:
+        # Shared background from the agent that delegated this run, sent once to
+        # every worker in the fan-out. It is here rather than glued onto each
+        # task because a task is copied into one window and paid for there,
+        # while the background is the same for all of them — six workers with
+        # the briefing restated in each task pay for it six times.
+        #
+        # Stated as *given* context, not as instruction: the goal is still the
+        # task. A worker that treats its briefing as the job does the wrong one.
+        parts += [
+            '',
+            'BRIEFING — background from the agent that delegated this to you. '
+            'Context, not instructions; your task is stated separately.',
+            briefing.strip(),
+        ]
 
     granted = sorted(k for k, v in grants.items() if v and k not in UNSERVED_GRANTS)
     parts += [
@@ -301,6 +605,24 @@ def build_system_prompt(agent, gathered: dict[str, Any]) -> str:
         parts.append('- Some actions pause for human approval before they run.')
     if guards.get('egress', 'none') == 'none':
         parts.append('- Your sandbox has no network access.')
+    # Stated up front rather than discovered by refusal. It only tells the model
+    # something it could not infer when the readable and writable subtrees
+    # differ — with `read_all_write_own`, every folder it lists is readable and
+    # almost none are writable, and a model that learns that from a failed write
+    # has already planned around the wrong shape.
+    if file_scope is not None:
+        if not file_scope.writable:
+            parts.append('- Your file access is read-only. You can read files, '
+                         'but not create, change or delete them.')
+        elif file_scope.write_label != file_scope.label:
+            parts.append(
+                f'- You can read files anywhere under {file_scope.label}, but you '
+                f'can only write, create and delete inside {file_scope.write_label}. '
+                f'Save anything you produce there.'
+            )
+        else:
+            parts.append(f'- Your files live under {file_scope.label}. You can '
+                         f'read and write there.')
     unserved = sorted(g for g in UNSERVED_GRANTS if grants.get(g))
     if unserved:
         parts.append(
@@ -465,6 +787,12 @@ async def _finalise_cancelled(log, stream, started: float) -> None:
     """
     async def _work() -> None:
         await _cancel_pending_hitl(log)
+        # Cancelled is as final as failed — nothing will resume this thread.
+        # The key lives in `input_data`, which is where `_open_log` puts it.
+        thread_id = (log.input_data or {}).get('thread_id')
+        if thread_id:
+            from chat.turn.agent import forget_thread
+            await forget_thread(thread_id)
         await _close_log(log, status='cancelled', result={}, tokens=0,
                          error='Run cancelled.')
         await stream.run_finished(
@@ -487,7 +815,10 @@ async def run_agent(agent, goal: str, *, user, sink=None,
                     depth: int = 0, log=None,
                     parent_step_id: int | None = None,
                     delegation_task: str = '',
-                    delegation_index: int = 0) -> AgentRun:
+                    delegation_index: int = 0,
+                    deadline=None,
+                    briefing: str = '',
+                    parent_session_key: str = '') -> AgentRun:
     """Run `agent` against `goal` and record the run.
 
     `thread_id` keys the checkpointer, so passing the id of a paused run is how
@@ -497,11 +828,19 @@ async def run_agent(agent, goal: str, *, user, sink=None,
     `log` lets a caller open the `ExecutionLog` first and hand it in, which is
     how `start_agent_run` can return an execution id before the run has done
     anything. Left None, this opens its own.
+
+    `deadline` is an `agents.budget.Deadline` and is how a *worker* is bounded
+    by the run that asked for it: `invoke_subagent` passes down a share of its
+    own remaining time, so a subagent configured for an hour inside a parent
+    with four minutes left gets four minutes. Left None, the agent's own
+    configured limit applies — which is what a top-level run wants.
     """
     from llm import access as llm
     from chat.turn.agent import TurnContext, iteration_limit, run_turn
+    from chat.turn.curation import CurationPolicy
     from chat.turn.events import null_sink
 
+    from agents import budget
     from .stream import AgentRunStream, tee
 
     # Checked here even when `start_agent_run` already checked it. The cost is
@@ -513,6 +852,11 @@ async def run_agent(agent, goal: str, *, user, sink=None,
     await check_guardrails(agent, user)
 
     started = time.monotonic()
+    # A run inherits its parent's clock or starts its own; it never gets both,
+    # and it can never extend one it was handed. `Deadline` is frozen for that
+    # reason — a worker that could re-derive its own limit from its saved row
+    # would make the parent's bound advisory.
+    deadline = deadline if deadline is not None else budget.Deadline.for_agent(agent)
     thread_id = thread_id or f'agent-{agent.id}-{uuid.uuid4()}'
     if log is None:
         log = await _open_log(
@@ -539,15 +883,25 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         # channel by the same path every other failure takes.
         await llm.preflight(provider=provider, model=model, user_id=user.id)
 
-        toolbox = AgentToolbox.for_agent(agent, user.id)
-        gathered = await _gather_context(agent, user)
         guards = agent.guardrails or {}
         autonomy = guards.get('autonomy', 'ask')
+        file_scope = await build_file_scope(agent, user)
+        # `plan` is the one level that changes which tools exist rather than
+        # which ones pause, so it has to be known before the toolbox is built.
+        toolbox = AgentToolbox.for_agent(
+            agent, user.id, file_scope=file_scope,
+            read_only=(autonomy == 'plan'),
+            session_key=thread_id,
+            archive_scopes=(parent_session_key,) if parent_session_key else (),
+        )
+        gathered = await _gather_context(agent, user)
 
         turn = TurnContext(
             provider=provider,
             model=model,
-            system_message=build_system_prompt(agent, gathered),
+            system_message=build_system_prompt(
+                agent, gathered, file_scope, briefing=briefing
+            ),
             user_id=user.id,
             session_id=thread_id,
             # The chat agent widens its iteration budget for research-shaped
@@ -567,17 +921,85 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             tool_dispatch=toolbox.dispatch,
             sensitive_tools=sensitive_tools_for(autonomy, toolbox),
             approval_policy=approval_policy_for(autonomy),
+            # What a mid-run switch would mean, resolved up front. Without it
+            # `tools_node` ignores the override entirely, which is what chat
+            # wants and what any caller that has not opted in gets.
+            approval_modes=switchable_modes(toolbox),
             on_tool_result=stream.on_tool_result,
             # One `AgentTurn` row per model call. Without it every tool call in
             # the run is unattributed, and the reasoning behind the run is lost
             # when the process ends.
             on_model_turn=stream.on_model_turn,
+            # The three context-lifecycle toggles, finally connected. Same
+            # history as `temperature` above: stored, validated, round-tripped
+            # to the builder and read by nothing, so a long run's only defence
+            # was `clamp_input` dropping its oldest segments at the wire with no
+            # record of what went. A run whose transcript never reaches the high
+            # mark never notices this exists.
+            curation=CurationPolicy.from_settings(agent.runtime_settings),
+            on_curation=stream.on_curation,
+            # This run has an `ExecutionLog`, so `stream._approval_requested`
+            # can queue a paused call as a `HITLRequest` and the reminder ladder
+            # takes it from there. Telling the graph stops it writing a second,
+            # unconditional notification of its own — see `TurnContext`.
+            approval_queue=True,
             # A worker is one level deeper than whoever asked for it, and the
             # counter is what stops delegation multiplying without bound.
             depth=depth,
+            # The soft stop. `agent_node` withholds tools once this is
+            # `wrapping_up`, which turns "out of time" into the same last pass
+            # that running out of iterations already produced: an answer built
+            # from what the run has, rather than a kill mid-tool-call that
+            # returns nothing having paid for everything.
+            deadline=deadline,
+            # Which slice of the user's document tree the file tools address.
+            # None when file access is off, which is also when the toolbox has
+            # already withheld the tools.
+            file_scope=file_scope,
+            # And which knowledge bases the KB tools may reach. The builder's
+            # selection, finally enforced rather than merely printed into the
+            # prompt: before this an agent configured for one KB could search
+            # every other KB its owner had.
+            kb_scope=kb_scope_for(gathered),
+            # A worker may read what its parent archived, and nothing else.
+            # Empty for every run a person started.
+            archive_scopes=(parent_session_key,) if parent_session_key else (),
         )
 
-        result = await run_turn(turn, prompt=goal, thread_id=thread_id)
+        # The backstop under the soft stop. The loop checks the clock between
+        # passes, which cannot help against a single call that never returns —
+        # a provider holding a socket open, an MCP subprocess that hangs. The
+        # grace is what separates the two: reaching *this* means the soft stop
+        # was given its chance and something ignored it.
+        async with asyncio.timeout(
+            deadline.remaining() + budget.RUN_WRAPUP_SECONDS
+        ) as clock:
+            result = await run_turn(turn, prompt=goal, thread_id=thread_id)
+    except TimeoutError:
+        if not clock.expired():
+            # Somebody else's TimeoutError — a socket, a subprocess — that
+            # happened to surface here. Reporting it as "your agent ran out of
+            # time" would send the owner to raise a limit that was never the
+            # problem, so it goes down the ordinary failure path below.
+            raise
+        # Distinct from cancelled on purpose: `timeout` is a limit this system
+        # imposed and the owner can raise, while `cancelled` is a person having
+        # pressed stop. Reporting either as the other sends whoever reads the
+        # run to the wrong place. `ExecutionLog` has carried a `timeout` status
+        # since it was written; until now nothing wrote it.
+        logger.warning('[AgentRuntime] Agent %s exceeded its %ss limit',
+                       agent.id, deadline.limit)
+        message = budget.describe(deadline)
+        from chat.turn.agent import forget_thread
+        await forget_thread(thread_id)
+        await _cancel_pending_hitl(log)
+        await _close_log(log, status='timeout', result={}, tokens=0,
+                         error=message)
+        await stream.run_finished(
+            status='timeout', answer=message,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        raise AgentRunRefused(message) from None
     except asyncio.CancelledError:
         # Not reachable from `except Exception`: since 3.8 `CancelledError` is a
         # `BaseException`. Without this branch a cancelled run left its
@@ -589,6 +1011,8 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         raise
     except Exception as exc:
         logger.exception('[AgentRuntime] Agent %s failed', agent.id)
+        from chat.turn.agent import forget_thread
+        await forget_thread(thread_id)
         await _close_log(log, status='failed', result={}, tokens=0, error=str(exc))
         await stream.run_finished(
             status='failed', answer=str(exc),
@@ -603,6 +1027,15 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         steering.discard(thread_id)
 
     status = 'paused' if result.awaiting_approval else 'completed'
+    if status != 'paused':
+        # The run is over and this thread id can never be reached again — agent
+        # threads are `agent-<id>-<uuid>` and workers get a throwaway. The
+        # checkpointer keeps every super-step for the life of the process
+        # otherwise, which on a small box is the whole memory budget after
+        # enough runs. A *paused* run keeps its checkpoint: that is what the
+        # approval resumes from.
+        from chat.turn.agent import forget_thread
+        await forget_thread(thread_id)
     structured, contract_error = _apply_contract(agent, result)
     payload: dict[str, Any] = {
         'answer': result.answer, 'tool_trace': result.tool_trace,
@@ -611,6 +1044,11 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         payload['structured'] = structured
     if contract_error:
         payload['contract_error'] = contract_error
+    if stream.curation['passes']:
+        # Only when it actually happened. A `context_curation` key reading all
+        # zeroes on every short run would make the interesting case harder to
+        # spot, not easier.
+        payload['context_curation'] = stream.curation
 
     await _close_log(
         log,
@@ -689,6 +1127,9 @@ async def start_agent_run(agent, goal: str, *, user,
     from llm import access as llm
     from workflow_backend.background import spawn
 
+    from agents import admission
+    from .stream import AgentRunStream
+
     _check_unattended(agent, caller)
     await check_guardrails(agent, user)
     # A missing credential is the same class of problem as a spent budget: the
@@ -710,8 +1151,36 @@ async def start_agent_run(agent, goal: str, *, user,
 
     async def _run() -> None:
         try:
-            await run_agent(agent, goal, user=user, thread_id=thread_id,
-                            trigger_type=trigger_type, caller=caller, log=log)
+            # A slot, before any work. This is the only bound on how much of
+            # the box one account may hold at once — the spend cap is monthly
+            # and per agent, so twenty schedules firing together are twenty
+            # runs it permits and one instance cannot serve. Taken *inside* the
+            # spawned task rather than before it, so the caller still gets its
+            # 202 and its execution id immediately: a queued run is visible and
+            # subscribable, it just has not started yet.
+            #
+            # Only top-level runs come through here. Workers reach `run_agent`
+            # directly from `invoke_subagent`, and must: a worker queueing
+            # behind the parent that is awaiting it would deadlock.
+            async with admission.slot(user.id):
+                await run_agent(agent, goal, user=user, thread_id=thread_id,
+                                trigger_type=trigger_type, caller=caller,
+                                log=log)
+        except admission.AdmissionTimeout as exc:
+            # Nothing ran, so there is nothing to report as having failed
+            # part-way. The log is closed here because `run_agent` never got to
+            # open it — leaving it at `running` would show the owner a spinner
+            # for a run that was never admitted.
+            logger.warning('[AgentRuntime] Agent %s not admitted: %s',
+                           agent.id, exc)
+            try:
+                await _close_log(log, status='failed', result={}, tokens=0,
+                                 error=str(exc))
+                await AgentRunStream(log).run_finished(
+                    status='failed', answer=str(exc), duration_ms=0,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception('[AgentRuntime] Could not close unadmitted run')
         except Exception:
             # `run_agent` already closed the log as failed and told the
             # channel. Nothing is waiting on this task, so swallow rather than
