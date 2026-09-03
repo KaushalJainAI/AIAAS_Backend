@@ -57,16 +57,16 @@ class DiscoveryAndDispatchTests(TestCase):
         )
 
     def _search(self, scope):
-        from chat.tools.agents import _search_agents
+        from chat.tools.agents import search_agents
 
-        return async_to_sync(_search_agents)(
+        return async_to_sync(search_agents)(
             {}, {'user_id': self.user.id, 'delegation_scope': scope},
         )
 
     def _run(self, agent_id, scope):
-        from chat.tools.agents import _run_agent
+        from chat.tools.agents import run_agent
 
-        return async_to_sync(_run_agent)(
+        return async_to_sync(run_agent)(
             {'agent_id': agent_id, 'goal': 'do it'},
             {'user_id': self.user.id, 'delegation_scope': scope},
         )

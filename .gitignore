@@ -75,6 +75,7 @@ scratch/
 status.txt
 diff.txt
 .archive/
+*.tmp
 
 # Data dumps & database backups
 *.sql

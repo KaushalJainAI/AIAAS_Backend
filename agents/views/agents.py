@@ -429,16 +429,12 @@ class AgentSerializer(serializers.Serializer):
     def validate_delegatesTo(self, value):
         """Only agents the caller owns, checked the way knowledge bases are.
 
-        An agent naming itself is dropped rather than refused: it is a
-        configuration mistake with an obvious intent (delegate to the others),
-        and the runtime's depth limit would stop the recursion anyway — but a
-        toolbox that offers an agent itself is one the model will waste a turn
-        on.
+        Self-reference is dropped in `apply`, not here: the detail view
+        validates a merged config without passing the row as `instance`, so
+        `self.instance` is None on exactly the request where an agent could name
+        itself.
         """
-        ids = self._owned_ids(SubAgent, value, 'agent')
-        if self.instance is not None:
-            ids = [i for i in ids if i != self.instance.id]
-        return ids
+        return self._owned_ids(SubAgent, value, 'agent')
 
     def _owned_ids(self, model, ids, label):
         """Reject any id the caller does not own.
@@ -608,7 +604,14 @@ class AgentSerializer(serializers.Serializer):
             'connectors': data.get('connectors', []),
             'knowledgeBases': data.get('knowledgeBases', []),
             'skills': data.get('skills', []),
-            'delegatesTo': data.get('delegatesTo', []),
+            # An agent naming itself is dropped rather than refused: the
+            # intent is obvious (delegate to the others), the depth limit would
+            # stop the recursion anyway, and a toolbox offering an agent itself
+            # is one the model wastes a turn on. Done here because this is the
+            # only place the row's own id is in hand.
+            'delegatesTo': [
+                i for i in data.get('delegatesTo', []) if i != workflow.id
+            ],
             'useEnvironment': data.get('useEnvironment', False),
         }
 

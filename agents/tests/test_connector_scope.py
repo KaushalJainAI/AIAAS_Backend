@@ -299,3 +299,75 @@ class ProviderFilterTests(TestCase):
         # Distinct from None: the runtime turns "no choice" into None before it
         # gets here, so an empty list arriving means a caller asked for nothing.
         self.assertEqual(self._descriptors([]), [])
+
+
+class ConnectorShapeApiTests(TestCase):
+    """The wire shape, where the user meets it."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.user = User.objects.create_user(username='shape', password='pw')
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.server = MCPServer.objects.create(
+            user=self.user, name='Mail', type='stdio', command='npx', enabled=True,
+        )
+
+    def _post(self, connectors):
+        return self.client.post(
+            '/api/orchestrator/agents/',
+            {'name': 'A', 'tools': {'mcp': True}, 'connectors': connectors},
+            format='json',
+        )
+
+    def test_a_bare_id_still_saves_and_reads_back_unchanged(self):
+        """Every agent saved before 2026-09-03 holds bare ids. Rewriting them
+        would be a migration that narrows nobody and could widen someone."""
+        response = self._post([self.server.id])
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['connectors'], [self.server.id])
+
+    def test_a_scoped_connection_round_trips(self):
+        response = self._post([
+            {'id': self.server.id, 'mode': 'selected', 'tools': ['search_threads']},
+        ])
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['connectors'], [
+            {'id': self.server.id, 'mode': 'selected', 'tools': ['search_threads']},
+        ])
+
+    def test_mode_all_with_no_tools_collapses_to_the_bare_id(self):
+        """One stored spelling for one meaning, so a diff of two agents that
+        chose the same thing is empty."""
+        response = self._post([{'id': self.server.id, 'mode': 'all'}])
+        self.assertEqual(response.data['connectors'], [self.server.id])
+
+    def test_an_unknown_mode_is_refused_rather_than_silently_widened(self):
+        response = self._post([{'id': self.server.id, 'mode': 'readonly'}])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('connectors', response.data)
+
+    def test_a_connection_the_user_cannot_see_is_refused_in_either_shape(self):
+        self.assertEqual(self._post([9_999_999]).status_code, 400)
+        self.assertEqual(
+            self._post([{'id': 9_999_999, 'mode': 'read'}]).status_code, 400,
+        )
+
+    def test_selected_naming_nothing_stays_open(self):
+        """A connection with no usable tools is not something a user can have
+        meant; the runtime reads it the same way."""
+        response = self._post([
+            {'id': self.server.id, 'mode': 'selected', 'tools': []},
+        ])
+        self.assertEqual(response.data['connectors'], [self.server.id])
+
+    def test_tool_names_are_not_validated_against_the_live_catalogue(self):
+        """Deliberate: they are minted by a third party, listing one costs a
+        subprocess and a timeout, and a name that disappeared has to stay
+        storable or saving would start failing because someone else shipped.
+        The toolbox intersects with the live catalogue at build time."""
+        response = self._post([
+            {'id': self.server.id, 'mode': 'selected', 'tools': ['not_a_real_tool']},
+        ])
+        self.assertEqual(response.status_code, 201)

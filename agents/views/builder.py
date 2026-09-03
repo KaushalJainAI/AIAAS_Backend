@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from adrf.decorators import api_view as async_api_view
@@ -193,6 +193,37 @@ def _tags(value, _cat):
     return tags
 
 
+def _connectors(value, cat):
+    """A connection selection, in either stored shape.
+
+    `read` is offered to the model but `selected` is not: naming individual
+    tools needs the live catalogue of a third-party server, which this endpoint
+    does not fetch, so a model doing it would be guessing names. The mode that
+    is *derived* from the name at run time is the one that is safe to propose.
+    """
+    if not isinstance(value, list):
+        raise Reject('expected a list of connections')
+    known = {row['id'] for row in cat.connectors}
+    out = []
+    for entry in value:
+        if isinstance(entry, bool):
+            raise Reject('expected a list of connections')
+        if isinstance(entry, int):
+            server_id, mode = entry, 'all'
+        elif isinstance(entry, dict):
+            server_id, mode = entry.get('id'), entry.get('mode', 'all')
+        else:
+            raise Reject('each connection is an id or {id, mode}')
+        if not isinstance(server_id, int) or isinstance(server_id, bool):
+            raise Reject('each connection needs an integer id')
+        if server_id not in known:
+            raise Reject(f'no such connection: {server_id}')
+        if mode not in ('all', 'read'):
+            raise Reject("mode is 'all' or 'read'")
+        out.append(server_id if mode == 'all' else {'id': server_id, 'mode': 'read'})
+    return out
+
+
 def _cron(value, _cat):
     if not isinstance(value, str):
         raise Reject('expected a cron string')
@@ -306,10 +337,23 @@ KNOBS: dict[str, Knob] = {
     },
     'connectors': Knob(
         'Connections',
-        'Which connected accounts this agent may reach, by id, from the '
-        'catalogue below. Only meaningful with the `mcp` grant. An empty list '
-        'means every connection the user has, so name the ones the job needs.',
-        _ids('connectors'),
+        'Which connected accounts this agent may reach, and how much of each. '
+        'A list whose entries are either a bare id from the catalogue below, or '
+        '{"id": <id>, "mode": "read"} to give it only the read-only tools of '
+        'that connection. Prefer `read` for anything that only needs to look — '
+        'choosing a mailbox otherwise grants sending and deleting too. Only '
+        'meaningful with the `mcp` grant; an empty list means every connection '
+        'the user has.',
+        _connectors,
+    ),
+    'delegatesTo': Knob(
+        'Delegates to',
+        'Which of the user\'s other agents this one may hand work to, by id '
+        'from the AGENTS catalogue below. Only meaningful with the `subAgents` '
+        'grant. An empty list means any of them, so name the ones the job needs '
+        '— an agent that can delegate to an agent with wider grants has those '
+        'grants by proxy.',
+        _ids('agents'),
     ),
     'knowledgeBases': Knob(
         'Knowledge bases',
@@ -407,10 +451,15 @@ class Catalogue:
     connectors: list[dict]
     knowledge_bases: list[dict]
     skills: list[dict]
+    #: The user's other agents, for `delegatesTo`. Same argument as connectors:
+    #: an id only exists on the server, so a model without the list can only
+    #: invent one, and an invented id is a 400 on the next save.
+    agents: list[dict] = field(default_factory=list)
 
 
 @sync_to_async
 def _catalogue(user) -> Catalogue:
+    from agents.models import SubAgent
     from inference.models import KnowledgeBase
     from mcp_integration.client import _visible_servers_queryset
     from skills.models import Skill
@@ -438,7 +487,14 @@ def _catalogue(user) -> Catalogue:
         for skill in Skill.objects.filter(user=user).only(
             'id', 'title', 'description')[:50]
     ]
-    return Catalogue(connectors, knowledge_bases, skills)
+    agents = [
+        {'id': row.id, 'label': row.name,
+         'about': (row.description or '')[:120]}
+        for row in SubAgent.objects.filter(user=user)
+        .exclude(status='archived')
+        .only('id', 'name', 'description')[:50]
+    ]
+    return Catalogue(connectors, knowledge_bases, skills, agents)
 
 
 def _catalogue_block(cat: Catalogue) -> str:
@@ -456,6 +512,8 @@ def _catalogue_block(cat: Catalogue) -> str:
                  'do not set `knowledgeBases` or the `rag` grant')
         + '\n\nSKILLS (ids for `skills`):\n'
         + render(cat.skills, 'do not set `skills`')
+        + '\n\nAGENTS this user already has (ids for `delegatesTo`):\n'
+        + render(cat.agents, 'do not set `delegatesTo` or the `subAgents` grant')
     )
 
 
@@ -484,7 +542,10 @@ a few lines. If the user has already written a good one, leave it alone.
 - Grants are the blast radius. Turn on only what the described job needs, and \
 say why in `why`.
 - A connector needs BOTH the `mcp` grant and that connector's id in \
-`connectors`. A knowledge base needs the `rag` grant and its id.
+`connectors`. A knowledge base needs the `rag` grant and its id. Delegation \
+needs the `subAgents` grant and ids in `delegatesTo`.
+- Prefer `{"id": N, "mode": "read"}` for a connection the agent only needs to \
+read from: naming a mailbox otherwise hands it sending and deleting too.
 - Anything that sends, posts, pays or deletes keeps `autonomy` at `ask` unless \
 the user explicitly asked to be left out of it.
 - A cadence ("every morning", "each Monday") means `trigger` = `maintenance`, a \
