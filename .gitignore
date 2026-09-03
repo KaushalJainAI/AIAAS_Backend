@@ -74,6 +74,7 @@ sandbox/wasm/
 scratch/
 status.txt
 diff.txt
+.archive/
 
 # Data dumps & database backups
 *.sql
