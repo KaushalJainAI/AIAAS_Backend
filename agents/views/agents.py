@@ -29,13 +29,18 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from inference.models import KnowledgeBase
+from llm.effort import LADDER as EFFORT_LADDER
 from logs import revisions
 from logs.models import ExecutionLog
 from skills.models import Skill
 
 from django.utils import timezone
 
-from agents import budget
+from agents import budget, contracts
+# Only the constant, and `orchestrator` imports nothing but the standard
+# library — so this does not drag the agent runtime into the URLconf the
+# way `views/runs.py` documents avoiding.
+from agents.agent.orchestrator import MAX_PARALLEL_WORKERS
 from agents.models import SubAgent
 from agents.serializers import SUSPICIOUS_WORKFLOW_NAME_RE
 from agents.spend import PRICED_SOURCES, rupees_for, rupees_for_usd
@@ -74,7 +79,14 @@ TOOL_KEYS = {'codeExecution', 'shell', 'webSearch', 'scrape', 'fileOps', 'rag', 
 # `read_all_write_own` is the combination the other four cannot express: read
 # the user's whole tree, write only the agent's own home. See inference/vfs.py.
 FILE_ACCESS = {'none', 'readonly', 'scoped', 'read_all_write_own', 'full'}
-TRIGGER_MODES = {'goal', 'maintenance', 'template'}
+
+# `trigger` (stored as `runtime_settings['invocationMode']`) is gone from the
+# wire too. Nothing in the runtime ever branched on it, and the serializer
+# already required a schedule for `maintenance` — so the schedule *was* the
+# answer and this was a second place to contradict it. `to_config` still emits
+# it, derived, because the builder shows how an agent is invoked; it is no
+# longer settable, so the two cannot disagree.
+
 # The autonomy ladder, loosest last. `plan` withholds every tool that could
 # change anything, so a run can only look and report; `auto` stops asking about
 # effects the user can undo (a file write lands in their recycle bin) while
@@ -82,7 +94,36 @@ TRIGGER_MODES = {'goal', 'maintenance', 'template'}
 # a gate set and a policy — see `agents/agent/runtime.py::AUTONOMY_LADDER`,
 # which is the authority on what each one means.
 AUTONOMY = {'plan', 'review', 'ask', 'auto', 'full'}
-EGRESS = {'none', 'allowlist', 'full'}
+
+# `egress` is gone from the wire (2026-09-03). It was read in exactly one place
+# — to add "your sandbox has no network access" to the system prompt — and the
+# other two values could never have been honoured: the production sandbox is a
+# sidecar container on an internal-only Docker network, so `full` was not
+# unenforced, it was unimplementable as built. The prompt line is now
+# unconditional, which is the true statement. Existing rows keep the key; it is
+# simply no longer read, offered or written.
+
+# Which agent lifecycle states a user may set. `archived` is deliberately
+# absent: `search_agents` already excludes it and there is no un-archive path,
+# so offering it as a save would be a one-way door disguised as a dropdown.
+SETTABLE_STATUS = {'draft', 'active', 'paused'}
+
+# The result shapes an agent may be asked for, from the closed registry in
+# `agents/contracts.py`. Blank means prose, which is the default and always
+# valid. Closed rather than free-form JSON Schema for the reason that module
+# states: the set of shapes the UI can render is closed by construction, so a
+# schema language would let an agent declare one nothing can display.
+OUTPUT_CONTRACTS = set(contracts.CONTRACTS)
+
+#: How many tools one connection's `selected` mode may name. A ceiling rather
+#: than a judgement: a server with more tools than this is one where picking
+#: individually has stopped being the right control, and `read` is.
+MAX_CONNECTOR_TOOLS = 60
+
+#: Tag shape. Bounded because tags are matched by `search_agents` against every
+#: agent a user owns, and an unbounded list is an unbounded scan.
+MAX_TAGS = 12
+MAX_TAG_CHARS = 30
 
 # What a single run may reserve. `cpu` and `memoryMb` used to live here and are
 # gone (2026-08-29): both were stored, validated, round-tripped to the builder
@@ -124,16 +165,48 @@ class AgentSerializer(serializers.Serializer):
     # Identity
     name = serializers.CharField(max_length=200)
     brief = serializers.CharField(required=False, allow_blank=True, default='')
+    #: One line saying what this agent is *for*. Not decoration: `search_agents`
+    #: reads it, and it is what a delegating agent chooses between. Until it
+    #: reached the wire (2026-09-03) every agent a user built was blank to the
+    #: parent trying to pick one.
+    description = serializers.CharField(
+        required=False, allow_blank=True, default='', max_length=2000,
+    )
+    #: Matched by `_agent_haystack` in the same search, and the natural grouping
+    #: for a user with thirty agents.
+    tags = serializers.ListField(
+        child=serializers.CharField(max_length=MAX_TAG_CHARS),
+        required=False, default=list, max_length=MAX_TAGS,
+    )
+    #: draft | active | paused. Writable as of 2026-09-03: it was read-only, so
+    #: the only way to stop a scheduled agent was to delete its schedule or the
+    #: agent itself.
+    status = serializers.ChoiceField(
+        choices=sorted(SETTABLE_STATUS), required=False,
+    )
 
     # Model
     provider = serializers.CharField(max_length=30, required=False, default='openrouter')
     model = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
     temperature = serializers.FloatField(required=False, default=0.2, min_value=0, max_value=2)
+    # How hard the model is asked to think. Blank is the model's own default,
+    # which is what every agent saved before this existed keeps — the same rule
+    # as `connectors`: a field the builder gains must not silently change how
+    # already-configured agents run. Validated against the ladder rather than
+    # against a model's own rungs, because the model can be changed in the same
+    # PATCH and `llm.access` snaps the level at call time anyway.
+    effort = serializers.ChoiceField(
+        choices=[('', 'Model default')] + [(level, level) for level in EFFORT_LADDER],
+        required=False, allow_blank=True, default='',
+    )
 
     # Sandbox
+    #: `workdir` and `venv` were removed from the wire (2026-09-03) alongside
+    #: `cpu`/`memoryMb` before them, for the same reason: stored, validated,
+    #: round-tripped to the builder and read by nothing. The sandbox is a fixed
+    #: sidecar image, and where an agent's files live is `fileAccess` plus the
+    #: virtual filesystem — there is no directory for a user to choose.
     fileAccess = serializers.ChoiceField(choices=sorted(FILE_ACCESS), required=False, default='scoped')
-    workdir = serializers.CharField(max_length=255, required=False, default='/workspace')
-    venv = serializers.BooleanField(required=False, default=True)
 
     # Tools
     tools = serializers.DictField(child=serializers.BooleanField(), required=False)
@@ -143,14 +216,44 @@ class AgentSerializer(serializers.Serializer):
     # to the `mcp` grant just as `fileAccess` is to `fileOps`. Empty means "any
     # the user has", which is what every agent saved before this was enforced
     # has; see `agents.agent.runtime.mcp_scope_for`.
-    connectors = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    #: Either a bare `MCPServer` id (the pre-2026-09-03 shape, meaning every
+    #: tool that connection offers) or `{id, mode, tools}`. Both are accepted
+    #: for ever: a bare id is what every existing agent stores, and rewriting
+    #: them would be a migration that narrows nobody but could widen someone.
+    connectors = serializers.ListField(required=False, default=list)
     knowledgeBases = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    #: Which of the caller's agents this one may delegate to. Empty is any of
+    #: them, which is what every agent saved before this existed means.
+    delegatesTo = serializers.ListField(
+        child=serializers.IntegerField(), required=False, default=list,
+    )
     skills = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
-    useOrgContext = serializers.BooleanField(required=False, default=True)
+    #: `useOrgContext` was removed from the wire (2026-09-03): it defaulted on,
+    #: was stored on every agent, and no prompt builder ever read it. There is
+    #: no workspace-level context to include or omit yet; it comes back with the
+    #: feature, not before it.
     useEnvironment = serializers.BooleanField(required=False, default=False)
 
+    # Result shape and shape of the work. Both columns have been read by the
+    # runtime since the agent model landed — `contracts.resolve` at the top and
+    # tail of every run, `run_fanout(parallel=…)` when a parent delegates a list
+    # — and until now only `agents/stock.py` could set either. They are the two
+    # fields the design leans on for "an agent that can only return prose cannot
+    # stand in for a coded tool", so leaving them unreachable made that argument
+    # untestable by anyone but us.
+    outputContract = serializers.ChoiceField(
+        choices=sorted(OUTPUT_CONTRACTS), required=False,
+        allow_blank=True, default='',
+    )
+    #: How many workers one delegated fan-out runs at a time. `None`/absent is a
+    #: single sequential turn; the runtime clamps to `MAX_PARALLEL_WORKERS`
+    #: regardless, so this narrows and never widens.
+    fanoutParallel = serializers.IntegerField(
+        required=False, allow_null=True, default=None,
+        min_value=1, max_value=MAX_PARALLEL_WORKERS,
+    )
+
     # Invocation
-    trigger = serializers.ChoiceField(choices=sorted(TRIGGER_MODES), required=False, default='goal')
     schedule = serializers.CharField(required=False, allow_blank=True, default='')
     # The zone the cron fields are read in. Defaults to UTC so an agent saved
     # by an older client keeps firing at exactly the instant it always did —
@@ -182,9 +285,7 @@ class AgentSerializer(serializers.Serializer):
         required=False, default=DEFAULT_RUN_SECONDS,
         min_value=MIN_RUN_SECONDS, max_value=MAX_RUN_SECONDS,
     )
-    # The knob the design note flagged as missing: an agent that can run code but
-    # cannot reach the network is a very different thing to grant a stranger.
-    egress = serializers.ChoiceField(choices=sorted(EGRESS), required=False, default='none')
+
 
     # Context lifecycle
     #: Which model folds the run's earlier steps when the window fills. Empty
@@ -204,7 +305,6 @@ class AgentSerializer(serializers.Serializer):
     indexing = serializers.BooleanField(required=False, default=True)
 
     # Read-only: observed behaviour, computed from the ledger of runs.
-    status = serializers.CharField(read_only=True)
     runs = serializers.IntegerField(read_only=True)
     unattended = serializers.IntegerField(read_only=True)
     spend = serializers.IntegerField(read_only=True)
@@ -231,39 +331,114 @@ class AgentSerializer(serializers.Serializer):
         return value
 
     def validate_connectors(self, value):
-        """Reject any connection the caller cannot see.
+        """Reject any connection the caller cannot see, and normalise the shape.
 
-        The mirror of `_owned_ids`, but it cannot use it: a curated connector is
-        a row with `user IS NULL` that everyone can see, so filtering on
-        `user=request.user` would reject every connection the platform ships and
-        accept only the user's own. `visible_server_ids_sync` is the same
-        predicate the runtime resolves through, which is the point — a selection
-        the builder accepts has to be one the toolbox will honour.
+        Ownership is the mirror of `_owned_ids`, but it cannot use it: a curated
+        connector is a row with `user IS NULL` that everyone can see, so
+        filtering on `user=request.user` would reject every connection the
+        platform ships and accept only the user's own. `visible_server_ids_sync`
+        is the same predicate the runtime resolves through, which is the point —
+        a selection the builder accepts has to be one the toolbox will honour.
+
+        Two shapes go in and one comes out. A bare id keeps working for ever
+        (it is what every agent saved before 2026-09-03 holds) and is stored as
+        given; an object carries the per-connection scope. What is *not* done
+        here is validating tool names against the server's live catalogue: they
+        are minted by a third party, a listing costs a subprocess and a timeout,
+        and a name that has since disappeared has to be storable anyway or a
+        save would start failing because someone else shipped a release. The
+        toolbox intersects with the live catalogue at build time instead, which
+        is the only place the answer is current.
         """
         from mcp_integration.client import visible_server_ids_sync
+        from agents.connector_scope import MODES
 
-        ids = sorted(set(value))
-        if not ids:
+        if not value:
             return []
-        unknown = set(ids) - visible_server_ids_sync(self.context['request'].user.id)
+
+        entries: dict[int, dict] = {}
+        for raw in value:
+            if isinstance(raw, bool):
+                raise serializers.ValidationError('A connection is an id, not a boolean.')
+            if isinstance(raw, int):
+                entries.setdefault(raw, raw)
+                continue
+            if not isinstance(raw, dict):
+                raise serializers.ValidationError(
+                    'Each connection is an id, or an object with id, mode and tools.'
+                )
+            server_id = raw.get('id')
+            if not isinstance(server_id, int) or isinstance(server_id, bool):
+                raise serializers.ValidationError('Each connection needs an integer id.')
+            mode = raw.get('mode', 'all')
+            if mode not in MODES:
+                raise serializers.ValidationError(
+                    f"Unknown connection mode '{mode}'. Allowed: {', '.join(MODES)}."
+                )
+            tools = raw.get('tools') or []
+            if not isinstance(tools, list) or any(not isinstance(t, str) for t in tools):
+                raise serializers.ValidationError('`tools` is a list of tool names.')
+            if len(tools) > MAX_CONNECTOR_TOOLS:
+                raise serializers.ValidationError(
+                    f'At most {MAX_CONNECTOR_TOOLS} tools may be named per connection.'
+                )
+            names = [t.strip()[:128] for t in tools if t.strip()]
+            # `selected` naming nothing is a connection with no usable tools,
+            # which nobody can have meant: it reads as the picking not being
+            # finished, so it stays open until names arrive. The runtime reads
+            # it the same way — one rule, stated in `connector_scope.parse`.
+            if mode == 'selected' and not names:
+                mode = 'all'
+            # An object always wins over a bare id for the same connection: the
+            # narrower statement is the deliberate one.
+            entries[server_id] = (
+                server_id if mode == 'all' and not names
+                else {'id': server_id, 'mode': mode, 'tools': names}
+            )
+
+        unknown = set(entries) - visible_server_ids_sync(self.context['request'].user.id)
         if unknown:
             raise serializers.ValidationError(
                 f"Unknown connections: {', '.join(str(i) for i in sorted(unknown))}."
             )
-        return ids
+        return [entries[key] for key in sorted(entries)]
 
-    def validate_workdir(self, value):
-        # The workdir is handed to the sandbox as a path. Traversal out of it
-        # would defeat the file-access setting entirely.
-        if not value.startswith('/') or '..' in value:
-            raise serializers.ValidationError('workdir must be an absolute path without "..".')
-        return value
+    def validate_tags(self, value):
+        """Trimmed, de-duplicated, order kept.
+
+        Order is kept rather than sorted because a user's first tag is the one
+        they think of the agent as, and `search_agents` shows them in stored
+        order.
+        """
+        seen: set[str] = set()
+        tags: list[str] = []
+        for raw in value:
+            tag = ' '.join(str(raw).split())
+            key = tag.lower()
+            if tag and key not in seen:
+                seen.add(key)
+                tags.append(tag)
+        return tags
 
     def validate_knowledgeBases(self, value):
         return self._owned_ids(KnowledgeBase, value, 'knowledge base')
 
     def validate_skills(self, value):
         return self._owned_ids(Skill, value, 'skill')
+
+    def validate_delegatesTo(self, value):
+        """Only agents the caller owns, checked the way knowledge bases are.
+
+        An agent naming itself is dropped rather than refused: it is a
+        configuration mistake with an obvious intent (delegate to the others),
+        and the runtime's depth limit would stop the recursion anyway — but a
+        toolbox that offers an agent itself is one the model will waste a turn
+        on.
+        """
+        ids = self._owned_ids(SubAgent, value, 'agent')
+        if self.instance is not None:
+            ids = [i for i in ids if i != self.instance.id]
+        return ids
 
     def _owned_ids(self, model, ids, label):
         """Reject any id the caller does not own.
@@ -285,9 +460,6 @@ class AgentSerializer(serializers.Serializer):
         return ids
 
     def validate(self, attrs):
-        # A maintenance agent with no schedule never runs; saying so now beats a
-        # silent no-op the user discovers a week later.
-        trigger = attrs.get('trigger', 'goal')
         schedule = (attrs.get('schedule') or '').strip()
         tz = (attrs.get('scheduleTimezone') or 'UTC').strip() or 'UTC'
         if not zone_is_valid(tz):
@@ -297,11 +469,6 @@ class AgentSerializer(serializers.Serializer):
             )
         attrs['scheduleTimezone'] = tz
 
-        if trigger == 'maintenance':
-            if not schedule:
-                raise serializers.ValidationError(
-                    {'schedule': 'A maintenance agent needs a schedule, otherwise it never runs.'}
-                )
         if schedule:
             if not cron_is_valid(schedule):
                 raise serializers.ValidationError(
@@ -329,15 +496,10 @@ class AgentSerializer(serializers.Serializer):
                                     'Turn it on, or clear the schedule.'}
             )
 
-        # Shell plus unrestricted network is the combination that turns a
-        # sandbox escape into an exfiltration path. Refuse it outright rather
-        # than leaving it to a reviewer to notice on the permissions screen.
-        tools = attrs.get('tools') or {}
-        if tools.get('shell') and attrs.get('egress', 'none') == 'full':
-            raise serializers.ValidationError(
-                {'egress': 'Shell access with unrestricted network egress is not allowed. '
-                           'Narrow one of the two.'}
-            )
+        # The shell-plus-open-egress refusal that stood here is gone with the
+        # `egress` field: there is no longer a way to ask for network access, so
+        # there is no longer a combination to refuse. The sandbox has none.
+
         return attrs
 
     # ---------------- mapping ----------------
@@ -361,19 +523,33 @@ class AgentSerializer(serializers.Serializer):
             'id': agent.id,
             'name': agent.name,
             'brief': agent.prompt or '',
+            'description': agent.description or '',
+            'tags': list(agent.tags or []),
             'provider': agent.llm_provider,
             'model': agent.llm_model,
             'temperature': settings_.get('temperature', 0.2),
+            'effort': settings_.get('effort', ''),
             'fileAccess': sandbox.get('fileAccess', 'scoped'),
-            'workdir': sandbox.get('workdir', '/workspace'),
-            'venv': sandbox.get('venv', True),
             'tools': {k: bool((workflow.tool_grants or {}).get(k, False)) for k in sorted(TOOL_KEYS)},
             'connectors': ctx.get('connectors', []),
             'knowledgeBases': ctx.get('knowledgeBases', []),
             'skills': ctx.get('skills', []),
-            'useOrgContext': ctx.get('useOrgContext', True),
+            'delegatesTo': ctx.get('delegatesTo', []),
             'useEnvironment': ctx.get('useEnvironment', False),
-            'trigger': settings_.get('invocationMode', 'goal'),
+            # The contract by name, blank for prose. `output_schema` is stored
+            # as `{'contract': name}`; anything else in there is a shape from
+            # before the registry closed and reads as prose, which is what
+            # `contracts.resolve` already does with it.
+            'outputContract': (
+                (agent.output_schema or {}).get('contract', '')
+                if contracts.resolve(agent.output_schema) else ''
+            ),
+            'fanoutParallel': (agent.fanout or {}).get('parallel'),
+            # Derived, not stored: an agent with a schedule is a maintenance
+            # agent, and that is the whole of what the retired `trigger` field
+            # meant. Emitted read-only so the builder can still say how the
+            # agent is invoked without owning a second answer.
+            'trigger': 'maintenance' if schedule else 'goal',
             'schedule': schedule.cron if schedule else '',
             'scheduleTimezone': schedule.tz if schedule else 'UTC',
             # How many *other* schedules this agent has, so the builder can say
@@ -389,7 +565,6 @@ class AgentSerializer(serializers.Serializer):
             # saved before this field existed has no key at all, and every one
             # of them still has to run.
             'maxRunSeconds': budget.limit_for(agent),
-            'egress': guards.get('egress', 'none'),
             'summaryModel': settings_.get('summaryModel', ''),
             'summaryProvider': settings_.get('summaryProvider', ''),
             'recursiveContext': settings_.get('recursiveContext', True),
@@ -410,14 +585,19 @@ class AgentSerializer(serializers.Serializer):
         """
         workflow.name = data['name']
         workflow.prompt = data.get('brief', '')
+        # PATCH merges, so an absent key must leave the stored value alone —
+        # these three are the ones a partial save from a narrow screen (the
+        # Schedules page, the run view) would otherwise blank.
+        if 'description' in data:
+            workflow.description = data['description']
+        if 'tags' in data:
+            workflow.tags = data['tags']
+        if 'status' in data:
+            workflow.status = data['status']
         workflow.llm_provider = data.get('provider', 'openrouter')
         workflow.llm_model = data.get('model', '')
 
-        workflow.sandbox = {
-            'fileAccess': data.get('fileAccess', 'scoped'),
-            'workdir': data.get('workdir', '/workspace'),
-            'venv': data.get('venv', True),
-        }
+        workflow.sandbox = {'fileAccess': data.get('fileAccess', 'scoped')}
         # Store the full closed set, not just what was sent: an absent key must
         # read as "denied", never as "unset and therefore whatever the runtime
         # defaults to".
@@ -428,9 +608,18 @@ class AgentSerializer(serializers.Serializer):
             'connectors': data.get('connectors', []),
             'knowledgeBases': data.get('knowledgeBases', []),
             'skills': data.get('skills', []),
-            'useOrgContext': data.get('useOrgContext', True),
+            'delegatesTo': data.get('delegatesTo', []),
             'useEnvironment': data.get('useEnvironment', False),
         }
+
+        # `{}` is prose, and prose is the default — so an unset contract clears
+        # the column rather than leaving whatever was there. Same for fanout: a
+        # blank field means one sequential turn, which is what an empty dict
+        # already means to `run_fanout`.
+        contract = (data.get('outputContract') or '').strip()
+        workflow.output_schema = {'contract': contract} if contract else {}
+        parallel = data.get('fanoutParallel')
+        workflow.fanout = {'parallel': int(parallel)} if parallel else {}
         autonomy = data.get('autonomy', 'ask')
         workflow.guardrails = {
             'autonomy': autonomy,
@@ -440,7 +629,6 @@ class AgentSerializer(serializers.Serializer):
             'maxRunSeconds': budget.clamp_run_seconds(
                 data.get('maxRunSeconds', DEFAULT_RUN_SECONDS)
             ),
-            'egress': data.get('egress', 'none'),
         }
         if 'allowUnattended' in data:
             workflow.allow_unattended = bool(data['allowUnattended'])
@@ -448,12 +636,12 @@ class AgentSerializer(serializers.Serializer):
         settings_ = dict(workflow.runtime_settings or {})
         settings_.update({
             'temperature': data.get('temperature', 0.2),
+            'effort': data.get('effort', ''),
             'summaryModel': data.get('summaryModel', ''),
             'summaryProvider': data.get('summaryProvider', ''),
             'recursiveContext': data.get('recursiveContext', True),
             'compaction': data.get('compaction', True),
             'indexing': data.get('indexing', True),
-            'invocationMode': data.get('trigger', 'goal'),
         })
         workflow.runtime_settings = settings_
         return workflow

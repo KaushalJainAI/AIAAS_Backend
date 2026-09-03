@@ -60,6 +60,7 @@ class MCPServerSerializer(serializers.ModelSerializer):
             "help_url",
             "setup_notes",
             "enabled",
+            "coming_soon",
             "effective_enabled",
             "supports_oauth",
             "oauth_connected",

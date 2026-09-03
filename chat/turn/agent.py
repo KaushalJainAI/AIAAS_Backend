@@ -121,6 +121,15 @@ class TurnContext:
     #: dropped on the floor — every agent turn ran at 0.7 whatever the user chose.
     temperature: float = 0.7
 
+    #: How hard the model is asked to think, from `llm.effort.LADDER`, or None
+    #: for the model's own default. Carried alongside `temperature` because it
+    #: is the same kind of thing — a per-turn knob the caller chose — but it is
+    #: deliberately *not* clamped here: what a given model offers is registry
+    #: data, so `llm.access` snaps the level at the one point that knows both
+    #: the request and the model. A level this model has no rung for costs
+    #: nothing; it simply never reaches the wire.
+    effort: str | None = None
+
     #: Identity for this turn, generated rather than passed: it exists only so a
     #: tool can meter itself per turn (`ask_vision` caps how many times it will
     #: interrogate one image before the user is paying for a loop). `session_id`
@@ -136,6 +145,13 @@ class TurnContext:
     tool_source: ToolSource | None = None
     tool_dispatch: ToolDispatch | None = None
     sensitive_tools: frozenset[str] | None = None
+
+    #: Which agents this run may delegate to (`SubAgent` ids), or None for any
+    #: the user owns. Chat passes None: a human is typing and watching, and the
+    #: agents are theirs. An agent run passes its own selection, because
+    #: `subAgents` was a grant with no scope — a delegating agent could reach
+    #: every agent on the account, including ones holding grants it was refused.
+    delegation_scope: tuple[int, ...] | None = None
 
     #: Which knowledge bases the KB tools may reach this turn, or None for "any
     #: the user owns". The agent runtime sets it from the builder's KB selection
@@ -471,6 +487,7 @@ async def _run_model(
                 user_id=turn.user_id,
                 temperature=turn.temperature,
                 max_tokens=turn.max_tokens,
+                effort=turn.effort,
                 tools=tools,
                 history=history,
                 attachments=list(turn.attachments),
@@ -893,6 +910,13 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # Same shape, same reasoning, for the knowledge bases: the KB tools
         # filter on it rather than resolving anything the user owns.
         "kb_scope": turn.kb_scope,
+        # And the same again for delegation. `subAgents` was a grant with no
+        # scope at all: `search_agents` and `run_agent` filtered on `user_id`
+        # and nothing else, so an agent that could delegate could discover and
+        # run *every* agent its owner had — including ones with wider grants
+        # than its own, which makes delegation a way to reach a tool you were
+        # not given. None is unrestricted, as everywhere else.
+        "delegation_scope": turn.delegation_scope,
         # Extra archives the retrieval tools may read — a worker's parent.
         "archive_scopes": turn.archive_scopes,
     }
@@ -1135,6 +1159,10 @@ async def _summariser_for(turn: TurnContext):
             user_id=turn.user_id,
             temperature=0,
             max_tokens=1_024,
+            # The fold is extractive: it rewrites text that already exists.
+            # Paying the run's chosen effort to compress its own transcript is
+            # the one place the knob would cost money for nothing.
+            effort="none",
         )
         return completion.content or "", completion.tokens
 
@@ -1588,6 +1616,12 @@ async def suggest_follow_ups(
             user_id=turn.user_id,
             max_tokens=300,
             temperature=0.8,
+            # Deliberately not `turn.effort`. The user chose an effort for
+            # their *answer*; three follow-up questions are a formatting job,
+            # and inheriting `high` here would bill a reasoning pass for them
+            # after the answer is already on screen. Same call as the curation
+            # fold below, for the same reason.
+            effort="none",
         )
     except (LLMUnavailable, RuntimeError) as exc:
         logger.info("[FollowUps] Skipped: %s", exc)

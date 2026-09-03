@@ -173,7 +173,7 @@ class InstallTests(APITestCase):
                                 requirements={'mailbox': curated('Gmail')})
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['autonomy'], listed['autonomy'])
-        self.assertEqual(response.data['egress'], listed['egress'])
+        self.assertEqual(response.data['fileAccess'], listed['fileAccess'])
         self.assertEqual(response.data['spendCapRupees'],
                          listed['spendCapRupees'])
         self.assertEqual(response.data['tools']['mcp'], True)

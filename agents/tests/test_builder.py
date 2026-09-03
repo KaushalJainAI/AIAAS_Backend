@@ -70,9 +70,10 @@ class SanitiseTests(APITestCase):
             {'path': 'autonomy', 'value': 'yolo'},
             {'path': 'fileAccess', 'value': 'everything'},
             {'path': 'temperature', 'value': 9},
-            {'path': 'egress', 'value': 'full'},
+            {'path': 'outputContract', 'value': 'freeform-json'},
+            {'path': 'fileAccess', 'value': 'readonly'},
         ])
-        self.assertEqual([c['path'] for c in out], ['egress'])
+        self.assertEqual([c['path'] for c in out], ['fileAccess'])
 
     def test_an_id_the_user_cannot_see_is_refused_whole(self):
         """Not narrowed to the ids that do resolve: a partial selection is a
@@ -117,6 +118,28 @@ class SanitiseTests(APITestCase):
         self.assertEqual(described, TOOL_KEYS)
 
 
+    def test_the_knobs_the_runtime_reads_are_all_settable(self):
+        """The four fields exposed in Phase 1 are the ones the runtime has
+        always read and the builder could never set — `description` and `tags`
+        drive `search_agents`, the contract drives `contracts.resolve`, and the
+        fan-out width drives `run_fanout`."""
+        for path in ('description', 'tags', 'outputContract', 'fanoutParallel',
+                     'status'):
+            self.assertIn(path, KNOBS)
+
+    def test_the_retired_knobs_cannot_be_proposed(self):
+        """A model that has seen an older config must not be able to put a
+        removed control back on the board."""
+        out = self._sanitise([
+            {'path': 'egress', 'value': 'full'},
+            {'path': 'workdir', 'value': '/tmp'},
+            {'path': 'venv', 'value': False},
+            {'path': 'useOrgContext', 'value': True},
+            {'path': 'trigger', 'value': 'maintenance'},
+        ])
+        self.assertEqual(out, [])
+
+
 class ParseTests(APITestCase):
     def test_json_is_found_through_fences_and_prose(self):
         for raw in (
@@ -155,7 +178,6 @@ class CouplingTests(APITestCase):
         the highlighted knobs was the problem."""
         changes = [
             {'path': 'schedule', 'label': 'Schedule', 'value': '0 9 * * 1', 'why': ''},
-            {'path': 'trigger', 'label': 'Trigger', 'value': 'maintenance', 'why': ''},
         ]
         kept = enforce_couplings(list(changes), {'name': 'A'}, self._request())
         self.assertNotIn('schedule', [c['path'] for c in kept])
@@ -166,16 +188,18 @@ class CouplingTests(APITestCase):
         kept = enforce_couplings(with_gate, {'name': 'A'}, self._request())
         self.assertEqual(
             {c['path'] for c in kept},
-            {'schedule', 'trigger', 'allowUnattended'},
+            {'schedule', 'allowUnattended'},
         )
 
-    def test_shell_with_open_egress_cannot_be_proposed(self):
+    def test_a_result_shape_outside_the_registry_cannot_be_proposed(self):
+        """Contracts are a closed registry because the UI renders them — a
+        shape nothing can display is a promise the product cannot keep."""
         changes = [
-            {'path': 'tools.shell', 'label': 'Tool: shell', 'value': True, 'why': ''},
-            {'path': 'egress', 'label': 'Network', 'value': 'full', 'why': ''},
+            {'path': 'outputContract', 'label': 'Result shape',
+             'value': 'freeform-json', 'why': ''},
         ]
         kept = enforce_couplings(changes, {'name': 'A'}, self._request())
-        self.assertNotIn('egress', [c['path'] for c in kept])
+        self.assertEqual(kept, [])
 
 
 class ConfigureEndpointTests(APITestCase):

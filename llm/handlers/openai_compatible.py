@@ -210,6 +210,14 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
     timeout: float = 120.0
     #: Sampling temperature when config omits one.
     default_temperature: float = 0.7
+    #: How this provider spells the effort knob. `"reasoning_effort"` is
+    #: OpenAI's own field and the one NIM copied; OpenRouter wraps the same
+    #: value in a `reasoning` object, so it overrides `reasoning_payload`
+    #: rather than this. None on a subclass whose provider has no effort
+    #: control at all — the field is then never sent, whatever a catalogue row
+    #: claims, because the row describes the *model* and this describes the
+    #: *endpoint*.
+    effort_field: str | None = "reasoning_effort"
     #: Whether a streamed call may ask for `stream_options.include_usage`.
     #: True for OpenAI, OpenRouter and NVIDIA NIM (all measured returning the
     #: trailing usage frame). Set False on a subclass whose provider rejects
@@ -264,11 +272,40 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
             # OpenAI extension, not part of the base protocol.
             if self.supports_stream_usage:
                 payload["stream_options"] = {"include_usage": True}
+        payload.update(self.reasoning_payload(config.get("effort")))
         if tools := self._tools_for(config):
             payload["tools"] = tools
         if (fmt := config.get("response_format")) in ("json_object", "json_code"):
             payload["response_format"] = {"type": "json_object"}
         return payload
+
+    def reasoning_payload(self, effort: Any) -> dict[str, Any]:
+        """The effort knob in this provider's own spelling, or `{}`.
+
+        Returns a dict to merge rather than a value to assign, because the
+        providers disagree about *shape* and not just about the field name:
+        OpenAI takes a bare string, OpenRouter takes an object that can also
+        carry `enabled: false`. A hook returning the finished fragment lets
+        both be expressed without the caller knowing which it got.
+
+        `llm.access` has already snapped the level to one this model offers, so
+        anything arriving here is either a valid rung or None. None means send
+        nothing — a model with no effort control must not be handed the field,
+        since OpenAI answers that with a 400 rather than ignoring it.
+        """
+        from llm import effort as effort_levels
+
+        level = effort_levels.normalize(effort)
+        if level is None or not self.effort_field:
+            return {}
+        # `none` is not in OpenAI's vocabulary — it has no way to say "think as
+        # little as possible but do answer" other than its cheapest rung, so
+        # that is what the request degrades to. Dropping the field instead
+        # would silently give the caller the model's *default* effort, which is
+        # the opposite of what they asked for.
+        if level == "none":
+            level = "minimal"
+        return {self.effort_field: level}
 
     def image_payload(self, *, model: str, prompt: str,
                       config: dict[str, Any]) -> dict[str, Any]:

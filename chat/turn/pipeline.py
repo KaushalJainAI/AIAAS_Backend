@@ -26,6 +26,7 @@ from workflow_backend.thresholds import (
 
 from chat import vision
 from llm import access as llm
+from llm.effort import normalize as normalize_effort
 from . import agent, history, prompts
 from .agent import TurnContext, TurnResult
 from .events import Event, EventSink, null_sink
@@ -93,6 +94,10 @@ class TurnRequest:
     intent: str | None = None
     provider: str | None = None
     model: str | None = None
+    #: How hard to think, from `llm.effort.LADDER`. None means the client did
+    #: not say, and the session's stored choice stands — which is what makes a
+    #: client that has never heard of effort behave exactly as before.
+    effort: str | None = None
     reference_message_id: int | None = None
     approve_tool_call: str | None = None
     #: "and stop asking me about this tool". Only meaningful with an approval.
@@ -120,6 +125,11 @@ class TurnRequest:
             intent=requested if requested in SELECTABLE_INTENTS else None,
             provider=(payload.get("llm_provider") or "").strip() or None,
             model=(payload.get("llm_model") or "").strip() or None,
+            # Validated here rather than trusted: an unknown level would reach
+            # `llm.effort.resolve` and be ignored, but silently ignoring a
+            # value the client believes it set is how a knob becomes
+            # decorative. Unknown reads as "not specified".
+            effort=_parse_effort(payload.get("llm_effort")),
             reference_message_id=(
                 reference.get("message_id") if isinstance(reference, dict) else None
             ),
@@ -182,16 +192,49 @@ async def _guard_media_intent(intent: str, model: str) -> None:
         )
 
 
+def _parse_effort(raw: Any) -> str | None:
+    """Read `llm_effort` from a request body.
+
+    Three answers, and the middle one is the reason this is not just
+    `normalize`. `None` means the client said nothing, so the session's stored
+    level stands — which is how a client that predates this field keeps
+    working. `""` means the client explicitly asked for the model's own
+    default, and must be able to *clear* a stored level. A level name is
+    itself. Anything else is a typo and reads as "said nothing", because
+    failing a whole turn over an unrecognised preference is worse than
+    answering at the level already chosen.
+    """
+    if not isinstance(raw, str):
+        return None
+    return "" if not raw.strip() else normalize_effort(raw)
+
+
 async def _sync_model_choice(
-    session: ChatSession, request: TurnRequest, provider: str, model: str
+    session: ChatSession, request: TurnRequest, provider: str, model: str,
+    effort: str,
 ) -> None:
-    """Persist a per-message model override as the session's new default."""
-    if not (request.provider or request.model):
+    """Persist a per-message model override as the session's new default.
+
+    Effort is part of the same choice and is written by the same rule, but note
+    the guard: a request that names *only* an effort still counts as an
+    override. Requiring a model alongside it would mean a user who changes
+    nothing but how hard the model thinks has that choice discarded on the next
+    reload — the exact bug this function's model half already fixed once.
+    """
+    # `is not None`, not truthiness: `""` is the client explicitly asking for
+    # the model's own default, and it has to be able to clear a stored level.
+    # Reading it as "said nothing" makes the knob one-way.
+    if not (request.provider or request.model or request.effort is not None):
         return
-    if (provider, model) == (session.llm_provider, session.llm_model):
+    current = (session.llm_provider, session.llm_model, session.llm_effort)
+    if (provider, model, effort) == current:
         return
-    session.llm_provider, session.llm_model = provider, model
-    await session.asave(update_fields=["llm_provider", "llm_model"])
+    session.llm_provider, session.llm_model, session.llm_effort = (
+        provider, model, effort,
+    )
+    await session.asave(
+        update_fields=["llm_provider", "llm_model", "llm_effort"]
+    )
 
 
 async def _recall_block(session: ChatSession, question: str) -> str:
@@ -389,6 +432,10 @@ async def run_chat_turn(
     """
     provider = request.provider or session.llm_provider
     model = request.model or session.llm_model
+    # `or` rather than a None check on purpose: the client sends "" to mean
+    # "back to the model's default", and that has to be able to clear a stored
+    # level rather than being read as "said nothing".
+    effort = request.effort if request.effort is not None else session.llm_effort
     intent, question = (
         (request.intent, request.content) if request.intent
         else classify_intent(request.content)
@@ -407,7 +454,7 @@ async def run_chat_turn(
     except llm.LLMUnavailable as exc:
         raise TurnError(str(exc)) from exc
 
-    await _sync_model_choice(session, request, provider, model)
+    await _sync_model_choice(session, request, provider, model, effort)
 
     thread_id = _thread_id(session)
     if request.approve_tool_call:
@@ -471,7 +518,9 @@ async def run_chat_turn(
     sendable, blocked = await history.partition_attachments(
         candidates, model=model, witness=witness
     )
-    metadata: dict[str, Any] = {"intent": intent, "model": model, "provider": provider}
+    metadata: dict[str, Any] = {
+        "intent": intent, "model": model, "provider": provider, "effort": effort,
+    }
 
     blocked_notice = ""
     if blocked:
@@ -520,6 +569,7 @@ async def run_chat_turn(
         attachments=attachments,
         memory_enabled=session.memory_enabled,
         max_iterations=agent.iteration_limit(intent),
+        effort=effort or None,
         sink=sink,
     )
 

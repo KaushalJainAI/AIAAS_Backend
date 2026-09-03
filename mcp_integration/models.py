@@ -125,6 +125,22 @@ class MCPServer(models.Model):
     setup_notes = models.TextField(blank=True, help_text="Human-readable setup notes shown in the UI")
 
     enabled = models.BooleanField(default=True)
+
+    #: Announced, not yet shippable. A *presentation* flag only: it never
+    #: widens access, so it is always paired with `enabled=False`, which is
+    #: what actually withholds the tools (`_visible_servers_queryset` filters
+    #: on `enabled`, and the toggle endpoint answers 409 for a platform-off
+    #: row). It exists because "Unavailable" and "Coming soon" need opposite
+    #: readings -- the first says something is broken, the second that it is
+    #: on the way -- and the UI must not tell them apart by connector name,
+    #: which is metadata, not code.
+    coming_soon = models.BooleanField(
+        default=False,
+        help_text=(
+            "Show as an upcoming feature. Pair with enabled=False; "
+            "this flag alone grants nothing."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

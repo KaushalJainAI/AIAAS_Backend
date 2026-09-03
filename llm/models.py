@@ -102,6 +102,29 @@ class AIModel(models.Model):
         default=0, help_text="Max context tokens (0 = unknown/variable)",
     )
 
+    #: Which effort rungs this model actually offers, from `llm.effort.LADDER`.
+    #: An empty list is a claim, not an absence: it says this model has no
+    #: reasoning-effort control, which is why `llm.effort.resolve` returns None
+    #: for it and no `reasoning_effort` field reaches the wire. Sending one to
+    #: a model that does not take it is a hard 400 on OpenAI, so "we don't
+    #: know" and "it has none" have to look the same downstream.
+    effort_levels = models.JSONField(
+        default=list, blank=True,
+        help_text=(
+            "Reasoning-effort levels this model offers, e.g. "
+            '["low", "medium", "high"]. Empty = no effort control.'
+        ),
+    )
+    #: The rung to use when the caller names none. Blank means "let the
+    #: provider decide", which is the honest answer for a model whose own
+    #: default we have not measured — and it is distinct from picking `medium`
+    #: on its behalf, which would silently change what an unconfigured call
+    #: costs.
+    default_effort = models.CharField(
+        max_length=10, blank=True, default="",
+        help_text="Effort level used when the caller names none (blank = provider default)",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

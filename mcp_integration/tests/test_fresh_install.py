@@ -210,3 +210,67 @@ class CuratedPackageTests(TestCase):
                     server.setup_notes.strip(),
                     "A connector offered but switched off must say why.",
                 )
+
+
+class UpcomingConnectorTests(TestCase):
+    """Notion and Slack are announced, not connectable.
+
+    The pairing is the whole point: `coming_soon` is presentation, `enabled`
+    is access. A flag that drifted apart from the switch would put a
+    "Coming soon" badge on a connector agents could still call.
+    """
+
+    UPCOMING = ("Notion", "Slack")
+
+    def test_upcoming_connectors_are_still_listed(self):
+        # Withdrawn, not hidden: the catalogue queryset does not filter on
+        # `enabled`, which is what lets the page announce them at all.
+        for name in self.UPCOMING:
+            with self.subTest(server=name):
+                self.assertTrue(
+                    MCPServer.objects.filter(name=name, user__isnull=True).exists()
+                )
+
+    def test_upcoming_connectors_are_withheld_not_merely_labelled(self):
+        for name in self.UPCOMING:
+            with self.subTest(server=name):
+                server = MCPServer.objects.get(name=name, user__isnull=True)
+                self.assertTrue(server.coming_soon)
+                self.assertFalse(
+                    server.enabled,
+                    "coming_soon is presentation only; `enabled` is what "
+                    "actually keeps the tools out of an agent's toolbox.",
+                )
+
+    def test_no_connector_claims_coming_soon_while_enabled(self):
+        # The pairing, as a rule rather than two spot checks: any future row
+        # that sets one without the other is the bug this guards.
+        offenders = list(
+            MCPServer.objects.filter(coming_soon=True, enabled=True)
+            .values_list("name", flat=True)
+        )
+        self.assertEqual(
+            offenders, [],
+            f"These rows are labelled 'Coming soon' but still live: {offenders}",
+        )
+
+    def test_upcoming_connectors_say_so_in_their_notes(self):
+        # The card renders `setup_notes` as the reason it is inert; notes that
+        # only describe setup would read as instructions the user can act on.
+        for name in self.UPCOMING:
+            with self.subTest(server=name):
+                server = MCPServer.objects.get(name=name, user__isnull=True)
+                self.assertIn("Coming soon", server.setup_notes)
+
+    def test_upcoming_connectors_are_invisible_to_agents(self):
+        # The end that matters: an announced connector must not still be
+        # resolvable as a tool source.
+        from mcp_integration.client import _visible_servers_queryset
+
+        visible = set(
+            _visible_servers_queryset(None, enabled_only=True)
+            .values_list("name", flat=True)
+        )
+        for name in self.UPCOMING:
+            with self.subTest(server=name):
+                self.assertNotIn(name, visible)

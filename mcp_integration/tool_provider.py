@@ -25,7 +25,7 @@ import logging
 import re
 from dataclasses import dataclass
 from hashlib import sha1
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from django.core.exceptions import PermissionDenied
@@ -97,6 +97,7 @@ class MCPToolProvider:
     @staticmethod
     async def get_openai_tool_descriptors(
         user, server_ids: Iterable[int] | None = None,
+        tool_filter: Callable[[int, str], bool] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Return OpenAI-format tool descriptors for every MCP tool visible to
@@ -113,11 +114,20 @@ class MCPToolProvider:
         same side as `get_servers_for_user`, so a server the user has switched
         off on Connections is excluded before the selection is even consulted —
         a stale id in an agent's config can only ever take tools away.
+
+        `tool_filter(server_id, original_name)` narrows one step further, to
+        individual tools. It runs here because this is the only place that holds
+        a tool's *original* name: everything downstream sees the encoded form,
+        whose middle section has already been through `_SAFE_TOOL_NAME_RE`. Chat
+        passes None — a human is typing and watching.
         """
         servers = await get_servers_for_user(user)
         if server_ids is not None:
             allowed = set(server_ids)
             servers = [s for s in servers if s.id in allowed]
+
+        def _keep(server_id: int, tool: dict[str, Any]) -> bool:
+            return tool_filter is None or tool_filter(server_id, tool.get('name') or '')
 
         async def _descriptors_for(server) -> list[dict[str, Any]]:
             # Bound each server: a hung/absent stdio server must not stall the
@@ -135,7 +145,8 @@ class MCPToolProvider:
             except Exception as e:  # noqa: BLE001
                 logger.warning("Failed to list tools for MCP server %s: %s", server.name, e)
                 return []
-            return [_build_openai_descriptor(server, t) for t in tools]
+            return [_build_openai_descriptor(server, t) for t in tools
+                    if _keep(server.id, t)]
 
         results = await asyncio.gather(
             *(_descriptors_for(s) for s in servers), return_exceptions=True

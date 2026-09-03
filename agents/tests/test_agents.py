@@ -36,7 +36,6 @@ def config(**overrides):
         'temperature': 0,
         'tools': {'codeExecution': True, 'rag': True},
         'autonomy': 'ask',
-        'trigger': 'goal',
     }
     base.update(overrides)
     return base
@@ -69,11 +68,14 @@ class AgentCrudTests(APITestCase):
 
     def test_round_trip_preserves_every_knob(self):
         sent = config(
-            fileAccess='readonly', workdir='/data', venv=False, maxRunSeconds=1800,
+            fileAccess='readonly', maxRunSeconds=1800,
+            description='Chases overdue invoices and reports what is stuck.',
+            tags=['finance', 'weekly'],
             connectors=sorted([curated('Gmail'), curated('Google Sheets')]),
-            useOrgContext=False, useEnvironment=True,
-            trigger='maintenance', schedule='0 9 * * 1', allowUnattended=True,
-            notifyOnHitl=False, reviewAgent=True, spendCapRupees=750, egress='allowlist',
+            useEnvironment=True,
+            outputContract='extraction', fanoutParallel=3, status='paused',
+            schedule='0 9 * * 1', allowUnattended=True,
+            notifyOnHitl=False, reviewAgent=True, spendCapRupees=750,
             recursiveContext=False, compaction=False, indexing=False,
         )
         created = self.client.post(self.list_url, sent, format='json')
@@ -125,26 +127,40 @@ class AgentValidationTests(APITestCase):
     def _post(self, **kw):
         return self.client.post(self.list_url, config(**kw), format='json')
 
-    def test_maintenance_without_schedule_is_refused(self):
-        r = self._post(trigger='maintenance', schedule='')
-        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('schedule', r.data)
+    def test_the_invocation_mode_is_derived_from_the_schedule(self):
+        """`trigger` came off the wire (2026-09-03).
+
+        Nothing in the runtime ever branched on it, and the serializer required
+        a schedule for `maintenance` — so the schedule was already the answer
+        and the field was a second place to contradict it. It is still emitted,
+        derived, because the builder shows how an agent is invoked.
+        """
+        plain = self._post()
+        self.assertEqual(plain.data['trigger'], 'goal')
+
+        scheduled = self._post(schedule='0 9 * * 1', allowUnattended=True)
+        self.assertEqual(scheduled.data['trigger'], 'maintenance')
+
+        # And a client still sending the old field cannot set it.
+        ignored = self._post(trigger='maintenance')
+        self.assertEqual(ignored.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(ignored.data['trigger'], 'goal')
 
     def test_malformed_cron_is_refused(self):
-        r = self._post(trigger='maintenance', schedule='every monday')
+        r = self._post(schedule='every monday')
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_a_schedule_without_unattended_clearance_is_refused(self):
         """The failure this replaces was silent: the Trigger row was created and
         armed, the sweep fired it, the runtime refused it, and after five
         refusals the trigger disabled itself. Nothing surfaced."""
-        r = self._post(trigger='maintenance', schedule='0 9 * * 1')
+        r = self._post(schedule='0 9 * * 1')
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('allowUnattended', r.data)
         self.assertFalse(SubAgent.objects.exists())
 
     def test_a_cleared_schedule_is_accepted_and_arms_a_trigger(self):
-        r = self._post(trigger='maintenance', schedule='0 9 * * 1', allowUnattended=True)
+        r = self._post(schedule='0 9 * * 1', allowUnattended=True)
         self.assertEqual(r.status_code, status.HTTP_201_CREATED)
         agent = SubAgent.objects.get(id=r.data['id'])
         self.assertTrue(agent.allow_unattended)
@@ -161,7 +177,7 @@ class AgentValidationTests(APITestCase):
 
     def test_unattended_survives_a_patch_that_does_not_mention_it(self):
         """PATCH merges `to_config`, so the gate must not silently close."""
-        created = self._post(trigger='maintenance', schedule='0 9 * * 1',
+        created = self._post(schedule='0 9 * * 1',
                              allowUnattended=True)
         url = reverse('orchestrator:agent_detail', args=[created.data['id']])
         r = self.client.patch(url, {'temperature': 0.5}, format='json')
@@ -192,14 +208,50 @@ class AgentValidationTests(APITestCase):
         r = self._post(connectors=[theirs.id])
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_workdir_traversal_is_refused(self):
-        r = self._post(workdir='/workspace/../../etc')
+    def test_the_sandbox_holds_only_file_access(self):
+        """`workdir` and `venv` came off the wire with `cpu`/`memoryMb` before
+        them, for the same reason: stored, validated, and read by nothing. A
+        client still sending them must not be able to put them back."""
+        r = self._post(workdir='/workspace/../../etc', venv=False)
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        agent = SubAgent.objects.get(id=r.data['id'])
+        self.assertEqual(agent.sandbox, {'fileAccess': 'scoped'})
+        self.assertNotIn('workdir', r.data)
+        self.assertNotIn('venv', r.data)
+
+    def test_egress_is_no_longer_settable(self):
+        """It was read in one place — to add a sentence to the system prompt —
+        and `allowlist`/`full` could never have been honoured: the sandbox is a
+        sidecar on an internal-only Docker network. The prompt line is now
+        unconditional, which is the true statement."""
+        r = self._post(tools={'shell': True}, egress='full')
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        agent = SubAgent.objects.get(id=r.data['id'])
+        self.assertNotIn('egress', agent.guardrails)
+        self.assertNotIn('egress', r.data)
+
+    def test_a_result_contract_outside_the_registry_is_refused(self):
+        r = self._post(outputContract='freeform-json')
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_shell_plus_full_egress_is_refused(self):
-        r = self._post(tools={'shell': True}, egress='full')
+    def test_tags_are_trimmed_and_deduplicated(self):
+        r = self._post(tags=['  Finance ', 'finance', 'Weekly'])
+        self.assertEqual(r.data['tags'], ['Finance', 'Weekly'])
+
+    def test_a_paused_agent_can_be_saved_and_resumed(self):
+        """`status` was read-only, so the only way to stop a scheduled agent
+        was to delete its schedule or the agent."""
+        created = self._post(status='paused')
+        self.assertEqual(created.data['status'], 'paused')
+        url = reverse('orchestrator:agent_detail', args=[created.data['id']])
+        resumed = self.client.patch(url, {'status': 'active'}, format='json')
+        self.assertEqual(resumed.data['status'], 'active')
+
+    def test_archiving_is_not_offered_as_a_save(self):
+        """There is no un-archive path, so a dropdown that reaches it is a
+        one-way door in disguise."""
+        r = self._post(status='archived')
         self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('egress', r.data)
 
     def test_run_limit_outside_the_range_is_refused(self):
         # The ceiling that replaced `memoryMb`'s. Both directions: a run limit

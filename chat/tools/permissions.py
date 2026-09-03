@@ -106,6 +106,20 @@ async def carries_credentials(tool_name: str) -> bool:
     return bool(server.required_credential_types or server.credential_env_map)
 
 
+def strip_encoded_digest(suffix: str) -> str:
+    """`send_email_ab12cd` -> `send_email`.
+
+    `encode_tool_name` appends an 8-character content digest so two tools whose
+    names sanitise to the same string stay distinct. Undoing it is shared rather
+    than reimplemented: the connector scope needs the same answer at dispatch,
+    where the original name is no longer available.
+    """
+    head, sep, tail = (suffix or "").rpartition("_")
+    if sep and len(tail) == 8:
+        return head or suffix
+    return suffix
+
+
 async def _original_name(tool_name: str) -> str:
     """
     The tool's name on its own server, for the read-only test.
@@ -120,12 +134,7 @@ async def _original_name(tool_name: str) -> str:
     decoded = decode_tool_name(tool_name)
     if decoded is None:
         return tool_name
-    suffix = decoded[1]
-    # Strip the 8-char content digest `encode_tool_name` appends.
-    head, sep, tail = suffix.rpartition("_")
-    if sep and len(tail) == 8:
-        return head or suffix
-    return suffix
+    return strip_encoded_digest(decoded[1])
 
 
 async def is_remembered(tool_name: str, context: dict[str, Any]) -> bool:

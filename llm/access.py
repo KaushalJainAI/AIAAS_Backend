@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable
 
-from . import budget
+from . import budget, effort as effort_levels
 from .providers import PROVIDER_LABELS, SUPPORTED_PROVIDERS
 from .usage import DEFAULT_CONVENTION, EMPTY_USAGE, TokenUsage
 from .usage import normalize as normalize_usage
@@ -398,6 +398,7 @@ async def _build_request(
     user_id: int,
     temperature: float,
     max_tokens: int,
+    effort: str | None,
     tools: list[dict] | None,
     history: list[dict] | None,
     attachments: list | None,
@@ -446,12 +447,24 @@ async def _build_request(
                     f" provider you have set up."
                 )
 
+    # Resolved here rather than at the call sites for the same reason the
+    # clamp is: this is the one funnel, and a level that reached a handler
+    # unresolved would be a level the model may not offer. `cached_support`
+    # reads what `preflight` primed and never queries — see `effort.py`.
+    offered, model_default = effort_levels.cached_support(model)
+    resolved_effort = effort_levels.resolve(
+        effort, offered=offered, default=model_default,
+    )
+
     config: dict[str, Any] = {
         "prompt": prompt,
         "model": model,
         "system_message": system_message,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        # None means "send no effort field", which is what a model with no
+        # effort control needs. Handlers must treat absent and None alike.
+        "effort": resolved_effort,
         "credential": credential_id,
         "api_key_override": api_key_override,
         "history": history or [],
@@ -490,6 +503,10 @@ async def preflight(*, provider: str, model: str, user_id: int) -> None:
     # learn the window is not a reason to refuse the turn — `prime` swallows its
     # own errors and the request falls back to the flat ceiling.
     await budget.prime(model)
+    # Same contract, same reason: `_build_request` resolves the effort
+    # level synchronously from this cache, and a cold cache simply means no
+    # effort field — the behaviour every call had before the knob existed.
+    await effort_levels.prime(model)
 
     if provider in _KEYLESS_PROVIDERS:
         return
@@ -553,6 +570,10 @@ async def complete(
     user_id: int,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    #: How hard to think, from `llm.effort.LADDER`. None lets the model's own
+    #: `default_effort` decide, and a level the model does not offer is snapped
+    #: to its nearest rung rather than refused.
+    effort: str | None = None,
     tools: list[dict] | None = None,
     history: list[dict] | None = None,
     attachments: list | None = None,
@@ -569,7 +590,8 @@ async def complete(
     request = await _build_request(
         provider=provider, model=model, prompt=prompt,
         system_message=system_message, user_id=user_id, temperature=temperature,
-        max_tokens=max_tokens, tools=tools, history=history, attachments=attachments,
+        max_tokens=max_tokens, effort=effort, tools=tools, history=history,
+        attachments=attachments,
     )
     handler = get_registry().get_handler(request.node_type)
     result = await handler.execute({}, request.config, _execution_context(user_id))
@@ -618,6 +640,10 @@ async def stream(
     user_id: int,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    #: How hard to think, from `llm.effort.LADDER`. None lets the model's own
+    #: `default_effort` decide, and a level the model does not offer is snapped
+    #: to its nearest rung rather than refused.
+    effort: str | None = None,
     tools: list[dict] | None = None,
     history: list[dict] | None = None,
     attachments: list | None = None,
@@ -633,7 +659,8 @@ async def stream(
     request = await _build_request(
         provider=provider, model=model, prompt=prompt,
         system_message=system_message, user_id=user_id, temperature=temperature,
-        max_tokens=max_tokens, tools=tools, history=history, attachments=attachments,
+        max_tokens=max_tokens, effort=effort, tools=tools, history=history,
+        attachments=attachments,
     )
     handler = get_registry().get_handler(request.node_type)
     async for chunk in handler.stream_execute({}, request.config, _execution_context(user_id)):

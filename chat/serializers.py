@@ -24,11 +24,32 @@ class ChatSessionSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatSession
         fields = [
-            'id', 'title', 'intent', 'llm_provider', 'llm_model',
+            'id', 'title', 'intent', 'llm_provider', 'llm_model', 'llm_effort',
             'system_prompt', 'memory_enabled', 'total_tokens_used',
             'created_at', 'updated_at', 'messages'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'messages', 'total_tokens_used']
+
+    def validate_llm_effort(self, value):
+        """Reject a level that is not on the ladder.
+
+        Blank is valid and means the model's own default — the value every
+        session starts at, and the only way back off the knob. Validated
+        against the ladder rather than against this session's model, because
+        the model can be changed in the same PATCH and `llm.access` snaps a
+        level the model does not serve at call time anyway.
+        """
+        from llm.effort import normalize
+
+        text = (value or '').strip()
+        if not text:
+            return ''
+        level = normalize(text)
+        if level is None:
+            raise serializers.ValidationError(
+                'Not a reasoning effort level.'
+            )
+        return level
 
     def validate_title(self, value):
         title = value.strip()

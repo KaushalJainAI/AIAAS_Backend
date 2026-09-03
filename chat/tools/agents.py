@@ -217,10 +217,15 @@ async def search_agents(args: Dict, context: Dict) -> str:
     limit = _agent_search_limit(args)
     terms = [t for t in re.split(r"\s+", (args.get("query") or "").lower()) if len(t) > 1]
 
+    # None is unrestricted; a selection narrows discovery as well as dispatch,
+    # because an agent that can see a name it may not run will keep trying it.
+    scope = context.get("delegation_scope")
+
     def _list() -> list[dict]:
         rows = list(
             SubAgent.objects
             .filter(user_id=user_id)
+            .filter(**({} if scope is None else {'id__in': list(scope)}))
             .exclude(status="archived")
             .order_by("-updated_at")
             .values("id", "name", "description", "tags", "status",
@@ -320,6 +325,19 @@ async def run_agent(args: Dict, context: Dict) -> str:
     except (TypeError, ValueError):
         wait = AGENT_RUN_DEFAULT_WAIT
     wait = max(0, min(wait, AGENT_RUN_MAX_WAIT))
+
+    # Re-checked here and not only in `search_agents`: the model names ids it
+    # saw in earlier turns, and "we didn't list it" has never been access
+    # control. The refusal says which boundary was hit, because one that does
+    # not is retried until the iteration cap ends the run.
+    scope = context.get("delegation_scope")
+    if scope is not None and agent_id not in scope:
+        return json.dumps({
+            "error": (
+                f"Agent {agent_id} is not one this agent may delegate to. Call "
+                f"search_agents to see the ones it can."
+            )
+        })
 
     agent = await SubAgent.objects.filter(
         id=agent_id, user_id=user_id
@@ -523,6 +541,14 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
             agent_id = int(args["agent_id"])
         except (TypeError, ValueError):
             return "Error: 'agent_id' must be the numeric id from search_agents."
+        scope = context.get("delegation_scope")
+        if scope is not None and agent_id not in scope:
+            return json.dumps({
+                "error": (
+                    f"Agent {agent_id} is not one this agent may delegate to. "
+                    f"Call search_agents to see the ones it can."
+                )
+            })
         worker_agent = await SubAgent.objects.filter(
             id=agent_id, user_id=user_id
         ).afirst()

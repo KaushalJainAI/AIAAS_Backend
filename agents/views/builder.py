@@ -56,11 +56,14 @@ from agents.triggers import (
 )
 from agents.views.agents import (
     AUTONOMY,
-    EGRESS,
     FILE_ACCESS,
-    TRIGGER_MODES,
+    MAX_TAGS,
+    OUTPUT_CONTRACTS,
+    SETTABLE_STATUS,
     AgentSerializer,
 )
+from agents.agent.orchestrator import MAX_PARALLEL_WORKERS
+from llm.effort import LADDER as EFFORT_LADDER
 from workflow_backend.thresholds import MAX_RUN_SECONDS, MIN_RUN_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -169,6 +172,27 @@ def _ids(field):
     return coerce
 
 
+def _tags(value, _cat):
+    """A short list of short labels, trimmed and de-duplicated.
+
+    Refused rather than trimmed when it is too long, for the same reason the
+    delegation payload is: the author is a model that can be told to shorten it.
+    """
+    if not isinstance(value, list) or any(not isinstance(t, str) for t in value):
+        raise Reject('expected a list of strings')
+    if len(value) > MAX_TAGS:
+        raise Reject(f'expected at most {MAX_TAGS} tags')
+    tags, seen = [], set()
+    for raw in value:
+        tag = ' '.join(raw.split())
+        if not tag or len(tag) > 30:
+            raise Reject('each tag is 1-30 characters')
+        if tag.lower() not in seen:
+            seen.add(tag.lower())
+            tags.append(tag)
+    return tags
+
+
 def _cron(value, _cat):
     if not isinstance(value, str):
         raise Reject('expected a cron string')
@@ -185,12 +209,6 @@ def _timezone(value, _cat):
     if not isinstance(value, str) or not zone_is_valid(value.strip()):
         raise Reject('expected an IANA zone name, e.g. "Asia/Kolkata"')
     return value.strip()
-
-
-def _workdir(value, _cat):
-    if not isinstance(value, str) or not value.startswith('/') or '..' in value:
-        raise Reject('expected an absolute path without ".."')
-    return value
 
 
 #: One line per grant, keyed by the same names `TOOL_KEYS` holds — the mapping
@@ -215,6 +233,41 @@ KNOBS: dict[str, Knob] = {
         'Name', 'A short human name for the agent, e.g. "Invoice triage".',
         _text(200),
     ),
+    'description': Knob(
+        'Description',
+        'One line saying what this agent is for, written for someone choosing '
+        'between agents — this is what another agent reads when deciding which '
+        'one to delegate a job to. Not the instructions; that is `brief`.',
+        _text(2000),
+    ),
+    'tags': Knob(
+        'Tags',
+        f'Up to {MAX_TAGS} short labels for grouping and search, e.g. '
+        '["finance", "weekly"]. Lowercase, one or two words each.',
+        _tags,
+    ),
+    'status': Knob(
+        'Status',
+        f'{sorted(SETTABLE_STATUS)}. `paused` stops schedules and delegation '
+        'without deleting anything. Only set this when the user asks to pause '
+        'or resume an agent.',
+        _one_of(SETTABLE_STATUS),
+    ),
+    'outputContract': Knob(
+        'Result shape',
+        f'What the answer must come back as: {sorted(OUTPUT_CONTRACTS)}, or "" '
+        'for prose. `research` returns text plus the queries run and the '
+        'sources used; `extraction` returns rows plus field names. Set one only '
+        'when the user wants a structured result something else will read.',
+        _one_of(OUTPUT_CONTRACTS | {''}),
+    ),
+    'fanoutParallel': Knob(
+        'Fan-out width',
+        f'1-{MAX_PARALLEL_WORKERS}. How many pieces of a delegated list this '
+        'agent works on at once when a parent hands it several. Blank means one '
+        'at a time. Only meaningful for an agent other agents delegate to.',
+        _number(1, MAX_PARALLEL_WORKERS),
+    ),
     'brief': Knob(
         'Brief',
         "The agent's own instructions, written in the second person ('You read "
@@ -229,6 +282,16 @@ KNOBS: dict[str, Knob] = {
         'want 0-0.2; drafting and tone want 0.6-0.8.',
         _number(0, 2, float),
     ),
+    'effort': Knob(
+        'Reasoning effort',
+        "How hard the model thinks before answering: ''(model default), "
+        "'none', 'minimal', 'low', 'medium', 'high'. Raise it for multi-step "
+        'analysis and anything the agent has to reason its way through; leave '
+        'it low or blank for extraction, routing and formatting, where the '
+        'extra thinking is billed and changes nothing. A model with no effort '
+        'control ignores this.',
+        _one_of({'', *EFFORT_LADDER}),
+    ),
     'fileAccess': Knob(
         'File access',
         "How much of the user's file tree it may touch: "
@@ -237,10 +300,6 @@ KNOBS: dict[str, Knob] = {
         "and is usually right for work that reads the user's documents.",
         _one_of(FILE_ACCESS),
     ),
-    'workdir': Knob(
-        'Workdir', 'Absolute sandbox path. Leave alone unless asked.', _workdir,
-    ),
-    'venv': Knob('Virtualenv', 'Whether the sandbox gets its own virtualenv.', _bool),
     **{
         f'tools.{key}': Knob(f'Tool: {key}', f'Grant `{key}` — {help_}.', _bool)
         for key, help_ in TOOL_HELP.items()
@@ -261,26 +320,18 @@ KNOBS: dict[str, Knob] = {
     'skills': Knob(
         'Skills', 'Skill ids from the catalogue below.', _ids('skills'),
     ),
-    'useOrgContext': Knob(
-        'Org context', 'Give it the workspace-level context.', _bool,
-    ),
     'useEnvironment': Knob(
         'Environment',
         'Tell it the current time and place. Needed by anything that reasons '
         'about "today", business hours, or a timezone.',
         _bool,
     ),
-    'trigger': Knob(
-        'Trigger',
-        f'How it is invoked: {sorted(TRIGGER_MODES)}. `goal` runs when the user '
-        'asks; `maintenance` runs on a schedule and *requires* a `schedule`.',
-        _one_of(TRIGGER_MODES),
-    ),
     'schedule': Knob(
         'Schedule',
         'Five-field cron, e.g. "0 9 * * 1-5" for weekday mornings. Set it only '
         'if the user described a cadence. Setting it also requires '
-        '`allowUnattended: true`, or every firing is refused.',
+        '`allowUnattended: true`, or every firing is refused. A schedule is '
+        'what makes an agent a standing job; there is no separate mode to set.',
         _cron,
     ),
     'scheduleTimezone': Knob(
@@ -320,13 +371,6 @@ KNOBS: dict[str, Knob] = {
         f'Wall-clock ceiling on one run, in seconds ({MIN_RUN_SECONDS}-'
         f'{MAX_RUN_SECONDS}). Bulk work needs more; a quick lookup needs less.',
         _number(MIN_RUN_SECONDS, MAX_RUN_SECONDS),
-    ),
-    'egress': Knob(
-        'Network',
-        f'Whether sandboxed code may open its own sockets: {sorted(EGRESS)}. '
-        'Not the same as web search, which goes through us. `full` is refused '
-        'alongside the `shell` grant.',
-        _one_of(EGRESS),
     ),
     'recursiveContext': Knob(
         'Recursive context',

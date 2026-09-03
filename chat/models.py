@@ -22,6 +22,12 @@ class ChatSession(models.Model):
     # work out of the box; users can switch provider/model per conversation.
     llm_provider = models.CharField(max_length=50, default='nvidia')
     llm_model = models.CharField(max_length=100, default='nvidia/nemotron-3-super-120b-a12b')
+    # How hard the model is asked to think, from `llm.effort.LADDER`. Blank is
+    # the model's own default and is what every existing session keeps, so
+    # turning the knob on changes nothing until someone chooses. Stored beside
+    # the model rather than derived from it because it is a preference, not a
+    # capability: two users on the same model want different answers here.
+    llm_effort = models.CharField(max_length=10, blank=True, default='')
     intent = models.CharField(max_length=50, default='chat')
     system_prompt = models.TextField(blank=True, default="")
 

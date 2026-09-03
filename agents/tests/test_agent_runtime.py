@@ -234,7 +234,9 @@ class DescriptorTests(SimpleTestCase):
         self.assertIn('execute_python', names)
 
     def test_mcp_tools_appear_only_when_granted(self):
-        async def descriptors(_user, _server_ids=None):
+        # Third argument is the per-tool filter added with the connector
+        # scope; this stub ignores it, which is what "no scope" means.
+        async def descriptors(_user, _server_ids=None, _tool_filter=None):
             return [{'type': 'function', 'function': {'name': 'mcp_1_send'}}]
 
         with patch('mcp_integration.tool_provider.MCPToolProvider.'

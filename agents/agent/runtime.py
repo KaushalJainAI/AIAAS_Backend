@@ -35,6 +35,10 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+# Pure data — no models, no Django app registry — so this is safe at module
+# scope even though the rest of the agent layer is imported lazily.
+from agents import connector_scope
+
 logger = logging.getLogger(__name__)
 
 #: Grant key -> the built-in tool names it unlocks. This map *is* the
@@ -150,17 +154,21 @@ class AgentToolbox:
     #: them.
     archive_scopes: tuple[str, ...] = ()
 
-    #: Which connections (`MCPServer` ids) this agent may reach, or None for
-    #: "any the user has". The second axis to the `mcp` grant, exactly as
-    #: `file_scope` is the second axis to `fileOps`: the grant says *may it
-    #: reach connectors at all*, this says *which ones*.
+    #: Which connections this agent may reach *and which of their tools*, or
+    #: None for "any the user has". The second axis to the `mcp` grant, exactly
+    #: as `file_scope` is the second axis to `fileOps`: the grant says *may it
+    #: reach connectors at all*, this says *which ones, and how much of each*.
     #:
     #: None rather than "all of them" is load-bearing for the same reason it is
     #: in `kb_scope_for`: this selection existed in the builder long before
     #: anything read it, so turning enforcement on must not silently empty the
     #: toolbox of every agent that never made a choice. An empty selection is
     #: therefore *unrestricted*, and only a deliberate non-empty one narrows.
-    mcp_servers: tuple[int, ...] | None = None
+    #:
+    #: Widened from a tuple of ids to a `ConnectorScope` on 2026-09-03: picking
+    #: a mailbox used to grant sending and deleting along with reading, because
+    #: there was no third field to say otherwise. See `agents/connector_scope.py`.
+    mcp_scope: Any = None
 
     @classmethod
     def for_agent(cls, agent, user_id: int, *, file_scope: Any = None,
@@ -171,7 +179,7 @@ class AgentToolbox:
         return cls(grants=grants, user_id=user_id, unserved=unserved,
                    file_scope=file_scope, read_only=read_only,
                    session_key=session_key, archive_scopes=archive_scopes,
-                   mcp_servers=mcp_scope_for(agent))
+                   mcp_scope=connector_scope.for_agent(agent))
 
     @property
     def allowed_names(self) -> frozenset[str]:
@@ -208,26 +216,43 @@ class AgentToolbox:
             return False
         return bool(self.grants.get('mcp'))
 
-    def mcp_server_allowed(self, name: str) -> bool:
-        """Whether a namespaced MCP tool belongs to a connection this agent may use.
+    def mcp_call_allowed(self, name: str) -> tuple[bool, str]:
+        """Whether this agent may make this namespaced MCP call, and why not.
 
         Separate from `mcp_allowed` because they answer different questions and
         both have to be asked at dispatch: the grant says whether connectors are
-        reachable at all, this says whether *this* one was chosen. Withholding
-        the descriptor is not access control — the model can name a tool it saw
-        in an earlier turn, or one a sibling agent mentioned.
+        reachable at all, this says whether *this* connection was chosen and
+        whether *this* tool is inside the scope chosen for it. Withholding the
+        descriptor is not access control — the model can name a tool it saw in
+        an earlier turn, or one a sibling agent mentioned.
 
         An unparseable name is refused rather than allowed. The only way to get
         here with one is a name that passed `is_mcp_tool` (so it starts `mcp__`)
         but does not carry a server id, which is not a tool that exists; letting
         it through would make the prefix alone enough to escape the selection.
+
+        The second half of the return is the refusal, because a model told only
+        "denied" retries the same call until the iteration cap ends the run.
         """
-        if self.mcp_servers is None:
-            return True
+        if self.mcp_scope is None:
+            return True, ''
         from mcp_integration.tool_provider import decode_tool_name
 
         decoded = decode_tool_name(name)
-        return decoded is not None and decoded[0] in self.mcp_servers
+        if decoded is None:
+            return False, 'that connection'
+        server_id, encoded_tool = decoded
+        if not self.mcp_scope.server_allowed(server_id):
+            return False, 'that connection'
+        # The encoded middle section carries a sanitised copy of the tool's own
+        # name plus an 8-char digest; `_original_name` is where that is undone,
+        # and it is shared rather than reimplemented here.
+        from chat.tools.permissions import strip_encoded_digest
+
+        original = strip_encoded_digest(encoded_tool)
+        if not self.mcp_scope.tool_allowed(server_id, original):
+            return False, self.mcp_scope.describe(server_id)
+        return True, ''
 
     async def descriptors(self) -> list[dict[str, Any]]:
         """The tool list the model is offered this turn."""
@@ -264,9 +289,16 @@ class AgentToolbox:
         if self.mcp_allowed:
             try:
                 from mcp_integration.tool_provider import MCPToolProvider
+                scope = self.mcp_scope
                 descriptors.extend(
                     await MCPToolProvider.get_openai_tool_descriptors(
-                        self.user_id, self.mcp_servers,
+                        self.user_id,
+                        None if scope is None else scope.server_ids,
+                        # Narrowed by tool as well as by connection. The filter
+                        # runs where the *original* names are, because that is
+                        # the only place they exist — everything downstream sees
+                        # the encoded form.
+                        None if scope is None else scope.tool_allowed,
                     )
                 )
             except Exception:
@@ -287,8 +319,9 @@ class AgentToolbox:
         if is_mcp_tool(name):
             if not self.mcp_allowed:
                 return _denied(name, 'MCP tools')
-            if not self.mcp_server_allowed(name):
-                return _denied(name, 'that connection')
+            allowed, refusal = self.mcp_call_allowed(name)
+            if not allowed:
+                return _denied(name, refusal)
             from mcp_integration.tool_provider import MCPToolProvider
             return await MCPToolProvider.execute(name, args, self.user_id)
 
@@ -330,25 +363,34 @@ async def build_file_scope(agent, user):
         return None
 
 
-def mcp_scope_for(agent) -> tuple[int, ...] | None:
-    """Which connections this agent may reach, or None for "any of the user's".
+# `mcp_scope_for` lived here and returned a tuple of connection ids. It is now
+# `agents/connector_scope.py`, which answers the same question one level finer —
+# which *tools* of each connection — because picking a mailbox used to grant
+# sending and deleting along with reading. The module keeps the two properties
+# this function documented: an empty selection is unrestricted, and a stale or
+# switched-off connection can only ever take tools away, since the scope is
+# intersected with what the user can actually see.
 
-    The companion to `build_file_scope`, and sync because it reads a stored
-    list rather than resolving anything: ownership is checked on write (the
-    serializer refuses an id the user cannot see) and again on read, since
-    `get_openai_tool_descriptors` intersects this with the servers actually
-    visible to the user. A revoked or switched-off connection therefore drops
-    out on its own, which is why this does not need a query of its own.
 
-    Non-integer entries are skipped rather than rejected. Until this was
-    enforced the field held presentation slugs (`'gdrive'`, `'photos'`) chosen
-    from a hardcoded list that never matched the connector catalogue; migration
-    `0021` clears them, and skipping here means a row that migration did not
-    reach degrades to "unrestricted" — the behaviour it has always had — rather
-    than to an agent with no connectors and no explanation.
+def delegation_scope_for(agent) -> tuple[int, ...] | None:
+    """Which agents this one may delegate to, or None for any the user owns.
+
+    The third of the grant/scope pairs, and the last one to get its second
+    half: `subAgents` said *whether* an agent may delegate and nothing said *to
+    whom*, so a delegating agent could reach every agent on the account —
+    including ones holding grants it was refused, which turns delegation into a
+    way around its own toolbox.
+
+    Empty is unrestricted, for the same reason it is in `kb_scope_for` and
+    `connector_scope`: the field arrives before enforcement does, and an agent
+    that never chose must not be silently cut off from delegating at all.
+    Non-integers are skipped rather than rejected — a stale id can only take a
+    candidate away, since the tools still filter by owner.
     """
-    raw = (agent.agent_context or {}).get('connectors') or []
-    ids = tuple(sorted({v for v in raw if isinstance(v, int) and not isinstance(v, bool)}))
+    raw = (agent.agent_context or {}).get('delegatesTo') or []
+    ids = tuple(sorted({
+        v for v in raw if isinstance(v, int) and not isinstance(v, bool)
+    }))
     return ids or None
 
 
@@ -604,8 +646,12 @@ def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
     ]
     if guards.get('autonomy') != 'full':
         parts.append('- Some actions pause for human approval before they run.')
-    if guards.get('egress', 'none') == 'none':
-        parts.append('- Your sandbox has no network access.')
+    # Unconditional as of 2026-09-03. This used to be gated on
+    # `guardrails['egress']`, a three-value knob whose other two values the
+    # sandbox could never have honoured: the production engine is a sidecar
+    # container on an internal-only Docker network. Saying it always is the
+    # true statement, and the knob is gone from the wire.
+    parts.append('- Your sandbox has no network access.')
     # Stated up front rather than discovered by refusal. It only tells the model
     # something it could not infer when the readable and writable subtrees
     # differ — with `read_all_write_own`, every folder it lists is readable and
@@ -881,7 +927,7 @@ async def run_agent(agent, goal: str, *, user, sink=None,
     from chat.turn.curation import CurationPolicy
     from chat.turn.events import null_sink
 
-    from agents import budget
+    from agents import budget, connector_scope
     from .stream import AgentRunStream, tee
 
     # Checked here even when `start_agent_run` already checked it. The cost is
@@ -956,6 +1002,11 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             # `TurnContext.temperature` existed the value was stored and never
             # read, so every agent ran at the library default of 0.7 instead.
             temperature=float((agent.runtime_settings or {}).get('temperature', 0.2)),
+            # The builder's effort choice. Blank means the model's own default,
+            # so an agent saved before the knob existed runs exactly as it did.
+            # Not clamped here: `llm.access` is the only place that knows which
+            # rungs this model offers, and it snaps rather than refuses.
+            effort=(agent.runtime_settings or {}).get('effort') or None,
             max_iterations=iteration_limit('research'),
             sink=tee(sink or null_sink, stream.sink),
             tool_source=toolbox.descriptors,
@@ -997,6 +1048,9 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             # None when file access is off, which is also when the toolbox has
             # already withheld the tools.
             file_scope=file_scope,
+            # And which of the user's agents this one may hand work to. Same
+            # shape and same default as the two scopes below it.
+            delegation_scope=delegation_scope_for(agent),
             # And which knowledge bases the KB tools may reach. The builder's
             # selection, finally enforced rather than merely printed into the
             # prompt: before this an agent configured for one KB could search

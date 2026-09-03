@@ -89,6 +89,59 @@ class ModelListPayloadTests(TestCase):
         self.assertNotIn('retired-provider', slugs)
         self.assertTrue(slugs.issubset(set(SUPPORTED_PROVIDERS)))
 
+    def test_effort_support_is_reported_per_model(self):
+        AIModel.objects.update_or_create(
+            value='test/reasoner',
+            defaults={
+                'provider': self.provider, 'name': 'Reasoner', 'is_active': True,
+                'is_free': True, 'effort_levels': ['high', 'low'],
+                'default_effort': 'low',
+            },
+        )
+        models = {
+            m['value']: m
+            for p in self.client.get(reverse('ai-models')).json()['providers']
+            for m in p['models']
+        }
+        entry = models['test/reasoner']
+        # Ladder order, not the order the row happened to store them in — the
+        # picker renders this list directly and wants cheapest first.
+        self.assertEqual(entry['effort_levels'], ['low', 'high'])
+        self.assertEqual(entry['default_effort'], 'low')
+        self.assertTrue(entry['supports_effort'])
+
+    def test_a_model_without_effort_control_says_so_rather_than_omitting_it(self):
+        entry = next(
+            m
+            for p in self.client.get(reverse('ai-models')).json()['providers']
+            for m in p['models']
+            if m['value'] == 'test/free-model'
+        )
+        # `[]` is an answer — "this model has no effort control" — so the key is
+        # always present. A missing key would make the picker guess.
+        self.assertEqual(entry['effort_levels'], [])
+        self.assertFalse(entry['supports_effort'])
+
+    def test_a_drifted_row_never_offers_a_rung_the_runtime_would_refuse(self):
+        # The column is admin-editable. A picker rendering a level the runtime
+        # would snap away from is worse than one rendering none.
+        AIModel.objects.update_or_create(
+            value='test/drifted',
+            defaults={
+                'provider': self.provider, 'name': 'Drifted', 'is_active': True,
+                'is_free': True, 'effort_levels': ['low', 'banana'],
+                'default_effort': 'nonsense',
+            },
+        )
+        entry = next(
+            m
+            for p in self.client.get(reverse('ai-models')).json()['providers']
+            for m in p['models']
+            if m['value'] == 'test/drifted'
+        )
+        self.assertEqual(entry['effort_levels'], ['low'])
+        self.assertEqual(entry['default_effort'], '')
+
     def test_requires_authentication(self):
         self.client.force_authenticate(user=None)
         self.assertEqual(self.client.get(reverse('ai-models')).status_code, 401)

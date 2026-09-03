@@ -103,6 +103,28 @@ if TYPE_CHECKING:
 
 
 
+def ollama_think(effort: Any) -> dict[str, Any]:
+    """Ollama's spelling of the effort knob, as fields to merge into the body.
+
+    Ollama takes `think` at the top level rather than inside `options`, and it
+    accepts both a boolean and — on the models that serve graded reasoning — a
+    level string. So `none` is expressible here exactly as it is on OpenRouter,
+    which is why neither needs the base class's degrade-to-`minimal` fallback.
+
+    `minimal` has no Ollama equivalent and becomes `low`: the local models that
+    take a level serve the same three rungs the hosted ones do, and the level
+    has already been snapped to something this model's catalogue row declared.
+    """
+    from llm import effort as effort_levels
+
+    level = effort_levels.normalize(effort)
+    if level is None:
+        return {}
+    if level == "none":
+        return {"think": False}
+    return {"think": "low" if level == "minimal" else level}
+
+
 def _build_ollama_messages(config: dict[str, Any], prompt: str,
                            skills: list[dict]) -> list[dict[str, Any]]:
     """The chat `messages` array for an Ollama request.
@@ -198,6 +220,7 @@ class OllamaNode(BaseNodeHandler):
                     "messages": messages,
                     "stream": True,
                     "options": {"temperature": temperature},
+                    **ollama_think(config.get("effort")),
                 }
 
                 splitter = ReasoningSplitter()
@@ -298,6 +321,7 @@ class OllamaNode(BaseNodeHandler):
                     "options": {
                         "temperature": temperature,
                     },
+                    **ollama_think(config.get("effort")),
                     # Use Ollama's native JSON format for structured output
                     **({
                         "format": "json"

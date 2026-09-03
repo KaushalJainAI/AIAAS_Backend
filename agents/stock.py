@@ -46,10 +46,12 @@ STOCK: dict[str, dict[str, Any]] = {
             'codeExecution': False, 'shell': False, 'fileOps': False,
             'rag': False, 'mcp': False, 'subAgents': False,
         },
-        'guardrails': {'autonomy': 'full', 'egress': 'none',
-                       'spendCapRupees': 500},
+        'guardrails': {'autonomy': 'full', 'spendCapRupees': 500},
         'output_schema': {'contract': 'research'},
-        'fanout': {'parallel': 4, 'mode': 'collect'},
+        # `parallel` only: `mode` was stored here and read by nothing —
+        # `run_fanout` takes a width and returns results in task order, which is
+        # the whole of what "collect" was describing.
+        'fanout': {'parallel': 4},
         'agent_context': {},
         'tags': ['research', 'stock'],
         'icon': 'search',

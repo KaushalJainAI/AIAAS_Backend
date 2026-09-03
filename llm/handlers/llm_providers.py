@@ -64,6 +64,25 @@ class OpenRouterNode(OpenAICompatibleLLMNode):
     #: callers both reference it by name.
     FALLBACK_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
+    def reasoning_payload(self, effort):
+        """OpenRouter wraps the level in a `reasoning` object.
+
+        Which is what makes it the one provider that can express the bottom of
+        the ladder honestly: `{"enabled": False}` is a real "do not think"
+        instruction, where OpenAI's vocabulary has no such rung and the base
+        class has to degrade `none` to `minimal`. Worth the override for that
+        alone — the routed model is often the same checkpoint either way, and
+        the difference is entirely in what we are able to ask for.
+        """
+        from llm import effort as effort_levels
+
+        level = effort_levels.normalize(effort)
+        if level is None:
+            return {}
+        if level == "none":
+            return {"reasoning": {"enabled": False}}
+        return {"reasoning": {"effort": level}}
+
     def chat_payload(self, *, model, messages, config, stream):
         from .openai_compatible import num
         payload = super().chat_payload(
@@ -94,4 +113,10 @@ class NvidiaNode(OpenAICompatibleLLMNode):
     default_model = "nvidia/nemotron-3-super-120b-a12b"
     #: NIM serves text models only.
     image_endpoint = None
+    #: NIM copied OpenAI's field name verbatim, so the inherited spelling is
+    #: right. Which NIM-hosted models actually honour it is a per-model fact
+    #: and lives in the catalogue (`AIModel.effort_levels`), not here: the
+    #: endpoint accepts the field, and a row that does not declare a level
+    #: never causes one to be sent.
+    effort_field = "reasoning_effort"
 

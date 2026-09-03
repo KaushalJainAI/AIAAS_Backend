@@ -15,6 +15,7 @@ from rest_framework.views import APIView
 from credentials.models import Credential
 from credentials.resolution import KEYLESS_PROVIDERS, platform_api_key, slugs_for
 
+from .effort import clean_levels, normalize as normalize_effort
 from .models import AIProvider
 from .providers import SUPPORTED_PROVIDERS
 
@@ -106,6 +107,14 @@ class AIModelListView(APIView):
                     'output_price_per_million': str(m.output_price_per_million),
                     'cached_input_price_per_million': str(m.cached_input_price_per_million) if m.cached_input_price_per_million is not None else None,
                     'context_window': m.context_window,
+                    # Cleaned rather than passed through: the column is
+                    # admin-editable, and a picker rendering a rung the
+                    # runtime would refuse to send is worse than one rendering
+                    # none. `[]` is a real answer — this model has no effort
+                    # control — which is why the key is always present.
+                    'effort_levels': list(clean_levels(m.effort_levels)),
+                    'default_effort': normalize_effort(m.default_effort) or '',
+                    'supports_effort': bool(clean_levels(m.effort_levels)),
                     'pricing_usd_per_million': {
                         'input': str(m.input_price_per_million),
                         'output': str(m.output_price_per_million),

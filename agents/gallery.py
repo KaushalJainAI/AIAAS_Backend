@@ -159,9 +159,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
             # Nothing it touches is yours and nothing it does is irreversible,
             # so there is no question worth stopping to ask.
             'autonomy': 'full',
-            'egress': 'none',
             'spendCapRupees': 500,
-            'trigger': 'goal',
         },
     },
 
@@ -196,9 +194,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
             # without asking and stops at anything leaving the account.
             'autonomy': 'ask',
             'notifyOnHitl': True,
-            'egress': 'none',
             'spendCapRupees': 300,
-            'trigger': 'goal',
         },
     },
 
@@ -229,9 +225,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
             'tools': {'rag': True},
             'fileAccess': 'none',
             'autonomy': 'full',
-            'egress': 'none',
             'spendCapRupees': 300,
-            'trigger': 'goal',
         },
     },
 
@@ -265,9 +259,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
             # lands somewhere you can open and nothing else can be overwritten.
             'fileAccess': 'read_all_write_own',
             'autonomy': 'auto',
-            'egress': 'none',
             'spendCapRupees': 400,
-            'trigger': 'maintenance',
             'schedule': '0 9 * * 1',
             # Required alongside a schedule: without it the sweep's every
             # firing is refused. See `AgentSerializer.validate`.
@@ -296,9 +288,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
             'autonomy': 'auto',
             # Code execution with no way to dial out. The combination is the
             # point: it can compute on your data and cannot post it anywhere.
-            'egress': 'none',
             'spendCapRupees': 300,
-            'trigger': 'goal',
         },
     },
 
@@ -324,9 +314,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
             # folder is enough, and is all it gets.
             'fileAccess': 'scoped',
             'autonomy': 'auto',
-            'egress': 'none',
             'spendCapRupees': 300,
-            'trigger': 'goal',
         },
     },
 }
