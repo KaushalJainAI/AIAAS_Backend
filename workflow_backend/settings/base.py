@@ -593,3 +593,11 @@ CONTEXT_SUMMARY_PROVIDER = os.environ.get('CONTEXT_SUMMARY_PROVIDER', 'nvidia')
 CONTEXT_SUMMARY_MODEL = os.environ.get(
     'CONTEXT_SUMMARY_MODEL', 'nvidia/nemotron-3.5-lightning-30b-a3b'
 )
+
+# Which model writes an agent's configuration from the builder's chat pane
+# (`agents/views/builder.py`). Blank falls through to the context-summary pair
+# above, for the same reason it exists: that one runs on the platform's own key,
+# so the builder still configures agents for a user who has connected nothing.
+# The agent's *own* model is tried first regardless — this is the fallback.
+AGENT_BUILDER_PROVIDER = os.environ.get('AGENT_BUILDER_PROVIDER', '')
+AGENT_BUILDER_MODEL = os.environ.get('AGENT_BUILDER_MODEL', '')

@@ -2,7 +2,10 @@
 
 Shipping and sharing **autonomous agents** instead of DAGs.
 
-Written 2026-07-29. **Phase 1 is built** (see §8); phases 2–4 remain design.
+Written 2026-07-29. **Phase 1 is built**, and so is the install half of
+Phase 2 (see §8). §3's data model is superseded — `Workflow` became `SubAgent`
+and `WorkflowTemplate` is gone; read §8's Phase 2 note for what replaced it.
+Phases 3–4 remain design.
 
 ---
 
@@ -75,7 +78,8 @@ Checked against the code on 2026-07-29, not assumed.
 - `WorkflowTemplate` stores `nodes`/`edges` — no agent shape. Still true.
 - Portable `requirements` has a column but nothing writes it yet — it only
   matters at publish time (Phase 2).
-- No permissions screen on install.
+- ~~No permissions screen on install.~~ Built 2026-09-02: `src/pages/Templates.tsx`,
+  rendered from the template's own `AgentConfig`.
 - No agent runtime, so a saved agent cannot yet be executed.
 - Agents can't call workflows as tools yet (`run_workflow` exists in chat, not
   wired to an agent runtime).
@@ -260,10 +264,40 @@ Two decisions worth recording, because they were not in the original design:
   sent. An absent key has to read as "denied", never as "unset, so whatever the
   runtime defaults to".
 
-**Phase 2 — sharing**
-- Mirror the fields onto `WorkflowTemplate`; publish from an agent
-- Install flow: requirement mapping + permissions screen
-- Pin version at install; notify on update; re-consent when grants widen
+**Phase 2 — sharing** — *the install half is built (2026-09-02)*
+
+Half of this shipped, and the half that did not is the half that needs a
+publisher. §3's data-model plan is superseded: `Workflow` was replaced by
+`SubAgent`, and `WorkflowTemplate` was deleted with the DAG gallery
+(`templates.0003_delete_template_gallery`). What replaced it is smaller.
+
+- **The catalogue is code**, `agents/gallery.py`, not a table. `templates/
+  models.py` states the rule: a template is a `SubAgent` used as a starting
+  point. A table would buy nothing — nobody edits a curated template through
+  the admin, every field it carries is already a column on the thing it
+  installs into, and a migration-seeded row would drift from the serializer
+  that validates it. Revisit when templates are *user-published*, which is the
+  point at which they stop being code.
+- **A template stores the flat `AgentConfig`**, and install hands it to
+  `AgentSerializer`. That is what makes §5's first rule structural rather than
+  a habit: the permissions screen renders the same `tools` / `guardrails` keys
+  the serializer stores and the runtime enforces, because there is only one
+  copy of them. `agents/tests/test_gallery.py` fails if a template's config is
+  one the builder would refuse, so a new validation rule lands as a failing
+  test rather than as a 400 the first installer discovers.
+- **Requirements are built as §4 describes** — kinds, not ids — with one
+  addition: the API attaches the caller's own *candidates* to each
+  requirement, computed with the same predicate the serializer validates
+  against. A picker offering something the validator would refuse is worse
+  than an empty picker.
+- `GET /api/orchestrator/templates/`, `GET .../{slug}/`,
+  `POST .../{slug}/install/`. Frontend: `/templates`.
+
+Still open, and all of it belongs to publishing rather than installing:
+
+- Publish from an agent — needs `requirements` to be *written* at publish time
+  (§2 flagged the column as unwritten; it still is)
+- Pin version at install; notify on update; **re-consent when grants widen**
 
 **Phase 3 — trust**
 - Aggregate the four signals across installs, show on template cards

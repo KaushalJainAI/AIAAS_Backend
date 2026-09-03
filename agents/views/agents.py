@@ -38,7 +38,7 @@ from django.utils import timezone
 from agents import budget
 from agents.models import SubAgent
 from agents.serializers import SUSPICIOUS_WORKFLOW_NAME_RE
-from agents.spend import rupees_for
+from agents.spend import PRICED_SOURCES, rupees_for, rupees_for_usd
 from workflow_backend.thresholds import (
     DEFAULT_RUN_SECONDS,
     MAX_RUN_SECONDS,
@@ -543,16 +543,25 @@ def _with_stats(configs, workflows, user):
                              distinct=True),
         )
     )
-    # Spend is derived from `tokens_used` through the same conversion the spend
-    # cap refuses runs on — see agents/spend.py. It used to sum `credits_used`,
-    # which nothing writes, so every agent reported a spend of zero.
+    # Spend goes through the same conversion the spend cap refuses runs on —
+    # see agents/spend.py — so the number shown here and the number enforced
+    # there cannot drift. Priced runs are summed from what they recorded;
+    # unpriced ones fall back to the blended token rate rather than to zero.
     spend_rows = (
         ExecutionLog.objects
         .filter(user=user, subagent_id__in=ids)
         .values('subagent_id')
-        .annotate(tokens=Sum('tokens_used'))
+        .annotate(
+            priced_usd=Sum('cost_usd', filter=Q(cost_source__in=PRICED_SOURCES)),
+            unpriced_tokens=Sum(
+                'tokens_used', filter=~Q(cost_source__in=PRICED_SOURCES)
+            ),
+        )
     )
-    spend_by_id = {r['subagent_id']: rupees_for(r['tokens']) for r in spend_rows}
+    spend_by_id = {
+        r['subagent_id']: rupees_for_usd(r['priced_usd']) + rupees_for(r['unpriced_tokens'])
+        for r in spend_rows
+    }
 
     by_id = {r['subagent_id']: r for r in rows}
     for cfg in configs:

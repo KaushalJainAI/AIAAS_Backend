@@ -502,6 +502,7 @@ async def _run_model(
             content="",
             thinking=f"{completion.thinking}\n{completion.content}".strip(),
             tool_calls=completion.tool_calls,
+            usage=completion.usage,
             tokens=completion.tokens,
         )
 
@@ -519,6 +520,7 @@ async def _run_model(
         # body is in the log line above for whoever has to debug it.
         return Completion(
             content=f"⚠️ {humanize_provider_body(accumulator.error)}",
+            usage=completion.usage,
             tokens=completion.tokens,
         )
 
@@ -617,6 +619,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
                 provider=turn.provider,
                 model_id=turn.model,
                 tokens=completion.tokens,
+                usage=completion.usage,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
         except Exception:  # noqa: BLE001

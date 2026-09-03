@@ -16,6 +16,7 @@ own builds. The rename happens in `_execution_row`, in one place.
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -24,6 +25,7 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from core.http.pagination import paginate_keyset
+from llm.pricing import combine_sources, format_usd
 from workflow_backend.thresholds import (
     EXECUTION_NODE_LOG_LIMIT,
     EXECUTION_TURN_LIMIT,
@@ -48,9 +50,16 @@ def _since(days: int):
 
 
 def _stringify_dates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """`TruncDate` yields `date` objects; JSON wants ISO strings."""
+    """`TruncDate` yields `date` objects, `Sum` over money yields `Decimal`.
+
+    Both are flattened here so every row leaving this module is plain JSON —
+    a Decimal that reaches the renderer becomes a float, and a cost is the one
+    number that must not acquire binary drift on the way out.
+    """
     for row in rows:
         row['date'] = row['date'].isoformat() if row['date'] else None
+        if 'cost_usd' in row:
+            row['cost_usd'] = format_usd(row['cost_usd'])
     return rows
 
 
@@ -170,13 +179,24 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
     """Token and credit usage over the last `days`, split by agent and tool."""
     executions = _user_executions(user, days=days)
     totals = executions.aggregate(
-        total_tokens=Sum('tokens_used'), total_credits=Sum('credits_used')
+        total_tokens=Sum('tokens_used'),
+        total_cost_usd=Sum('cost_usd'),
+        total_input=Sum('input_tokens'),
+        total_output=Sum('output_tokens'),
+        total_cached_read=Sum('cached_read_tokens'),
     )
 
     return {
         "period_days": days,
         "total_tokens": totals['total_tokens'] or 0,
-        "total_credits": totals['total_credits'] or 0,
+        # `credits_used` was summed here and nothing has ever written it, so
+        # this endpoint's headline number was structurally zero. Kept on the
+        # wire at zero for one release so an old client does not read `None`.
+        "total_credits": 0,
+        "total_cost_usd": format_usd(totals['total_cost_usd']),
+        "total_input_tokens": totals['total_input'] or 0,
+        "total_output_tokens": totals['total_output'] or 0,
+        "total_cached_read_tokens": totals['total_cached_read'] or 0,
         # Renamed from `subagent__id` / `subagent__name` so this response keeps
         # the same wire vocabulary as every other `/api/logs/` endpoint — the
         # column name must not leak out of the query layer.
@@ -185,16 +205,48 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
                 "workflow_id": row['subagent__id'],
                 "workflow_name": row['subagent__name'],
                 "tokens": row['tokens'],
-                "credits": row['credits'],
+                "cost_usd": format_usd(row['cost_usd']),
+                # An agent with even one unpriced run cannot have its total
+                # reported as money: the sum silently omits that run, so a
+                # figure would understate it while looking exact. Counted
+                # rather than combined, because `combine_sources` needs the
+                # individual values and this is one GROUP BY.
+                "cost_source": (
+                    "unpriced" if row['unpriced'] else "estimated"
+                ),
                 "executions": row['executions'],
             }
             for row in executions.values('subagent__id', 'subagent__name')
             .annotate(
                 tokens=Sum('tokens_used'),
-                credits=Sum('credits_used'),
+                cost_usd=Sum('cost_usd'),
                 executions=Count('id'),
+                unpriced=Count('id', filter=Q(cost_source='unpriced')),
             )
             .order_by('-tokens')[:10]
+        ],
+        # Which *model* the money went to. `by_workflow` says which agent
+        # spent it, which is a different question — one agent on an expensive
+        # model and five on a cheap one look identical by agent and obvious
+        # by model.
+        "by_model": [
+            {
+                "model_id": row['model_id'] or 'unknown',
+                "provider": row['provider'] or '',
+                "tokens": row['tokens'] or 0,
+                "cost_usd": format_usd(row['cost_usd']),
+                "turns": row['turns'],
+            }
+            for row in AgentTurn.objects.filter(
+                execution__user=user, execution__created_at__gte=_since(days)
+            )
+            .values('model_id', 'provider')
+            .annotate(
+                tokens=Sum('tokens'),
+                cost_usd=Sum('cost_usd'),
+                turns=Count('id'),
+            )
+            .order_by('-cost_usd')[:10]
         ],
         "by_tool": list(
             AgentStep.objects.filter(
@@ -207,7 +259,7 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
         "daily_usage": _stringify_dates(list(
             executions.annotate(date=TruncDate('created_at'))
             .values('date')
-            .annotate(tokens=Sum('tokens_used'), credits=Sum('credits_used'))
+            .annotate(tokens=Sum('tokens_used'), cost_usd=Sum('cost_usd'))
             .order_by('date')
         )),
     }
@@ -265,6 +317,17 @@ def _execution_row(execution: ExecutionLog) -> dict[str, Any]:
         "duration_ms": execution.duration_ms,
         "nodes_executed": execution.nodes_executed,
         "tokens_used": execution.tokens_used,
+        # The breakdown rides alongside the total rather than replacing it: a
+        # client that only knows about `tokens_used` keeps working, and one
+        # that wants to show what the run cost has the four buckets it was
+        # actually billed in. `cost_source` is what stops a `0.00` that means
+        # "free" rendering identically to one that means "we do not know".
+        "input_tokens": execution.input_tokens,
+        "output_tokens": execution.output_tokens,
+        "cached_read_tokens": execution.cached_read_tokens,
+        "cached_write_tokens": execution.cached_write_tokens,
+        "cost_usd": format_usd(execution.cost_usd),
+        "cost_source": execution.cost_source or "unpriced",
         "error_message": execution.error_message,
         "started_at": execution.started_at,
         "completed_at": execution.completed_at,
@@ -362,6 +425,13 @@ def execution_detail(user, execution_id: str) -> dict[str, Any] | None:
             "provider": turn.provider,
             "model_id": turn.model_id,
             "tokens": turn.tokens,
+            "input_tokens": turn.input_tokens,
+            "output_tokens": turn.output_tokens,
+            "cached_read_tokens": turn.cached_read_tokens,
+            "cached_write_tokens": turn.cached_write_tokens,
+            "reasoning_tokens": turn.reasoning_tokens,
+            "cost_usd": format_usd(turn.cost_usd),
+            "cost_source": turn.cost_source or "unpriced",
             "duration_ms": turn.duration_ms,
             "created_at": turn.created_at,
             "steps": [_step_row(s) for s in steps_by_turn.get(turn.id, [])],
@@ -391,8 +461,54 @@ def execution_detail(user, execution_id: str) -> dict[str, Any] | None:
         "turns_truncated": turn_total > len(turns),
         "revision": _revision_summary(execution.revision),
         "delegated_by": _delegated_by(execution),
+        **_delegated_cost(execution),
     }
     return detail
+
+
+def _delegated_cost(execution: ExecutionLog) -> dict[str, Any]:
+    """What this run cost once its delegated workers are counted.
+
+    Separate from `cost_usd` rather than folded into it, because they answer
+    different questions: an orchestrator's own spend is a rounding error next
+    to its eight workers', and a single blended figure would hide which of the
+    two a user is looking at. Walked one generation at a time — delegation
+    nests, and `parent_step__execution` is the only link between the levels.
+
+    Bounded by `MAX_DELEGATION_DEPTH` rather than trusting the tree to be
+    shallow: this is a read on a page load, and a cycle (however impossible it
+    should be) must cost a wrong number, not the request.
+    """
+    from django.db.models import Sum
+
+    from agents.agent.orchestrator import MAX_DELEGATION_DEPTH
+
+    total = execution.cost_usd or Decimal("0")
+    sources = [execution.cost_source or "unpriced"]
+    tokens = execution.tokens_used or 0
+    frontier = [execution.id]
+    descendants = 0
+
+    for _ in range(MAX_DELEGATION_DEPTH + 1):
+        children = list(
+            ExecutionLog.objects
+            .filter(parent_step__execution_id__in=frontier)
+            .values_list('id', 'cost_usd', 'cost_source', 'tokens_used')
+        )
+        if not children:
+            break
+        descendants += len(children)
+        total += sum((c[1] or Decimal("0") for c in children), Decimal("0"))
+        sources.extend(c[2] or "unpriced" for c in children)
+        tokens += sum(c[3] or 0 for c in children)
+        frontier = [c[0] for c in children]
+
+    return {
+        "delegated_run_count": descendants,
+        "cost_usd_total": format_usd(total),
+        "cost_source_total": combine_sources(sources),
+        "tokens_used_total": tokens,
+    }
 
 
 def _delegated_by(execution: ExecutionLog) -> dict[str, Any] | None:

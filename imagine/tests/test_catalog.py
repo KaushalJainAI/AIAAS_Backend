@@ -45,6 +45,22 @@ IMAGE_PAYLOAD = [
         },
     },
     {
+        # The OpenAI image family is the only one advertising quality,
+        # background and output_compression — which is exactly why the dial set
+        # cannot be a global list.
+        "id": "openai/gpt-image-2",
+        "name": "OpenAI: GPT Image 2",
+        "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["image"]},
+        "supported_parameters": {
+            "aspect_ratio": {"type": "enum", "values": ["1:1", "16:9", "9:16"]},
+            "quality": {"type": "enum", "values": ["low", "medium", "high"]},
+            "background": {"type": "enum", "values": ["auto", "transparent", "opaque"]},
+            "output_compression": {"type": "range", "min": 0, "max": 100},
+            "n": {"type": "range", "min": 1, "max": 8},
+            "input_references": {"type": "range", "min": 0, "max": 10},
+        },
+    },
+    {
         # Deliberately bare: no supported_parameters at all.
         "id": "recraft/recraft-v4",
         "name": "Recraft: Recraft V4",
@@ -60,6 +76,8 @@ VIDEO_PAYLOAD = [
         "supported_resolutions": ["480p", "720p"],
         "supported_aspect_ratios": ["16:9", "9:16", "21:9"],
         "supported_durations": [4, 5, 6, 10, 30],
+        "supported_sizes": ["1280x720"],
+        "supported_frame_images": ["first_frame", "last_frame"],
         "generate_audio": True,
         "seed": True,
     },
@@ -102,13 +120,62 @@ class CatalogNormalizationTests(TestCase):
         self.assertTrue(lite["supports_seed"])
         self.assertTrue(lite["supports_references"])
 
-    def test_model_without_parameters_still_gets_usable_options(self):
-        """An empty option list renders as a dead control, so never emit one."""
+    def test_a_model_that_advertises_no_dial_is_offered_none(self):
+        """The reverse of what this file used to assert, and the reason why.
+
+        Normalization used to substitute `["1K", "2K"]` whenever a model
+        advertised no resolutions, so the panel would never show a dead
+        control. Measured against the live API, that kindness is a 400:
+
+            resolution "512": not supported. Accepted: 2K, 4K
+
+        and for a model that advertises no `resolution` at all the key is
+        accepted and ignored — the control moves nothing while looking like it
+        works, and the user is billed for the result. An empty list now means
+        the model exposes no such dial, and the UI renders no control.
+        """
         caps = self._fetch()
         recraft = catalog.find_model(caps, "image", "recraft/recraft-v4")
-        self.assertTrue(recraft["resolutions"])
-        self.assertTrue(recraft["aspect_ratios"])
+        self.assertEqual(recraft["resolutions"], [])
+        self.assertEqual(recraft["aspect_ratios"], [])
         self.assertFalse(recraft["supports_seed"])
+        self.assertEqual(recraft["max_batch"], 0)
+
+    def test_every_dial_the_endpoint_accepts_is_surfaced(self):
+        """`POST /images` takes nine dials and each is per-model. Dropping one
+        here is the difference between the user having the control and not."""
+        caps = self._fetch()
+        gpt = catalog.find_model(caps, "image", "openai/gpt-image-2")
+        self.assertEqual(gpt["qualities"], ["low", "medium", "high"])
+        self.assertEqual(gpt["backgrounds"], ["auto", "transparent", "opaque"])
+        self.assertEqual(gpt["output_compression"], {"min": 0, "max": 100})
+        self.assertEqual(gpt["batch"], {"min": 1, "max": 8})
+        self.assertEqual(gpt["max_references"], 10)
+
+        # …and the same model's *absent* dials stay absent.
+        self.assertEqual(gpt["resolutions"], [])
+
+    def test_video_carries_sizes_and_frame_slots(self):
+        """`supported_sizes` and `supported_frame_images` were dropped on the
+        floor. The second is what image-to-video is made of: a model taking
+        `first_frame` can be handed the picture the clip should start from."""
+        caps = self._fetch()
+        seedance = catalog.find_model(caps, "video", "bytedance/seedance-2.5")
+        self.assertEqual(seedance["sizes"], ["1280x720"])
+        self.assertEqual(seedance["frame_slots"], ["first_frame", "last_frame"])
+        veo = catalog.find_model(caps, "video", "google/veo-3.1")
+        self.assertEqual(veo["frame_slots"], [])
+
+    def test_audio_declares_formats_speed_range_and_instructions(self):
+        caps = self._fetch()
+        gpt = catalog.find_model(caps, "audio", "openai/gpt-4o-mini-tts")
+        self.assertEqual(gpt["response_formats"], ["mp3", "pcm"])
+        # The documented range for this endpoint. The slider ran 0.25-4.0,
+        # which belongs to a different API.
+        self.assertEqual(gpt["speed_range"], {"min": 0.5, "max": 2.0})
+        self.assertTrue(gpt["supports_instructions"])
+        kokoro = catalog.find_model(caps, "audio", "hexgrad/kokoro-82m")
+        self.assertFalse(kokoro["supports_instructions"])
 
     def test_video_carries_durations_and_audio_support(self):
         caps = self._fetch()

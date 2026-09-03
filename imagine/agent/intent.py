@@ -8,6 +8,7 @@ from django.conf import settings
 from ..services import catalog
 from ..services.capabilities import capabilities_for
 from ..services.openrouter import MissingOpenRouterCredentialError, OpenRouterService
+from ..validation import constrain
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +26,19 @@ Return JSON with this exact shape (no markdown, no commentary):
   "model": "<model id from the available list> or null",
   "prompt": "<the prompt to send to the model — refine the user's request>",
   "params": {
-    "aspect_ratio": "1:1|16:9|9:16|4:3|3:4 (image/video)",
-    "resolution": "string (image/video)",
+    "aspect_ratio": "image/video — only a value the chosen model lists",
+    "resolution": "image/video — only a value the chosen model lists",
+    "size": "video — explicit WIDTHxHEIGHT, where the model lists sizes",
     "duration": "integer seconds (video only)",
+    "quality": "image — only where the model lists qualities",
+    "output_format": "image — png|jpeg|webp, only where the model lists them",
+    "background": "image — auto|transparent|opaque, only where listed",
+    "output_compression": "image — 0-100, jpeg/webp only",
+    "batch_size": "image — how many images to return, within the model's range",
     "negative_prompt": "string (optional)",
-    "voice": "alloy|echo|fable|onyx|nova|shimmer (audio)",
-    "speed": "float 0.25-4.0 (audio)"
+    "voice": "audio — only a voice the chosen model lists",
+    "speed": "audio — float 0.5-2.0",
+    "instructions": "audio — tone direction, only where the model lists support"
   },
   "confidence": 0.0-1.0,
   "missing_required": ["list of fields the user did not specify that the model truly needs"],
@@ -372,49 +380,20 @@ def _constrain_params(intent: Dict[str, Any], caps: Dict[str, List[Dict[str, Any
     respect them, and an out-of-range aspect ratio or duration is rejected by
     OpenRouter well after the user has approved the plan. Constraining here
     means the HITL card shows what will actually be sent.
+
+    The rule itself lives in `imagine/validation.py`, shared with the form
+    path — which *refuses* rather than drops, because there a human set the
+    dial deliberately. This is the same table read with the other policy: two
+    copies would have meant the conversational path quietly keeping whatever
+    dial the last catalogue change added.
     """
-    params = dict(intent.get("params") or {})
     model = catalog.find_model(caps, intent["type"], intent.get("model") or "")
+    params = dict(intent.get("params") or {})
     if not model:
         return params
-
-    def snap(key: str, allowed: List[Any], coerce=str) -> None:
-        if key not in params or not allowed:
-            return
-        try:
-            value = coerce(params[key])
-            permitted = [coerce(a) for a in allowed]
-        except (TypeError, ValueError):
-            # Unparseable value ('5s' for an int duration) — drop it and let
-            # the model default rather than forwarding something invalid.
-            params.pop(key)
-            return
-        if value in permitted:
-            params[key] = value
-        else:
-            params.pop(key)
-
-    if intent["type"] == "audio":
-        params.pop("aspect_ratio", None)
-        params.pop("resolution", None)
-        params.pop("duration", None)
-        snap("voice", model.get("voices") or [])
-        if not model.get("supports_speed"):
-            params.pop("speed", None)
-    else:
-        params.pop("voice", None)
-        params.pop("speed", None)
-        snap("aspect_ratio", model.get("aspect_ratios") or [])
-        snap("resolution", model.get("resolutions") or [])
-        if intent["type"] == "video":
-            snap("duration", model.get("durations") or [], coerce=int)
-        else:
-            params.pop("duration", None)
-            if model.get("qualities"):
-                snap("quality", model.get("qualities") or [])
-            else:
-                # The model advertises no quality control — forward none
-                # rather than an unvalidated value the provider may reject.
-                params.pop("quality", None)
-
-    return params
+    # `negative_prompt` is not a provider dial (it is folded into the prompt),
+    # so it is carried through rather than validated against anything.
+    constrained = constrain(intent["type"], model, params)
+    if params.get("negative_prompt"):
+        constrained["negative_prompt"] = params["negative_prompt"]
+    return constrained

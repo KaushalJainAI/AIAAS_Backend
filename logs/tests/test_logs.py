@@ -12,6 +12,8 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.urls import reverse
+from decimal import Decimal
+
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -37,6 +39,9 @@ class LogsTestBase(APITestCase):
             nodes_executed=2,
             tokens_used=300,
             credits_used=3,
+            # What a real run records now: the breakdown, and what it cost.
+            input_tokens=180, output_tokens=100, cached_read_tokens=20,
+            cost_usd=Decimal('0.004200'), cost_source='estimated',
             started_at=timezone.now(),
         )
         self.failed = ExecutionLog.objects.create(
@@ -146,11 +151,20 @@ class CostBreakdownTests(LogsTestBase):
         response = self.client.get(reverse('logs:cost_breakdown'))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['total_tokens'], 400)
-        self.assertEqual(response.data['total_credits'], 3)
+        # `credits_used` is a column nothing has ever written outside a test
+        # fixture, so the endpoint no longer reports it as a spend figure. The
+        # money now comes from `cost_usd`, which a run actually records.
+        self.assertEqual(response.data['total_credits'], 0)
+        self.assertEqual(response.data['total_cost_usd'], '0.004200')
+        self.assertEqual(response.data['total_input_tokens'], 180)
+        self.assertEqual(response.data['total_output_tokens'], 100)
         row = response.data['by_workflow'][0]
         self.assertEqual(row['workflow_id'], self.agent.id)
         self.assertEqual(row['workflow_name'], 'Test Agent')
         self.assertNotIn('subagent__id', row)
+        self.assertEqual(row['cost_usd'], '0.004200')
+        models = {r['model_id'] for r in response.data['by_model']}
+        self.assertIn('m', models)
         tools = {row['tool'] for row in response.data['by_tool']}
         self.assertEqual(tools, {'web_search', 'read_url'})
         self.assertIsInstance(response.data['daily_usage'][0]['date'], str)

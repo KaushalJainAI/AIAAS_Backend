@@ -88,6 +88,16 @@ class AIModel(models.Model):
         max_digits=10, decimal_places=4, null=True, blank=True,
         help_text="USD per 1M cached input tokens, if provider offers caching",
     )
+    #: Separate from the read rate because the two differ by more than a
+    #: factor of ten in opposite directions: OpenAI writes the cache for free
+    #: and reads at 0.1x, while Anthropic charges 1.25x to write and 0.1x to
+    #: read. Folding writes into the input rate understates an Anthropic bill
+    #: on exactly the turns that write most — the long ones.
+    #: NULL means "this provider does not charge to write", not "unknown".
+    cache_write_price_per_million = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True,
+        help_text="USD per 1M cache-write tokens (blank = writes are free)",
+    )
     context_window = models.IntegerField(
         default=0, help_text="Max context tokens (0 = unknown/variable)",
     )

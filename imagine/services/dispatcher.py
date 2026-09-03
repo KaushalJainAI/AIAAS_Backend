@@ -86,12 +86,20 @@ def _build_config(generation: Generation) -> dict:
     """
     config = {
         "aspect_ratio": generation.aspect_ratio,
+        "size": generation.size,
         "negative_prompt": generation.negative_prompt,
         "seed": generation.seed,
         "voice": generation.voice,
         "speed": generation.speed,
+        "instructions": generation.instructions,
+        "response_format": generation.response_format,
         "quality": generation.quality,
         "output_format": generation.output_format,
+        "background": generation.background,
+        "output_compression": generation.output_compression,
+        "n": generation.batch_size,
+        "reference_urls": generation.reference_urls or None,
+        "frame_images": generation.frame_images or None,
         "generate_audio": generation.generate_audio,
     }
 
@@ -119,6 +127,10 @@ def run_image_generation(generation: Generation, service: OpenRouterService) -> 
     else:
         generation.status = "completed"
         generation.output_url = result["url"]
+        # A batch is one request and one row; every image it returned is kept,
+        # with the first also in `output_url` so single-result readers are
+        # unchanged.
+        generation.output_urls = list(result.get("urls") or [result["url"]])
         if result.get("cost") is not None:
             generation.metadata = {
                 **(generation.metadata or {}),
@@ -184,6 +196,7 @@ def run_generation(generation: Generation) -> Generation:
             else:
                 generation.status = "completed"
                 generation.output_url = result["url"]
+                generation.output_urls = [result["url"]]
             generation.save()
             if generation.status == "completed" and generation.output_url:
                 try:

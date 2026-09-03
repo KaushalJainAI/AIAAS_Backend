@@ -37,6 +37,7 @@ History: `AuditEntry` and `OrchestratorThought` lived here until 2026-08-19, and
 `AgentStep` was `NodeExecutionLog` until 2026-08-19. All three were DAG-era.
 """
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
@@ -225,7 +226,33 @@ class ExecutionLog(models.Model):
     # ── Resource usage ──
     nodes_executed = models.IntegerField(default=0, validators=[MinValueValidator(0)])
     tokens_used = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    #: Dead column, kept only because dropping it is a separate migration on a
+    #: live table. Nothing has ever written it; `cost_usd` below is the number
+    #: the spend cap and the UI both read. Do not revive it.
     credits_used = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+
+    # ── Cost ──
+    # The breakdown, because a single total cannot be priced: output costs 5-6x
+    # input on every model in the registry and a cache read costs a tenth of
+    # one, so `tokens_used` alone is wrong by up to an order of magnitude in
+    # either direction. Summed from the run's turns rather than recomputed at
+    # read time — a run can switch models on resume, so there is no single rate
+    # to apply to a run-level total.
+    input_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    output_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    cached_read_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    cached_write_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    #: USD, six decimal places: a cheap turn costs $0.0003 and rounding to
+    #: four would floor a run of them to zero.
+    cost_usd = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal('0.000000'),
+    )
+    #: `billed` (the provider told us), `estimated` (our price table), or
+    #: `unpriced` (we do not know). Stored rather than derived because the
+    #: answer depends on what the price table said *at the time*, and because
+    #: a zero that means "free" and a zero that means "unknown" must never
+    #: render alike. See `llm/pricing.py`.
+    cost_source = models.CharField(max_length=12, blank=True, default='')
 
     supervision_level = models.CharField(
         max_length=20, blank=True, help_text='Level of supervision used for this run'
@@ -310,6 +337,22 @@ class AgentTurn(models.Model):
     model_id = models.CharField(max_length=200, blank=True)
 
     tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    #: The same breakdown as the run carries, at the level it is actually
+    #: knowable: one turn is one model call, on one model, at one set of rates.
+    #: The run's totals are the sum of these. `input_tokens` excludes the
+    #: cached buckets, so the four are disjoint and can be priced and added.
+    input_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    output_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    cached_read_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    cached_write_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    #: Reasoning tokens, a subset of `output_tokens`. Never priced separately —
+    #: providers bill it as output — but recorded because a run whose spend is
+    #: all reasoning is a different problem from one whose spend is all answer.
+    reasoning_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    cost_usd = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal('0.000000'),
+    )
+    cost_source = models.CharField(max_length=12, blank=True, default='')
     duration_ms = models.IntegerField(
         blank=True, null=True, validators=[MinValueValidator(0)]
     )

@@ -87,28 +87,71 @@ def _sanitize_slug(text: str, limit: int = 40) -> str:
 
 
 def persist_generation_as_document(generation) -> Optional[object]:
-    """Create a Document for a completed generation.
+    """Save a completed generation into the user's files.
 
-    Returns the Document or None. Safe to call from sync or async contexts
-    (uses only sync ORM) and from Celery workers (imports are lazy).
+    Returns the *first* Document, or None — the signature every caller already
+    has. A batch is what makes this a loop: `n` may return up to ten images
+    from one request, and persisting `output_url` alone put one of them in My
+    Files and dropped the rest, which the user had asked for and been billed
+    for. `output_urls` is the authority, with `output_url` as the fallback for
+    rows written before that field existed.
+
+    Safe to call from sync or async contexts (sync ORM only) and from Celery
+    workers (lazy imports).
     """
+    urls = list(getattr(generation, "output_urls", None) or [])
+    if not urls and generation.output_url:
+        urls = [generation.output_url]
+    if not urls:
+        logger.info("No output for generation %s; skip document persist", generation.id)
+        return None
+
+    documents = []
+    for index, url in enumerate(urls):
+        document = _persist_one(generation, url, index, len(urls))
+        if document is not None:
+            documents.append(document)
+
+    if not documents:
+        return None
+
+    # Correlation is written once, after the loop: a partial failure should not
+    # leave metadata claiming documents that were never created.
+    try:
+        meta = dict(generation.metadata or {})
+        meta["document_id"] = documents[0].id
+        meta["document_name"] = documents[0].name
+        # Every document, for a batch. Kept beside the singular key rather than
+        # replacing it, because the API and the frontend both read that one.
+        meta["document_ids"] = [d.id for d in documents]
+        generation.metadata = meta
+        generation.save(update_fields=["metadata"])
+    except Exception as e:
+        logger.warning("Could not write document ids to generation %s metadata: %s",
+                       generation.id, e)
+
+    return documents[0]
+
+
+def _persist_one(generation, output_url: str, index: int, total: int) -> Optional[object]:
+    """One output of a generation -> one Document."""
     try:
         from inference.filesystem import ensure_folder
         from inference.models import Document, KnowledgeBase
         from inference.utils import normalize_file_type
 
-        if not generation.output_url:
-            logger.info("No output_url for generation %s; skip document persist", generation.id)
-            return None
-
-        # Idempotency: don't duplicate if already persisted
+        # Idempotency, per output rather than per generation: a batch has
+        # several, and keying on the first would have skipped the other nine.
         try:
-            existing_doc_id = (generation.metadata or {}).get("document_id")
-            if existing_doc_id:
+            existing = ((generation.metadata or {}).get("document_ids")
+                        or ([(generation.metadata or {}).get("document_id")]
+                            if (generation.metadata or {}).get("document_id") else []))
+            if index < len(existing) and existing[index]:
                 from inference.models import Document as DocCheck
 
-                if DocCheck.objects.filter(id=existing_doc_id, user=generation.user).exists():
-                    logger.info("Generation %s already has document %s; skip", generation.id, existing_doc_id)
+                if DocCheck.objects.filter(id=existing[index], user=generation.user).exists():
+                    logger.info("Generation %s output %s already persisted; skip",
+                                generation.id, index)
                     return None
         except Exception:
             pass
@@ -123,7 +166,6 @@ def persist_generation_as_document(generation) -> Optional[object]:
             folder = None
 
         # Decode bytes
-        output_url = generation.output_url
         file_bytes: bytes
         mime = ""
         if output_url.startswith("data:"):
@@ -155,7 +197,11 @@ def persist_generation_as_document(generation) -> Optional[object]:
         slug = _sanitize_slug(generation.prompt or kind)
         # Filename must be unique enough but human-readable: <slug>-<id>-<ts>.<ext>
         ts = int(time.time())
-        filename = f"{slug}-{generation.id}-{ts}.{ext}"
+        # The index is in the name only for a batch: `-1` on a single result
+        # would be noise, and four files sharing one timestamp would otherwise
+        # differ by nothing at all.
+        suffix = f"-{index + 1}" if total > 1 else ""
+        filename = f"{slug}-{generation.id}{suffix}-{ts}.{ext}"
 
         file_type = normalize_file_type(filename, mime or "")
         # Ensure KB exists (same default as uploads) so process_document doesn't create race
@@ -190,7 +236,8 @@ def persist_generation_as_document(generation) -> Optional[object]:
             status=doc_status,
             knowledge_base=kb,
             folder=folder,
-            metadata={"source": "imagine", "generation_id": generation.id, "kind": generation.type},
+            metadata={"source": "imagine", "generation_id": generation.id,
+                      "kind": generation.type, "output_index": index},
         )
 
         # Only index text-like documents; media is stored as-is.
@@ -204,17 +251,6 @@ def persist_generation_as_document(generation) -> Optional[object]:
             except Exception as e:
                 logger.warning("Could not start process_document for %s: %s", document.id, e)
 
-        # Record correlation on the Generation (server-owned metadata).
-        try:
-            meta = dict(generation.metadata or {})
-            meta["document_id"] = document.id
-            # Also store human document path for API convenience
-            meta["document_name"] = document.name
-            generation.metadata = meta
-            generation.save(update_fields=["metadata"])
-        except Exception as e:
-            logger.warning("Could not write document_id to generation %s metadata: %s", generation.id, e)
-
         logger.info(
             "Persisted generation %s (%s) as document %s in folder %s",
             generation.id,
@@ -224,6 +260,7 @@ def persist_generation_as_document(generation) -> Optional[object]:
         )
         return document
     except Exception as e:
-        logger.exception("persist_generation_as_document failed for generation %s: %s", getattr(generation, "id", "?"), e)
+        logger.exception("persist_generation_as_document failed for generation %s: %s",
+                         getattr(generation, "id", "?"), e)
         return None
 

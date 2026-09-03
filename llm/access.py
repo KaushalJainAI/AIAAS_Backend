@@ -24,6 +24,8 @@ from typing import Any, AsyncIterator, Iterable
 
 from . import budget
 from .providers import PROVIDER_LABELS, SUPPORTED_PROVIDERS
+from .usage import DEFAULT_CONVENTION, EMPTY_USAGE, TokenUsage
+from .usage import normalize as normalize_usage
 from credentials.resolution import (
     KEYLESS_PROVIDERS,
     platform_api_key as _platform_api_key,
@@ -370,6 +372,11 @@ class Completion:
     #: surface them only so the UI trace is not silently missing steps. Never
     #: re-execute these.
     executed_tools: tuple[dict[str, Any], ...] = ()
+    #: What this call consumed, broken into the buckets cost is computed from.
+    #: `tokens` below is its total, kept as a field so every existing reader
+    #: (`state["total_tokens"]`, `AgentTurn.tokens`, `ChatSession`) is
+    #: unaffected by the breakdown arriving underneath it.
+    usage: TokenUsage = EMPTY_USAGE
     tokens: int = 0
     media_url: str | None = None
 
@@ -579,7 +586,10 @@ async def complete(
         )
 
     data = result.data
-    usage = data.get("usage") or {}
+    usage = normalize_usage(
+        data.get("usage") or {},
+        data.get("usage_convention") or DEFAULT_CONVENTION,
+    )
     raw_calls = data.get("tool_calls") or []
     # Two shapes share this key. Handlers that only *report* what the model
     # asked for use OpenAI's `{"function": {...}}`; OpenAINode runs its own tool
@@ -593,7 +603,8 @@ async def complete(
         thinking=data.get("thinking") or "",
         tool_calls=to_tool_calls(pending),
         executed_tools=tuple(executed),
-        tokens=usage.get("total_tokens") or 0,
+        usage=usage,
+        tokens=usage.total,
         media_url=data.get("media_url"),
     )
 
@@ -641,7 +652,10 @@ class StreamAccumulator:
 
     content: str = ""
     thinking: str = ""
-    tokens: int = 0
+    #: Folded field-wise across every metadata frame. A provider may send usage
+    #: once at the end (the common case) or incrementally; `TokenUsage.__add__`
+    #: makes both correct without the accumulator knowing which it is getting.
+    usage: TokenUsage = EMPTY_USAGE
     error: str | None = None
     #: HTTP status behind `error`, when the provider gave one.
     error_status: int | None = None
@@ -659,10 +673,15 @@ class StreamAccumulator:
             case "tool_calls":
                 self._add_tool_call_deltas(chunk.get("tool_calls") or [])
             case "metadata":
-                usage = chunk.get("usage") or {}
-                self.tokens += usage.get("total_tokens") or (
-                    (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)
-                )
+                if raw_usage := chunk.get("usage"):
+                    # The convention travels on the frame: by here the handler
+                    # that knows it is long out of scope, and reading an
+                    # inclusive payload as exclusive double-counts every cached
+                    # token without erroring. See `llm/usage.py`.
+                    self.usage += normalize_usage(
+                        raw_usage,
+                        chunk.get("usage_convention") or DEFAULT_CONVENTION,
+                    )
             case "error":
                 self.error = chunk.get("message") or "Unknown provider error"
                 self.error_status = chunk.get("status")
@@ -695,6 +714,16 @@ class StreamAccumulator:
             slot["function"]["arguments"] += function.get("arguments") or ""
 
     @property
+    def tokens(self) -> int:
+        """Total tokens folded so far.
+
+        Kept as a read-only view over `usage` rather than a second counter, so
+        the breakdown and the total can never disagree — which is precisely
+        how `credits_used` and `tokens_used` came to say different things.
+        """
+        return self.usage.total
+
+    @property
     def has_tool_calls(self) -> bool:
         return any(
             slot["function"]["name"].strip() for slot in self._partial_calls.values()
@@ -706,5 +735,6 @@ class StreamAccumulator:
             content=self.content,
             thinking=self.thinking,
             tool_calls=to_tool_calls(ordered),
-            tokens=self.tokens,
+            usage=self.usage,
+            tokens=self.usage.total,
         )

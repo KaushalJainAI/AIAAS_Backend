@@ -2,6 +2,8 @@ from rest_framework import serializers
 
 from .models import Generation, ImagineConversation, ImagineMessage
 from .services.capabilities import capabilities_for
+from .services.catalog import find_model
+from .validation import DialError, validate_dials
 
 
 class GenerationSerializer(serializers.ModelSerializer):
@@ -11,13 +13,17 @@ class GenerationSerializer(serializers.ModelSerializer):
         model = Generation
         fields = [
             'id', 'user_email', 'type', 'prompt', 'negative_prompt',
-            'model', 'resolution', 'aspect_ratio', 'duration', 'seed',
-            'quality', 'output_format', 'generate_audio', 'voice', 'speed',
-            'output_url', 'job_id', 'polling_url', 'status', 'error_message', 'metadata',
+            'model', 'resolution', 'aspect_ratio', 'size', 'duration', 'seed',
+            'quality', 'output_format', 'background', 'output_compression',
+            'batch_size', 'reference_urls', 'frame_images',
+            'generate_audio', 'voice', 'speed', 'instructions', 'response_format',
+            'output_url', 'output_urls', 'job_id', 'polling_url', 'status',
+            'error_message', 'metadata',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
-            'id', 'user_email', 'output_url', 'job_id', 'polling_url',
+            'id', 'user_email', 'output_url', 'output_urls', 'job_id',
+            'polling_url',
             'status', 'error_message', 'created_at', 'updated_at',
             # Written by the dispatcher (generation cost, agent reasoning), so
             # a client cannot seed it with arbitrary content.
@@ -25,11 +31,18 @@ class GenerationSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        """Reject a model the selected modality cannot actually run.
+        """Reject a model the modality cannot run, and a dial the model cannot take.
 
-        Without this the request reaches OpenRouter and fails there, surfacing
-        as an opaque provider error on a row already marked failed. Catching it
-        at the edge returns a 400 naming the problem instead.
+        Without the first check the request reaches OpenRouter and fails there,
+        surfacing as an opaque provider error on a row already marked failed.
+
+        The second is the same argument one level down. Each model advertises
+        its own dial set, and the two ways of getting it wrong do not look
+        alike: a value outside an advertised enum is a hard 400 from the
+        provider, while a dial the model never advertised is *silently
+        ignored* — the request succeeds, the user is billed, and the setting
+        did nothing. Both are refused here, against the same catalogue the
+        picker renders from. See `imagine/validation.py`.
         """
         kind = attrs.get('type') or getattr(self.instance, 'type', None)
         model = attrs.get('model') or getattr(self.instance, 'model', None)
@@ -47,6 +60,20 @@ class GenerationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'model': f"'{model}' is not an available {kind} model.",
             })
+
+        merged = {
+            field: attrs.get(field, getattr(self.instance, field, None))
+            for field in (
+                'resolution', 'aspect_ratio', 'size', 'duration', 'quality',
+                'output_format', 'background', 'output_compression',
+                'batch_size', 'reference_urls', 'frame_images', 'voice',
+                'speed', 'instructions', 'response_format',
+            )
+        }
+        try:
+            validate_dials(kind, find_model(caps, kind, model), merged)
+        except DialError as exc:
+            raise serializers.ValidationError(exc.args[0])
         return attrs
 
 

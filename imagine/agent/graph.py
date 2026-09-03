@@ -29,9 +29,18 @@ def _intent_to_generation_kwargs(intent: Dict[str, Any], user) -> Dict[str, Any]
         "resolution": str(p["resolution"]) if p.get("resolution") else None,
         "aspect_ratio": p.get("aspect_ratio"),
         "duration": str(p["duration"]) if p.get("duration") else None,
+        "size": p.get("size"),
         "quality": p.get("quality"),
+        "output_format": p.get("output_format"),
+        "background": p.get("background"),
+        "output_compression": p.get("output_compression"),
+        "batch_size": p.get("batch_size"),
+        "reference_urls": p.get("reference_urls") or [],
+        "frame_images": p.get("frame_images") or [],
         "voice": p.get("voice"),
         "speed": float(p["speed"]) if p.get("speed") else None,
+        "instructions": p.get("instructions"),
+        "response_format": p.get("response_format"),
         "metadata": {"agent": True, "reasoning": intent.get("reasoning", "")},
     }
 

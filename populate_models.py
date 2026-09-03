@@ -109,16 +109,37 @@ RETIRED_MODEL_VALUES = [
     "o3",                                   # superseded by o4-mini / gpt-5.6 reasoning
     # Ollama local — tiny or superseded
     "deepseek-r1:1.5b",                     # superseded by 8b/32b, too small for R1 quality
-    "qwen2.5-coder:32b",                    # superseded by qwen3.6:latest
+    "qwen2.5-coder:32b",                    # superseded by qwen3.6:latest,
+    # Pruned 2026-09-02 -- not cost-efficient / fast / intelligent, superseded by 2026-08/09 open-source wave
+    "openai/gpt-4o-mini",                   # superseded by gpt-5.6-luna ($0.20/$1.20, 1.5M ctx, far smarter)
+    "gpt-4o-mini",                          # openai provider duplicate of above
+    "google/gemini-3.1-pro-preview",        # superseded by gemini-3.7-flash ($0.75 vs $2/12, faster)
+    "deepseek/deepseek-v4-pro",             # superseded by v4-pro-0813 (cheaper cached, newer)
+    "deepseek/deepseek-v4-flash",           # superseded by v4-flash-0731 ($0.07 vs $0.22)
+    # Gemma family -- small, not competitive vs Qwen/DeepSeek/NVIDIA (pruned per user 2026-09-02)
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-31b-it",
+    "gemma4:latest",
+    "gemma4:4b",
 ]
 
 
-def m(name, value, is_free=False, caps=None, input_price="0.0000", output_price="0.0000", cached_price=None, context=0):
+def m(name, value, is_free=False, caps=None, input_price="0.0000", output_price="0.0000",
+      cached_price=None, context=0, cache_write_price=None):
     """
     Helper: caps is capability dict, pricing is USD per 1M tokens as strings
     (kept as string to avoid binary float). cached_price None means no cache tier.
     context is max input tokens (0 = unknown).
     Pricing source: official provider pages + OpenRouter listings, verified 2026-08-24.
+
+    `cache_write_price` is what the provider charges to *write* the cache, and
+    None means it charges nothing — which is true of OpenAI and of every model
+    served without prompt caching. Anthropic-family models routed through
+    OpenRouter charge ~1.25x input to write, and folding that into the input
+    rate understates exactly the long runs it is meant to bound. Note that
+    `is_free=True` is load-bearing beyond display: `llm/pricing.py` reads it to
+    tell a genuinely free model from one whose price nobody filled in, and only
+    the latter is reported as `unpriced`.
     """
     return {
         "name": name,
@@ -128,6 +149,7 @@ def m(name, value, is_free=False, caps=None, input_price="0.0000", output_price=
         "input_price_per_million": input_price,
         "output_price_per_million": output_price,
         "cached_input_price_per_million": cached_price,
+        "cache_write_price_per_million": cache_write_price,
         "context_window": context,
     }
 
@@ -144,6 +166,10 @@ def build_model_defaults(item):
         "cached_input_price_per_million": (
             Decimal(str(item["cached_input_price_per_million"]))
             if item.get("cached_input_price_per_million") is not None else None
+        ),
+        "cache_write_price_per_million": (
+            Decimal(str(item["cache_write_price_per_million"]))
+            if item.get("cache_write_price_per_million") is not None else None
         ),
         "context_window": int(item.get("context_window", 0)),
     }
@@ -229,7 +255,6 @@ def populate():
                 # --- Mistral via OpenRouter ---
                 m("Mistral Small 4", "mistralai/mistral-small-2603", caps=VISION_CAPS, input_price="0.1000", output_price="0.3000", context=128000),
                 # --- Google Open via OpenRouter ---
-                m("Google Gemma 4 31B Free", "google/gemma-4-31b-it:free", True, CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=128000),
                 # --- NVIDIA via OpenRouter (the :free suffix is OpenRouter-only) ---
                 m("NVIDIA Nemotron 3 Ultra 550B", "nvidia/nemotron-3-ultra-550b-a55b", caps=REASONING_CAPS, input_price="0.5000", output_price="2.2000", context=1000000),
                 m("NVIDIA Nemotron 3 Super 120B Free", "nvidia/nemotron-3-super-120b-a12b:free", True, CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=1000000),
@@ -240,6 +265,39 @@ def populate():
                 # GLM-5.3: Z.ai 2026-08-14, $1.40/$4.40 cached $0.26, 1M ctx 128K out — docs: docs.z.ai/guides/overview/pricing
                 m("Meta Muse Spark 1.2", "meta/muse-spark-1.2", caps=MULTIMODAL_CAPS, input_price="1.2500", output_price="4.2500", cached_price="0.1500", context=1048576),
                 m("Z.ai GLM-5.3", "z-ai/glm-5.3", caps=REASONING_CAPS, input_price="1.4000", output_price="4.4000", cached_price="0.2600", context=1000000),
+                # --- Sep 2026: Muse Spark 1.3 family (verified 2026-09-03 against OpenRouter + Meta pricing) ---
+                # Standard: meta/muse-spark-1.3, $1.25/$4.25 cached $0.15, 1M ctx, text+image+video in — private, not trained on.
+                # Contributor: meta/muse-spark-1.3-contributor, $0.10/$0.20 cached $0.002, same caps/ctx — ~12x cheaper
+                # in exchange for Meta training on prompts/completions. Same checkpoint, distinct billing endpoint.
+                m("Meta Muse Spark 1.3", "meta/muse-spark-1.3", caps=MULTIMODAL_CAPS, input_price="1.2500", output_price="4.2500", cached_price="0.1500", context=1048576),
+                m("Meta Muse Spark 1.3 Contributor", "meta/muse-spark-1.3-contributor", caps=MULTIMODAL_CAPS, input_price="0.1000", output_price="0.2000", cached_price="0.0020", context=1048576),
+                # --- Sep 2026: DeepSeek V4 Flash Vision Exp (verified 2026-09-03) ---
+                # deepseek/deepseek-v4-flash-vision-exp, 2026-08-21 exp, $0.22/$0.66 cached $0.007 on OpenRouter,
+                # 1M ctx, text+image->text + reasoning/tools/structured/caching. Vision twin of the 0731 Flash row below.
+                # --- Sep 2026 open-source wave (updated versions, verified 2026-09-02 against OpenRouter /v1/models) ---
+                # Qwen3.8 Flash: open weights Qwen/Qwen3.8-Flash-Next, $0.15/$0.47 1M ctx, image+video->text -- updated, more intelligent than 3.7 Flash ($0.03) at still-cheap price
+                m("Qwen3.8 Flash", "qwen/qwen3.8-flash", caps={**VISION_CAPS, "video_input": True}, input_price="0.1500", output_price="0.4700", context=1000000),
+                # Qwen3.8 2.4T A95B: open weights Qwen/Qwen3.8-2.4T-A95B, 2.4T MoE frontier, $2/$6 1M -- updated max tier
+                m("Qwen3.8 2.4T A95B", "qwen/qwen3.8-2.4t-a95b", caps=CHAT_CAPS, input_price="2.0000", output_price="6.0000", context=1048576),
+                # DeepSeek V4 Flash 0731: open weights deepseek-ai/DeepSeek-V4-Flash-0731, $0.07/$0.18 1.3M -- cheaper & smarter than v4-flash ($0.22)
+                m("DeepSeek V4 Flash 0731", "deepseek/deepseek-v4-flash-0731", caps=REASONING_CAPS, input_price="0.0700", output_price="0.1800", context=1310720),
+                m("DeepSeek V4 Flash Vision Exp", "deepseek/deepseek-v4-flash-vision-exp", caps={**VISION_CAPS, "numeric_input": True, "numeric_generation": True}, input_price="0.2200", output_price="0.6600", cached_price="0.0070", context=1048576),
+                # DeepSeek V4 Pro 0813: open weights deepseek-ai/DeepSeek-V4-Pro-0813, $1.12/$3.35 1M -- updated pro tier
+                m("DeepSeek V4 Pro 0813", "deepseek/deepseek-v4-pro-0813", caps=REASONING_CAPS, input_price="1.1200", output_price="3.3500", context=1048576),
+                # Z.ai GLM-5.3 Flash: open weights zai-org/GLM-5.3-Flash, $0.075/$0.25 cached $0.015, 1M ctx (providers vary 262K-1.31M) -- cost-efficient flash of 5.3 ($1.40)
+                m("Z.ai GLM-5.3 Flash", "z-ai/glm-5.3-flash", caps={**VISION_CAPS, "video_input": True}, input_price="0.0750", output_price="0.2500", cached_price="0.0150", context=1048576),
+                # NVIDIA Nemotron 3.5 Lightning: open weights nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16, $0.08/$0.20 262k -- cheaper than 3.5-30b-a3b
+                m("NVIDIA Nemotron 3.5 Lightning", "nvidia/nemotron-3.5-lightning", caps=CHAT_CAPS, input_price="0.0800", output_price="0.2000", context=262144),
+                # StepFun Step 3.7 Flash: open weights stepfun-ai/Step-3.7-Flash, 196B MoE 11B active, $0.20/$1.15 262k multimodal -- fastest cheap
+                m("StepFun Step 3.7 Flash", "stepfun/step-3.7-flash", caps=MULTIMODAL_CAPS, input_price="0.2000", output_price="1.1500", context=262144),
+                # MiniMax M3: open weights MiniMaxAI/Minimax-M3, $0.30/$1.20 1M multimodal -- cost-efficient coding
+                m("MiniMax M3", "minimax/minimax-m3", caps=MULTIMODAL_CAPS, input_price="0.3000", output_price="1.2000", context=1048576),
+                # Moonshot Kimi K2.7 Code: open weights moonshotai/Kimi-K2.7-Code, $0.66/$3.40 262k image -- updated cheaper than K3 ($3/$15)
+                m("Moonshot Kimi K2.7 Code", "moonshotai/kimi-k2.7-code", caps=VISION_CAPS, input_price="0.6600", output_price="3.4000", context=262144),
+                # Meta Muse Glimmer 30B: open weights meta-models/Muse-Glimmer-30B, $0.30/$1.20 131k image -- new Meta open
+                m("Meta Muse Glimmer 30B", "meta/muse-glimmer-30b", caps=VISION_CAPS, input_price="0.3000", output_price="1.2000", context=131072),
+                # Inception Mercury 2.5 Preview: diffusion LM, $0.04/$0.15 260k -- fastest cheap text
+                m("Inception Mercury 2.5 Preview", "inception/mercury-2.5-preview", caps=CHAT_CAPS, input_price="0.0400", output_price="0.1500", context=260000),
             ],
         },
         {
@@ -265,7 +323,6 @@ def populate():
                 # Open-weight models hosted on NIM (pruned older gens)
                 m("GPT-OSS 120B", "openai/gpt-oss-120b", caps=CHAT_CAPS, input_price="0.2000", output_price="0.8000", context=128000),
                 m("GPT-OSS 20B", "openai/gpt-oss-20b", caps=CHAT_CAPS, input_price="0.1000", output_price="0.3000", context=128000),
-                m("Gemma 4 31B", "google/gemma-4-31b-it", caps=VISION_CAPS, input_price="0.1000", output_price="0.3000", context=256000),
                 # Embeddings — RAG pipeline model. 2048-dim; inference/engine.py
                 # pins EMBEDDING_DIM to match, and EMBEDDER_VERSION carries the
                 # pair so a swap re-indexes instead of mixing two vector spaces.
@@ -304,8 +361,6 @@ def populate():
                 m("Llama 4 Scout", "llama4:scout", True, VISION_CAPS, input_price="0.0000", output_price="0.0000", context=10000000),
                 m("Qwen 3.6", "qwen3.6:latest", True, VISION_CAPS, input_price="0.0000", output_price="0.0000", context=262144),
                 m("Qwen 3 8B", "qwen3:8b", True, CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=32768),
-                m("Gemma 4", "gemma4:latest", True, VISION_CAPS, input_price="0.0000", output_price="0.0000", context=262144),
-                m("Gemma 4 4B", "gemma4:4b", True, VISION_CAPS, input_price="0.0000", output_price="0.0000", context=128000),
                 m("Phi 4", "phi4:latest", True, REASONING_CAPS, input_price="0.0000", output_price="0.0000", context=16384),
                 m("Mistral 7B", "mistral:7b", True, CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=32768),
             ],
@@ -374,6 +429,18 @@ def populate():
             for value in sorted(retired.values_list("value", flat=True)):
                 print(f"   - {value}")
             retired.update(is_active=False)
+            print()
+
+        # Prune Gemma and weaker irrelevant older models (2026-09-02)
+        # Any active model not in the curated synced list is stale.
+        # This removes Gemma family and $0 placeholder older models (qwen3-14b, gemini-2.5, gpt-5.2 etc.)
+        # not cost-efficient / fast / intelligent vs current Qwen3.8/DeepSeek/NVIDIA wave.
+        stale = AIModel.objects.filter(is_active=True).exclude(value__in=synced_model_values)
+        if stale.exists():
+            print(f"Pruning {stale.count()} stale/weak models not in curated list (Gemma + older):")
+            for v in sorted(stale.values_list("value", flat=True)):
+                print(f"   - {v}")
+            stale.update(is_active=False)
             print()
 
     print("=" * 80)

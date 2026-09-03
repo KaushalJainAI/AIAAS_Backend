@@ -70,6 +70,14 @@ class OpenRouterNode(OpenAICompatibleLLMNode):
             model=model, messages=messages, config=config, stream=stream,
         )
         payload["top_p"] = num(config.get("top_p"), 1.0)
+        # Asks OpenRouter to return what it actually charged, plus the cache
+        # split, in its usage object. Without it the response carries token
+        # counts only and every cost downstream is our own estimate against a
+        # price table that goes stale the day a model is repriced upstream —
+        # while OpenRouter, the party doing the billing, knew the real number
+        # all along. `usage.reported_cost_usd` wins over the estimate in
+        # `pricing.cost_for_usage` for exactly this reason.
+        payload["usage"] = {"include": True}
         return payload
 
 

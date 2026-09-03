@@ -9,7 +9,9 @@ from django.urls import path
 
 from .views import (
     agents,
+    builder,
     conversations,
+    gallery,
     hitl,
     runs,
     system,
@@ -22,11 +24,25 @@ urlpatterns = [
     # Agents
     path('agents/', agents.agent_list, name='agent_list'),
     path('agents/<int:agent_id>/', agents.agent_detail, name='agent_detail'),
+    # The builder's chat pane: a description in, knob changes out. Nothing is
+    # saved — it proposes against the board the caller sends, and the save it
+    # leads to is the ordinary PATCH above. Not nested under an agent id
+    # because a brand-new agent has none.
+    path('agents/configure/', builder.configure_agent, name='agent_configure'),
     path('agents/<int:agent_id>/execute/', runs.agent_execute, name='agent_execute'),
     path('agents/<int:agent_id>/approve/', runs.agent_approve, name='agent_approve'),
     path('agents/<int:agent_id>/reject/', runs.agent_reject, name='agent_reject'),
     path('agents/<int:agent_id>/steer/', runs.agent_steer, name='agent_steer'),
     path('agents/<int:agent_id>/autonomy/', runs.agent_autonomy, name='agent_autonomy'),
+
+    # Templates — the gallery you install a starting point from. The
+    # catalogue is code (`agents/gallery.py`), not rows, so these are reads
+    # against a dict; only the install writes anything, and it writes through
+    # the same serializer the builder saves through.
+    path('templates/', gallery.template_list, name='template_list'),
+    path('templates/<slug:slug>/', gallery.template_detail, name='template_detail'),
+    path('templates/<slug:slug>/install/', gallery.template_install,
+         name='template_install'),
 
     # Triggers — how something other than the user starts a run.
     path('triggers/', triggers.trigger_list, name='trigger_list'),

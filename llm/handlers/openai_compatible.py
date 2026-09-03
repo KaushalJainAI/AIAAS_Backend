@@ -40,6 +40,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 import httpx
 
 from .base import BaseNodeHandler, NodeExecutionResult
+from ..usage import DEFAULT_CONVENTION
 from .llm_base import ChatChunkParser, iter_sse_chunks
 
 if TYPE_CHECKING:
@@ -214,6 +215,13 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
     #: trailing usage frame). Set False on a subclass whose provider rejects
     #: the field rather than ignoring it.
     supports_stream_usage: bool = True
+    #: How this provider counts prompt tokens against its cache. Every provider
+    #: reachable through *this* base class speaks the OpenAI protocol, where
+    #: `prompt_tokens` INCLUDES the cached ones — so the default is right for
+    #: all of them and a subclass only changes it if it stops being
+    #: OpenAI-shaped. Getting this wrong bills every cached token twice, or not
+    #: at all, with no error either way. See `llm/usage.py`.
+    usage_convention: str = DEFAULT_CONVENTION
 
     # ── overridable hooks ──
 
@@ -437,6 +445,10 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
             "model": model,
             "media_url": media_url,
             "usage": data.get("usage") or {},
+            # Rides with the usage it describes: `access.complete` normalises
+            # the two together and has no other way to learn which convention
+            # produced them.
+            "usage_convention": self.usage_convention,
         })
         return NodeExecutionResult(
             success=True, data=result,
@@ -476,7 +488,10 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
             model=model, messages=await self._messages(prompt, config, context),
             config=config, stream=True,
         )
-        parser = ChatChunkParser(emit_thinking=bool(config.get("thinking", False)))
+        parser = ChatChunkParser(
+            emit_thinking=bool(config.get("thinking", False)),
+            usage_convention=self.usage_convention,
+        )
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:

@@ -193,3 +193,75 @@ class CostThrottleTests(TestCase):
             self.assertTrue(
                 any(isinstance(t, ImagineGenerateThrottle) for t in view.get_throttles())
             )
+
+class BatchOutputTests(TestCase):
+    """`n` returns several images. All of them are the user's."""
+
+    def _run(self, urls):
+        gen = _make_generation(batch_size=len(urls))
+        service = Mock()
+        service.generate_image.return_value = {
+            "status": "completed", "url": urls[0], "urls": urls, "cost": 0.04,
+        }
+        # Imported lazily inside the dispatcher, so it is patched where it lives.
+        with patch("imagine.services.documents.persist_generation_as_document"):
+            from imagine.services.dispatcher import run_image_generation
+
+            run_image_generation(gen, service)
+        gen.refresh_from_db()
+        return gen
+
+    def test_every_image_of_a_batch_is_kept(self):
+        """`data[0]` was the only one read: three images generated, three
+        billed, one shown."""
+        gen = self._run(["data:image/png;base64,a", "data:image/png;base64,b",
+                         "data:image/png;base64,c"])
+        self.assertEqual(len(gen.output_urls), 3)
+        # The first stays where every single-result reader already looks.
+        self.assertEqual(gen.output_url, gen.output_urls[0])
+
+    def test_a_single_result_still_fills_both_fields(self):
+        gen = self._run(["data:image/png;base64,a"])
+        self.assertEqual(gen.output_urls, [gen.output_url])
+
+
+class BatchPersistenceTests(TestCase):
+    """A batch lands in My Files as a batch, not as its first frame."""
+
+    def _persist(self, urls):
+        from imagine.services.documents import persist_generation_as_document
+
+        gen = _make_generation()
+        gen.output_url = urls[0]
+        gen.output_urls = urls
+        gen.status = "completed"
+        gen.save()
+        first = persist_generation_as_document(gen)
+        gen.refresh_from_db()
+        return gen, first
+
+    def test_each_output_becomes_its_own_document(self):
+        from inference.models import Document
+
+        urls = [f"data:image/png;base64,{c}" for c in ("aGk=", "aGo=", "aGs=")]
+        gen, first = self._persist(urls)
+        docs = Document.objects.filter(metadata__generation_id=gen.id)
+        self.assertEqual(docs.count(), 3)
+        # Distinct names: four files sharing one timestamp would otherwise
+        # differ by nothing at all.
+        self.assertEqual(len({d.name for d in docs}), 3)
+        self.assertEqual(gen.metadata["document_ids"], [d.id for d in docs.order_by("id")])
+        # The singular key still points at the first, because the API and the
+        # frontend both read that one.
+        self.assertEqual(gen.metadata["document_id"], first.id)
+
+    def test_persisting_twice_does_not_duplicate_any_of_them(self):
+        """Idempotency is per output now — keyed on the first document alone,
+        a retry would have re-created the other two."""
+        from imagine.services.documents import persist_generation_as_document
+        from inference.models import Document
+
+        urls = [f"data:image/png;base64,{c}" for c in ("aGk=", "aGo=")]
+        gen, _ = self._persist(urls)
+        persist_generation_as_document(gen)
+        self.assertEqual(Document.objects.filter(metadata__generation_id=gen.id).count(), 2)

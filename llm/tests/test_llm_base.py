@@ -304,8 +304,20 @@ class ChatChunkParserTests(SimpleTestCase):
         usage = {"total_tokens": 12}
         self.assertEqual(
             self._events(ChatChunkParser(), {"choices": [], "usage": usage}),
-            [{"type": "metadata", "usage": usage}],
+            [{"type": "metadata", "usage": usage,
+              "usage_convention": "inclusive"}],
         )
+
+    def test_the_usage_convention_travels_with_the_usage(self):
+        """Without it the accumulator cannot read the object it is handed.
+
+        By the time a metadata frame reaches `StreamAccumulator` the handler
+        that knows how its provider counts cached tokens is long out of scope,
+        and guessing wrong double-counts them with no error to notice.
+        """
+        parser = ChatChunkParser(usage_convention="exclusive")
+        [frame] = self._events(parser, {"choices": [], "usage": {"total_tokens": 1}})
+        self.assertEqual(frame["usage_convention"], "exclusive")
 
     def test_citations_are_forwarded(self):
         self.assertEqual(

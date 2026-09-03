@@ -41,6 +41,9 @@ def poll_video_generation(self, generation_id):
         if result["status"] == "completed":
             gen.status = "completed"
             gen.output_url = result["url"]
+            # One entry, but the same field every other modality writes — a
+            # reader should not have to know which kind produced the row.
+            gen.output_urls = [result["url"]] if result["url"] else []
             gen.save()
             # Persist to Documents (Images/Videos/Audio per user)
             try:

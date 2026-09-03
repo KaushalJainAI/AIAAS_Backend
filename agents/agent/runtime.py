@@ -29,6 +29,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from asgiref.sync import sync_to_async
@@ -645,24 +646,22 @@ def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
 def _spend_this_month(agent, user) -> int:
     """What this agent has cost its owner so far this month, in rupees.
 
-    Derived from `tokens_used`, not `credits_used`: the latter is a column
-    nothing writes, so summing it returned zero on every run and the spend cap
-    below could never refuse anything however low it was set. The conversion
-    lives in `agents.spend` because `views/agents.py` has to show the user the
-    same number this refuses them on.
+    Derived from what each run recorded — `cost_usd` where the run was priced,
+    the blended `tokens_used` rate where it was not — never from `credits_used`,
+    a column nothing writes, which returned zero on every run and left the cap
+    below unable to refuse anything however low it was set. The conversion lives
+    in `agents.spend` because `views/agents.py` has to show the user the same
+    number this refuses them on.
     """
-    from django.db.models import Sum
     from logs.models import ExecutionLog
 
-    from agents.spend import rupees_for
+    from agents.spend import aggregate_rupees
 
     start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    tokens = (
+    return aggregate_rupees(
         ExecutionLog.objects
         .filter(user=user, subagent=agent, created_at__gte=start)
-        .aggregate(total=Sum('tokens_used'))['total']
     )
-    return rupees_for(tokens)
 
 
 async def check_guardrails(agent, user) -> None:
@@ -752,10 +751,52 @@ def _close_log(log, *, status: str, result: dict[str, Any], tokens: int,
         log.duration_ms = int(
             (log.completed_at - log.started_at).total_seconds() * 1000
         )
+    _roll_up_cost(log)
     log.save(update_fields=[
         'status', 'output_data', 'tokens_used', 'error_message',
         'completed_at', 'duration_ms', 'updated_at',
+        'input_tokens', 'output_tokens', 'cached_read_tokens',
+        'cached_write_tokens', 'cost_usd', 'cost_source',
     ])
+
+
+def _roll_up_cost(log) -> None:
+    """Sum this run's turns onto the run, in place.
+
+    Summed from `AgentTurn` rather than accumulated in memory because the turn
+    rows are the record: a resumed run re-enters the loop with a fresh
+    in-process total but the same turn rows, and `update_or_create` on
+    `(execution, index)` means re-running a turn corrects its row instead of
+    adding a second one. Anything counted in memory would double on resume.
+
+    A failure here costs the cost figures, never the run: the answer is already
+    in hand and `log.save` is about to record it.
+    """
+    from django.db.models import Sum
+    from llm.pricing import combine_sources
+    from logs.models import AgentTurn
+
+    try:
+        turns = AgentTurn.objects.filter(execution=log)
+        totals = turns.aggregate(
+            input=Sum('input_tokens'), output=Sum('output_tokens'),
+            cached_read=Sum('cached_read_tokens'),
+            cached_write=Sum('cached_write_tokens'),
+            cost=Sum('cost_usd'),
+        )
+        log.input_tokens = totals['input'] or 0
+        log.output_tokens = totals['output'] or 0
+        log.cached_read_tokens = totals['cached_read'] or 0
+        log.cached_write_tokens = totals['cached_write'] or 0
+        log.cost_usd = totals['cost'] or Decimal('0')
+        # The total is only as trustworthy as its least-known turn, so one
+        # unpriced turn makes the run unpriced. A confident sum that silently
+        # omits a turn is worse than an admitted gap.
+        log.cost_source = combine_sources(
+            turns.values_list('cost_source', flat=True)
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception('[Agent] Failed to roll up cost for %s', log.execution_id)
 
 
 @sync_to_async

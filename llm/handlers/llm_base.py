@@ -38,6 +38,8 @@ from typing import Any, AsyncIterator, Iterator, Sequence
 
 import httpx
 
+from ..usage import DEFAULT_CONVENTION
+
 logger = logging.getLogger(__name__)
 
 THINK_OPEN = "<think>"
@@ -302,11 +304,19 @@ class ChatChunkParser:
         emit_thinking: bool = True,
         emit_tool_calls: bool = True,
         reasoning_keys: Sequence[str] = DEFAULT_REASONING_KEYS,
+        usage_convention: str = DEFAULT_CONVENTION,
     ):
         self.emit_thinking = emit_thinking
         self.emit_tool_calls = emit_tool_calls
         self.reasoning_keys = tuple(reasoning_keys)
         self.splitter = ReasoningSplitter()
+        #: Forwarded on every metadata frame so the accumulator can read the
+        #: usage object correctly. It travels *with the usage* rather than
+        #: being looked up later, because by the time a chunk reaches
+        #: `StreamAccumulator` the handler that produced it is out of scope —
+        #: and reading an inclusive payload as exclusive double-counts every
+        #: cached token silently. See `llm/usage.py`.
+        self.usage_convention = usage_convention
 
     def feed(self, chunk: dict[str, Any]) -> Iterator[dict[str, Any]]:
         # A provider may report a failure *inside* a 200 SSE body rather than
@@ -358,7 +368,11 @@ class ChatChunkParser:
         # Usage arrives on a trailing frame with empty choices when
         # stream_options.include_usage is set, and inline for other providers.
         if chunk.get("usage"):
-            yield {"type": "metadata", "usage": chunk["usage"]}
+            yield {
+                "type": "metadata",
+                "usage": chunk["usage"],
+                "usage_convention": self.usage_convention,
+            }
 
         if chunk.get("citations"):
             yield {"type": "citations", "citations": chunk["citations"]}

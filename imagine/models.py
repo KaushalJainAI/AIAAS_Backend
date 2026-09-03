@@ -25,12 +25,29 @@ class Generation(models.Model):
     resolution = models.CharField(max_length=20, blank=True, null=True)
     # Wide enough for the long ratios the catalog advertises, e.g. '19.5:9'.
     aspect_ratio = models.CharField(max_length=16, blank=True, null=True)
+    # The explicit alternative to a resolution tier: 'WIDTHxHEIGHT'. Both the
+    # image and video endpoints accept it, and a model that advertises
+    # `supported_sizes` is one where the tier list may be empty — so without
+    # this there is no way to say how big the output should be at all.
+    size = models.CharField(max_length=20, blank=True, null=True)
     duration = models.CharField(max_length=10, blank=True, null=True)
     seed = models.BigIntegerField(blank=True, null=True)
+    # Image-to-image / style guidance: `input_references` on both endpoints.
+    # HTTP(S) urls or data URIs, capped per model by `max_references`. Stored
+    # as sent, because a result is only reproducible with the inputs that made
+    # it.
+    reference_urls = models.JSONField(default=list, blank=True)
 
     # Image specific
     quality = models.CharField(max_length=20, blank=True, null=True)
     output_format = models.CharField(max_length=10, blank=True, null=True)
+    #: `auto` | `transparent` | `opaque`, on the models that advertise it.
+    background = models.CharField(max_length=20, blank=True, null=True)
+    #: 0-100, webp/jpeg only.
+    output_compression = models.IntegerField(blank=True, null=True)
+    #: `n` — an upper bound on how many images to return, not a promise. One
+    #: row still describes one request; the extra images land in `output_urls`.
+    batch_size = models.IntegerField(blank=True, null=True)
 
     # Video specific. `motion_intensity` and `fps` are retained only because
     # historical rows carry values; OpenRouter's video API accepts neither, so
@@ -42,8 +59,21 @@ class Generation(models.Model):
     # Audio specific
     voice = models.CharField(max_length=50, blank=True, null=True)
     speed = models.FloatField(blank=True, null=True)
-    
+    #: Tone direction for the OpenAI speech family ("speak warmly, unhurried").
+    instructions = models.TextField(blank=True, null=True)
+    #: `mp3` | `pcm`. The endpoint defaults to pcm; we ask for mp3 unless told
+    #: otherwise, because that is what an <audio> element can play.
+    response_format = models.CharField(max_length=10, blank=True, null=True)
+
+    #: Frame pinning for video: `[{"url": ..., "frame_type": "first_frame"}]`.
+    #: Which slots a model accepts comes from its `frame_slots`.
+    frame_images = models.JSONField(default=list, blank=True)
+
     output_url = models.TextField(blank=True, null=True) # Changed to TextField for base64
+    #: Every output of the request, in order. `output_url` stays the first one
+    #: so nothing that reads a single result had to change; a batch of four is
+    #: one request, one row, four entries here.
+    output_urls = models.JSONField(default=list, blank=True)
     job_id = models.CharField(max_length=255, blank=True, null=True)
     polling_url = models.URLField(max_length=1000, blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')

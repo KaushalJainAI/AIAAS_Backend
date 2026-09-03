@@ -16,9 +16,13 @@ The previous implementation read `output_modalities` off the top level of
 `/api/v1/models`, where the field does not exist (it lives under
 `architecture.output_modalities`). Every bucket came back empty, which is why
 no model could be picked anywhere in the UI. Two guards now stand against a
-silent repeat: `normalize_*` never invents an empty option list, and
-`tests/test_catalog.py` asserts each bucket is non-empty against a recorded
-fixture of the real payloads.
+silent repeat: `tests/test_catalog.py` asserts each bucket is non-empty
+against a recorded fixture of the real payloads.
+
+The opposite mistake was made later and is also fixed here: `normalize_*` used
+to *invent* option lists for a model that advertised none. See the note above
+`normalize_image_model` — a dial is offered only where the model claims it, and
+only with the values it claims, because the API rejects anything else.
 """
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +71,10 @@ TTS_MODELS: List[Dict[str, Any]] = [
         "description": "Low-latency English-first speech with steerable delivery.",
         "voices": ["alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "sage"],
         "supports_speed": True,
+        # "steerable delivery" is this: the OpenAI speech models take a free-text
+        # `instructions` field ("speak in a warm, unhurried tone"). No other
+        # family here accepts it, so it is declared rather than assumed.
+        "supports_instructions": True,
     },
     {
         "id": "minimax/speech-2.8-hd",
@@ -137,7 +145,8 @@ def _enum_values(spec: Any) -> List[Any]:
 
     Specs are typed objects, e.g. `{"type": "enum", "values": ["1K", "2K"]}` or
     `{"type": "range", "min": 1, "max": 4}`. Only enums carry a choice list;
-    anything else yields none, and the caller falls back to a default.
+    an absent or non-enum spec yields `[]`, which means *this model exposes no
+    such control* and is never to be papered over — see `normalize_image_model`.
     """
     if isinstance(spec, dict) and spec.get("type") == "enum":
         values = spec.get("values")
@@ -146,76 +155,120 @@ def _enum_values(spec: Any) -> List[Any]:
     return []
 
 
-def _range_max(spec: Any, default: int = 1) -> int:
-    if isinstance(spec, dict) and spec.get("type") == "range":
-        try:
-            return int(spec.get("max", default))
-        except (TypeError, ValueError):
-            return default
-    return default
+def _range(spec: Any) -> Optional[Dict[str, int]]:
+    """`{"type": "range", "min": 1, "max": 4}` -> `{"min": 1, "max": 4}`.
 
-
-def _clean(values: List[Any], fallback: List[Any]) -> List[Any]:
-    """Never hand the UI an empty option list — it renders as a dead control."""
-    return list(values) if values else list(fallback)
+    None when the model does not advertise the parameter at all, which is the
+    difference between "you may ask for 1 to 4" and "do not send this key".
+    """
+    if not isinstance(spec, dict) or spec.get("type") != "range":
+        return None
+    try:
+        return {"min": int(spec.get("min", 0)), "max": int(spec.get("max", 0))}
+    except (TypeError, ValueError):
+        return None
 
 
 # ── normalizers ──────────────────────────────────────────────────────────────
 
-DEFAULT_IMAGE_RESOLUTIONS = ["1K", "2K"]
-DEFAULT_IMAGE_ASPECT_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4"]
-DEFAULT_VIDEO_RESOLUTIONS = ["720p"]
-DEFAULT_VIDEO_ASPECT_RATIOS = ["16:9", "9:16", "1:1"]
-DEFAULT_VIDEO_DURATIONS = [5]
+# There are deliberately no default option lists here any more.
+#
+# `_clean` used to substitute `["1K", "2K"]` (and five aspect ratios) whenever a
+# model advertised none, so the panel would never render a dead control. The
+# cost of that kindness was measured against the live API: a model advertising
+# `["2K", "4K"]` answers a request for `1K` with
+#
+#   400 — resolution "512": not supported. Accepted: 2K, 4K
+#
+# and a model that advertises no `resolution` at all silently ignores the key,
+# so the control moved nothing while looking like it did. Both failures come
+# from the same place — offering a dial the model never claimed. An empty list
+# now means exactly that, and the UI renders no control for it.
+#
+# The dials below are the complete set `POST /api/v1/images` and
+# `POST /api/v1/videos` accept, as advertised per model by `/images/models` and
+# `/videos/models`.
 
 
 def normalize_image_model(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """`/api/v1/images/models` entry -> our capability shape."""
+    """`/api/v1/images/models` entry -> our capability shape.
+
+    Every key in `supported_parameters` is surfaced, because every one of them
+    is a request parameter the user is entitled to set. The union across the
+    live catalog is: aspect_ratio, background, input_references, n,
+    output_compression, output_format, quality, resolution, seed — and they are
+    genuinely per-model (only the OpenAI image models take `quality` and
+    `background`; only the vector and FLUX families take `output_format`).
+    """
     model_id = raw.get("id") or ""
     params = raw.get("supported_parameters") or {}
     architecture = raw.get("architecture") or {}
-    input_modalities = architecture.get("input_modalities") or []
+
+    references = _range(params.get("input_references"))
+    batch = _range(params.get("n"))
+    compression = _range(params.get("output_compression"))
 
     return {
         "id": model_id,
         "name": raw.get("name") or model_id,
         "provider": provider_of(model_id),
         "description": raw.get("description") or "",
-        "resolutions": _clean(
-            _enum_values(params.get("resolution")), DEFAULT_IMAGE_RESOLUTIONS
-        ),
-        "aspect_ratios": _clean(
-            _enum_values(params.get("aspect_ratio")), DEFAULT_IMAGE_ASPECT_RATIOS
-        ),
+        "resolutions": _enum_values(params.get("resolution")),
+        "aspect_ratios": _enum_values(params.get("aspect_ratio")),
         "qualities": _enum_values(params.get("quality")),
-        "max_batch": _range_max(params.get("n"), default=1),
+        "output_formats": _enum_values(params.get("output_format")),
+        "backgrounds": _enum_values(params.get("background")),
+        #: {min,max} or None. None means "do not send this key".
+        "output_compression": compression,
+        "batch": batch,
+        # Retained as the flat number the picker already reads; `batch` is the
+        # authority, and 0 means the model does not take `n` at all.
+        "max_batch": (batch or {}).get("max", 0),
+        "max_references": (references or {}).get("max", 0),
         "supports_seed": bool(params.get("seed")),
-        # Image-to-image: the model accepts reference images.
-        "supports_references": _range_max(params.get("input_references"), default=0) > 0
-        or "image" in input_modalities,
+        "supports_streaming": bool(raw.get("supports_streaming")),
+        # Kept for the existing picker badge. Note it is now strictly about
+        # whether references may be *sent*, not about input modalities: a model
+        # that lists `image` under inputs but advertises no `input_references`
+        # range has nowhere to put one.
+        "supports_references": (references or {}).get("max", 0) > 0,
+        "input_modalities": list(architecture.get("input_modalities") or []),
     }
 
 
 def normalize_video_model(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """`/api/v1/videos/models` entry -> our capability shape."""
+    """`/api/v1/videos/models` entry -> our capability shape.
+
+    The video catalog advertises its dials as plain lists rather than typed
+    specs. `supported_sizes` and `supported_frame_images` were being dropped:
+    the first is the explicit `WIDTHxHEIGHT` alternative to a resolution tier,
+    the second is what makes image-to-video possible at all — a model taking
+    `first_frame` can be handed the picture a clip should start from.
+    """
     model_id = raw.get("id") or ""
     return {
         "id": model_id,
         "name": raw.get("name") or model_id,
         "provider": provider_of(model_id),
         "description": raw.get("description") or "",
-        "resolutions": _clean(
-            raw.get("supported_resolutions") or [], DEFAULT_VIDEO_RESOLUTIONS
-        ),
-        "aspect_ratios": _clean(
-            raw.get("supported_aspect_ratios") or [], DEFAULT_VIDEO_ASPECT_RATIOS
-        ),
-        "durations": _clean(
-            raw.get("supported_durations") or [], DEFAULT_VIDEO_DURATIONS
-        ),
+        "resolutions": list(raw.get("supported_resolutions") or []),
+        "aspect_ratios": list(raw.get("supported_aspect_ratios") or []),
+        "sizes": list(raw.get("supported_sizes") or []),
+        "durations": list(raw.get("supported_durations") or []),
+        #: `first_frame` / `last_frame` — which ends of the clip may be pinned.
+        "frame_slots": list(raw.get("supported_frame_images") or []),
         "supports_audio": bool(raw.get("generate_audio")),
         "supports_seed": bool(raw.get("seed")),
     }
+
+
+#: What `POST /api/v1/audio/speech` returns. `pcm` is the API default; we ask
+#: for `mp3` unless told otherwise, because a `<audio>` element can play it.
+AUDIO_RESPONSE_FORMATS = ["mp3", "pcm"]
+
+#: The documented range. The slider used to run 0.25–4.0, which is the OpenAI
+#: chat-TTS range, not this endpoint's — anything outside is a provider error.
+AUDIO_SPEED_RANGE = {"min": 0.5, "max": 2.0}
 
 
 def normalize_audio_model(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -227,6 +280,12 @@ def normalize_audio_model(raw: Dict[str, Any]) -> Dict[str, Any]:
         "description": raw.get("description") or "",
         "voices": list(raw.get("voices") or []),
         "supports_speed": bool(raw.get("supports_speed")),
+        "speed_range": dict(AUDIO_SPEED_RANGE) if raw.get("supports_speed") else None,
+        "response_formats": list(AUDIO_RESPONSE_FORMATS),
+        #: Tone direction ("speak warmly"). An OpenAI-family extra, forwarded
+        #: as a provider option — declared per model so the box is not offered
+        #: where it would be dropped on the floor.
+        "supports_instructions": bool(raw.get("supports_instructions")),
     }
 
 

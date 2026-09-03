@@ -835,6 +835,17 @@ def visible_server_ids_sync(user_id: int | None) -> set[int]:
     )
 
 
+def visible_servers_sync(user_id: int | None) -> list[MCPServer]:
+    """The rows behind `visible_server_ids_sync`, for offering the choice.
+
+    `enabled_only=False` for exactly the reason that helper gives: this is the
+    pool a picker renders, and it has to be the same pool the validator
+    accepts. Two predicates would mean a connection the user is shown, picks,
+    and is then told does not exist.
+    """
+    return list(_visible_servers_queryset(user_id, enabled_only=False))
+
+
 async def get_servers_for_user(user) -> list[MCPServer]:
     """Return enabled MCPServer rows visible to the given user or user_id."""
     return await sync_to_async(_servers_for_user_sync)(_coerce_user_id(user))

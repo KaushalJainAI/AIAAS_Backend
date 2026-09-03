@@ -25,6 +25,8 @@ class BackfillTurnsMigrationTests(TransactionTestCase):
     available_apps = None
 
     before = [('logs', '0014_add_turns_and_revisions')]
+    #: The forward target under test. Deliberately *not* the value `tearDown`
+    #: restores to — see below.
     after = [('logs', '0016_drop_step_config')]
 
     def _migrate(self, targets):
@@ -38,8 +40,27 @@ class BackfillTurnsMigrationTests(TransactionTestCase):
         self.apps_before = self._migrate(self.before)
 
     def tearDown(self):
-        # Leave the database at the latest state so later tests are unaffected.
-        self._migrate([('logs', '0016_drop_step_config')])
+        # Leave the database at the app's real tip so later tests are
+        # unaffected. Asked of the migration graph rather than written down:
+        # this used to name `0016`, which was the tip on the day it was
+        # written, so adding `0017` left the schema rewound for the whole rest
+        # of the session. Every later test that wrote an `ExecutionLog` then
+        # failed on a column that does exist, three files away in another app
+        # — about as far from the cause as a test failure gets.
+        #
+        # Note `(app, None)` is NOT the way to spell this: in Django's executor
+        # that means *unapply everything for the app*.
+        self._migrate(self._tip())
+
+    @staticmethod
+    def _tip():
+        """The app's latest migration, as the executor spells a target."""
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        return [
+            node for node in executor.loader.graph.leaf_nodes()
+            if node[0] == 'logs'
+        ]
 
     def _seed(self, apps):
         User = apps.get_model('auth', 'User')

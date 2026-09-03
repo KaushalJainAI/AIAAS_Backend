@@ -23,7 +23,13 @@ def drop_old_extraction_tables(apps, schema_editor):
     connection = schema_editor.connection
     with connection.cursor() as cursor:
         tables = set(connection.introspection.table_names(cursor))
-        for table in ('extraction_extractionschema', 'extraction_extractedrow'):
+        # Child before parent: `extraction_extractedrow` carries an FK to
+        # `extraction_extractionschema`, so dropping the parent first fails on
+        # PostgreSQL with DependentObjectsStillExist. SQLite does not enforce
+        # this, which is why the wrong order survived until a real upgrade of
+        # the production database hit it. Order matters here, not CASCADE:
+        # CASCADE would also silently drop anything else that grew a reference.
+        for table in ('extraction_extractedrow', 'extraction_extractionschema'):
             if table in tables:
                 cursor.execute(f'DROP TABLE "{table}"')
         cursor.execute("DELETE FROM django_migrations WHERE app = 'extraction'")

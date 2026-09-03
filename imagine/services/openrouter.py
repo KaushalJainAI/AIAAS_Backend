@@ -25,7 +25,7 @@ catalog was unaddressable. The unified endpoint also names its fields properly
 """
 import base64
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -36,11 +36,44 @@ from . import catalog
 logger = logging.getLogger(__name__)
 
 
+#: The one sentence the whole app says about a missing key. It used to be
+#: assembled by appending this file's advice to `CredentialUnavailable`'s own,
+#: which already ends in "Add one under Credentials" — so the banner read
+#: "…Add one under Credentials, or configure a platform key. Add an
+#: 'OpenRouter API' credential under Credentials." Two instructions for one
+#: action reads as two actions.
+MISSING_CREDENTIAL_MESSAGE = (
+    "Imagine needs an OpenRouter key. Add an 'OpenRouter API' credential "
+    "under Credentials — generations work immediately, no restart needed."
+)
+
+#: Machine-readable companion, so a client can tell this apart from every other
+#: 400 without matching on prose. `useImagineStudio` treated *any* 400 from the
+#: catalogue as a missing credential, which was true only because nothing else
+#: there answers 400 yet.
+MISSING_CREDENTIAL_CODE = "credential_missing"
+
+
+def _image_url(entry: Dict[str, Any]) -> Optional[str]:
+    """One `data[]` entry -> something an <img> can show.
+
+    The documented shape is base64 plus a media type; some providers answer
+    with a hosted url instead, so both are accepted rather than failing on a
+    response that plainly contains an image.
+    """
+    if not isinstance(entry, dict):
+        return None
+    b64 = entry.get("b64_json")
+    if b64:
+        return f"data:{entry.get('media_type') or 'image/png'};base64,{b64}"
+    return entry.get("url")
+
+
 class MissingOpenRouterCredentialError(RuntimeError):
     """Raised when a user has no usable OpenRouter credential configured.
 
     Kept as its own type because the imagine views and tasks catch it to return
-    a specific "add a credential" message; it now wraps the shared
+    a specific "add a credential" message; it wraps the shared
     `CredentialUnavailable` rather than being raised from a private query.
     """
 
@@ -54,10 +87,7 @@ class OpenRouterService:
 
     def __init__(self, api_key: str):
         if not api_key:
-            raise MissingOpenRouterCredentialError(
-                "An OpenRouter API key is required. Add an 'OpenRouter API' "
-                "credential under Credentials in the app."
-            )
+            raise MissingOpenRouterCredentialError(MISSING_CREDENTIAL_MESSAGE)
         self._api_key = api_key
 
     # ── construction ─────────────────────────────────────────────────────────
@@ -68,9 +98,10 @@ class OpenRouterService:
         try:
             api_key = resolve_api_key_sync('openrouter', user.id)
         except CredentialUnavailable as exc:
+            # The resolver's own wording is for a developer reading a log; the
+            # user gets one instruction naming one place.
             raise MissingOpenRouterCredentialError(
-                f"{exc} Add an 'OpenRouter API' credential under Credentials."
-            ) from exc
+                MISSING_CREDENTIAL_MESSAGE) from exc
         return cls(api_key=api_key)
 
     @property
@@ -159,11 +190,27 @@ class OpenRouterService:
                 f"{prompt}\n\nAvoid the following: {config['negative_prompt']}"
             )
 
-        for key in ("resolution", "aspect_ratio", "quality", "output_format", "background"):
+        # The complete dial set `POST /images` accepts. Each is sent only when
+        # the caller set it, and the caller may only set what the *model*
+        # claims to support (`serializers.py` refuses the rest): a value outside
+        # a model's advertised enum is a hard 400 from OpenRouter, and a key the
+        # model never advertised is silently dropped, which is worse — the
+        # control looks like it worked.
+        for key in ("resolution", "aspect_ratio", "size", "quality",
+                    "output_format", "background"):
             if config.get(key):
                 payload[key] = config[key]
         if config.get("seed") is not None:
             payload["seed"] = config["seed"]
+        if config.get("output_compression") is not None:
+            payload["output_compression"] = int(config["output_compression"])
+        if config.get("n"):
+            payload["n"] = int(config["n"])
+        if config.get("reference_urls"):
+            # Image-to-image. The endpoint takes urls or data URIs, and they are
+            # passed through rather than fetched here, so nothing in this process
+            # ever downloads a URL a user pasted.
+            payload["input_references"] = list(config["reference_urls"])
 
         try:
             response = requests.post(
@@ -179,22 +226,17 @@ class OpenRouterService:
             if not images:
                 return {"error": "No images generated"}
 
-            first = images[0]
-            # Preferred shape is base64 + media type; some providers return a
-            # hosted url instead, so accept either rather than failing on a
-            # response that plainly contains an image.
-            b64 = first.get("b64_json")
-            if b64:
-                media_type = first.get("media_type") or "image/png"
-                url = f"data:{media_type};base64,{b64}"
-            else:
-                url = first.get("url")
-            if not url:
+            # `n` may return several. Reading only `data[0]` silently discarded
+            # everything past the first — asked for, generated, billed, and
+            # thrown away. `url` stays the first, for readers that show one.
+            urls = [u for u in (_image_url(entry) for entry in images) if u]
+            if not urls:
                 return {"error": "Image response contained no image data"}
 
             return {
                 "status": "completed",
-                "url": url,
+                "url": urls[0],
+                "urls": urls,
                 "cost": (data.get("usage") or {}).get("cost"),
             }
         except requests.HTTPError as e:
@@ -213,7 +255,15 @@ class OpenRouterService:
         """Submit a POST /videos job. Returns id + polling_url."""
         payload: Dict[str, Any] = {"model": model, "prompt": prompt}
 
-        for key in ("resolution", "aspect_ratio"):
+        # `POST /videos` has no negative-prompt field, so the same inline
+        # treatment the image path uses. It used to be dropped here in silence:
+        # the panel offered the box for video, and nothing ever read it.
+        if config.get("negative_prompt"):
+            payload["prompt"] = (
+                f"{prompt}\n\nAvoid the following: {config['negative_prompt']}"
+            )
+
+        for key in ("resolution", "aspect_ratio", "size"):
             if config.get(key):
                 payload[key] = config[key]
         if config.get("duration"):
@@ -222,6 +272,21 @@ class OpenRouterService:
             payload["generate_audio"] = bool(config["generate_audio"])
         if config.get("seed") is not None:
             payload["seed"] = config["seed"]
+        if config.get("reference_urls"):
+            payload["input_references"] = [
+                {"type": "image_url", "image_url": url}
+                for url in config["reference_urls"]
+            ]
+        if config.get("frame_images"):
+            # Image-to-video: pin the first and/or last frame. Which slots a
+            # model accepts is advertised as `supported_frame_images`, and the
+            # serializer refuses one it does not.
+            payload["frame_images"] = [
+                {"type": "image_url",
+                 "image_url": frame["url"],
+                 "frame_type": frame["frame_type"]}
+                for frame in config["frame_images"]
+            ]
 
         try:
             response = requests.post(
@@ -289,10 +354,11 @@ class OpenRouterService:
         """TTS via POST /audio/speech. Returns base64 data URL."""
         # response_format default on OpenRouter is `pcm` — we explicitly ask
         # for mp3 so the frontend gets a directly playable audio element.
+        response_format = config.get("response_format") or "mp3"
         payload: Dict[str, Any] = {
             "model": model,
             "input": text,
-            "response_format": "mp3",
+            "response_format": response_format,
         }
         # Voice ids are provider-specific — `alloy` is an OpenAI name and is
         # rejected by MiniMax/Voxtral/Kokoro. Send only what the caller chose
@@ -301,6 +367,14 @@ class OpenRouterService:
             payload["voice"] = config["voice"]
         if config.get("speed") is not None:
             payload["speed"] = float(config["speed"])
+        if config.get("instructions"):
+            # Tone direction, an OpenAI-family extra. It rides `provider`,
+            # which is how this endpoint carries per-provider options — sending
+            # it top-level is rejected by every other provider.
+            payload["provider"] = {
+                **(payload.get("provider") or {}),
+                "options": {"openai": {"instructions": config["instructions"]}},
+            }
 
         try:
             response = requests.post(
@@ -311,9 +385,18 @@ class OpenRouterService:
             )
             response.raise_for_status()
             audio_b64 = base64.b64encode(response.content).decode("utf-8")
+            # The data URI has to name what the bytes actually are. `pcm` is
+            # raw samples with no container — no <audio> element will play it,
+            # and labelling it audio/mpeg produces a player that silently fails
+            # on a file that downloaded perfectly. It is still offered, because
+            # it is what the endpoint returns by default and what anyone
+            # post-processing the audio wants; it just arrives as a download.
+            media_type = (
+                "application/octet-stream" if response_format == "pcm" else "audio/mpeg"
+            )
             return {
                 "status": "completed",
-                "url": f"data:audio/mpeg;base64,{audio_b64}",
+                "url": f"data:{media_type};base64,{audio_b64}",
             }
         except requests.HTTPError as e:
             body = getattr(e.response, "text", "")[:500]

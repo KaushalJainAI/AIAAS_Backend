@@ -37,6 +37,7 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from chat.turn.events import Event
+from llm.usage import EMPTY_USAGE, TokenUsage
 from workflow_backend.thresholds import (
     TURN_CONTENT_CHAR_LIMIT,
     TURN_REASONING_CHAR_LIMIT,
@@ -219,7 +220,8 @@ class AgentRunStream:
 
     async def on_model_turn(self, *, index: int, reasoning: str, content: str,
                             decision: str, provider: str, model_id: str,
-                            tokens: int, duration_ms: int) -> None:
+                            tokens: int, duration_ms: int,
+                            usage: TokenUsage | None = None) -> None:
         """A `TurnObserver`. Record the turn, then announce it.
 
         Recorded *before* its tool calls run, which is what gives every step
@@ -231,6 +233,7 @@ class AgentRunStream:
                 index=index, reasoning=reasoning, content=content,
                 decision=decision, provider=provider, model_id=model_id,
                 tokens=tokens, duration_ms=duration_ms,
+                usage=usage if usage is not None else EMPTY_USAGE,
             )
         except Exception:  # noqa: BLE001
             # Steps from this turn become unattributed rather than lost.
@@ -252,11 +255,19 @@ class AgentRunStream:
     @sync_to_async
     def _record_turn(self, *, index: int, reasoning: str, content: str,
                      decision: str, provider: str, model_id: str,
-                     tokens: int, duration_ms: int) -> int:
+                     tokens: int, duration_ms: int,
+                     usage: TokenUsage = EMPTY_USAGE) -> int:
         from logs.models import AgentTurn
+        from llm.pricing import cost_for_usage
 
         clipped_reasoning, reasoning_cut = _clip(reasoning, TURN_REASONING_CHAR_LIMIT)
         clipped_content, content_cut = _clip(content, TURN_CONTENT_CHAR_LIMIT)
+
+        # Priced here, per turn, against `model_id` — not once per run against
+        # a run-level total. A run can resolve a different model on a resume,
+        # and there is no single rate that could be applied to a sum of turns
+        # billed at different ones.
+        cost, source = cost_for_usage(model_id or '', usage)
 
         # A resumed run re-enters the loop at a turn index it has already used,
         # so this updates rather than inserts — `(execution, index)` is unique,
@@ -273,6 +284,13 @@ class AgentRunStream:
                 'provider': provider or '',
                 'model_id': model_id or '',
                 'tokens': tokens,
+                'input_tokens': usage.input,
+                'output_tokens': usage.output,
+                'cached_read_tokens': usage.cached_read,
+                'cached_write_tokens': usage.cached_write,
+                'reasoning_tokens': usage.reasoning,
+                'cost_usd': cost,
+                'cost_source': source,
                 'duration_ms': duration_ms,
             },
         )

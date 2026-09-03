@@ -18,7 +18,11 @@ from .serializers import (
 from .services import catalog
 from .services.capabilities import capabilities_for
 from .services.dispatcher import run_generation
-from .services.openrouter import MissingOpenRouterCredentialError, OpenRouterService
+from .services.openrouter import (
+    MISSING_CREDENTIAL_CODE,
+    MissingOpenRouterCredentialError,
+    OpenRouterService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +66,8 @@ class ImagineViewSet(viewsets.ModelViewSet):
             OpenRouterService.for_user(request.user)
         except MissingOpenRouterCredentialError as e:
             return Response(
-                {"detail": str(e), **catalog.EMPTY_CAPABILITIES, "defaults": {}},
+                {"detail": str(e), "code": MISSING_CREDENTIAL_CODE,
+                 **catalog.EMPTY_CAPABILITIES, "defaults": {}},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -85,7 +90,8 @@ class ImagineViewSet(viewsets.ModelViewSet):
         try:
             OpenRouterService.for_user(self.request.user)
         except MissingOpenRouterCredentialError as e:
-            raise serializers.ValidationError({"detail": str(e)})
+            raise serializers.ValidationError(
+                {"detail": str(e), "code": MISSING_CREDENTIAL_CODE})
         generation = serializer.save(user=self.request.user)
         try:
             run_generation(generation)
@@ -109,6 +115,19 @@ class ImagineAgentChatView(APIView):
         message = (request.data.get('message') or '').strip()
         if not message:
             return Response({"error": "message is required"}, status=status.HTTP_400_BAD_REQUEST)
+        # Preflight, exactly as the form path does. Without this a user with no
+        # key got a 200 and an assistant *message* apologising for something
+        # only they can fix — the studio's version of looking busy before
+        # failing. The conversation is not created either: an empty thread
+        # titled with the prompt is a record of nothing.
+        try:
+            OpenRouterService.for_user(request.user)
+        except MissingOpenRouterCredentialError as e:
+            return Response(
+                {"detail": str(e), "code": MISSING_CREDENTIAL_CODE},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         conversation_id = request.data.get('conversation_id')
 
         if conversation_id:
@@ -146,6 +165,20 @@ class ImagineAgentResumeView(APIView):
 
         if decision not in ('approve', 'edit', 'cancel'):
             return Response({"error": "decision must be approve|edit|cancel"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Same preflight as `chat`, for the same reason: resuming spends money,
+        # and an approval that dispatches into a missing key fails the run
+        # after the user has already said yes. `cancel` is exempt — clearing a
+        # pending intent needs no provider at all, and refusing it would trap
+        # the conversation in `awaiting_hitl` for as long as the key is absent.
+        if decision != 'cancel':
+            try:
+                OpenRouterService.for_user(request.user)
+            except MissingOpenRouterCredentialError as e:
+                return Response(
+                    {"detail": str(e), "code": MISSING_CREDENTIAL_CODE},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         try:
             conversation = ImagineConversation.objects.get(id=conversation_id, user=request.user)

@@ -195,6 +195,56 @@ class ImagineApiTests(APITestCase):
         self.assertIn("add an OpenRouter key", response.json()["detail"])
         run.assert_not_called()
 
+    def test_agent_chat_without_a_credential_fails_before_it_answers(self):
+        """The conversational path used to answer 200 with an assistant message
+        apologising for a missing key — the studio's version of looking busy
+        before failing, and a problem only the user can fix stated in the
+        model's own voice. It is a 400 with the credential code, so the page
+        shows the same banner the form view does."""
+        from imagine.models import ImagineConversation
+        from imagine.services.openrouter import (
+            MISSING_CREDENTIAL_CODE,
+            MissingOpenRouterCredentialError,
+        )
+
+        with patch(
+            "imagine.views.OpenRouterService.for_user",
+            side_effect=MissingOpenRouterCredentialError("add an OpenRouter key"),
+        ):
+            response = self.client.post(
+                "/api/imagine/agent/chat/", {"message": "a fox"}, format="json",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], MISSING_CREDENTIAL_CODE)
+        # And no empty conversation left behind: a thread titled with the
+        # prompt that holds nothing is a record of a turn that never ran.
+        self.assertFalse(ImagineConversation.objects.exists())
+
+    def test_the_missing_credential_message_gives_one_instruction(self):
+        """It was assembled by appending this app's advice to the resolver's,
+        which already ends in "Add one under Credentials" — so the banner told
+        the user to add a credential twice, in two different wordings."""
+        from credentials.resolution import CredentialUnavailable
+        from imagine.services.openrouter import (
+            MISSING_CREDENTIAL_MESSAGE,
+            MissingOpenRouterCredentialError,
+            OpenRouterService,
+        )
+
+        with patch(
+            "imagine.services.openrouter.resolve_api_key_sync",
+            side_effect=CredentialUnavailable("No usable openrouter credential."),
+        ):
+            with self.assertRaises(MissingOpenRouterCredentialError) as caught:
+                OpenRouterService.for_user(self.user)
+
+        message = str(caught.exception)
+        self.assertEqual(message, MISSING_CREDENTIAL_MESSAGE)
+        # One imperative, not two. The resolver's own wording is for a log.
+        self.assertEqual(message.count("Add "), 1)
+        self.assertNotIn("configure a platform key", message)
+
     # ── ownership ────────────────────────────────────────────────────────────
 
     def test_list_only_returns_the_callers_generations(self):
