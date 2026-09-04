@@ -1,0 +1,617 @@
+from django.db import models
+from django.conf import settings
+from django.utils.text import slugify
+import uuid
+
+from llm.providers import provider_choices
+
+
+class SubAgent(models.Model):
+    """
+    A specialised agent: a prompt, a model, and the capabilities it is allowed.
+
+    A row is a *configuration*, and the runtime is the only thing that turns
+    one into a run.
+
+    Every row is the same kind of thing. There is deliberately no `kind` column
+    and no "orchestrator" variant — an agent that fans out to other agents is
+    one holding the `subAgents` grant, so composition goes through the same
+    grant check as every other capability rather than through a second code
+    path. See `agents/agent/runtime.py::GRANT_TOOLS`.
+    """
+
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('active', 'Active'),
+        ('paused', 'Paused'),
+        ('archived', 'Archived'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='subagents',
+    )
+
+    # ── Identity ──
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, blank=True)
+    description = models.TextField(
+        blank=True,
+        help_text='What this agent is for — shown when picking one to delegate to',
+    )
+    prompt = models.TextField(
+        blank=True,
+        default='',
+        help_text='The specialisation: what this agent is, how it should work, '
+                  'and what a good result looks like. Becomes its system prompt.',
+    )
+
+    # ── Model ──
+    LLM_PROVIDER_CHOICES = provider_choices()
+
+    llm_provider = models.CharField(
+        max_length=30, choices=LLM_PROVIDER_CHOICES, default='openrouter',
+    )
+    llm_model = models.CharField(max_length=100, blank=True, default='')
+    llm_credential = models.ForeignKey(
+        'credentials.Credential',
+        on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='subagents_using_llm',
+    )
+
+    # ── Capability ──
+    # Each column has one job, because the permissions screen shown at install
+    # renders from these same rows the runtime enforces. A single opaque config
+    # blob would let the screen and the enforcement drift apart, which is the
+    # one failure this design cannot tolerate.
+    tool_grants = models.JSONField(
+        default=dict, blank=True,
+        help_text='Which capabilities this agent may use, e.g. {"webSearch": true}',
+    )
+    requirements = models.JSONField(
+        default=list, blank=True,
+        help_text='Portable requirements for sharing — what kind of connection '
+                  'or KB it needs, never the row ids of whoever authored it',
+    )
+    guardrails = models.JSONField(
+        default=dict, blank=True,
+        help_text='autonomy, spend cap, max delegation depth, egress policy',
+    )
+    agent_context = models.JSONField(
+        default=dict, blank=True,
+        help_text='What it is given: connector ids, knowledge base ids, skill ids',
+    )
+    sandbox = models.JSONField(
+        default=dict, blank=True,
+        help_text='Execution envelope: file access, workdir, venv, cpu, memory',
+    )
+
+    # ── Result shape ──
+    # These two are why a *configured* agent can replace a hardcoded tool.
+    # `deep_research` is 55 lines that fan out across queries and hand back a
+    # fixed JSON contract the UI renders. An agent that can only return prose,
+    # one query at a time, can never stand in for it however good its prompt
+    # is — so the shape of the answer and the shape of the work are config,
+    # not orchestrator-only code.
+    output_schema = models.JSONField(
+        default=dict, blank=True,
+        help_text='Contract the result must satisfy. Empty means prose.',
+    )
+    fanout = models.JSONField(
+        default=dict, blank=True,
+        help_text='How it parallelises, e.g. {"parallel": 4, "mode": "collect"}. '
+                  'Empty means a single sequential turn.',
+    )
+
+    runtime_settings = models.JSONField(
+        default=dict, blank=True,
+        help_text='Turn-level knobs: temperature, recursiveContext, compaction, '
+                  'indexing, and the builder’s invocation mode.',
+    )
+
+    # ── Invocation ──
+    allow_unattended = models.BooleanField(
+        default=False,
+        help_text='May run with nobody watching (schedule, webhook, event). Off '
+                  'by default: a trigger is a way for something other than the '
+                  'user to spend their model credits.',
+    )
+
+    # ── Presentation & state ──
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    is_template = models.BooleanField(default=False)
+    tags = models.JSONField(default=list, blank=True)
+    icon = models.CharField(max_length=50, blank=True)
+    color = models.CharField(max_length=7, default='#6366f1')
+
+    # Counters are denormalised for listing; `_with_stats` still computes the
+    # observed numbers from ExecutionLog, because a stored counter drifts.
+    execution_count = models.IntegerField(default=0)
+    last_executed_at = models.DateTimeField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Sub-agent'
+        verbose_name_plural = 'Sub-agents'
+        ordering = ['-updated_at']
+        unique_together = ['user', 'name']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['user', '-updated_at']),
+            models.Index(fields=['user', '-updated_at', '-id']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == 'active'
+
+    @property
+    def delegates(self) -> bool:
+        """Whether this agent may invoke other agents."""
+        return bool((self.tool_grants or {}).get('subAgents'))
+
+
+class Trigger(models.Model):
+    """Something other than the user asking an agent to run.
+
+    A real table rather than a JSON blob on the agent, because the schedule
+    sweep queries `next_due_at` across every user on a timer — that has to be
+    an index, not a full scan with JSON parsing per row.
+
+    A trigger answers one question: should this agent run now. It knows nothing
+    about graphs or nodes, and polling triggers with cursors (email UIDs, RSS
+    GUIDs) are deliberately out of scope — those are connector-side and a much
+    larger thing than an invocation.
+    """
+
+    MODE_CHOICES = [
+        ('schedule', 'Schedule'),
+        ('webhook', 'Webhook'),
+        ('event', 'Event'),
+    ]
+
+    #: What to do when a trigger fires while its previous run is still going.
+    OVERLAP_CHOICES = [
+        ('skip', 'Skip this firing'),
+        ('queue', 'Run after the current one'),
+        ('cancel', 'Cancel the running one'),
+    ]
+
+    #: Who owns this row's schedule. The agent builder carries a single cron
+    #: field and reconciles it on every save, which must not reach schedules
+    #: the user added on the Schedules page — otherwise adding a second slot in
+    #: one screen deletes it from the other. `builder` is the one row the
+    #: builder round-trips; every other schedule is `manual` and left alone.
+    ORIGIN_CHOICES = [
+        ('builder', 'Agent builder'),
+        ('manual', 'Added directly'),
+    ]
+
+    subagent = models.ForeignKey(
+        'SubAgent', on_delete=models.CASCADE, related_name='triggers',
+    )
+    mode = models.CharField(max_length=12, choices=MODE_CHOICES, db_index=True)
+    config = models.JSONField(
+        default=dict, blank=True,
+        help_text='Mode-specific: {"cron": "0 9 * * 1"} or {"event": "run.completed"}',
+    )
+    goal = models.TextField(
+        blank=True, default='',
+        help_text='What the agent is asked to do when this fires.',
+    )
+    #: What the user calls this schedule. An agent may now have several, and
+    #: "the 06:00 one" is not something a cron string says out loud.
+    name = models.CharField(max_length=80, blank=True, default='')
+
+    #: The IANA zone the cron fields are read in. `next_due_at` stays UTC —
+    #: this is the zone the *expression* means, not the zone the column is
+    #: stored in, which is the distinction that lets one indexed column serve
+    #: users in different places. Defaults to UTC so existing rows keep firing
+    #: at exactly the instant they always did.
+    timezone = models.CharField(max_length=64, default='UTC')
+
+    #: The window the schedule is live in. Both optional: a schedule with
+    #: neither is the old behaviour, "for ever". `ends_at` is what makes a
+    #: schedule stoppable without deleting it and losing its history.
+    starts_at = models.DateTimeField(null=True, blank=True)
+    ends_at = models.DateTimeField(null=True, blank=True)
+
+    origin = models.CharField(
+        max_length=8, choices=ORIGIN_CHOICES, default='manual', db_index=True,
+    )
+
+    #: Path component for `mode='webhook'`. The endpoint is unauthenticated by
+    #: construction — there is no session on an inbound hook — so this string
+    #: is the only thing standing between the open internet and a run that
+    #: spends the owner's model credits. Generated, never chosen.
+    secret = models.CharField(max_length=64, unique=True, db_index=True, blank=True)
+
+    enabled = models.BooleanField(default=True)
+    overlap = models.CharField(
+        max_length=8, choices=OVERLAP_CHOICES, default='skip',
+    )
+
+    last_fired_at = models.DateTimeField(null=True, blank=True)
+    #: Indexed: the sweep's whole job is "which of these are due now".
+    next_due_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    consecutive_failures = models.IntegerField(default=0)
+
+    #: The slot a `queue` firing is still owed, set when the agent was busy at
+    #: its due time. Indexed because the sweep now asks two questions — what is
+    #: due, and what is owed — and the second must not become a table scan.
+    #: `overlap='queue'` was a choice the UI offered and the sweep never
+    #: implemented: a queued firing fell straight through to running
+    #: immediately, which is precisely what the other two policies exist to
+    #: avoid. This column is where "later" is written down.
+    queued_for = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    #: What happened last time, in the sweep's own vocabulary, and why. The
+    #: reason a firing was refused only ever reached the server log, so a user
+    #: watching a schedule fail five times and disable itself had no way to
+    #: find out it was the spend cap.
+    last_outcome = models.CharField(max_length=12, blank=True, default='')
+    last_error = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Trigger'
+        verbose_name_plural = 'Triggers'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['enabled', 'mode', 'next_due_at']),
+            models.Index(fields=['subagent', 'mode']),
+            models.Index(fields=['enabled', 'mode', 'queued_for']),
+        ]
+
+    def __str__(self):
+        return f'{self.mode} trigger for {self.subagent_id}'
+
+    def save(self, *args, **kwargs):
+        # Every row needs a distinct secret: the column is unique, and schedule
+        # triggers would otherwise collide on ''. Only webhook mode *surfaces*
+        # it (via the serializer); the others just carry an opaque id.
+        if not self.secret:
+            self.secret = uuid.uuid4().hex + uuid.uuid4().hex[:16]
+        super().save(*args, **kwargs)
+
+    @property
+    def cron(self) -> str:
+        return (self.config or {}).get('cron', '')
+
+    @property
+    def tz(self) -> str:
+        """The zone the cron fields are read in; never blank."""
+        return self.timezone or 'UTC'
+
+    def window_state(self, now) -> str:
+        """Where `now` sits relative to this schedule's live window.
+
+        One of `pending` (not started yet), `live`, `expired`. The sweep acts
+        on all three differently, and a schedule that has not started is not
+        the same thing as one that is broken — which is what it looked like
+        before, when the only two states were "fires" and "does not".
+        """
+        if self.starts_at and now < self.starts_at:
+            return 'pending'
+        if self.ends_at and now > self.ends_at:
+            return 'expired'
+        return 'live'
+
+
+class HITLRequest(models.Model):
+    """
+    Human-in-the-Loop requests for approval, clarification, or error recovery.
+    Blocks execution until user responds.
+    """
+    REQUEST_TYPE_CHOICES = [
+        ('approval', 'Approval Required'),
+        ('clarification', 'Clarification Needed'),
+        ('error_recovery', 'Error Recovery'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('answered', 'Answered'),
+        ('timeout', 'Timeout'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    request_id = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True
+    )
+    
+    # Context
+    execution = models.ForeignKey(
+        'logs.ExecutionLog',
+        on_delete=models.CASCADE,
+        related_name='hitl_requests'
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='hitl_requests'
+    )
+    node_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text='ID of the node requesting human input'
+    )
+    
+    # Request Details
+    request_type = models.CharField(
+        max_length=20,
+        choices=REQUEST_TYPE_CHOICES
+    )
+    title = models.CharField(
+        max_length=200,
+        help_text='Short title for the request'
+    )
+    message = models.TextField(
+        help_text='Detailed message explaining what is needed'
+    )
+    options = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Available options/choices for the user'
+    )
+    context_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Additional context data'
+    )
+    
+    # Response
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending'
+    )
+    response = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='User response data'
+    )
+    responded_at = models.DateTimeField(
+        blank=True,
+        null=True
+    )
+    
+    # Timeout
+    timeout_seconds = models.IntegerField(
+        default=300,
+        help_text='Timeout in seconds (0 = no timeout)'
+    )
+    auto_action = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text='Action to take on timeout (e.g., approve, reject, skip)'
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'HITL Request'
+        verbose_name_plural = 'HITL Requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['request_id']),
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['execution', 'status']),
+            models.Index(fields=['status', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.request_type}: {self.title}"
+
+    @property
+    def is_pending(self):
+        """Check if request is still waiting for response"""
+        return self.status == 'pending'
+
+
+class ConversationMessage(models.Model):
+    """
+    AI chat conversation history.
+    Stores messages between user and AI assistant.
+    """
+    ROLE_CHOICES = [
+        ('user', 'User'),
+        ('assistant', 'Assistant'),
+        ('system', 'System'),
+    ]
+    
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='conversation_messages'
+    )
+    
+    # Conversation Context
+    conversation_id = models.UUIDField(
+        default=uuid.uuid4,
+        help_text='Groups messages into conversations'
+    )
+    subagent = models.ForeignKey(
+        'SubAgent',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='conversation_messages',
+        help_text='Sub-agent this conversation is about, if any'
+    )
+    
+    # Message
+    role = models.CharField(
+        max_length=20,
+        choices=ROLE_CHOICES
+    )
+    content = models.TextField(
+        help_text='Message content'
+    )
+    
+    # Metadata
+    metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Additional metadata (tokens used, model, etc.)'
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Conversation Message'
+        verbose_name_plural = 'Conversation Messages'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['user', 'conversation_id']),
+            models.Index(fields=['conversation_id', 'created_at']),
+            models.Index(fields=['user', '-created_at']),
+        ]
+
+    def __str__(self):
+        preview = self.content[:50] + "..." if len(self.content) > 50 else self.content
+        return f"{self.role}: {preview}"
+
+
+class SharedAgent(models.Model):
+    """One user's agent, published for others to install.
+
+    **This one is a table, and the curated gallery is not.** The distinction is
+    not taste: `agents/gallery.py` is written by us and changes when we edit a
+    file, while this is written by users, at runtime, and carries facts that
+    only exist once it is published — who published it, when, how many people
+    installed it, and whether it is still listed. None of that has anywhere to
+    live in a dict in a source file.
+
+    **It stores a snapshot, not a pointer.** `subagent` is the author's live
+    copy and is only kept so they can republish from it; everything an
+    installer reads comes from `config` and `requirements`, frozen at publish.
+    Rendering the live agent instead would mean a stranger's install screen
+    changed while they were reading it, and — worse — that an author could
+    widen the grants of something already listed without anyone re-consenting.
+    That is also why `subagent` is `SET_NULL`: deleting your own agent must not
+    silently retract something other people are installing, and a listing whose
+    source is gone is still perfectly installable.
+
+    **`config` is an allow-listed projection** built by
+    `agents/publishing.py::to_shareable`, never `to_config()` verbatim. Every
+    id is stripped and reappears as a `requirement`, so a published agent names
+    *kinds* of connections and corpora rather than rows in the author's
+    account.
+    """
+
+    #: Three rungs, each strictly wider than the last, and the widest is the
+    #: only one that leaves the platform.
+    #:
+    #: `link`     — reachable by slug, listed nowhere, still requires an
+    #:              account. What you pick to send one colleague.
+    #: `platform` — listed on Explore to signed-in users.
+    #: `public`   — listed on Explore *and* readable with no account at all,
+    #:              through `agents/views/gallery.py`'s unauthenticated pair.
+    #:
+    #: The ladder is why `link` exists: without it, sharing with one person and
+    #: publishing to the open internet would be the same act, and everyone
+    #: would perform the second while meaning the first.
+    VISIBILITY_CHOICES = [
+        ('link', 'Anyone with the link'),
+        ('platform', 'Everyone on the platform'),
+        ('public', 'Anyone, including people without an account'),
+    ]
+
+    #: The visibilities that appear in the signed-in Explore listing. `public`
+    #: is included because it is *wider* than `platform`, not parallel to it —
+    #: spelling this as a set rather than as `!= 'link'` is what stops a fourth
+    #: rung added later from silently becoming listed.
+    LISTED_VISIBILITIES = ('platform', 'public')
+
+    #: Nullable so an author can delete their own agent without retracting what
+    #: other people are installing. Nothing on the install path reads it.
+    subagent = models.ForeignKey(
+        'orchestrator.SubAgent',
+        on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='shares',
+    )
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='shared_agents',
+    )
+
+    #: The public identifier. Not the agent's own slug: two users may both
+    #: publish a "Deep research", and the URL has to survive that.
+    slug = models.SlugField(max_length=220, unique=True)
+
+    name = models.CharField(max_length=200)
+    tagline = models.CharField(
+        max_length=200,
+        help_text='One line, shown on the card. What it does, not how.',
+    )
+    description = models.TextField(
+        blank=True,
+        help_text='The longer pitch, shown on the install screen.',
+    )
+
+    config = models.JSONField(
+        default=dict,
+        help_text='Allow-listed AgentConfig snapshot — see agents/publishing.py',
+    )
+    requirements = models.JSONField(
+        default=list,
+        help_text='What the installer must supply, as kinds and never as ids',
+    )
+
+    tags = models.JSONField(default=list, blank=True)
+    icon = models.CharField(max_length=50, blank=True)
+
+    visibility = models.CharField(
+        max_length=10, choices=VISIBILITY_CHOICES, default='platform',
+    )
+    #: Withdrawn rather than deleted: an install already made keeps working,
+    #: and the author can relist without minting a second URL.
+    is_listed = models.BooleanField(default=True)
+
+    #: Bumped on every republish. An installer's copy records the version it
+    #: came from, which is what a "this has been updated" prompt would read —
+    #: the notify-and-re-consent half of the design is not built yet, and this
+    #: is the column it needs.
+    version = models.IntegerField(default=1)
+
+    #: Denormalised because the alternative is counting installed agents by
+    #: tag on every listing render. It is a popularity signal, not a ledger.
+    install_count = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Shared agent'
+        verbose_name_plural = 'Shared agents'
+        ordering = ['-updated_at']
+        indexes = [
+            # The explore listing's exact predicate.
+            models.Index(fields=['is_listed', 'visibility', '-updated_at']),
+            models.Index(fields=['author', '-updated_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.name} by {self.author_id}'

@@ -1,598 +1,129 @@
 """
-Logs App API Views - Insights and Analytics Endpoints
+`/api/logs/` — insights, execution history, and configuration history.
 
-Provides execution statistics, per-workflow metrics, and audit trail APIs.
+Views are thin on purpose: validate query params with a serializer, call one
+function in `queries.py`, return the result. Every read is a plain synchronous
+ORM call, so these are sync `@api_view`s (as in `agents/views/agents.py`) rather
+than `async def` wrappers around a `sync_to_async` closure.
+
+Note the vocabulary seam: the URL and query parameter are still spelled
+`workflow_id`, and responses still carry `workflow_id` / `workflow_name`,
+because the frontend and BrowserOS ship their own builds. What they identify is
+a `SubAgent`. `queries.py` does the renaming in one place.
 """
-from datetime import timedelta
-from typing import Any
-
-from django.db.models import Count, Sum, Avg, F, Q
-from django.db.models.functions import TruncDate, TruncHour
-from django.utils import timezone
-from adrf.decorators import api_view
-from rest_framework.decorators import permission_classes
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from asgiref.sync import sync_to_async
 
-from drf_spectacular.utils import extend_schema, inline_serializer
-from drf_spectacular.types import OpenApiTypes
-from rest_framework import serializers as drf_serializers
-
-from core.pagination import paginate_keyset
-from .models import ExecutionLog, NodeExecutionLog, AuditEntry, OrchestratorThought
+from . import queries
 from .serializers import (
     AnalyticsFilterSerializer,
-    AuditFilterSerializer,
     ExecutionListFilterSerializer,
-    AuditExportSerializer,
-    OrchestratorThoughtSerializer
+    RevisionListFilterSerializer,
 )
 
 
-_LogsGenericObject = inline_serializer(
-    name="LogsGenericResponse",
-    fields={"results": drf_serializers.ListField(child=drf_serializers.DictField(), required=False)},
-)
-
-
-# ======================== Insights/Analytics API ========================
-
-@extend_schema(responses={200: OpenApiTypes.OBJECT})
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-async def execution_statistics(request):
-    """
-    Get execution statistics for the authenticated user.
-    """
-    serializer = AnalyticsFilterSerializer(data=request.query_params)
+def _validated(serializer_class, request) -> dict:
+    serializer = serializer_class(data=request.query_params)
     serializer.is_valid(raise_exception=True)
-    
-    days = serializer.validated_data['days']
-    workflow_id = serializer.validated_data.get('workflow_id')
-    
-    def get_stats():
-        start_date = timezone.now() - timedelta(days=days)
-        
-        # Base queryset
-        qs = ExecutionLog.objects.filter(
-            user=request.user,
-            created_at__gte=start_date
-        )
-        
-        if workflow_id:
-            qs = qs.filter(workflow_id=workflow_id)
-        
-        # Summary statistics
-        total = qs.count()
-        completed = qs.filter(status='completed').count()
-        failed = qs.filter(status='failed').count()
-        
-        aggregates = qs.aggregate(
-            avg_duration=Avg('duration_ms'),
-            total_nodes=Sum('nodes_executed'),
-            total_tokens=Sum('tokens_used'),
-        )
-        
-        summary = {
-            "total_executions": total,
-            "successful": completed,
-            "failed": failed,
-            "success_rate": round(completed / total * 100, 1) if total > 0 else 0,
-            "avg_duration_ms": round(aggregates['avg_duration'] or 0, 0),
-            "total_nodes_executed": aggregates['total_nodes'] or 0,
-            "total_tokens_used": aggregates['total_tokens'] or 0,
-        }
-        
-        # Group by status
-        by_status = dict(
-            qs.values('status')
-            .annotate(count=Count('id'))
-            .values_list('status', 'count')
-        )
-        
-        # Group by trigger type
-        by_trigger = dict(
-            qs.values('trigger_type')
-            .annotate(count=Count('id'))
-            .values_list('trigger_type', 'count')
-        )
-        
-        # Daily trend
-        daily_trend = list(
-            qs.annotate(date=TruncDate('created_at'))
-            .values('date')
-            .annotate(
-                count=Count('id'),
-                success=Count('id', filter=Q(status='completed'))
-            )
-            .order_by('date')
-            .values('date', 'count', 'success')
-        )
-        
-        # Convert dates to strings
-        for item in daily_trend:
-            item['date'] = item['date'].isoformat() if item['date'] else None
-            
-        return {
-            "summary": summary,
-            "by_status": by_status,
-            "by_trigger": by_trigger,
-            "daily_trend": daily_trend,
-        }
+    return serializer.validated_data
 
-    stats = await sync_to_async(get_stats)()
-    return Response(stats)
+
+# ======================== Insights ========================
+
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def execution_statistics(request):
+    """Execution statistics for the authenticated user."""
+    params = _validated(AnalyticsFilterSerializer, request)
+    return Response(queries.execution_statistics(
+        request.user, days=params['days'], agent_id=params.get('workflow_id')
+    ))
 
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-async def workflow_metrics(request, workflow_id: int):
-    """
-    Get detailed metrics for a specific workflow.
-    """
-    def get_metrics():
-        # Verify workflow belongs to user
-        from orchestrator.models import Workflow
-        try:
-            workflow = Workflow.objects.get(id=workflow_id, user=request.user)
-        except Workflow.DoesNotExist:
-            return None
-        
-        executions = ExecutionLog.objects.filter(workflow=workflow)
-        
-        # Basic stats
-        total = executions.count()
-        completed = executions.filter(status='completed').count()
-        
-        aggregates = executions.aggregate(
-            avg_duration=Avg('duration_ms'),
-            total_tokens=Sum('tokens_used'),
-        )
-        
-        # Recent executions
-        recent = list(
-            executions.order_by('-created_at')[:10]
-            .values('execution_id', 'status', 'duration_ms', 'created_at', 'trigger_type')
-        )
-        
-        # Node success rates
-        node_logs = NodeExecutionLog.objects.filter(execution__workflow=workflow)
-        node_stats = (
-            node_logs.values('node_id', 'node_name')
-            .annotate(
-                total=Count('id'),
-                success=Count('id', filter=Q(status='completed')),
-            )
-        )
-        node_success_rates = {
-            n['node_id']: {
-                "name": n['node_name'],
-                "success_rate": round(n['success'] / n['total'] * 100, 1) if n['total'] > 0 else 0,
-                "total_runs": n['total'],
-            }
-            for n in node_stats
-        }
-        
-        # Error hotspots (nodes that fail most)
-        error_hotspots = list(
-            node_logs
-            .filter(status='failed')
-            .values('node_id', 'node_name', 'node_type')
-            .annotate(error_count=Count('id'))
-            .order_by('-error_count')[:5]
-        )
-        
-        return {
-            "workflow_id": workflow_id,
-            "workflow_name": workflow.name,
-            "total_executions": total,
-            "avg_duration_ms": round(aggregates['avg_duration'] or 0, 0),
-            "success_rate": round(completed / total * 100, 1) if total > 0 else 0,
-            "total_tokens_used": aggregates['total_tokens'] or 0,
-            "recent_executions": recent,
-            "node_success_rates": node_success_rates,
-            "error_hotspots": error_hotspots,
-        }
-
-    metrics = await sync_to_async(get_metrics)()
+def workflow_metrics(request, workflow_id: int):
+    """Detailed metrics for one agent, including per-tool success rates."""
+    metrics = queries.agent_metrics(request.user, workflow_id)
     if metrics is None:
-        return Response({"error": "Workflow not found"}, status=404)
+        return Response({"error": "Agent not found"}, status=404)
     return Response(metrics)
 
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-async def cost_breakdown(request):
-    """
-    Get token/credit usage breakdown.
-    """
-    serializer = AnalyticsFilterSerializer(data=request.query_params)
-    serializer.is_valid(raise_exception=True)
-    
-    days = serializer.validated_data['days']
-    
-    def get_costs():
-        start_date = timezone.now() - timedelta(days=days)
-        
-        executions = ExecutionLog.objects.filter(
-            user=request.user,
-            created_at__gte=start_date
-        )
-        
-        # Total usage
-        totals = executions.aggregate(
-            total_tokens=Sum('tokens_used'),
-            total_credits=Sum('credits_used'),
-        )
-        
-        # By workflow
-        by_workflow = list(
-            executions
-            .values('workflow__id', 'workflow__name')
-            .annotate(
-                tokens=Sum('tokens_used'),
-                credits=Sum('credits_used'),
-                executions=Count('id'),
-            )
-            .order_by('-tokens')[:10]
-        )
-        
-        # By node type
-        node_logs = NodeExecutionLog.objects.filter(
-            execution__user=request.user,
-            execution__created_at__gte=start_date,
-        )
-        
-        by_node_type = list(
-            node_logs
-            .values('node_type')
-            .annotate(
-                count=Count('id'),
-            )
-            .order_by('-count')
-        )
-        
-        # Daily usage trend
-        daily_usage = list(
-            executions
-            .annotate(date=TruncDate('created_at'))
-            .values('date')
-            .annotate(
-                tokens=Sum('tokens_used'),
-                credits=Sum('credits_used'),
-            )
-            .order_by('date')
-        )
-        
-        for item in daily_usage:
-            item['date'] = item['date'].isoformat() if item['date'] else None
-            
-        return {
-            "period_days": days,
-            "total_tokens": totals['total_tokens'] or 0,
-            "total_credits": totals['total_credits'] or 0,
-            "by_workflow": by_workflow,
-            "by_node_type": by_node_type,
-            "daily_usage": daily_usage,
-        }
-
-    costs = await sync_to_async(get_costs)()
-    return Response(costs)
+def cost_breakdown(request):
+    """Token and credit usage breakdown."""
+    params = _validated(AnalyticsFilterSerializer, request)
+    return Response(queries.cost_breakdown(request.user, days=params['days']))
 
 
-# ======================== Audit Trail API ========================
+# ======================== Execution history ========================
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-async def audit_list(request):
-    """
-    List audit entries for the user.
-    """
-    serializer = AuditFilterSerializer(data=request.query_params)
-    serializer.is_valid(raise_exception=True)
-    
-    params = serializer.validated_data
-    
-    action_type = params.get('action_type')
-    workflow_id = params.get('workflow_id')
-    limit = params['limit']
-    cursor = params.get('cursor')
-    
-    def get_audit():
-        qs = AuditEntry.objects.filter(user=request.user)
-        
-        if action_type:
-            qs = qs.filter(action_type=action_type)
-        
-        if workflow_id:
-            qs = qs.filter(workflow_id=workflow_id)
-        
-        total = qs.count() if not cursor else None
-        page = paginate_keyset(qs, limit=limit, cursor=cursor)
-        entries = list(
-            AuditEntry.objects.filter(id__in=[entry.id for entry in page.items])
-            .order_by('-created_at', '-id')
-            .values(
-                'id', 'action_type', 'request_details', 'response',
-                'workflow_id', 'node_id', 'created_at', 'ip_address'
-            )
-        )
-        return {
-            "count": total,
-            "results": entries,
-            "next_cursor": page.next_cursor,
-            "has_more": page.has_more,
-        }
-
-    result = await sync_to_async(get_audit)()
-    return Response({
-        **result,
-        "limit": limit,
-        "offset": 0,
-    })
+def execution_list(request):
+    """One page of the user's runs, newest first."""
+    params = _validated(ExecutionListFilterSerializer, request)
+    return Response(queries.execution_page(
+        request.user,
+        limit=params['limit'],
+        cursor=params.get('cursor'),
+        agent_id=params.get('workflow_id'),
+        status=params.get('status'),
+        caller=params.get('caller'),
+    ))
 
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-async def audit_export(request):
+def execution_detail(request, execution_id: str):
+    """One run as turns, each with the reasoning behind it and its tool calls.
+
+    Also carries the revision the run executed under, and — for a delegated run
+    — who asked for it and what they were thinking.
     """
-    Export audit entries as JSON or CSV.
-    """
-    serializer = AuditExportSerializer(data=request.query_params)
-    serializer.is_valid(raise_exception=True)
-    
-    export_format = serializer.validated_data['format']
-    days = serializer.validated_data['days']
-    
-    def generate_export():
-        from django.http import HttpResponse
-        import csv
-        import json as json_lib
-        from io import StringIO
-        
-        start_date = timezone.now() - timedelta(days=days)
-        
-        entries = AuditEntry.objects.filter(
-            user=request.user,
-            created_at__gte=start_date
-        ).order_by('-created_at')
-        
-        if export_format == 'csv':
-            output = StringIO()
-            writer = csv.writer(output)
-            writer.writerow(['Timestamp', 'Action Type', 'Workflow ID', 'Node ID', 'IP Address', 'Details'])
-            
-            for entry in entries:
-                writer.writerow([
-                    entry.created_at.isoformat(),
-                    entry.action_type,
-                    entry.workflow_id or '',
-                    entry.node_id,
-                    entry.ip_address or '',
-                    json_lib.dumps(entry.request_details),
-                ])
-            
-            response = HttpResponse(output.getvalue(), content_type='text/csv')
-            response['Content-Disposition'] = f'attachment; filename="audit_export_{timezone.now().date()}.csv"'
-            return response
-        
-        else:  # JSON
-            data = list(
-                entries.values(
-                    'id', 'action_type', 'request_details', 'response',
-                    'workflow_id', 'node_id', 'created_at', 'ip_address'
-                )
-            )
-            
-            response = HttpResponse(
-                json_lib.dumps(data, default=str, indent=2),
-                content_type='application/json'
-            )
-            response['Content-Disposition'] = f'attachment; filename="audit_export_{timezone.now().date()}.json"'
-            return response
-
-    return await sync_to_async(generate_export)()
-
-
-# ======================== Execution History API ========================
-
-@extend_schema(responses={200: OpenApiTypes.OBJECT})
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-async def execution_list(request):
-    """
-    List executions for the user.
-    """
-    serializer = ExecutionListFilterSerializer(data=request.query_params)
-    serializer.is_valid(raise_exception=True)
-    
-    params = serializer.validated_data
-    
-    workflow_id = params.get('workflow_id')
-    exec_status = params.get('status')
-    limit = params['limit']
-    cursor = params.get('cursor')
-    
-    def get_executions():
-        qs = ExecutionLog.objects.filter(user=request.user)
-        
-        if workflow_id:
-            qs = qs.filter(workflow_id=workflow_id)
-        
-        if exec_status:
-            qs = qs.filter(status=exec_status)
-        
-        total = qs.count() if not cursor else None
-        qs = qs.select_related('workflow')
-        page = paginate_keyset(qs, limit=limit, cursor=cursor)
-        page_ids = [execution.id for execution in page.items]
-        executions = list(
-            ExecutionLog.objects.filter(id__in=page_ids)
-            .select_related('workflow')
-            .annotate(workflow_name=F('workflow__name'))
-            .order_by('-created_at', '-id')
-            .values(
-                'id', 'execution_id', 'workflow_id', 'workflow_name',
-                'status', 'trigger_type', 'duration_ms',
-                'nodes_executed', 'tokens_used', 'error_message',
-                'started_at', 'completed_at', 'created_at'
-            )
-        )
-        return {
-            "count": total,
-            "results": executions,
-            "next_cursor": page.next_cursor,
-            "has_more": page.has_more,
-        }
-
-    result = await sync_to_async(get_executions)()
-    return Response({
-        **result,
-        "limit": limit,
-        "offset": 0,
-    })
-
-
-@extend_schema(responses={200: OpenApiTypes.OBJECT})
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-async def execution_detail(request, execution_id: str):
-    """
-    Get detailed execution information including node logs.
-    """
-    def get_detail():
-        try:
-            execution = ExecutionLog.objects.get(
-                execution_id=execution_id,
-                user=request.user
-            )
-        except ExecutionLog.DoesNotExist:
-            return None
-        
-        # Get node logs
-        node_logs = list(
-            execution.node_logs.order_by('execution_order')
-            .values(
-                'id', 'node_id', 'node_type', 'node_name', 'status',
-                'execution_order', 'duration_ms', 'error_message',
-                'input_data', 'output_data', 'started_at', 'completed_at'
-            )
-        )
-        
-        return {
-            "execution_id": str(execution.execution_id),
-            "workflow_id": execution.workflow_id,
-            "workflow_name": execution.workflow.name if execution.workflow else None,
-            "status": execution.status,
-            "trigger_type": execution.trigger_type,
-            "duration_ms": execution.duration_ms,
-            "nodes_executed": execution.nodes_executed,
-            "tokens_used": execution.tokens_used,
-            "credits_used": execution.credits_used,
-            "supervision_level": execution.supervision_level,
-            "input_data": execution.input_data,
-            "output_data": execution.output_data,
-            "error_message": execution.error_message,
-            "error_node_id": execution.error_node_id,
-            "started_at": execution.started_at,
-            "completed_at": execution.completed_at,
-            "node_logs": node_logs,
-        }
-
-    detail = await sync_to_async(get_detail)()
+    detail = queries.execution_detail(request.user, execution_id)
     if detail is None:
         return Response({"error": "Execution not found"}, status=404)
     return Response(detail)
 
 
-@extend_schema(responses={200: OpenApiTypes.OBJECT})
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-async def execution_activity_logs(request, execution_id: str):
-    """
-    Get all orchestrator activity logs (thoughts, thinking, status) for an execution.
-    """
-    def get_activities():
-        thoughts = OrchestratorThought.objects.filter(
-            execution__execution_id=execution_id,
-            user=request.user
-        ).order_by('created_at')
-        
-        serializer = OrchestratorThoughtSerializer(thoughts, many=True)
-        return serializer.data
-
-    activities = await sync_to_async(get_activities)()
-    return Response(activities)
-
+# ======================== Configuration history ========================
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-async def execution_narrative(request, execution_id: str):
-    """
-    Get or generate a synthesized narrative summary of the execution's thoughts.
-    """
-    def get_narrative():
-        # Check if we already have a narrative entry
-        narrative = OrchestratorThought.objects.filter(
-            execution__execution_id=execution_id,
-            thought_type='narrative',
-            user=request.user
-        ).first()
-        
-        if narrative:
-            return OrchestratorThoughtSerializer(narrative).data
-            
-        # If not, find all thoughts to synthesize
-        # [NEW] Exclude 'status' and 'thinking' types to focus on final 'thought' entries
-        thoughts = OrchestratorThought.objects.filter(
-            execution__execution_id=execution_id,
-            user=request.user
-        ).filter(thought_type__in=['thought', 'error']).order_by('created_at')
-        
-        if not thoughts.exists():
-            return None
-            
-        # [NEW] Improved synthesis logic
-        lines = []
-        for t in thoughts:
-            node_display = t.node_name if t.node_name else (f"@{t.node_id}" if t.node_id and t.node_id != 'orchestrator' else "System")
-            prefix = node_display
-            # Use reasoning if content is tiny or placeholder-like
-            body = t.content
-            if (not body or len(body) < 30) and t.reasoning:
-                body = t.reasoning
-            lines.append(f"[{t.created_at.strftime('%H:%M:%S')}] {prefix}: {body}")
-        
-        combined_thoughts = "\n".join(lines)
-        
-        summary = f"Synthesized Narrative for Execution {execution_id[:8]}...\n\n"
-        summary += "Key Decisions & Insights:\n"
-        summary += combined_thoughts
-        
-        return {
-            "execution_id": execution_id,
-            "thought_type": "narrative",
-            "content": f"AI Narrative Review - {len(thoughts)} insights captured.",
-            "reasoning": summary,
-            "created_at": timezone.now()
-        }
+def revision_list(request, agent_id: int):
+    """One page of an agent's configuration changes, newest first, with diffs.
 
-    narrative_data = await sync_to_async(get_narrative)()
-    if narrative_data is None:
-        # Return a 200 with a placeholder if the execution exists but has no thoughts yet
-        # This prevents 404 errors during early execution polling.
-        return Response({
-            "execution_id": execution_id,
-            "thought_type": "narrative",
-            "content": "AI Narrative Review - Still generating...",
-            "reasoning": "The execution has not yet generated enough activity to synthesize a narrative. Please check back when more steps are completed.",
-            "created_at": timezone.now()
-        }, status=200)
-        
-    return Response(narrative_data)
+    Paged rather than capped: the history grows for the life of the agent, so
+    the builder shows only the newest few and the full timeline has its own
+    page, which walks the rest with `cursor`.
+    """
+    params = _validated(RevisionListFilterSerializer, request)
+    timeline = queries.revision_timeline(
+        request.user, agent_id, limit=params['limit'], cursor=params.get('cursor')
+    )
+    if timeline is None:
+        return Response({"error": "Agent not found"}, status=404)
+    return Response(timeline)
+
+
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def revision_detail(request, agent_id: int, number: int):
+    """One revision's full configuration snapshot."""
+    revision = queries.revision_detail(request.user, agent_id, number)
+    if revision is None:
+        return Response({"error": "Revision not found"}, status=404)
+    return Response(revision)

@@ -11,7 +11,7 @@ from rest_framework.throttling import AnonRateThrottle
 from rest_framework.throttling import UserRateThrottle
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum
 from django.utils import timezone as django_timezone
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -25,7 +25,6 @@ import uuid
 
 from .models import UserProfile, APIKey, UsageTracking, PasswordOTP
 from .serializers import (
-    UserSerializer,
     UserProfileSerializer,
     UserRegistrationSerializer,
     CustomTokenObtainPairSerializer,
@@ -40,17 +39,29 @@ from .serializers import (
     PasswordResetConfirmSerializer,
 )
 from logs.models import ExecutionLog
-from .permissions import IsOwner
+from core.http.throttling import TestClientExemptMixin
 
 
 # ==================== CUSTOM THROTTLES ====================
 
-class LoginRateThrottle(AnonRateThrottle):
+# The throttles below are the ones the auth views actually use.
+# `core/http/throttling.py` also defines `LoginThrottle` / `RegistrationThrottle`
+# on the same scopes, but no view references them -- so a change made there has
+# no effect on any request, which is exactly how the first attempt at the
+# test-client lane below appeared to do nothing.
+#
+# `TestClientExemptMixin` gives an automated E2E client its own lane: the rates
+# stay exactly as they are for every ordinary client, and a client presenting
+# the configured `X-E2E-Bypass-Token` skips the limit -- and only the limit;
+# authentication, permissions and ownership are untouched. The whole mechanism
+# is off unless `E2E_THROTTLE_BYPASS_TOKEN` is set, which it is not by default.
+
+class LoginRateThrottle(TestClientExemptMixin, AnonRateThrottle):
     """Throttle for login attempts - prevents brute force attacks"""
     scope = 'login'
 
 
-class RegisterRateThrottle(AnonRateThrottle):
+class RegisterRateThrottle(TestClientExemptMixin, AnonRateThrottle):
     """Throttle for registration - prevents mass account creation"""
     scope = 'register'
 
@@ -195,6 +206,7 @@ class GoogleLoginView(APIView):
         from django.conf import settings
         from django.contrib.auth import get_user_model
         from rest_framework_simplejwt.tokens import RefreshToken
+        from asgiref.sync import async_to_sync
         
         serializer = GoogleLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -205,7 +217,10 @@ class GoogleLoginView(APIView):
         provider = GoogleOAuthProvider(redirect_uri=redirect_uri)
         
         try:
-            token_data = provider.exchange_code(code)
+            # The provider's methods are async (aiohttp); this sync view must
+            # bridge them, or token_data is a coroutine and `'error' in
+            # token_data` raises TypeError at runtime.
+            token_data = async_to_sync(provider.exchange_code)(code)
         except Exception as e:
              return Response({'error': f'Token exchange failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
              
@@ -216,8 +231,8 @@ class GoogleLoginView(APIView):
         
         # 2. Get User Info
         try:
-            user_info = provider.get_user_info(access_token)
-        except Exception as e:
+            user_info = async_to_sync(provider.get_user_info)(access_token)
+        except Exception:
             return Response({'error': 'Failed to fetch user info'}, status=status.HTTP_400_BAD_REQUEST)
             
         email = user_info.get('email')
@@ -605,3 +620,65 @@ class UsageTrackingView(generics.ListAPIView):
     
     def get_queryset(self):
         return UsageTracking.objects.filter(user=self.request.user)[:30]  # Last 30 days
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What the assistant remembers about you
+# ─────────────────────────────────────────────────────────────────────────────
+
+class UserMemoryView(APIView):
+    """List and delete the durable facts stored about the requesting user.
+
+    A memory store the person cannot see is one they cannot correct, and every
+    fact here is injected into the system prompt of every future turn — so a
+    wrong one keeps being wrong, in every conversation, until someone removes
+    it. The model can call `forget_about_user`, but that only helps if the user
+    knows what is there to forget.
+
+    Read and delete only. There is deliberately no create: a fact typed into a
+    settings screen is a preference, and preferences belong on the profile
+    where they are validated. This surface exists to *audit and correct* what
+    the assistant inferred, which is a different job.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import UserMemory
+
+        rows = UserMemory.objects.filter(user=request.user)
+        return Response({
+            'memories': [
+                {
+                    'id': row.id,
+                    'text': row.text,
+                    'category': row.category,
+                    'source': row.source,
+                    'updated_at': row.updated_at,
+                }
+                for row in rows
+            ],
+            # So a UI can say "24 of 25" rather than leaving the user to guess
+            # why an old fact vanished.
+            'max_per_category': UserMemory.MAX_PER_CATEGORY,
+        })
+
+    def delete(self, request, memory_id=None):
+        """Forget one fact, or all of them.
+
+        Scoped by `user=request.user` in the query rather than checked after
+        the fetch, so somebody else's id and a nonexistent id are the same
+        404 — a distinguishable "exists but not yours" is an oracle.
+        """
+        from .models import UserMemory
+
+        rows = UserMemory.objects.filter(user=request.user)
+        if memory_id is not None:
+            deleted, _ = rows.filter(id=memory_id).delete()
+            if not deleted:
+                return Response({'detail': 'No such memory.'},
+                                status=status.HTTP_404_NOT_FOUND)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        rows.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

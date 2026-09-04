@@ -4,8 +4,7 @@ URL configuration for workflow_backend project.
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
-from orchestrator.views import receive_webhook
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAdminUser
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
 
@@ -20,32 +19,32 @@ urlpatterns = [
     # Health check
     path('api/health/', health_check, name='health-check'),
 
-    # API Schema & Docs (public, read-only)
-    path('api/schema/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema'),
-    path('api/schema/json/', SpectacularAPIView.as_view(permission_classes=[AllowAny]), name='schema-json'),
-    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny]), name='swagger-ui'),
-    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny]), name='redoc'),
-    
+    # API Schema & Docs — admin-only. Exposing the full API surface + schema
+    # unauthenticated leaks the entire backend contract to anyone.
+    path('api/schema/', SpectacularAPIView.as_view(permission_classes=[IsAdminUser]), name='schema'),
+    path('api/schema/json/', SpectacularAPIView.as_view(permission_classes=[IsAdminUser]), name='schema-json'),
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[IsAdminUser]), name='swagger-ui'),
+    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[IsAdminUser]), name='redoc'),
+
     # Aliases for common paths
-    path('swagger.json', SpectacularAPIView.as_view(permission_classes=[AllowAny])),
-    path('openapi.json', SpectacularAPIView.as_view(permission_classes=[AllowAny])),
-    path('redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[AllowAny])),
-    path('docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[AllowAny])),
+    path('swagger.json', SpectacularAPIView.as_view(permission_classes=[IsAdminUser])),
+    path('openapi.json', SpectacularAPIView.as_view(permission_classes=[IsAdminUser])),
+    path('redoc/', SpectacularRedocView.as_view(url_name='schema', permission_classes=[IsAdminUser])),
+    path('docs/', SpectacularSwaggerView.as_view(url_name='schema', permission_classes=[IsAdminUser])),
     
     # Core (auth, users, API keys)
     path('api/', include('core.urls')),
     
-    # Nodes (node registry, schemas)
-    path('api/', include('nodes.urls')),
+    # AI provider vocabulary + the model registry the picker reads.
+    path('api/', include('llm.urls')),
+
     
-    # Compiler (workflow compile/validate)
-    path('api/', include('compiler.urls')),
     
     # Streaming (SSE, events)
     path('api/streaming/', include('streaming.urls')),
     
     # Orchestrator (workflows, executions, HITL, chat)
-    path('api/orchestrator/', include('orchestrator.urls')),
+    path('api/orchestrator/', include('agents.urls')),
     
     # Logs (insights, audit, executions)
     path('api/logs/', include('logs.urls')),
@@ -57,34 +56,32 @@ urlpatterns = [
     path('api/credentials/', include('credentials.urls')),
     
     # Templates
-    path('api/orchestrator/templates/', include('templates.urls')),
     
-    # Webhooks (Public)
-    path('api/webhooks/<int:user_id>/<path:webhook_path>', receive_webhook, name='webhook_receiver'),
     
     # MCP
     path('api/mcp/', include('mcp_integration.urls')),
 
     # Skills
     path('api/', include('skills.urls')),
-    
+
+    # Tool library — read-only catalogue of standard tools (grouped by grant)
+    path('api/tools/', include('tools_config.urls')),
+
     # Standalone Chat
     path('api/chat/', include('chat.urls')),
-    
-    # Buddy (Help Assistant)
-    path('api/buddy/', include('buddy.urls')),
 
-    # BrowserOS
-    path('api/browseros/', include('browserOS.urls')),
-
-    # Canvas Agent
-    path('api/canvas-agent/', include('canvas_agent.urls')),
 
     # Notifications
     path('api/notifications/', include('notifications.urls')),
     
     # Imagine (Image/Video/Audio Generation)
     path('api/imagine/', include('imagine.urls')),
+
+    # Extract (document -> rows, owned by inference)
+    path('api/extraction/', include('inference.extraction_urls')),
+
+    # Eval (sub-agent evaluation + human supervision of the graders)
+    path('api/eval/', include('eval.urls')),
 ]
 
 

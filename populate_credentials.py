@@ -1,10 +1,9 @@
 import os
 import django
-import sys
 
 # Set up Django environment BEFORE importing models
 # Fix: Correct settings path to workflow_backend.settings
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'workflow_backend.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'workflow_backend.settings.local')
 django.setup()
 
 from credentials.models import CredentialType
@@ -86,26 +85,6 @@ def populate_types():
             'auth_method': 'bearer',
             'fields_schema': [
                 {'name': 'token', 'label': 'Bearer Token', 'type': 'password', 'required': True}
-            ]
-        },
-        {
-            'name': 'Gemini API',
-            'slug': 'gemini-api',
-            'description': 'Google Gemini API Key',
-            'icon': 'Sparkles',
-            'auth_method': 'api_key',
-            'fields_schema': [
-                {'name': 'api_key', 'label': 'API Key', 'type': 'password', 'required': True}
-            ]
-        },
-        {
-            'name': 'Perplexity API',
-            'slug': 'perplexity-api',
-            'description': 'Perplexity AI API Key',
-            'icon': 'Search',
-            'auth_method': 'api_key',
-            'fields_schema': [
-                {'name': 'api_key', 'label': 'API Key', 'type': 'password', 'required': True}
             ]
         },
         {
@@ -193,68 +172,16 @@ def populate_types():
                 {'name': 'bot_token', 'label': 'Bot Token', 'type': 'password', 'required': True}
             ]
         },
-        # --- NEW AI PROVIDER CREDENTIAL TYPES ---
-        {
-            'name': 'Anthropic API',
-            'slug': 'anthropic',
-            'description': 'API Key for Anthropic Claude',
-            'icon': '🎭',
-            'auth_method': 'api_key',
-            'fields_schema': standard_api_key_schema
-        },
+        # --- AI PROVIDER CREDENTIAL TYPES ---
+        # Only providers in `llm.providers.SUPPORTED_PROVIDERS`. Seeding a
+        # type for a provider with no handler produced a credential the user
+        # could save, verify, and never spend — which is what `cohere`, `groq`
+        # and `mistral` were. Ollama is absent because it needs no key.
         {
             'name': 'OpenRouter API',
             'slug': 'openrouter',
             'description': 'API Key for OpenRouter.ai',
             'icon': '🛣️',
-            'auth_method': 'api_key',
-            'fields_schema': standard_api_key_schema
-        },
-        {
-            'name': 'Hugging Face API',
-            'slug': 'huggingface',
-            'description': 'Access Token for Hugging Face Inference API',
-            'icon': '🤗',
-            'auth_method': 'bearer',
-            'fields_schema': standard_api_key_schema
-        },
-        {
-            'name': 'Mistral API',
-            'slug': 'mistral',
-            'description': 'API Key for Mistral AI',
-            'icon': '🌪️',
-            'auth_method': 'api_key',
-            'fields_schema': standard_api_key_schema
-        },
-        {
-            'name': 'xAI API (Grok)',
-            'slug': 'xai',
-            'description': 'API Key for xAI',
-            'icon': '✖️',
-            'auth_method': 'api_key',
-            'fields_schema': standard_api_key_schema
-        },
-        {
-            'name': 'DeepSeek API',
-            'slug': 'deepseek',
-            'description': 'API Key for DeepSeek',
-            'icon': '🐳',
-            'auth_method': 'api_key',
-            'fields_schema': standard_api_key_schema
-        },
-        {
-            'name': 'Cohere API',
-            'slug': 'cohere',
-            'description': 'API Key for Cohere',
-            'icon': '🪐',
-            'auth_method': 'api_key',
-            'fields_schema': standard_api_key_schema
-        },
-        {
-            'name': 'Groq API',
-            'slug': 'groq',
-            'description': 'API Key for Groq Cloud',
-            'icon': '⚡',
             'auth_method': 'api_key',
             'fields_schema': standard_api_key_schema
         },

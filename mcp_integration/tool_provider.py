@@ -1,36 +1,54 @@
 """
 MCPToolProvider — bridges MCP servers into the platform's agent tool loops.
 
-This is the single integration surface used by:
-    * the chat agent  (chat/graph.py, chat/tools.py)
-    * the King orchestrator (executor/king.py), via MCPToolNode
-    * the "buddy" help agent (reuses the chat agent tool list)
+This is the single integration surface used by the chat agent and, through it,
+by agent runs (`chat/tools/`, dispatched via the `mcp` grant in
+`agents/agent/runtime.py::GRANT_TOOLS`). It is now the only such surface:
+the King orchestrator reached MCP through `MCPToolNode`, and both went with
+the DAG runtime.
 
 Tool names are namespaced so MCP tools never collide with built-in tools:
 
     mcp__<server_id>__<tool_name>
 
 The provider exposes two calls:
-    * `get_openai_tool_descriptors(user)` -> list of OpenAI-format function
-      specs ready to merge into `AVAILABLE_TOOLS`.
+    * `get_openai_tool_descriptors(user, server_ids=None)` -> list of
+      OpenAI-format function specs ready to merge into `AVAILABLE_TOOLS`,
+      optionally narrowed to a chosen few connections.
     * `execute(name, arguments, user)` -> JSON-serialisable result.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass
 from hashlib import sha1
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from django.core.exceptions import PermissionDenied
 
-from .client import MCPClientManager, get_servers_for_user
-from .credential_injector import CredentialInvalidError, CredentialMissingError
+from .client import MCPClientManager, get_servers_for_user, AGENT_LIST_TOOLS_TIMEOUT
+from .credential_injector import (
+    CredentialInvalidError,
+    CredentialMissingError,
+    _coerce_user_id,
+)
 from .models import MCPServer
 
+import os
+
 logger = logging.getLogger(__name__)
+
+# Emergency brake, read at call time so tests can flip it without reload.
+# `MCP_DISABLED=True` makes every listing path return no tools without
+# spawning anything: the turn still answers, just without connector tools.
+# For when a wedged subprocess pool is taking the whole box down and the
+# right fix (disable unused connections, redeploy) needs a minute.
+def _mcp_disabled() -> bool:
+    return os.environ.get("MCP_DISABLED", "False").lower() in ("true", "1", "yes")
 
 TOOL_PREFIX = "mcp__"
 _NAME_RE = re.compile(r"^mcp__(\d+)__(.+)$")
@@ -91,27 +109,94 @@ class MCPToolProvider:
     """Stateless facade. All methods take `user` explicitly — no hidden state."""
 
     @staticmethod
-    async def get_openai_tool_descriptors(user) -> list[dict[str, Any]]:
+    async def get_openai_tool_descriptors(
+        user, server_ids: Iterable[int] | None = None,
+        tool_filter: Callable[[int, str], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Return OpenAI-format tool descriptors for every MCP tool visible to
         `user`. Safe to call on every chat turn — `list_tools` is cached.
+
+        `server_ids` narrows that to a chosen few connections. `None` means
+        "every one the user has", which is what chat passes: a human is typing
+        and watching, so the whole workspace is the right scope. An agent run
+        passes its own selection, because an agent is configuration that runs
+        unattended and "every connection this account owns" is not a blast
+        radius anyone chose.
+
+        Filtering here rather than in the caller keeps the narrowing on the
+        same side as `get_servers_for_user`, so a server the user has switched
+        off on Connections is excluded before the selection is even consulted —
+        a stale id in an agent's config can only ever take tools away.
+
+        `tool_filter(server_id, original_name)` narrows one step further, to
+        individual tools. It runs here because this is the only place that holds
+        a tool's *original* name: everything downstream sees the encoded form,
+        whose middle section has already been through `_SAFE_TOOL_NAME_RE`. Chat
+        passes None — a human is typing and watching.
         """
+        if _mcp_disabled():
+            return []
         servers = await get_servers_for_user(user)
-        descriptors: list[dict[str, Any]] = []
-        for server in servers:
+        if server_ids is not None:
+            allowed = set(server_ids)
+            servers = [s for s in servers if s.id in allowed]
+
+        def _keep(server_id: int, tool: dict[str, Any]) -> bool:
+            return tool_filter is None or tool_filter(server_id, tool.get('name') or '')
+
+        async def _descriptors_for(server) -> list[dict[str, Any]]:
+            # Bound each server: a hung/absent stdio server must not stall the
+            # whole agent turn. All servers are queried concurrently under one
+            # shared 8s budget each — deliberately *unbounded*: batching them
+            # through a semaphore turns one 8s timeout into ceil(n/k)*8s of
+            # dead air when all of them are cold, which is exactly the hang
+            # this path must not produce.
             try:
                 manager = MCPClientManager(server.id, user=user)
-                tools = await manager.list_tools()
+                tools = await asyncio.wait_for(manager.list_tools(), timeout=AGENT_LIST_TOOLS_TIMEOUT)
             except CredentialMissingError as e:
                 # Don't advertise a tool the user can't actually call.
                 logger.info("Skipping MCP server %s for user %s: %s", server.name, getattr(user, "id", None), e)
-                continue
+                return []
+            except (asyncio.TimeoutError, TimeoutError):
+                # The 8s agent budget is far below a cold `npx` start
+                # (~21s), so a cold connector times out here by design and
+                # returns no tools for this turn. Two things keep that from
+                # becoming every turn: remember the failure so the next
+                # turn backs off for FAILURE_TTL instead of paying another
+                # 8s immediately, and warm the cache behind the turn with
+                # the full 25s+15s budget so the retry hits instead of
+                # re-dialling cold. Without both, a connector whose cache
+                # never filled costs every turn 8s for nothing.
+                logger.warning("Timed out listing tools for MCP server %s", server.name)
+                try:
+                    from .client import _record_failure, _refresh_in_background
+                    from .client import AGENT_LIST_TOOLS_TIMEOUT as _budget
+
+                    _record_failure(
+                        (server.id, _coerce_user_id(user)),
+                        f"Timed out after {_budget:.0f}s listing tools for "
+                        f"'{server.name}' (warming in background).",
+                    )
+                    _refresh_in_background(server.id, user)
+                except Exception:  # noqa: BLE001 — backoff must never break listing
+                    logger.debug("Failed to schedule MCP background warm", exc_info=True)
+                return []
             except Exception as e:  # noqa: BLE001
                 logger.warning("Failed to list tools for MCP server %s: %s", server.name, e)
-                continue
-            for t in tools:
-                descriptors.append(_build_openai_descriptor(server, t))
-        return descriptors
+                return []
+            return [_build_openai_descriptor(server, t) for t in tools
+                    if _keep(server.id, t)]
+
+        results = await asyncio.gather(
+            *(_descriptors_for(s) for s in servers), return_exceptions=True
+        )
+        return [
+            d for group in results
+            if not isinstance(group, BaseException)
+            for d in group
+        ]
 
     @staticmethod
     async def _resolve_binding(name: str, user) -> _ToolBinding | None:

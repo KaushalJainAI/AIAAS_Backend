@@ -4,7 +4,9 @@ This directory contains the logic for the Standalone AI Chat Agent.
 
 ## Key Files
 - `views.py`: Main entry points for chat sessions, message handling, and the agentic tool loop.
-- `tools.py`: Registry of tools available to the AI (web search, code execution, etc.).
+- `tools/`: Tool registry package — one module per domain (`web`, `knowledge`,
+  `conversation`, `agents`, `sandbox`, `artifacts`, `vision`, `internal`, `clock`),
+  each tool declaring its schema and implementation together via `@tool(...)`.
 - `orchestrator.py`: Logic for model name normalization and intent analysis.
 - `models.py`: Database schemas for `ChatSession`, `ChatMessage`, and `ChatAttachment`.
 - `extraction.py`: Pattern matching and extraction of tool calls from LLM text.

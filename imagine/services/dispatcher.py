@@ -1,94 +1,162 @@
 """Shared generation dispatcher used by both the form ViewSet and the agent."""
 import logging
+import re
 from typing import Optional
 
+from django.conf import settings
+
 from ..models import Generation
+from .events import broadcast_generation
 from .openrouter import MissingOpenRouterCredentialError, OpenRouterService
+
+# Document persistence is imported lazily inside call sites to avoid
+# circular inference -> imagine imports at module load; but the name is
+# needed here for the post-completion hook.
 
 logger = logging.getLogger(__name__)
 
 
-def _map_resolution_to_size(res_str: Optional[str]) -> str:
-    """Coerce a free-form resolution string to OpenRouter's image_size enum."""
+def _map_resolution_to_size(res_str: Optional[str]) -> Optional[str]:
+    """Coerce a free-form resolution string to OpenRouter's image enum.
+
+    Returns None for an unset value so the key can be dropped entirely — image
+    models disagree on which resolutions they accept, so defaulting to "1K"
+    here would send an unsupported value to the several models that only offer
+    2K/4K.
+    """
     if not res_str:
-        return "1K"
-    s = res_str.upper()
-    if "4096" in s or "4K" in s:
+        return None
+    s = str(res_str).upper()
+    for token in ("4K", "2K", "1K"):
+        if token in s:
+            return token
+    if "4096" in s:
         return "4K"
-    if "2048" in s or "2K" in s:
+    if "2048" in s:
         return "2K"
-    return "1K"
+    if "512" in s:
+        return "512"
+    if "1024" in s:
+        return "1K"
+    return None
 
 
-def _normalize_video_resolution(res_str: Optional[str]) -> str:
+def _normalize_video_resolution(res_str: Optional[str]) -> Optional[str]:
     """Coerce a resolution string into one of OpenRouter's video enums."""
     if not res_str:
-        return "720p"
-    s = res_str.lower().strip()
-    for known in ("480p", "720p", "1080p"):
+        return None
+    s = str(res_str).lower().strip()
+    for known in ("480p", "720p", "768p", "1080p"):
         if known in s:
             return known
-    if "4k" in s or "2160" in s:
+    if "2160" in s:
         return "4K"
-    if "2k" in s or "1440" in s:
+    if "1440" in s:
         return "2K"
-    if "1k" in s:
-        return "1K"
-    return "720p"
+    for token in ("4k", "2k", "1k"):
+        if token in s:
+            return token.upper()
+    return None
 
 
-def _parse_seconds(value, default: int = 5) -> int:
-    """Accept '5', '5s', '10 seconds', 5, etc. Falls back to default on garbage."""
+def _parse_seconds(value, default: Optional[int] = None) -> Optional[int]:
+    """Accept '5', '5s', '10 seconds', 5, 1.5, etc. Returns default on garbage.
+
+    A naive digit filter turned "1.5" into 15; keep the decimal point when
+    parsing so fractional durations round instead of multiplying by ten.
+    """
     if value is None or value == "":
         return default
     if isinstance(value, (int, float)):
         return int(value)
-    digits = "".join(c for c in str(value) if c.isdigit())
-    return int(digits) if digits else default
+    match = re.search(r"\d+(?:\.\d+)?", str(value))
+    if not match:
+        return default
+    return int(float(match.group()))
 
 
 def _build_config(generation: Generation) -> dict:
-    return {
+    """Assemble the provider config, dropping anything the user never set.
+
+    Every key here used to be emitted unconditionally, so an unset field
+    arrived as an explicit `None` — and `config.get("aspect_ratio", "1:1")`
+    returns `None`, not the default, when the key is present. Null aspect
+    ratios were being posted to OpenRouter as a result. Absent means absent
+    now, and the model's own default applies.
+    """
+    config = {
         "aspect_ratio": generation.aspect_ratio,
-        "image_size": _map_resolution_to_size(generation.resolution),
-        "resolution": _normalize_video_resolution(generation.resolution),
-        "duration": _parse_seconds(generation.duration, default=5),
+        "size": generation.size,
         "negative_prompt": generation.negative_prompt,
         "seed": generation.seed,
         "voice": generation.voice,
         "speed": generation.speed,
+        "instructions": generation.instructions,
+        "response_format": generation.response_format,
+        "quality": generation.quality,
+        "output_format": generation.output_format,
+        "background": generation.background,
+        "output_compression": generation.output_compression,
+        "n": generation.batch_size,
+        "reference_urls": generation.reference_urls or None,
+        "frame_images": generation.frame_images or None,
+        "generate_audio": generation.generate_audio,
     }
 
+    if generation.type == "video":
+        config["resolution"] = _normalize_video_resolution(generation.resolution)
+        config["duration"] = _parse_seconds(generation.duration)
+    else:
+        config["resolution"] = _map_resolution_to_size(generation.resolution)
 
-def _broadcast(generation: Generation, event_type: str, payload: dict) -> None:
-    """Push a status event to the user's imagine WS group. No-op if Channels not configured."""
-    try:
-        from channels.layers import get_channel_layer
-        from asgiref.sync import async_to_sync
-        layer = get_channel_layer()
-        if not layer:
-            return
-        async_to_sync(layer.group_send)(
-            f"imagine_agent_{generation.user_id}",
-            {
-                "type": "imagine.event",
-                "event": event_type,
-                "data": {
-                    "generation_id": generation.id,
-                    "status": generation.status,
-                    "type": generation.type,
-                    **payload,
-                },
-            },
-        )
-    except Exception as e:
-        logger.debug(f"WS broadcast skipped: {e}")
+    return {k: v for k, v in config.items() if v is not None and v != ""}
+
+
+def run_image_generation(generation: Generation, service: OpenRouterService) -> None:
+    """Execute the image call and write the outcome to the row.
+
+    Shared by the inline dispatch and the Celery worker so the two paths cannot
+    drift — the worker must produce exactly what the request cycle would have.
+    """
+    result = service.generate_image(
+        generation.prompt, generation.model, _build_config(generation)
+    )
+    if "error" in result:
+        generation.status = "failed"
+        generation.error_message = result["error"]
+    else:
+        generation.status = "completed"
+        generation.output_url = result["url"]
+        # A batch is one request and one row; every image it returned is kept,
+        # with the first also in `output_url` so single-result readers are
+        # unchanged.
+        generation.output_urls = list(result.get("urls") or [result["url"]])
+        if result.get("cost") is not None:
+            generation.metadata = {
+                **(generation.metadata or {}),
+                "cost_usd": result["cost"],
+            }
+    generation.save()
+    if generation.status == "completed" and generation.output_url:
+        try:
+            from .documents import persist_generation_as_document
+
+            persist_generation_as_document(generation)
+        except Exception:
+            logger.exception("Failed to persist image generation %s as document", generation.id)
 
 
 def run_generation(generation: Generation) -> Generation:
-    """Dispatch a Generation to OpenRouter. Mutates and saves the row in place."""
-    config = _build_config(generation)
-    _broadcast(generation, "generation.started", {"prompt": generation.prompt})
+    """Dispatch a Generation to OpenRouter. Mutates and saves the row in place.
+
+    Image is async only when `RUN_WORKFLOWS_ASYNC` is on: the row is left
+    `pending` and a Celery worker performs the call, exactly like the video
+    path. Local dev and tests run without Redis, so they stay inline — the same
+    split as `inference.dispatch_extraction`. If the broker is unreachable at
+    enqueue time the call falls back to inline rather than leaving a `pending`
+    row that can never complete.
+    """
+    _broadcast_started(generation)
 
     try:
         service = OpenRouterService.for_user(generation.user)
@@ -96,25 +164,18 @@ def run_generation(generation: Generation) -> Generation:
         generation.status = "failed"
         generation.error_message = str(e)
         generation.save()
-        _broadcast(generation, "generation.failed", {
-            "output_url": None,
-            "error": generation.error_message,
-        })
+        broadcast_generation(generation, "generation.failed")
         return generation
 
     try:
         if generation.type == "image":
-            result = service.generate_image(generation.prompt, generation.model, config)
-            if "error" in result:
-                generation.status = "failed"
-                generation.error_message = result["error"]
+            if settings.RUN_WORKFLOWS_ASYNC:
+                _enqueue_image(generation, service)
             else:
-                generation.status = "completed"
-                generation.output_url = result["url"]
-            generation.save()
+                run_image_generation(generation, service)
 
         elif generation.type == "video":
-            result = service.generate_video(generation.prompt, generation.model, config)
+            result = service.generate_video(generation.prompt, generation.model, _build_config(generation))
             if "error" in result:
                 generation.status = "failed"
                 generation.error_message = result["error"]
@@ -128,14 +189,22 @@ def run_generation(generation: Generation) -> Generation:
                 poll_video_generation.delay(generation.id)
 
         elif generation.type == "audio":
-            result = service.generate_audio(generation.prompt, generation.model, config)
+            result = service.generate_audio(generation.prompt, generation.model, _build_config(generation))
             if "error" in result:
                 generation.status = "failed"
                 generation.error_message = result["error"]
             else:
                 generation.status = "completed"
                 generation.output_url = result["url"]
+                generation.output_urls = [result["url"]]
             generation.save()
+            if generation.status == "completed" and generation.output_url:
+                try:
+                    from .documents import persist_generation_as_document
+
+                    persist_generation_as_document(generation)
+                except Exception:
+                    logger.exception("Failed to persist audio generation %s as document", generation.id)
 
         else:
             generation.status = "failed"
@@ -149,9 +218,32 @@ def run_generation(generation: Generation) -> Generation:
         generation.save()
 
     if generation.status in ("completed", "failed"):
-        _broadcast(
+        broadcast_generation(
             generation,
             "generation.completed" if generation.status == "completed" else "generation.failed",
-            {"output_url": generation.output_url, "error": generation.error_message},
         )
     return generation
+
+
+def _broadcast_started(generation: Generation) -> None:
+    """Fire `generation.started` before anything else touches the row."""
+    broadcast_generation(generation, "generation.started", prompt=generation.prompt)
+
+
+def _enqueue_image(generation: Generation, service: OpenRouterService) -> None:
+    """Offload the image call to the worker, falling back to inline.
+
+    A `pending` row with no worker behind it is a worse failure than a slow
+    request — if the task cannot be enqueued the request cycle does the work
+    so the row always reaches a terminal state.
+    """
+    generation.status = "pending"
+    generation.save()
+    try:
+        from ..tasks import generate_image_task
+        generate_image_task.delay(generation.id)
+    except Exception as e:
+        logger.warning("Image task enqueue failed (%s); running inline", e)
+        generation.status = "processing"
+        generation.save()
+        run_image_generation(generation, service)

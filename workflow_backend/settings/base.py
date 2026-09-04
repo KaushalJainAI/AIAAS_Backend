@@ -70,15 +70,42 @@ def _database_config():
             'OPTIONS': options,
         }
 
+    # Resolve a relative SQLITE_PATH against BASE_DIR, never against the current
+    # working directory: manage.py runs from Backend/ while instance/scripts/ and
+    # the harnesses run from the repo root, and a cwd-relative path silently gives
+    # each of them a *different* database file.
+    sqlite_path = Path(os.environ.get('SQLITE_PATH', 'db.sqlite3'))
+    if not sqlite_path.is_absolute():
+        sqlite_path = BASE_DIR / sqlite_path
+
     return {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': Path(os.environ.get('SQLITE_PATH', str(BASE_DIR / 'db.sqlite3'))),
+        'NAME': sqlite_path,
         'OPTIONS': {'timeout': 20},
     }
 
 
-SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-default-key-change-in-production')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+
+#: Shared secret an automated E2E client presents (header `X-E2E-Bypass-Token`)
+#: to be exempted from the *rate limits only* -- see
+#: `core.http.throttling.is_test_client`. Blank disables the whole mechanism,
+#: which is the default and what production should keep: the throttles are a
+#: brute-force guard, and the adversarial harness asserts they still fire.
+E2E_THROTTLE_BYPASS_TOKEN = os.environ.get('E2E_THROTTLE_BYPASS_TOKEN', '')
+
+# A missing SECRET_KEY must never silently fall back to a shared, well-known
+# value in production: that key signs JWTs and session cookies, so a known key
+# lets anyone forge either. In DEBUG we tolerate an ephemeral dev key; outside
+# DEBUG an unset key is a hard configuration error.
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'django-insecure-dev-only-key-not-for-production'
+    else:
+        raise RuntimeError(
+            'SECRET_KEY environment variable is required when DEBUG is False.'
+        )
 
 ALLOWED_HOSTS = [
     'localhost',
@@ -89,6 +116,14 @@ ALLOWED_HOSTS = [
 ]
 ALLOWED_HOSTS.extend(_split_env_list(os.environ.get('ALLOWED_HOSTS', '')))
 ALLOWED_HOSTS = [h for h in ALLOWED_HOSTS if h]
+
+# Trust the same hostnames for CSRF (needed for the admin / cookie-auth POSTs
+# over HTTPS; the JWT API auth is header-based and does not rely on this).
+CSRF_TRUSTED_ORIGINS = [
+    f'https://{h}' for h in ALLOWED_HOSTS
+    if h and not h.startswith('.') and h not in ('localhost', '127.0.0.1')
+]
+CSRF_TRUSTED_ORIGINS += ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:8000']
 
 INSTALLED_APPS = [
     'daphne',
@@ -111,10 +146,9 @@ INSTALLED_APPS = [
     'dj_rest_auth',
     'dj_rest_auth.registration',
     'core',
-    'nodes',
-    'compiler',
+    'llm',
     'executor',
-    'orchestrator',
+    'agents',
     'credentials',
     'inference',
     'logs',
@@ -123,18 +157,24 @@ INSTALLED_APPS = [
     'mcp_integration',
     'skills',
     'chat',
-    'browserOS',
     'django_celery_beat',
-    'buddy',
-    'canvas_agent',
     'notifications',
     'imagine',
+    'tools_config',
+    # Evaluation of sub-agents. Label is `eval` (singular): the deleted `evals`
+    # app left inert `evals_*` tables and an `evals.0001_initial` row in dev
+    # databases, so the new tables must not be named the same thing.
+    'eval',
 ]
 
 SITE_ID = 1
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves STATIC_ROOT itself. runserver only serves static when DEBUG is on,
+    # so with DEBUG=False the admin loaded with no CSS; nginx proxies /static
+    # straight through to Django, so there was nothing else to fall back on.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -143,9 +183,9 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'allauth.account.middleware.AccountMiddleware',
-    'core.middleware.RequestLoggingMiddleware',
-    'core.middleware.InputSanitizationMiddleware',
-    'core.middleware.RateLimitHeaderMiddleware',
+    'core.http.middleware.RequestLoggingMiddleware',
+    'core.http.middleware.InputSanitizationMiddleware',
+    'core.http.middleware.RateLimitHeaderMiddleware',
 ]
 
 ROOT_URLCONF = 'workflow_backend.urls'
@@ -237,12 +277,50 @@ else:
     STATIC_URL = '/static/'
     MEDIA_URL = '/media/'
 
+# ---------------------------------------------------------------------------
+# Code execution sandbox
+# ---------------------------------------------------------------------------
+# `service` runs the `execute_python` tool in the hardened sidecar container
+# (sandbox_service/) — real confinement, numpy/pandas available. `inprocess` is
+# the weaker AST-guarded dev fallback in sandbox/safe_execution.py. The deployed
+# image sets SANDBOX_ENGINE=service; a bare local runserver defaults to
+# inprocess so it works with no sidecar. There is no automatic fallback between
+# them — see sandbox/engine.py.
+SANDBOX_ENGINE = os.environ.get('SANDBOX_ENGINE', 'inprocess')
+SANDBOX_SERVICE_URL = os.environ.get('SANDBOX_SERVICE_URL', 'http://sandbox:8100')
+SANDBOX_WALL_SECONDS = int(os.environ.get('SANDBOX_WALL_SECONDS', '10'))
+SANDBOX_CPU_SECONDS = int(os.environ.get('SANDBOX_CPU_SECONDS', '8'))
+SANDBOX_MEM_MB = int(os.environ.get('SANDBOX_MEM_MB', '384'))
+
+# ---------------------------------------------------------------------------
+# Agent run checkpoints
+# ---------------------------------------------------------------------------
+# Where a run's graph state lives, and therefore whether a run survives the
+# process that started it. `memory` is in-process and loses every in-flight run
+# on restart; `sqlite` is a file beside the dev database; `postgres` is for a
+# deployment with more than one process or a replaceable container. One door,
+# no automatic fallback between them — see chat/turn/checkpoints.py.
+#
+# The dev default is `sqlite` rather than `memory` because the failure it
+# prevents is invisible: an interrupted run leaves an ExecutionLog on `running`
+# for ever and a user watching a stream attached to nothing.
+AGENT_CHECKPOINTER = os.environ.get('AGENT_CHECKPOINTER', 'sqlite')
+# Its own file, never db.sqlite3: checkpoint writes are heavy and would take
+# SQLite's single write lock on the application database on every super-step.
+AGENT_CHECKPOINT_PATH = os.environ.get('AGENT_CHECKPOINT_PATH', '')
+AGENT_CHECKPOINT_DSN = os.environ.get('AGENT_CHECKPOINT_DSN', '')
+# How often to look for runs whose process is gone.
+RUN_RECOVERY_SWEEP_SECONDS = int(
+    os.environ.get('RUN_RECOVERY_SWEEP_SECONDS', '600')
+)
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'core.authentication.APIKeyAuthentication',
+        'core.auth.query_param_jwt.QueryParamJWTAuthentication',
+        'core.auth.authentication.APIKeyAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
@@ -266,6 +344,7 @@ REST_FRAMEWORK = {
         'execute': '5/minute',
         'chat': '20/hour',
         'stream': '20/minute',
+        'imagine_generate': '30/hour',
         'password_reset': '10/hour',
         'password_change': '10/hour',
         'guest_chat_min': '3/minute',
@@ -274,12 +353,16 @@ REST_FRAMEWORK = {
     },
 }
 
-# --- Guest chat (anonymous NVIDIA NIM demo) ---
+# --- Guest chat (anonymous OpenRouter free-router demo) ---
+# NVIDIA_API_KEY is still read here: it remains the platform default key for
+# authenticated users with no credential of their own (PLATFORM_ENV_KEYS in
+# credentials/resolution.py). Guest chat no longer uses it.
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '')
-NVIDIA_GUEST_MODEL = os.environ.get(
-    'NVIDIA_GUEST_MODEL',
-    'nvidia/llama-3.3-nemotron-super-49b-v1',
-)
+# Which model guests get is NOT configurable here: it is pinned to OpenRouter's
+# free-models router in chat/guest/runtime.py (GUEST_PROVIDER/GUEST_MODEL), and
+# its key comes from OPENROUTER_API_KEY via platform_api_key(). An env override
+# of the *model* would let a deploy quietly serve anonymous visitors on a model
+# nobody chose to pay for, which is the opposite of what the pin is for.
 GUEST_CHAT_MAX_TOKENS = int(os.environ.get('GUEST_CHAT_MAX_TOKENS', '200000'))
 GUEST_USER_EMAIL = os.environ.get('GUEST_USER_EMAIL', 'guest@aiaas.local')
 
@@ -317,8 +400,11 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
+# These look unused, but a settings module *is* its namespace — Django reads
+# these names off it directly, so the import is the assignment. The module is
+# present; the guard only covers a build that strips it.
 try:
-    from workflow_backend.thresholds import (
+    from workflow_backend.thresholds import (  # noqa: F401
         DATA_UPLOAD_MAX_MEMORY_SIZE,
         FILE_UPLOAD_MAX_MEMORY_SIZE,
         DATA_UPLOAD_MAX_NUMBER_FIELDS,
@@ -349,11 +435,112 @@ else:
         },
     }
 
+# ── Cache ───────────────────────────────────────────────────────────────────
+#
+# There was no `CACHES` block here at all, which is not the same as there being
+# no cache: Django falls back to `LocMemCache`, silently, per process. Every
+# `django.core.cache` user was therefore holding a private copy that died with
+# the worker — and the most expensive of them is `mcp_integration/tool_cache.py`,
+# whose whole purpose is to keep a ~21-second cold `npx` off the front of a
+# user's first token. A per-process cache means that cost is paid again by every
+# worker, and again after every deploy.
+#
+# Two other things only work on a shared backend. `tool_cache.invalidate_user`
+# needs `delete_pattern`, which LocMem does not implement — so editing a
+# connection left stale tools advertised until the TTL lapsed (`imporvements.md`
+# §3.3). And `llm/access.py`'s effort-support cache, primed by `preflight` and
+# read synchronously on the hot path, was primed in one process and read in
+# another.
+#
+# Opt-in by URL rather than by environment name: `USE_REDIS_CACHE` defaults on
+# wherever the channel layer is already on Redis, because a deployment with a
+# broker has one. Local dev with no Redis keeps LocMem and needs no config —
+# the same rule the channel layer above follows, and for the same reason.
+USE_REDIS_CACHE = os.environ.get(
+    'USE_REDIS_CACHE', 'True' if USE_REDIS_CHANNEL_LAYER else 'False',
+) == 'True'
+
+if USE_REDIS_CACHE:
+    CACHES = {
+        'default': {
+            # Django's own backend (5.x), so no `django-redis` dependency and
+            # no second connection-pool implementation to reason about.
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            # A different logical database from the channel layer and Celery:
+            # a `flushdb` while debugging a queue must not also drop every
+            # cached tool list and re-cold-start every connector.
+            'LOCATION': os.environ.get('CACHE_URL', REDIS_URL.rsplit('/', 1)[0] + '/1'),
+            'KEY_PREFIX': 'aiaas',
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            # Named, so two processes in one dev box at least agree on the
+            # name — and so the fallback is visible in `settings.CACHES`
+            # rather than being an absence someone has to know about.
+            'LOCATION': 'aiaas-local',
+        }
+    }
+
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', REDIS_URL)
 CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', REDIS_URL)
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
+
+# Periodic work. Run with:  celery -A workflow_backend beat -l info
+# The HITL sweep is also runnable without a broker as
+# `manage.py send_hitl_reminders`, which is how local dev and cron-only
+# deployments drive it — see notifications/reminders.py.
+HITL_REMINDER_SWEEP_SECONDS = int(os.environ.get('HITL_REMINDER_SWEEP_SECONDS', '300'))
+TRIGGER_SWEEP_SECONDS = int(os.environ.get('TRIGGER_SWEEP_SECONDS', '60'))
+RECYCLE_SWEEP_SECONDS = int(os.environ.get('RECYCLE_SWEEP_SECONDS', '3600'))
+CELERY_BEAT_SCHEDULE = {
+    'sweep-hitl-reminders': {
+        'task': 'notifications.sweep_hitl_reminders',
+        'schedule': HITL_REMINDER_SWEEP_SECONDS,
+    },
+    # Every minute: cron's own resolution is one minute, so a slower sweep
+    # would make `next_due_at` a suggestion rather than a schedule. Also
+    # runnable as `manage.py run_due_triggers` — see agents/sweep.py.
+    'sweep-due-triggers': {
+        'task': 'orchestrator.sweep_triggers',
+        'schedule': TRIGGER_SWEEP_SECONDS,
+    },
+    # Hourly: a 30-day retention has no use for minute resolution, and this
+    # sweep is the destructive one. Also runnable as
+    # `manage.py purge_recycle_bin` — see inference/recycle.py.
+    'sweep-recycle-bin': {
+        'task': 'inference.sweep_recycle_bin',
+        'schedule': RECYCLE_SWEEP_SECONDS,
+    },
+    # Runs whose process went away. Slower than the trigger sweep because a
+    # run is only judged orphaned well past its own wall-clock limit, so
+    # checking oftener would find the same nothing. Also runnable as
+    # `manage.py recover_runs` — see agents/recovery.py, where the reason that
+    # second path matters is sharpest: this is the recovery for a dead
+    # process, so a broker-only design would be missing exactly when needed.
+    'recover-orphaned-runs': {
+        'task': 'orchestrator.recover_runs',
+        'schedule': RUN_RECOVERY_SWEEP_SECONDS,
+    },
+}
+
+# How long a trashed folder or document stays restorable before the sweep
+# purges it for good. Policy, not a shape cap, so it lives here and is
+# env-tunable — and the API reports it as `purges_after_days` rather than
+# letting any client hardcode 30.
+RECYCLE_BIN_RETENTION_DAYS = int(os.environ.get('RECYCLE_BIN_RETENTION_DAYS', '30'))
+
+# Default wall-clock time for the daily HITL digest, applied to new users.
+HITL_DIGEST_DEFAULT_TIME = os.environ.get('HITL_DIGEST_DEFAULT_TIME', '09:00')
+
+# A pending HITL request older than this is treated as abandoned and cancelled
+# by the same sweep, so it stops nudging and stops holding its run open. Not
+# `HITLRequest.timeout_seconds` — see notifications/reminders.py::ABANDON_AFTER.
+HITL_ABANDON_AFTER_DAYS = int(os.environ.get('HITL_ABANDON_AFTER_DAYS', '7'))
 
 RUN_WORKFLOWS_ASYNC = os.environ.get('RUN_WORKFLOWS_ASYNC', 'False') == 'True'
 
@@ -413,7 +600,7 @@ LOGGING = {
     'disable_existing_loggers': False,
     'filters': {
         'sensitive_data': {
-            '()': 'core.security.SensitiveDataFilter',
+            '()': 'core.safety.security.SensitiveDataFilter',
         },
     },
     'handlers': {
@@ -426,11 +613,72 @@ LOGGING = {
         'handlers': ['console'],
         'level': 'INFO',
     },
+    'loggers': {
+        # Django's DEFAULT_LOGGING gives 'django' its own console handler and
+        # leaves propagate=True, so every record it handles was ALSO re-handled
+        # by root's console handler above — every request logged twice.
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # daphne's runserver access log ("HTTP GET /path 200 [0.01, ip]").
+        # RequestLoggingMiddleware already logs the same request with the user
+        # id attached, so this one is pure duplication in dev.
+        'django.channels.server': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+    },
 }
 
-CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'openai/gpt-4o-mini')
+CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'nvidia/nemotron-3-super-120b-a12b')
 
 # NOTE: OpenRouter API keys are loaded per-user from the encrypted `credentials`
 # vault (slug 'openrouter'). Do not reintroduce an OPEN_ROUTER_KEY setting.
 IMAGINE_AGENT_MODEL = os.environ.get('IMAGINE_AGENT_MODEL', 'openrouter/openai/gpt-4o-mini')
 IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD', '0.10'))
+
+
+# ==================== Evaluation ====================
+# Default provider/model for the `llm_judge` grader when a case does not name
+# one. Left blank, `llm.access` resolves the provider's own default model. A
+# judge deliberately defaults to a *different* call than the agent under test:
+# same-model self-grading is the one configuration where a rubric failure and
+# an agent failure cannot be told apart.
+EVAL_JUDGE_PROVIDER = os.environ.get('EVAL_JUDGE_PROVIDER', 'openrouter')
+EVAL_JUDGE_MODEL = os.environ.get('EVAL_JUDGE_MODEL', '')
+
+
+# ==================== Context curation ====================
+# The model that folds an agent run's earlier steps into a running note when the
+# transcript outgrows the window (`chat/turn/curation.py`, the agent's
+# `recursiveContext` toggle). Deliberately a small, cheap model and deliberately
+# not the agent's own: a forty-turn run on an expensive model would otherwise
+# pay full rate to compress itself, and the fold is an extractive job — keep
+# these figures, drop this prose — that a large model is not better at.
+#
+# Left blank, the run's own provider/model is used. That is the fallback rather
+# than the default because a fold that cannot run at all is worse than one that
+# costs a little: without it the transcript stays whole and `clamp_input` drops
+# the oldest segments with no summary behind them.
+# NVIDIA on purpose: it is the provider the platform ships a key for
+# (`credentials.resolution.PLATFORM_KEY_ENV`), so the fold works on a fresh
+# install and for a user who has connected nothing of their own. Every other
+# provider would make the fold depend on a credential the user may not have —
+# and a context mechanism that silently stops working when a key is missing is
+# worse than one that costs a little, because the run just starts losing its
+# oldest steps again with no summary behind them.
+CONTEXT_SUMMARY_PROVIDER = os.environ.get('CONTEXT_SUMMARY_PROVIDER', 'nvidia')
+CONTEXT_SUMMARY_MODEL = os.environ.get(
+    'CONTEXT_SUMMARY_MODEL', 'nvidia/nemotron-3.5-lightning-30b-a3b'
+)
+
+# Which model writes an agent's configuration from the builder's chat pane
+# (`agents/views/builder.py`). Blank falls through to the context-summary pair
+# above, for the same reason it exists: that one runs on the platform's own key,
+# so the builder still configures agents for a user who has connected nothing.
+# The agent's *own* model is tried first regardless — this is the fallback.
+AGENT_BUILDER_PROVIDER = os.environ.get('AGENT_BUILDER_PROVIDER', '')
+AGENT_BUILDER_MODEL = os.environ.get('AGENT_BUILDER_MODEL', '')

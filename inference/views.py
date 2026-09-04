@@ -3,7 +3,6 @@ Inference App API Views — Documents, Knowledge Bases, and RAG Endpoints
 """
 import threading
 import logging
-from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
@@ -14,14 +13,15 @@ from adrf.decorators import api_view
 from rest_framework.decorators import permission_classes
 from drf_spectacular.utils import extend_schema, inline_serializer
 from drf_spectacular.types import OpenApiTypes
-from rest_framework import serializers as drf_serializers
 
-from core.pagination import paginate_keyset
+from core.http.pagination import paginate_keyset
+from . import filesystem as fs
+from . import recycle
 from .models import Document, KnowledgeBase
-from .engine import get_hnsw_kb, get_kb_manager, get_rag_pipeline
-from .utils import validate_file_upload
+from .engine import KnowledgeBaseUnavailable, get_hnsw_kb, get_rag_pipeline
+from .utils import normalize_file_type, validate_file_upload
 from .serializers import (
-    DocumentSerializer, DocumentListSerializer, KnowledgeBaseSerializer,
+    DocumentSerializer, DocumentListSerializer,
     RagSearchSerializer, RagQuerySerializer,
 )
 from django.core.exceptions import ValidationError
@@ -30,159 +30,130 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Knowledge Base CRUD
-# =============================================================================
-
-@extend_schema(
-    methods=['GET'],
-    responses={200: KnowledgeBaseSerializer(many=True)},
-)
-@extend_schema(
-    methods=['POST'],
-    request=KnowledgeBaseSerializer,
-    responses={201: KnowledgeBaseSerializer, 400: OpenApiTypes.OBJECT},
-)
-@api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
-async def kb_list(request):
-    """
-    GET: List all KBs for the authenticated user.
-    POST: Create a new named KB.
-    """
-    if request.method == 'GET':
-        def _list():
-            kbs = KnowledgeBase.objects.filter(user=request.user).order_by('-created_at')
-            return KnowledgeBaseSerializer(kbs, many=True).data
-
-        return Response(await sync_to_async(_list)())
-
-    # POST — create new KB
-    name = (request.data.get('name') or '').strip()
-    if not name:
-        return Response({'error': 'name is required'}, status=400)
-
-    description = request.data.get('description', '')
-
-    def _create():
-        if KnowledgeBase.objects.filter(user=request.user, name=name).exists():
-            return None
-        return KnowledgeBase.objects.create(
-            user=request.user,
-            name=name,
-            description=description,
-        )
-
-    kb = await sync_to_async(_create)()
-    if kb is None:
-        return Response({'error': f'A knowledge base named "{name}" already exists.'}, status=400)
-    return Response(KnowledgeBaseSerializer(kb).data, status=201)
-
-
-@api_view(['GET', 'DELETE'])
-@permission_classes([IsAuthenticated])
-async def kb_detail(request, kb_id: int):
-    """
-    GET: Retrieve KB details (with document list).
-    DELETE: Delete KB, remove its index from local disk + S3.
-    """
-    kb = await sync_to_async(get_object_or_404)(KnowledgeBase, id=kb_id, user=request.user)
-
-    if request.method == 'GET':
-        def _detail():
-            docs = Document.objects.filter(knowledge_base=kb).order_by('-created_at')
-            return {
-                **KnowledgeBaseSerializer(kb).data,
-                'documents': DocumentSerializer(docs, many=True).data,
-            }
-        return Response(await sync_to_async(_detail)())
-
-    # DELETE
-    def _delete():
-        # Un-assign documents so they aren't orphaned references
-        Document.objects.filter(knowledge_base=kb).update(knowledge_base=None)
-        kb_id_local = kb.id
-        s3_key = kb.s3_index_key
-        kb.delete()
-        return kb_id_local, s3_key
-
-    deleted_id, s3_key = await sync_to_async(_delete)()
-
-    # Remove from in-memory manager
-    get_kb_manager().evict(deleted_id)
-
-    # Clean up local files
-    hnsw = get_hnsw_kb(deleted_id)
-    hnsw.destroy_local()
-
-    # Clean up S3
-    if s3_key:
-        import asyncio
-        from .engine import _delete_from_s3
-        await asyncio.to_thread(_delete_from_s3, s3_key + '.faiss')
-        await asyncio.to_thread(_delete_from_s3, s3_key + '_docs.pkl')
-
-    return Response(status=204)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-async def kb_assign_document(request, kb_id: int, document_id: int):
-    """Move a document into a different KB and re-index it."""
-    kb = await sync_to_async(get_object_or_404)(KnowledgeBase, id=kb_id, user=request.user)
-    doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user)
-
-    old_kb_id = doc.knowledge_base_id
-
-    def _assign():
-        doc.knowledge_base = kb
-        doc.status = 'pending'
-        doc.chunk_count = 0
-        doc.save(update_fields=['knowledge_base', 'status', 'chunk_count'])
-
-    await sync_to_async(_assign)()
-
-    # Remove from old KB index
-    if old_kb_id:
-        old_hnsw = get_hnsw_kb(old_kb_id)
-        await old_hnsw.initialize()
-        await old_hnsw.delete_document(doc.id)
-
-    # Re-index into new KB in background
-    from .tasks import process_document
-    threading.Thread(target=process_document, args=(doc.id, kb.id)).start()
-
-    return Response({'detail': f'Document queued for re-indexing into KB "{kb.name}".'})
-
-
-@api_view(['DELETE'])
-@permission_classes([IsAuthenticated])
-async def kb_remove_document(request, kb_id: int, document_id: int):
-    """Remove a document's vectors from a KB without deleting the document."""
-    kb = await sync_to_async(get_object_or_404)(KnowledgeBase, id=kb_id, user=request.user)
-    doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user, knowledge_base=kb)
-
-    hnsw = get_hnsw_kb(kb.id, kb.s3_index_key or f'indices/kb_{kb.id}')
-    await hnsw.initialize()
-    await hnsw.delete_document(doc.id)
-
-    def _unassign():
-        doc.knowledge_base = None
-        doc.chunk_count = 0
-        doc.status = 'pending'
-        doc.save(update_fields=['knowledge_base', 'chunk_count', 'status'])
-        KnowledgeBase.objects.filter(id=kb.id).update(
-            doc_count=Document.objects.filter(knowledge_base_id=kb.id).count(),
-            vector_count=hnsw.ntotal,
-            index_size_bytes=hnsw.index_size_bytes,
-        )
-
-    await sync_to_async(_unassign)()
-    return Response(status=204)
-
-
-# =============================================================================
 # Documents
 # =============================================================================
+
+# -- GET /api/documents/ -- the two response shapes ---------------------------
+#
+# `_legacy_page` is the uncursored shape older clients still ask for;
+# `_cursor_page` is the keyset-paginated one. Both were inline branches of a
+# nested closure, which is how they came to disagree on ordering and return the
+# same rows in two different orders depending only on whether `limit` was
+# passed. Named and separate, that class of drift is visible.
+
+_LEGACY_CAP = 50
+_DEFAULT_LIMIT = 50
+_MAX_LIMIT = 100
+_SHARED_MODES = ['shared_read', 'shared_write']
+
+
+#: "the caller did not ask to filter by folder" — distinct from None, which is
+#: the root folder. See `_owned_documents`.
+_UNFILTERED = object()
+
+
+def _owned_documents(user, folder=_UNFILTERED):
+    """The caller's documents, optionally narrowed to one folder.
+
+    `folder` defaults to the `_UNFILTERED` sentinel rather than None, because
+    None is a *meaningful* location — the user's root — not "no filter". Absent
+    means today's flat listing across the whole tree, which is what keeps the
+    existing clients and tests working unchanged.
+    """
+    qs = (Document.objects.filter(user=user)
+          .select_related('user', 'knowledge_base', 'folder')
+          .order_by('-created_at'))
+    if folder is not _UNFILTERED:
+        qs = qs.filter(folder=folder)
+    return qs
+
+
+def _shared_documents():
+    return (Document.objects.filter(sharing_mode__in=_SHARED_MODES)
+            .select_related('user', 'knowledge_base').order_by('-created_at'))
+
+
+def _wants_cursor_page(params) -> bool:
+    return any(k in params for k in
+               ('limit', 'cursor', 'my_cursor', 'public_cursor', 'scope'))
+
+
+def _requested_limit(params) -> int:
+    try:
+        return min(max(int(params.get('limit', _DEFAULT_LIMIT)), 1), _MAX_LIMIT)
+    except (TypeError, ValueError):
+        return _DEFAULT_LIMIT
+
+
+def _legacy_page(user, folder=_UNFILTERED) -> dict:
+    """The uncursored shape, capped.
+
+    `DocumentSerializer` exposes `content` -- each document's full extracted
+    text -- so before the cap this response carried every character of every
+    document the user owns plus every shared one, in a single list call.
+    Callers needing more pass `limit`/`cursor` and get the paged shape.
+    """
+    mine = list(_owned_documents(user, folder)[:_LEGACY_CAP])
+    shared = list(_shared_documents()[:_LEGACY_CAP])
+    return {
+        'my_documents': DocumentSerializer(mine, many=True).data,
+        'public_documents': DocumentSerializer(shared, many=True).data,
+        'truncated': len(mine) == _LEGACY_CAP or len(shared) == _LEGACY_CAP,
+    }
+
+
+def _cursor_page(user, params, folder=_UNFILTERED) -> dict:
+    """The keyset-paginated shape.
+
+    `scope` selects which half is paged; the unselected half stays None rather
+    than becoming an empty page, so a caller can tell "you did not ask for
+    this" from "you asked and there is nothing".
+    """
+    limit = _requested_limit(params)
+    scope = params.get('scope', 'all')
+    my_cursor = params.get('my_cursor') or params.get('cursor')
+    public_cursor = params.get('public_cursor')
+
+    my_page = public_page = None
+    if scope != 'public':
+        my_page = paginate_keyset(_owned_documents(user, folder), limit=limit, cursor=my_cursor)
+    if scope != 'personal':
+        public_page = paginate_keyset(
+            _shared_documents(), limit=limit,
+            cursor=(my_cursor or public_cursor) if scope == 'public' else public_cursor,
+        )
+
+    # The bare `next_cursor`/`has_more` keys are the single-scope aliases older
+    # callers read. One page is authoritative for them: the public one when
+    # that is all that was asked for, otherwise the user's own.
+    primary = public_page if scope == 'public' else my_page
+    return {
+        'my_documents': DocumentListSerializer(my_page.items, many=True).data if my_page else [],
+        'public_documents': DocumentListSerializer(public_page.items, many=True).data if public_page else [],
+        'my_next_cursor': my_page.next_cursor if my_page else None,
+        'public_next_cursor': public_page.next_cursor if public_page else None,
+        'my_has_more': my_page.has_more if my_page else False,
+        'public_has_more': public_page.has_more if public_page else False,
+        'next_cursor': primary.next_cursor if primary else None,
+        'has_more': primary.has_more if primary else False,
+        'limit': limit,
+    }
+
+
+def _document_page(request) -> dict:
+    params = request.query_params
+    # `folder_id` narrows the personal half to one folder; `root` means the
+    # documents sitting directly at the user's root. Absent leaves the listing
+    # flat, exactly as before this feature existed. Shared documents are never
+    # narrowed — they are a flat public library, not a place in anyone's tree.
+    folder = _UNFILTERED
+    if 'folder_id' in params:
+        folder = fs.resolve_folder(request.user, params.get('folder_id'))
+
+    if _wants_cursor_page(params):
+        return _cursor_page(request.user, params, folder)
+    return _legacy_page(request.user, folder)
+
 
 @extend_schema(
     methods=['GET'],
@@ -206,56 +177,10 @@ async def document_list(request):
     POST: Upload new document (optionally specify kb_id).
     """
     if request.method == 'GET':
-        def _get():
-            wants_cursor_page = (
-                'limit' in request.query_params
-                or 'cursor' in request.query_params
-                or 'my_cursor' in request.query_params
-                or 'public_cursor' in request.query_params
-                or 'scope' in request.query_params
-            )
-            if not wants_cursor_page:
-                my_docs = Document.objects.filter(user=request.user)\
-                    .select_related('user', 'knowledge_base').order_by('-created_at')
-                public_docs = Document.objects.filter(sharing_mode__in=['shared_read', 'shared_write'])\
-                    .select_related('user', 'knowledge_base').order_by('-shared_at')
-                return {
-                    'my_documents': DocumentSerializer(my_docs, many=True).data,
-                    'public_documents': DocumentSerializer(public_docs, many=True).data,
-                }
-
-            try:
-                limit = min(max(int(request.query_params.get('limit', 50)), 1), 100)
-            except (TypeError, ValueError):
-                limit = 50
-            scope = request.query_params.get('scope', 'all')
-            my_cursor = request.query_params.get('my_cursor') or request.query_params.get('cursor')
-            public_cursor = request.query_params.get('public_cursor')
-            my_docs = Document.objects.filter(user=request.user)\
-                .select_related('user', 'knowledge_base').order_by('-created_at')
-            public_docs = Document.objects.filter(sharing_mode__in=['shared_read', 'shared_write'])\
-                .select_related('user', 'knowledge_base').order_by('-created_at')
-            if scope == 'public':
-                my_page = None
-                public_page = paginate_keyset(public_docs, limit=limit, cursor=my_cursor or public_cursor)
-            elif scope == 'personal':
-                my_page = paginate_keyset(my_docs, limit=limit, cursor=my_cursor)
-                public_page = None
-            else:
-                my_page = paginate_keyset(my_docs, limit=limit, cursor=my_cursor)
-                public_page = paginate_keyset(public_docs, limit=limit, cursor=public_cursor)
-            return {
-                'my_documents': DocumentListSerializer(my_page.items, many=True).data if my_page else [],
-                'public_documents': DocumentListSerializer(public_page.items, many=True).data if public_page else [],
-                'my_next_cursor': my_page.next_cursor if my_page else None,
-                'public_next_cursor': public_page.next_cursor if public_page else None,
-                'my_has_more': my_page.has_more if my_page else False,
-                'public_has_more': public_page.has_more if public_page else False,
-                'next_cursor': (public_page.next_cursor if scope == 'public' and public_page else my_page.next_cursor if my_page else None),
-                'has_more': (public_page.has_more if scope == 'public' and public_page else my_page.has_more if my_page else False),
-                'limit': limit,
-            }
-        return Response(await sync_to_async(_get)())
+        try:
+            return Response(await sync_to_async(_document_page)(request))
+        except fs.FolderNotFound as exc:
+            return Response({'error': str(exc)}, status=404)
 
     # POST — upload
     if 'file' not in request.FILES:
@@ -263,12 +188,24 @@ async def document_list(request):
 
     file = request.FILES['file']
     try:
-        await sync_to_async(validate_file_upload)(file)
+        mime_type = await sync_to_async(validate_file_upload)(file)
     except ValidationError as e:
         return Response({'error': str(e)}, status=400)
 
-    file_type = file.name.split('.')[-1].lower() if '.' in file.name else 'txt'
+    # One vocabulary for file_type across every producer — the raw extension
+    # was not one of Document.FILE_TYPE_CHOICES, so images were indexed as
+    # mojibake and never reached the vision path.
+    file_type = normalize_file_type(file.name, mime_type)
     kb_id = request.data.get('kb_id')
+
+    # Where the file lands in the caller's tree. Absent means their root, which
+    # is what keeps every existing client working unchanged. Resolved through
+    # the one choke point, so a foreign id is a 404 rather than a filing.
+    try:
+        folder = await sync_to_async(fs.resolve_folder)(
+            request.user, request.data.get('folder_id'))
+    except fs.FolderNotFound as exc:
+        return Response({'error': str(exc)}, status=404)
 
     def _create():
         kb = None
@@ -292,11 +229,18 @@ async def document_list(request):
             file_size=file.size,
             status='pending',
             knowledge_base=kb,
+            folder=folder,
         ), kb.id
 
     doc, resolved_kb_id = await sync_to_async(_create)()
-    from .tasks import process_document_task
-    process_document_task.delay(doc.id, resolved_kb_id)
+    # Index inline in a background thread. There is no Celery worker / Redis
+    # broker on this deployment, so .delay() would hang on broker-reconnect and
+    # then fail — leaving the upload stuck "pending". The thread runs the same
+    # sync indexing service used by the Celery path.
+    from .tasks import process_document
+    threading.Thread(
+        target=process_document, args=(doc.id, resolved_kb_id), daemon=True
+    ).start()
 
     return Response(DocumentSerializer(doc).data, status=201)
 
@@ -304,43 +248,64 @@ async def document_list(request):
 @api_view(['GET', 'DELETE'])
 @permission_classes([IsAuthenticated])
 async def document_detail(request, document_id: int):
-    doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user)
+    doc = await sync_to_async(
+        lambda: get_object_or_404(
+            Document.objects.select_related('user', 'knowledge_base'),
+            id=document_id, user=request.user,
+        )
+    )()
 
     if request.method == 'GET':
-        return Response(DocumentSerializer(doc).data)
+        # Serialize in a sync context: the serializer touches obj.user /
+        # obj.knowledge_base, which would trigger a lazy DB query from this
+        # async view and raise SynchronousOnlyOperation.
+        return Response(await sync_to_async(lambda: DocumentSerializer(doc).data)())
 
-    # DELETE — also remove vectors from its KB
-    kb_id = doc.knowledge_base_id
-    doc_id = doc.id
-    await sync_to_async(doc.delete)()
-
-    if kb_id:
-        hnsw = get_hnsw_kb(kb_id)
-        await hnsw.initialize()
-        await hnsw.delete_document(doc_id)
-
-    return Response(status=204)
+    # DELETE — to the recycle bin, not out of existence. The row keeps its
+    # `content_text` and its file, so restore is just a re-ingest through the
+    # ordinary upload door; `recycle.trash` drops the vectors immediately,
+    # because a file the user can no longer see must not keep answering RAG
+    # queries. The permanent delete happens in `manage.py purge_recycle_bin`
+    # / the `inference.sweep_recycle_bin` beat task, after the retention.
+    result = await sync_to_async(recycle.trash)(request.user, documents=[doc])
+    return Response(result, status=200)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 async def document_share(request, document_id: int):
-    doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user)
+    doc = await sync_to_async(
+        lambda: get_object_or_404(
+            Document.objects.select_related('user', 'knowledge_base'),
+            id=document_id, user=request.user,
+        )
+    )()
 
-    if doc.sharing_mode == 'private':
-        doc.sharing_mode = 'shared_read'
-        doc.is_shared = True
-        doc.shared_at = timezone.now()
-        from .tasks import share_document_task
-        share_document_task.delay(doc.id, request.user.id)
-    else:
+    if doc.sharing_mode != 'private':
+        # Serialize in a sync context (obj.user / obj.knowledge_base are lazy).
+        data = await sync_to_async(lambda: DocumentSerializer(doc).data)()
         return Response({
-            **DocumentSerializer(doc).data,
+            **data,
             'error': 'Un-sharing documents is not allowed once they are part of the platform knowledge base.',
         }, status=403)
 
+    doc.sharing_mode = 'shared_read'
+    doc.is_shared = True
+    doc.shared_at = timezone.now()
+
+    # Commit *before* the worker starts. The thread re-reads the row to copy
+    # `sharing_mode` into the platform KB's metadata, so starting it first was
+    # a race it could lose — recording the document as still private.
     await sync_to_async(doc.save)()
-    return Response({**DocumentSerializer(doc).data, 'message': f'Document set to {doc.sharing_mode}'})
+
+    # Inline background thread — no Celery worker on this box (see upload).
+    from .tasks import share_document
+    threading.Thread(
+        target=share_document, args=(doc.id, request.user.id), daemon=True
+    ).start()
+
+    data = await sync_to_async(lambda: DocumentSerializer(doc).data)()
+    return Response({**data, 'message': f'Document set to {doc.sharing_mode}'})
 
 
 # =============================================================================
@@ -358,22 +323,33 @@ async def rag_search(request):
     top_k = data['top_k']
     kb_id = data.get('kb_id')
 
-    if kb_id:
-        kb_model = await sync_to_async(get_object_or_404)(KnowledgeBase, id=kb_id, user=request.user)
-        hnsw = get_hnsw_kb(kb_model.id, kb_model.s3_index_key or f'indices/kb_{kb_model.id}')
-        await hnsw.initialize()
-        user_results = await hnsw.search(query, top_k=top_k)
-    else:
-        from .engine import get_kb_for_user
-        _, hnsw = await get_kb_for_user(request.user.id)
-        user_results = await hnsw.search(query, top_k=top_k)
+    # A KB that cannot be opened answers 503, not an empty result list: a
+    # broken embedder and an empty corpus must not look the same to the caller.
+    try:
+        if kb_id:
+            kb_model = await sync_to_async(get_object_or_404)(KnowledgeBase, id=kb_id, user=request.user)
+            hnsw = get_hnsw_kb(kb_model.id, kb_model.s3_index_key or f'indices/kb_{kb_model.id}')
+            await hnsw.initialize()
+        else:
+            from .engine import get_kb_for_user
+            _, hnsw = await get_kb_for_user(request.user.id)
 
-    platform_results = []
-    if data.get('include_platform'):
-        from .engine import get_platform_knowledge_base
-        platform_kb = get_platform_knowledge_base()
-        await platform_kb.initialize()
-        platform_results = await platform_kb.search(query, top_k=top_k)
+        # Embed the question once and reuse it for every tier searched. The two
+        # searches asked the same embedder the same question and paid for it twice.
+        query_emb = await hnsw.embed_query(query)
+        user_results = await hnsw.search(query, top_k=top_k, query_embedding=query_emb)
+
+        platform_results = []
+        if data.get('include_platform'):
+            from .engine import get_platform_knowledge_base
+            platform_kb = get_platform_knowledge_base()
+            await platform_kb.initialize()
+            platform_results = await platform_kb.search(
+                query, top_k=top_k, query_embedding=query_emb
+            )
+    except KnowledgeBaseUnavailable as exc:
+        logger.error('rag_search could not open a knowledge base: %s', exc)
+        return Response({'error': str(exc)}, status=503)
 
     return Response({
         'query': query,
@@ -395,8 +371,13 @@ async def rag_query(request):
     serializer.is_valid(raise_exception=True)
     data = serializer.validated_data
 
-    pipeline = get_rag_pipeline(user_id=request.user.id)
-    await pipeline.kb.initialize()
+    try:
+        pipeline = await get_rag_pipeline(user_id=request.user.id)
+        await pipeline.kb.initialize()
+    except KnowledgeBaseUnavailable as exc:
+        logger.error('rag_query could not open a knowledge base: %s', exc)
+        return Response({'error': str(exc)}, status=503)
+
     result = await pipeline.query(
         question=data['question'],
         user_id=request.user.id,
@@ -415,11 +396,43 @@ from django.http import FileResponse
 from io import BytesIO
 
 
+def _servable(doc) -> bool:
+    """Whether this document's bytes may be streamed back.
+
+    New uploads are written by `utils.user_document_path`, whose every segment
+    is server-derived — but rows predate it, and a `FileField` name is just a
+    string in a column. `validate_attachment_path` is the guard already used
+    for LLM attachments; reusing it here closes the one traversal gap the
+    2026-08-24 audit found in this view. Remote storage has no local path, so
+    absence of one is not a failure.
+    """
+    from django.core.exceptions import SuspiciousFileOperation
+
+    from llm.handlers.openai_compatible import validate_attachment_path
+
+    try:
+        path = doc.file.path
+    except SuspiciousFileOperation:
+        # Django's storage refused to even build the path. That is already the
+        # right answer; catching it here turns a 400 from deep inside the
+        # storage layer into the ordinary content_text fallback.
+        logger.error('Refused to serve document %s: storage rejected its path', doc.pk)
+        return False
+    except (NotImplementedError, ValueError):
+        return True          # non-filesystem storage — nothing to traverse
+    if not validate_attachment_path(path):
+        logger.error(
+            'Refused to serve document %s: %s is outside MEDIA_ROOT', doc.pk, path,
+        )
+        return False
+    return True
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def document_download(request, document_id: int):
     doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user)
-    if doc.file:
+    if doc.file and await sync_to_async(_servable)(doc):
         try:
             return FileResponse(doc.file.open('rb'), as_attachment=True, filename=doc.name)
         except Exception:

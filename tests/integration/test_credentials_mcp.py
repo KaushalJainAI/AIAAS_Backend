@@ -22,11 +22,17 @@ User = get_user_model()
 
 
 def _make_cred_type(slug="github"):
-    return CredentialType.objects.create(
-        name=slug.title(),
+    # update_or_create, not create: `credentials.0005` seeds the real catalog when
+    # the test database migrates, so this slug may already exist. Overwriting pins
+    # the schema these tests assert against instead of inheriting the seeder's.
+    ctype, _ = CredentialType.objects.update_or_create(
         slug=slug,
-        fields_schema=[{"name": "token", "type": "password", "required": True}],
+        defaults={
+            "name": slug.title(),
+            "fields_schema": [{"name": "token", "type": "password", "required": True}],
+        },
     )
+    return ctype
 
 
 def _make_cred(user, ctype, *, name="default", data=None):
@@ -51,8 +57,29 @@ def _make_server(*, env_map=None, header_map=None, required=None):
     )
 
 
-class CredentialInjectionHappy(TestCase):
+class _CacheIsolated(TestCase):
+    """Base for every case here that resolves a credential.
+
+    `CredentialManager` is a process-global singleton with a 5-minute cache of
+    decrypted data, keyed `{user_id}:{credential_id}`, and the injector reads
+    through it. Test databases restart ids at 1, so those keys collide across
+    cases and one test reads the previous test's plaintext — which is why
+    `CredentialInjectionHappy` passed alone and failed in a full run.
+
+    That is a correctness problem as well as a flake: `CredentialInjectionAngry`
+    exists to catch one user reading another's secret, and a stale cache entry
+    is precisely the shape of bug it would mask.
+    """
+
     def setUp(self):
+        super().setUp()
+        from credentials.manager import get_credential_manager
+        get_credential_manager().clear_cache()
+
+
+class CredentialInjectionHappy(_CacheIsolated):
+    def setUp(self):
+        super().setUp()
         self.alice = User.objects.create_user("alice", "a@x.com", "x" * 12)
         self.ctype = _make_cred_type()
         _make_cred(self.alice, self.ctype, data={"token": "alice-token"})
@@ -63,8 +90,9 @@ class CredentialInjectionHappy(TestCase):
         self.assertEqual(resolved.env_vars, {"GITHUB_TOKEN": "alice-token"})
 
 
-class CredentialInjectionSad(TestCase):
+class CredentialInjectionSad(_CacheIsolated):
     def setUp(self):
+        super().setUp()
         self.alice = User.objects.create_user("alice", "a@x.com", "x" * 12)
         self.ctype = _make_cred_type()
         self.server = _make_server()
@@ -84,10 +112,11 @@ class CredentialInjectionSad(TestCase):
         self.assertEqual(resolved.headers, {})
 
 
-class CredentialInjectionAngry(TestCase):
+class CredentialInjectionAngry(_CacheIsolated):
     """Adversarial — these are the tests that catch privilege-escalation bugs."""
 
     def setUp(self):
+        super().setUp()
         self.alice = User.objects.create_user("alice", "a@x.com", "x" * 12)
         self.mallory = User.objects.create_user("mallory", "m@x.com", "x" * 12)
         self.ctype = _make_cred_type()

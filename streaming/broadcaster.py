@@ -26,7 +26,6 @@ from typing import AsyncGenerator, Optional
 from uuid import UUID
 from dataclasses import dataclass, asdict
 
-from django.core.cache import cache
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
@@ -87,9 +86,21 @@ class SSEBroadcaster:
     EVENT_HITL_REQUEST = 'hitl_request'
     EVENT_PROGRESS = 'progress'
     EVENT_LOG = 'log'
-    EVENT_ORCHESTRATOR_THINKING = 'thinking'
-    EVENT_ORCHESTRATOR_THOUGHT = 'thought'
     EVENT_WORKFLOW_CANCELLED = 'workflow_cancelled'
+    # One pass of the model: its reasoning, and what it decided to do next.
+    # A new event type on the existing channel rather than a second socket —
+    # two channels would have to agree forever about what a run looks like.
+    EVENT_AGENT_TURN = 'agent_turn'
+    # The run cut its own transcript back to stay inside the context
+    # window. Announced because a run that silently forgets its first
+    # thirty steps and a run that was curated look identical from outside,
+    # and only one of them is working as designed.
+    EVENT_CONTEXT_CURATED = 'context_curated'
+    # The run exists but holds no admission slot yet — every slot is taken,
+    # so it waits. Announced because until `workflow_start` a queued run and
+    # a run whose task died between the 202 and its first frame look
+    # identical from outside, and only one of them is still alive.
+    EVENT_WORKFLOW_QUEUED = 'workflow_queued'
     
     # In-memory subscribers (for single instance)
     # Format: {execution_id: [asyncio.Queue, ...]}
@@ -261,6 +272,19 @@ class SSEBroadcaster:
     
     # Convenience methods for common events
     
+    async def workflow_queued(self, execution_id: str) -> None:
+        """The run is waiting for an admission slot, not executing yet.
+
+        A client that subscribed on the 202 and has seen nothing is otherwise
+        left guessing whether the run is queued or its task died silently.
+        `workflow_start` is still the executing signal; this is the before.
+        """
+        await self.send_event(
+            execution_id,
+            self.EVENT_WORKFLOW_QUEUED,
+            {'status': 'queued'},
+        )
+
     async def workflow_started(
         self,
         execution_id: str,
@@ -295,21 +319,6 @@ class SSEBroadcaster:
             }
         )
     
-    async def workflow_cancelled(
-        self,
-        execution_id: str,
-        duration_ms: int = 0
-    ):
-        """Send workflow cancelled event."""
-        await self.send_event(
-            execution_id,
-            self.EVENT_WORKFLOW_CANCELLED,
-            {
-                'status': 'cancelled',
-                'duration_ms': duration_ms,
-            }
-        )
-
     async def workflow_error(
         self,
         execution_id: str,
@@ -327,6 +336,60 @@ class SSEBroadcaster:
             }
         )
     
+    async def agent_turn(
+        self,
+        execution_id: str,
+        index: int,
+        reasoning: str = '',
+        decision: str = 'tools',
+        model_id: str = '',
+        tokens: int = 0,
+    ):
+        """Announce one turn of the agent loop.
+
+        Sent when the model has decided but before its tool calls run, so a
+        client can show *why* the calls that follow are about to happen rather
+        than reconstructing the reason from them afterwards.
+        """
+        await self.send_event(
+            execution_id,
+            self.EVENT_AGENT_TURN,
+            {
+                'index': index,
+                'reasoning': reasoning,
+                'decision': decision,
+                'model_id': model_id,
+                'tokens': tokens,
+            }
+        )
+
+    async def context_curated(
+        self,
+        execution_id: str,
+        results_compacted: int = 0,
+        steps_folded: int = 0,
+        tokens_before: int = 0,
+        tokens_after: int = 0,
+        summary_tokens: int = 0,
+    ):
+        """Announce that the transcript was cut back.
+
+        Carries the before and after rather than only the saving, because "we
+        freed 40k tokens" says nothing about whether the run is now comfortable
+        or still one tool call from the ceiling.
+        """
+        await self.send_event(
+            execution_id,
+            self.EVENT_CONTEXT_CURATED,
+            {
+                'results_compacted': results_compacted,
+                'steps_folded': steps_folded,
+                'tokens_before': tokens_before,
+                'tokens_after': tokens_after,
+                'summary_tokens': summary_tokens,
+            }
+        )
+
     async def node_started(
         self,
         execution_id: str,
@@ -425,46 +488,6 @@ class SSEBroadcaster:
                 'total': total_nodes,
                 'percentage': int((current_node / total_nodes) * 100) if total_nodes > 0 else 0,
                 'message': message,
-            }
-        )
-
-    async def orchestrator_thinking(
-        self,
-        execution_id: str,
-        content: str,
-        node_id: str = 'orchestrator'
-    ):
-        """Send orchestrator thinking status event."""
-        await self.send_event(
-            execution_id,
-            self.EVENT_ORCHESTRATOR_THINKING,
-            {
-                'content': content,
-                'node_id': node_id,
-                'category': 'orchestrator_activity',
-                'type': 'thinking',
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        )
-
-    async def orchestrator_thought(
-        self,
-        execution_id: str,
-        content: str,
-        reasoning: str = '',
-        node_id: str = 'orchestrator'
-    ):
-        """Send orchestrator final thought event."""
-        await self.send_event(
-            execution_id,
-            self.EVENT_ORCHESTRATOR_THOUGHT,
-            {
-                'content': content,
-                'reasoning': reasoning,
-                'node_id': node_id,
-                'category': 'orchestrator_activity',
-                'type': 'thought',
-                'timestamp': datetime.utcnow().isoformat()
             }
         )
 

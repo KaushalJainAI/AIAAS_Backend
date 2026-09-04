@@ -1,7 +1,18 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import ChatSessionViewSet, send_message, send_message_stream, upload_file, run_workflow_from_chat, delete_message, execute_tool_view
-from . import guest_views
+from .views import (
+    ChatSessionViewSet,
+    active_runs,
+    attach_message_stream,
+    delete_message,
+    execute_tool_view,
+    send_message,
+    send_message_stream,
+    steer_message_stream,
+    stop_message_stream,
+    upload_file,
+)
+from chat.guest import views as guest_views
 
 router = DefaultRouter()
 router.register(r'sessions', ChatSessionViewSet, basename='chat-session')
@@ -11,9 +22,12 @@ urlpatterns = [
     path('execute-tool/', execute_tool_view, name='execute_tool'),
     path('sessions/<str:session_id>/message/', send_message, name='send_message'),
     path('sessions/<str:session_id>/message/stream/', send_message_stream, name='send_message_stream'),
+    path('sessions/<str:session_id>/message/attach/', attach_message_stream, name='attach_message_stream'),
+    path('sessions/<str:session_id>/message/stop/', stop_message_stream, name='stop_message_stream'),
+    path('sessions/<str:session_id>/message/steer/', steer_message_stream, name='steer_message_stream'),
+    path('runs/', active_runs, name='active_runs'),
     path('sessions/<str:session_id>/messages/<int:message_id>/', delete_message, name='delete_message'),
     path('sessions/<str:session_id>/upload/', upload_file, name='upload_file'),
-    path('sessions/<str:session_id>/run-workflow/', run_workflow_from_chat, name='run_workflow_from_chat'),
 
     # Guest (unauthenticated) chat endpoints — NVIDIA NIM only, IP-rate-limited.
     path('guest/sessions/', guest_views.create_guest_session, name='guest_create_session'),

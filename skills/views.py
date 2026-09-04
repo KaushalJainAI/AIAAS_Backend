@@ -1,10 +1,14 @@
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.exceptions import PermissionDenied
 from .models import Skill
 from .serializers import SkillSerializer
 from .services import SkillService
-import threading
+from inference.engine import submit_kb_async
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SkillViewSet(viewsets.ModelViewSet):
     serializer_class = SkillSerializer
@@ -14,30 +18,52 @@ class SkillViewSet(viewsets.ModelViewSet):
         user = self.request.user
         return (Skill.objects.filter(user=user) | Skill.objects.filter(is_shared=True)).distinct()
 
+    def _ensure_can_edit(self, skill):
+        """Only the owner or an admin may modify a skill; everyone else reads and forks."""
+        if skill.user != self.request.user and not self.request.user.is_staff:
+            raise PermissionDenied(
+                'Only the owner or an admin can modify this skill.'
+            )
+
     def perform_create(self, serializer):
         skill = serializer.save(user=self.request.user)
-        # Offload embedding update
+        # Offload indexing to the shared KB loop
         self._trigger_embedding_update(skill)
 
     def perform_update(self, serializer):
+        self._ensure_can_edit(serializer.instance)
         skill = serializer.save()
-        # Offload embedding update
+        # Offload indexing to the shared KB loop
         self._trigger_embedding_update(skill)
 
+    def perform_destroy(self, instance):
+        self._ensure_can_edit(instance)
+        instance.delete()
+        self._trigger_index_removal(instance)
+
     def _trigger_embedding_update(self, skill):
-        def update_task():
-            import asyncio
-            service = SkillService()
-            asyncio.run(service.update_embedding(skill))
-        
-        threading.Thread(target=update_task).start()
+        service = SkillService()
+        future = submit_kb_async(service.update_embedding(skill), name=f'skill-embed-{skill.pk}')
+        future.add_done_callback(
+            lambda f: logger.exception(
+                "[Skills] Embedding update failed for skill %s", skill.pk
+            ) if f.exception() else None
+        )
+
+    def _trigger_index_removal(self, skill):
+        service = SkillService()
+        future = submit_kb_async(service.remove_embedding(skill), name=f'skill-remove-{skill.pk}')
+        future.add_done_callback(
+            lambda f: logger.exception(
+                "[Skills] Index removal failed for skill %s", skill.pk
+            ) if f.exception() else None
+        )
 
     @action(detail=False, methods=['get'])
     def search(self, request):
         """
         Hybrid search endpoint.
         """
-        from asgiref.sync import async_to_sync
         from .serializers import SkillSearchSerializer
         
         serializer = SkillSearchSerializer(data=request.query_params)
@@ -46,7 +72,7 @@ class SkillViewSet(viewsets.ModelViewSet):
         params = serializer.validated_data
         
         service = SkillService()
-        results = async_to_sync(service.hybrid_search)(
+        results = service.hybrid_search(
             query=params['query'],
             user=request.user,
             category = params.get('category'),
@@ -70,8 +96,8 @@ class SkillViewSet(viewsets.ModelViewSet):
         """
         skill = self.get_object()
         
-        # Security: only owner can share
-        if skill.user != request.user:
+        # Security: only owner or admin can toggle sharing
+        if skill.user != request.user and not request.user.is_staff:
             return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
             
         skill.is_shared = not skill.is_shared

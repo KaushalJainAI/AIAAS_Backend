@@ -6,7 +6,7 @@ This document provides a comprehensive review of the tool-calling architecture w
 
 The AIAAS tool-calling system is primarily driven by the central agentic loop located in `chat/views.py`. It uses a **Hybrid Approach**, blending native LLM structured tool calls with highly aggressive, regex-based fallback parsing to support models that fail to produce strictly compliant API call formats.
 
-### 1. Tool Registration and Definition (`chat/tools.py`)
+### 1. Tool Registration and Definition (`chat/tools/`)
 Tools are defined centrally in `AVAILABLE_TOOLS`, which acts as the registry sent to the LLM.
 - **Format:** The registry follows the standard JSON Schema structure required by OpenAI and supported by most major providers (defining `name`, `description`, `parameters.type`, `parameters.properties`, and `parameters.required`).
 - **Standard Tools:** Includes `web_search`, `image_search`, `video_search`, `suggest_workflow`, `get_current_time`, `read_url`, `read_attachment_text`, and `get_chat_message_full_text`.
@@ -17,16 +17,16 @@ The system implements a classic **Controller Loop** for agentic execution, prima
 
 - **Eager Execution:** For specific intents (`search`, `research`, `workflow`), the system forcefully injects a predetermined tool call (e.g., `web_search` for a search intent) *before* the main multi-turn loop begins. This reduces latency by skipping the initial LLM decision phase.
 - **The multi-turn Loop:** Controlled by `MAX_TOOL_ITERATIONS` (default 12, defined in `thresholds.py`).
-- **Streaming Aggregation:** In `send_message_stream`, the system heavily relies on `execute_llm` (from `nodes/handlers/llm_nodes.py`), awaiting streams of chunks. It aggregates both `tool_calls` chunks (native structured calls) and raw `content` chunks.
+- **Streaming Aggregation:** In `send_message_stream`, the system heavily relies on `execute_llm` (from `llm/handlers/llm_nodes.py`), awaiting streams of chunks. It aggregates both `tool_calls` chunks (native structured calls) and raw `content` chunks.
 - **Timeout Enforcement:** The loop strictly enforces `LLM_STREAM_TIMEOUT` and `TOOL_EXECUTION_TIMEOUT` to prevent infinite hanging.
 - **Interruption Handling:** If the loop hits the iteration limit or a timeout, it falls back to a forced final LLM synthesis prompt containing whatever tool results it managed to gather.
 
-### 3. Provider Adapters (`nodes/handlers/llm_nodes.py`)
+### 3. Provider Adapters (`llm/handlers/llm_nodes.py`)
 The system abstracts different LLM vendors (OpenAI, Gemini, OpenRouter, Grok, etc.) using Node Handlers.
 - **OpenAINode & GeminiNode:** Both natively support `tools` parameters and yield standard `tool_calls` chunk types when streaming answers.
 - This creates a unified internal object representation for native tool calls before passing them back to the `views.py` controller.
 
-### 4. Tool Call Parsing and Extraction (`chat/extraction.py`)
+### 4. Tool Call Parsing and Extraction (`chat/turn/extraction.py`)
 This is the most complex layer of the system. While `llm_nodes.py` returns native tool calls if the model supports them, `views.py` concurrently funnels all raw text output through `extract_tool_calls()` in `extraction.py`.
 - **The Regex Engine:** `extraction.py` contains over 15 distinct regex patterns to rip tool calls out of raw text. Examples include:
     - `<tool_call>` tags, `<invoke>` tags (Anthropic style)
@@ -49,14 +49,14 @@ The system supports integrating external, standard-compliant MCP servers.
 
 Modern production standards for tool calling strongly advocate for **Strict Structured Outputs** and unified internal representations. How does AIAAS stack up?
 
-### ✅ Where AIAAS Aligns with Best Practices
+### Where AIAAS Aligns with Best Practices
 1. **Schema-Driven Definitions:** Defining tools via JSON Schema (`AVAILABLE_TOOLS`) perfectly aligns with OpenAI/Anthropic spec requirements. 
 2. **Controller Loop Pattern:** The bounded `while`/`for` loop executing tools and feeding results back up to a max iteration count is exactly the industry-standard architecture for agents.
 3. **Provider Agnostic Adapters:** Normalizing API inputs and standard stream chunks via the `llm_nodes.py` layer matches the core pattern of abstracting vendor APIs.
 4. **Standardized Extensibility:** Built-in support for MCP servers shows forward-thinking alignment with the newest open standards for tool federation.
 
-### ❌ Discrepancies and Anti-Patterns
-The most blatant discrepancy is the **extreme reliance on ad-hoc regex parsing (`chat/extraction.py`)**.
+### Discrepancies and Anti-Patterns
+The most blatant discrepancy is the **extreme reliance on ad-hoc regex parsing (`chat/turn/extraction.py`)**.
 
 **The Best Practice Standard:**
 Production agents are *not* built around regex parsing of model text. The established pattern is:

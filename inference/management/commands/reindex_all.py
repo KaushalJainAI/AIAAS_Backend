@@ -1,20 +1,20 @@
 """
 Management command: reindex_all
 
-Rebuild every Knowledge Base's FAISS index using the current embedding model.
-Run this after changing EMBEDDING_MODEL / EMBEDDING_DIM in engine.py.
+Rebuild Knowledge Base FAISS indices using the current embedding model. Run
+after changing EMBEDDING_MODEL / EMBEDDING_DIM.
+
+The sweep itself lives in `inference/reindex.py`, shared with the Celery task
+`inference.reindex_all` — local dev has no Redis, so a Celery-only path would
+silently never run.
 
 Usage:
     python manage.py reindex_all           # Re-index all KBs
     python manage.py reindex_all --kb 42   # Re-index only KB id=42
+    python manage.py reindex_all --force   # Rebuild even if already current
     python manage.py reindex_all --dry-run # Show what would be re-indexed
 """
-import logging
-
 from django.core.management.base import BaseCommand
-from asgiref.sync import async_to_sync
-
-logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -24,87 +24,43 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            '--kb',
-            type=int,
-            default=None,
-            help='Re-index only this KB id (default: all)',
-        )
-        parser.add_argument(
-            '--dry-run',
-            action='store_true',
-            help='Show what would be re-indexed without actually doing it.',
-        )
+        parser.add_argument('--kb', type=int, default=None,
+                            help='Re-index only this KB id (default: all)')
+        parser.add_argument('--force', action='store_true',
+                            help='Rebuild even KBs already on the current version.')
+        parser.add_argument('--dry-run', action='store_true',
+                            help='Show what would be re-indexed without doing it.')
 
     def handle(self, *args, **options):
-        from inference.models import KnowledgeBase
-        from inference.engine import EMBEDDER_VERSION, get_hnsw_kb
+        from inference.engine import EMBEDDER_VERSION
+        from inference.reindex import kb_rows, reindex_many
 
-        kb_id = options['kb']
-        dry_run = options['dry_run']
-
-        if kb_id:
-            qs = KnowledgeBase.objects.filter(id=kb_id)
-        else:
-            qs = KnowledgeBase.objects.all()
-
-        kbs = list(qs.values_list('id', 'name', 's3_index_key'))
-
-        if not kbs:
+        rows = kb_rows(options['kb'])
+        if not rows:
             self.stdout.write(self.style.WARNING('No knowledge bases found.'))
             return
 
         self.stdout.write(
             f'Target embedder version: {EMBEDDER_VERSION}\n'
-            f'Knowledge Bases to process: {len(kbs)}\n'
+            f'Knowledge Bases to process: {len(rows)}\n'
         )
 
-        if dry_run:
-            for kid, kname, _ in kbs:
-                self.stdout.write(f'  [DRY-RUN] KB {kid}: {kname}')
+        if options['dry_run']:
+            for kb_id, name, _ in rows:
+                self.stdout.write(f'  [DRY-RUN] KB {kb_id}: {name}')
             return
 
-        rebuilt = 0
-        skipped = 0
-        failed = 0
+        styles = {
+            'rebuilt': self.style.SUCCESS,
+            'skipped': self.style.SUCCESS,
+        }
 
-        for kid, kname, s3_key in kbs:
-            self.stdout.write(f'  Processing KB {kid} ({kname})... ', ending='')
-            try:
-                hnsw = get_hnsw_kb(kid, s3_key or f'indices/kb_{kid}')
+        def report(kb_id, name, outcome):
+            label = {'rebuilt': 'REBUILT', 'skipped': 'UP-TO-DATE'}.get(outcome, outcome.upper())
+            style = styles.get(outcome, self.style.ERROR)
+            self.stdout.write(f'  KB {kb_id} ({name})... ' + style(label))
 
-                async def _run():
-                    await hnsw.initialize()
-
-                    if hnsw._stored_version == EMBEDDER_VERSION:
-                        return 'skip'
-
-                    await hnsw.rebuild_index()
-                    return 'rebuilt'
-
-                result = async_to_sync(_run)()
-
-                if result == 'skip':
-                    skipped += 1
-                    self.stdout.write(self.style.SUCCESS('UP-TO-DATE'))
-                else:
-                    rebuilt += 1
-                    self.stdout.write(self.style.SUCCESS(f'REBUILT ({hnsw.ntotal} vectors)'))
-
-                    KnowledgeBase.objects.filter(id=kid).update(
-                        embedding_model=EMBEDDER_VERSION.split(':')[0],
-                        vector_dim=int(EMBEDDER_VERSION.split(':')[1]),
-                        vector_count=hnsw.ntotal,
-                        index_size_bytes=hnsw.index_size_bytes,
-                    )
-
-            except Exception as e:
-                failed += 1
-                self.stdout.write(self.style.ERROR(f'FAILED: {e}'))
+        result = reindex_many(rows, force=options['force'], on_result=report)
 
         self.stdout.write('')
-        self.stdout.write(
-            self.style.SUCCESS(
-                f'Done — rebuilt={rebuilt}, skipped={skipped}, failed={failed}'
-            )
-        )
+        self.stdout.write(self.style.SUCCESS(f'Done — {result}'))

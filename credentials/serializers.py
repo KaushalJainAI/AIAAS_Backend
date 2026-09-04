@@ -2,9 +2,21 @@ from rest_framework import serializers
 from .models import Credential, CredentialType, CredentialAuditLog
 
 class CredentialAuditLogSerializer(serializers.ModelSerializer):
-    credential_name = serializers.CharField(source='credential.name', read_only=True)
-    credential_type_name = serializers.CharField(source='credential.credential_type.name', read_only=True)
-    
+    credential_name = serializers.SerializerMethodField()
+    credential_type_name = serializers.SerializerMethodField()
+
+    # A deleted credential's FK is nulled (SET_NULL), so the snapshot taken at
+    # event time is what keeps deletion history meaningful.
+    def get_credential_name(self, obj):
+        if obj.credential_id:
+            return obj.credential.name
+        return obj.snapshot.get('name') if obj.snapshot else None
+
+    def get_credential_type_name(self, obj):
+        if obj.credential_id:
+            return obj.credential.credential_type.name
+        return obj.snapshot.get('credential_type') if obj.snapshot else None
+
     class Meta:
         model = CredentialAuditLog
         fields = [
@@ -20,7 +32,10 @@ class CredentialTypeSerializer(serializers.ModelSerializer):
 
 
 class CredentialTypeRelatedField(serializers.PrimaryKeyRelatedField):
-    """Accept credential type by integer primary key or slug."""
+    """Accept credential type by integer primary key or slug (active types only)."""
+
+    def get_queryset(self):
+        return CredentialType.objects.filter(is_active=True)
 
     def to_internal_value(self, data):
         queryset = self.get_queryset()
@@ -34,7 +49,7 @@ class CredentialTypeRelatedField(serializers.PrimaryKeyRelatedField):
 
 class CredentialSerializer(serializers.ModelSerializer):
     credential_type = CredentialTypeRelatedField(
-        queryset=CredentialType.objects.all(),
+        queryset=CredentialType.objects.filter(is_active=True),
     )
     credential_type_display = serializers.CharField(source='credential_type.name', read_only=True)
     # The 'data' field is virtual - it's decrypted on read, and encrypted on write via set_credential_data
@@ -108,6 +123,35 @@ class CredentialSerializer(serializers.ModelSerializer):
         ret['fields'] = fields_response
         return ret
 
+    def validate(self, attrs):
+        # The `data` dict is unconstrained by DRF, so the type's own
+        # `fields_schema` has to be enforced here — previously a credential
+        # missing required fields saved fine and only failed at run time.
+        raw_data = attrs.get('data')
+        if raw_data is not None:
+            credential_type = attrs.get('credential_type') or (
+                self.instance.credential_type if self.instance else None
+            )
+            if credential_type is not None:
+                # Layer incoming values over what is already stored, so an
+                # untouched required field doesn't fail a partial update.
+                merged = {}
+                if self.instance:
+                    try:
+                        merged.update(self.instance.get_credential_data())
+                    except Exception:
+                        # Undecryptable existing blob: validate what arrives.
+                        pass
+                    merged.update(self.instance.public_metadata or {})
+                merged.update(raw_data)
+                from credentials.manager import get_credential_manager
+                errors = get_credential_manager().validate_against_schema(
+                    merged, credential_type
+                )
+                if errors:
+                    raise serializers.ValidationError({'data': errors})
+        return attrs
+
     def create(self, validated_data):
         validated_data.pop('data', None)
         raw_data = self.initial_data.get('data', {})
@@ -129,7 +173,10 @@ class CredentialSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         
         if raw_data is not None:
-             self._save_credential_data(instance, raw_data, save=False)
+             # Merge, don't replace: the read serializer masks secrets, so the
+             # client can only send back the fields the user actually retyped.
+             # A straight replace would wipe every untouched secret.
+             self._save_credential_data(instance, raw_data, save=False, merge=True)
              # Reset verification status on sensitive data update
              instance.is_verified = False
              instance.last_error = "" # Set to empty string as field is NOT NULL
@@ -137,9 +184,12 @@ class CredentialSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
-    def _save_credential_data(self, credential, data, save=True):
+    def _save_credential_data(self, credential, data, save=True, merge=False):
         """
-        Splits data into public and encrypted based on type schema
+        Splits data into public and encrypted based on type schema.
+
+        With merge=True the incoming keys are layered over what is already
+        stored, so omitting a key leaves it untouched (used on update).
         """
         # Fetch type (if not loaded)
         if not credential.credential_type_id:
@@ -160,7 +210,16 @@ class CredentialSerializer(serializers.ModelSerializer):
         encrypted_payload = {}
         
         public_keys = {f['name'] for f in schema if f.get('public')}
-        
+
+        if merge:
+            public_payload.update(credential.public_metadata or {})
+            try:
+                encrypted_payload.update(credential.get_credential_data())
+            except Exception:
+                # Undecryptable existing blob: better to overwrite with what the
+                # user just supplied than to fail the whole update.
+                pass
+
         for key, value in data.items():
             if key in public_keys:
                 public_payload[key] = value

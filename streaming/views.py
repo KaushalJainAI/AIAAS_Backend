@@ -6,11 +6,10 @@ Provides HTTP endpoints for:
 - Stream history/replay
 - Connection management
 """
-import asyncio
 import logging
 from uuid import UUID
 
-from django.http import StreamingHttpResponse, JsonResponse
+from django.http import StreamingHttpResponse
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -20,7 +19,7 @@ from rest_framework.permissions import IsAuthenticated
 from logs.models import ExecutionLog
 from .broadcaster import get_broadcaster, StreamEvent
 from .models import StreamEvent as StreamEventModel
-from core.throttling import StreamThrottle
+from core.http.throttling import StreamThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,9 @@ class ExecutionStreamView(APIView):
         """Stream execution events via SSE."""
         # Verify user owns this execution
         try:
-            execution = ExecutionLog.objects.get(
+            # Ownership check: the .get() raising DoesNotExist *is* the
+            # guard. Nothing needs the row, but the query must stay.
+            ExecutionLog.objects.get(
                 execution_id=execution_id,
                 user=request.user
             )
@@ -129,7 +130,9 @@ class ExecutionEventsHistoryView(APIView):
         """Get execution event history."""
         # Verify user owns this execution
         try:
-            execution = ExecutionLog.objects.get(
+            # Ownership check: the .get() raising DoesNotExist *is* the
+            # guard. Nothing needs the row, but the query must stay.
+            ExecutionLog.objects.get(
                 execution_id=execution_id,
                 user=request.user
             )
@@ -233,7 +236,8 @@ def test_stream_event(request, execution_id: UUID):
     
     # Verify user owns this execution
     try:
-        execution = ExecutionLog.objects.get(
+        # Ownership check: the .get() raising DoesNotExist *is* the guard.
+        ExecutionLog.objects.get(
             execution_id=execution_id,
             user=request.user
         )

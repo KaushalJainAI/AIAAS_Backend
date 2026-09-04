@@ -6,7 +6,14 @@ from django.apps import AppConfig
 
 logger = logging.getLogger(__name__)
 
-_SKIP_CMDS = {'migrate', 'makemigrations', 'collectstatic', 'test', 'shell', 'dbshell'}
+#: Entry points that must not pay for (or be perturbed by) an embedder load.
+#: `pytest` is in here for the same reason `test` is — the pytest runner never
+#: puts the word "test" in argv, so the preload thread started on every test
+#: run and reached for NVIDIA_API_KEY during collection.
+_SKIP_CMDS = {
+    'migrate', 'makemigrations', 'collectstatic', 'test', 'shell', 'dbshell',
+    'pytest', 'py.test',
+}
 
 
 def _safe_preload():
@@ -22,7 +29,13 @@ class InferenceConfig(AppConfig):
     name = 'inference'
 
     def ready(self):
-        if set(sys.argv) & _SKIP_CMDS:
+        # Signals are registered unconditionally — unlike the embedder preload
+        # below, `doc_count` must stay true under `manage.py` commands and in
+        # tests too, since those delete documents as much as the API does.
+        from . import signals  # noqa: F401
+
+        argv = {os.path.basename(a) for a in sys.argv}
+        if argv & _SKIP_CMDS:
             return
         if os.environ.get('PRELOAD_EMBEDDER', 'True').lower() not in ('true', '1', 'yes'):
             return

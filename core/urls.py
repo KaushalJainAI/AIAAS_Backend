@@ -23,6 +23,7 @@ from .views import (
     GoogleLoginView,
     UsageTrackingView,
     UsageInsightsView,
+    UserMemoryView,
 )
 
 
@@ -32,6 +33,10 @@ router.register(r'api-keys', APIKeyViewSet, basename='api-keys')
 
 
 urlpatterns = [
+    # What the assistant remembers about you, so it can be audited and
+    # corrected — every row here rides in every future system prompt.
+    path('memory/', UserMemoryView.as_view(), name='user_memory'),
+    path('memory/<int:memory_id>/', UserMemoryView.as_view(), name='user_memory_detail'),
     # Authentication
     path('auth/register/', UserRegistrationView.as_view(), name='register'),
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='login'),

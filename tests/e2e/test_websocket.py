@@ -2,9 +2,19 @@
 """
 WebSocket smoke test for the streaming layer.
 
+⚠ CURRENTLY NON-FUNCTIONAL — needs porting, not deleting.
+
 Real flow: register → login → create gemini credential → create workflow with
 manual_trigger → gemini → POST /execute/ → connect to /ws/execution/{id}/ and
 verify at least one streamed event arrives.
+
+The `POST /api/orchestrator/workflows/{id}/execute/` step no longer exists: it
+went with the workflow canvas. The streaming layer it exercises is very much
+alive — agent runs stream to the same `ws/execution/{id}/` — so the harness
+below is worth keeping. Porting means driving
+`POST /api/orchestrator/agents/{id}/execute/`, which answers **202** with an
+`execution_id` rather than 200, and taking the run's completion from the socket
+instead of a status poll.
 """
 from __future__ import annotations
 

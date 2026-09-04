@@ -29,8 +29,18 @@ def _intent_to_generation_kwargs(intent: Dict[str, Any], user) -> Dict[str, Any]
         "resolution": str(p["resolution"]) if p.get("resolution") else None,
         "aspect_ratio": p.get("aspect_ratio"),
         "duration": str(p["duration"]) if p.get("duration") else None,
+        "size": p.get("size"),
+        "quality": p.get("quality"),
+        "output_format": p.get("output_format"),
+        "background": p.get("background"),
+        "output_compression": p.get("output_compression"),
+        "batch_size": p.get("batch_size"),
+        "reference_urls": p.get("reference_urls") or [],
+        "frame_images": p.get("frame_images") or [],
         "voice": p.get("voice"),
         "speed": float(p["speed"]) if p.get("speed") else None,
+        "instructions": p.get("instructions"),
+        "response_format": p.get("response_format"),
         "metadata": {"agent": True, "reasoning": intent.get("reasoning", "")},
     }
 
@@ -65,18 +75,48 @@ def _dispatch_intent(conv: ImagineConversation, intent: Dict[str, Any]) -> Gener
     return generation
 
 
-def run_turn(conversation: ImagineConversation, user_message: str) -> Dict[str, Any]:
-    """Handle one user message. Returns API response payload."""
+def run_turn(
+    conversation: ImagineConversation,
+    user_message: str,
+    preferred_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Handle one user message. Returns API response payload.
+
+    `preferred_model` carries the picker selection from the chat composer, so
+    Agent mode is not limited to whatever the router happens to choose.
+    """
     with transaction.atomic():
         ImagineMessage.objects.create(
             conversation=conversation, role='user', content=user_message,
         )
 
-    intent = classify(
-        user_message,
-        user=conversation.user,
-        history=_conversation_history(conversation),
-    )
+    try:
+        intent = classify(
+            user_message,
+            user=conversation.user,
+            # The message just persisted above is the tail of this history;
+            # pass it without the current message, or the classifier sees the
+            # request twice — once as history, once in the user block.
+            history=_conversation_history(conversation)[:-1],
+            preferred_model=preferred_model,
+        )
+    except Exception as e:
+        logger.exception("intent classification failed")
+        msg = ImagineMessage.objects.create(
+            conversation=conversation,
+            role='assistant',
+            content=f"Generation failed: {e}",
+        )
+        conversation.status = 'idle'
+        conversation.save(update_fields=['status', 'updated_at'])
+        return {
+            "conversation_id": conversation.id,
+            "message_id": msg.id,
+            "assistant_message": f"Generation failed: {e}",
+            "requires_hitl": False,
+            "generation": None,
+            "error": str(e),
+        }
     threshold = float(getattr(settings, "IMAGINE_HITL_COST_THRESHOLD", 0.10))
 
     if needs_hitl(intent, threshold):

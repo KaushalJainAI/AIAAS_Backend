@@ -1,11 +1,12 @@
-from rest_framework import status, serializers as drf_serializers
+from rest_framework import status, serializers
 from adrf import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema, extend_schema_view, inline_serializer, OpenApiResponse
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse
 from django.conf import settings as django_settings
 from django.core import signing
+from django.db import IntegrityError
 from urllib.parse import urlparse
 from .models import Credential, CredentialType, CredentialAuditLog
 from .serializers import (
@@ -92,7 +93,32 @@ class CredentialViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         # Automatically assign the creator
-        serializer.save(user=self.request.user)
+        try:
+            serializer.save(user=self.request.user)
+        except IntegrityError:
+            # unique_together ['user', 'name'] — surface as a 400, not a 500.
+            raise serializers.ValidationError(
+                {'name': 'You already have a credential with this name.'}
+            ) from None
+        # The manager caches decrypted data for 5 minutes; a fresh credential
+        # must not be invisible to callers that hit the cached miss path.
+        self._bust_credential_cache(self.request.user.id)
+
+    def perform_update(self, serializer):
+        try:
+            serializer.save()
+        except IntegrityError:
+            raise serializers.ValidationError(
+                {'name': 'You already have a credential with this name.'}
+            ) from None
+        # Stale decrypted data (old key, old is_verified) must not outlive an
+        # update in the manager's process-local cache.
+        self._bust_credential_cache(self.request.user.id)
+
+    @staticmethod
+    def _bust_credential_cache(user_id):
+        from .manager import get_credential_manager
+        get_credential_manager().clear_cache(user_id=user_id)
 
     def destroy(self, request, *args, **kwargs):
         """
@@ -101,43 +127,42 @@ class CredentialViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         credential_id = str(instance.id)
         
-        # Check active workflows
-        # Since we don't have a normalized WorkflowNode model, we inspect the JSON
-        from orchestrator.models import Workflow
-        
-        active_workflows = Workflow.objects.filter(
-            user=request.user, 
-            status='active'
+        # Which agents would break. This used to scan every active workflow's
+        # node JSON for a `credential_id`; there are no nodes any more, and an
+        # agent names its LLM credential with a real foreign key — so the same
+        # question is now one indexed query instead of a full scan plus a
+        # nested loop over untyped JSON.
+        from agents.models import SubAgent
+
+        affected = list(
+            SubAgent.objects
+            .filter(user=request.user, status='active', llm_credential_id=instance.id)
+            .values_list('name', flat=True)
         )
-        
-        affected = []
-        for wf in active_workflows:
-            for node in wf.nodes:
-                data = node.get('data', {})
-                # check for credential_id usage
-                if str(data.get('credential_id')) == credential_id:
-                    affected.append(wf.name)
-                    break 
-        
+
         if affected:
             return Response(
-                {'error': f'Cannot delete credential used in active workflows: {", ".join(affected)}'},
+                {'error': f'Cannot delete credential used by active agents: {", ".join(affected)}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
             
-        # Log deletion audit
+        # Log deletion audit. The snapshot keeps name/type readable after the
+        # credential's FK is nulled by SET_NULL on delete. The `or ''` keeps the
+        # NOT NULL user_agent column happy for clients that send no UA header.
         from .models import CredentialAuditLog
         CredentialAuditLog.objects.create(
-            credential=instance, # It will be nullified on delete due to SET_NULL but we capture it now? 
-            # Actually on_delete=SET_NULL in AuditLog means log stays but credential link is lost.
-            # We should probably capture name/type in snapshot if we want to keep history meaningful?
-            # Creating audit log BEFORE deletion so it has the link.
+            credential=instance,
             user=request.user,
             action='deleted',
             ip_address=request.META.get('REMOTE_ADDR'),
-            user_agent=request.META.get('HTTP_USER_AGENT')
+            user_agent=request.META.get('HTTP_USER_AGENT') or '',
+            snapshot={
+                'name': instance.name,
+                'credential_type': instance.credential_type.name,
+            },
         )
             
+        self._bust_credential_cache(request.user.id)
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
@@ -238,27 +263,27 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         name = serializer.validated_data['name']
         state = serializer.validated_data.get('state') or request.data.get('state')
         
-        # Validate CSRF state token
-        if state:
-            try:
-                state_data = signing.loads(state, salt='oauth-state', max_age=600)  # 10 min expiry
-                if state_data.get('user_id') != request.user.id:
-                    return Response({'error': 'OAuth state token user mismatch'}, status=400)
-                if state_data.get('redirect_uri') != redirect_uri:
-                    return Response({'error': 'OAuth state token redirect_uri mismatch'}, status=400)
-            except signing.BadSignature:
-                return Response({'error': 'Invalid OAuth state token'}, status=400)
-            except signing.SignatureExpired:
-                return Response({'error': 'OAuth state token expired. Please try again.'}, status=400)
-        else:
-            logger.warning(f"OAuth callback missing state parameter for user {request.user.id}")
+        # Validate CSRF state token — mandatory, not best-effort: without it a
+        # stolen code could be exchanged against an arbitrary redirect_uri.
+        if not state:
+            return Response({'error': 'Missing OAuth state token'}, status=400)
+        try:
+            state_data = signing.loads(state, salt='oauth-state', max_age=600)  # 10 min expiry
+            if state_data.get('user_id') != request.user.id:
+                return Response({'error': 'OAuth state token user mismatch'}, status=400)
+            if state_data.get('redirect_uri') != redirect_uri:
+                return Response({'error': 'OAuth state token redirect_uri mismatch'}, status=400)
+        except signing.BadSignature:
+            return Response({'error': 'Invalid OAuth state token'}, status=400)
+        except signing.SignatureExpired:
+            return Response({'error': 'OAuth state token expired. Please try again.'}, status=400)
         
         # Validate redirect_uri against allowlist
         parsed_redirect = urlparse(redirect_uri)
         redirect_origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
         if redirect_origin not in ALLOWED_REDIRECT_ORIGINS:
             return Response(
-                {'error': f'Redirect URI origin is not allowed'},
+                {'error': 'Redirect URI origin is not allowed'},
                 status=status.HTTP_400_BAD_REQUEST
             )
             
@@ -283,21 +308,26 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
         from cryptography.fernet import Fernet
         fernet = Fernet(Credential._get_encryption_key())
         
-        # Create Credential
-        credential = await sync_to_async(Credential.objects.create)(
-            user=request.user,
-            credential_type=cred_type,
-            name=name,
-            access_token=fernet.encrypt(token_data.get('access_token', '').encode()),
-            refresh_token=fernet.encrypt(token_data.get('refresh_token', '').encode()),
-        )
-        
-        # Also store expiration if available
+        # Re-connecting the same account is update-or-create by (user, name):
+        # the frontend always sends 'Google Account', so a second connect used
+        # to raise IntegrityError (unique_together ['user', 'name']) → 500.
         expires_in = token_data.get('expires_in')
+        token_expires_at = None
         if expires_in:
             from django.utils import timezone
             from datetime import timedelta
-            credential.token_expires_at = timezone.now() + timedelta(seconds=expires_in)
+            token_expires_at = timezone.now() + timedelta(seconds=expires_in)
+        
+        credential, _ = await sync_to_async(Credential.objects.update_or_create)(
+            user=request.user,
+            name=name,
+            defaults={
+                'credential_type': cred_type,
+                'access_token': fernet.encrypt(token_data.get('access_token', '').encode()),
+                'refresh_token': fernet.encrypt(token_data.get('refresh_token', '').encode()),
+                'token_expires_at': token_expires_at,
+            },
+        )
             
         # Verify immediately - use async info fetch
         try:
@@ -313,6 +343,11 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
             credential.is_verified = False
             
         await sync_to_async(credential.save)()
+        
+        # New tokens are in the DB; don't let the manager's cache serve the
+        # pre-reconnect values (or miss entirely) for the next 5 minutes.
+        from .manager import get_credential_manager
+        get_credential_manager().clear_cache(user_id=request.user.id)
         
         # Use sync_to_async for serializer in async context
         serialized_data = await sync_to_async(lambda: CredentialSerializer(credential).data)()
