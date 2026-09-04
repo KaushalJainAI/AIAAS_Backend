@@ -636,6 +636,11 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
     fanout = await run_fanout(
         tasks, runner=runner, parent_thread=str(parent_thread),
         parallel=(worker_agent.fanout or {}).get("parallel"),
+        # Passed so a trimmed worker answer can be archived under *this* run's
+        # session key — which is what makes the parent's `read_tool_output`
+        # able to fetch it, and what stops the cut text being lost after the
+        # parent has already paid a whole worker run for it.
+        context=context,
     )
 
     return json.dumps({

@@ -24,3 +24,23 @@ def sweep_triggers():
     except Exception as exc:
         logger.exception('Trigger sweep failed: %s', exc)
         raise
+
+
+@shared_task(name='orchestrator.recover_runs', ignore_result=True)
+def recover_runs():
+    """Resume or close runs whose process went away. Scheduled by Celery beat.
+
+    Same wrapper-only shape as the sweep above, and for a sharper version of
+    the same reason: this is the recovery path for a process that died, so a
+    design where it only runs under a broker would be unavailable in exactly
+    the conditions that produce work for it.
+    """
+    from asgiref.sync import async_to_sync
+
+    from .recovery import sweep_orphaned_runs
+
+    try:
+        return async_to_sync(sweep_orphaned_runs)()
+    except Exception as exc:
+        logger.exception('Run recovery sweep failed: %s', exc)
+        raise

@@ -478,6 +478,44 @@ class _StderrTap:
             pass
 
 
+#: Refreshes currently in flight, so a burst of turns re-lists a connector once.
+#: Without it, five parallel agent workers sharing one stale entry each spawn
+#: their own `npx` — the stampede the cache exists to prevent, moved from the
+#: foreground to the background where it is harder to notice.
+_refreshing: set[tuple[int, int | None]] = set()
+
+
+def _refresh_in_background(server_id: int, user: Any) -> None:
+    """Re-list a connector's tools without making anyone wait for it.
+
+    `spawn` rather than `create_task`: this outlives the request that noticed
+    the staleness, and a bare task inherits an executor that dies with the
+    response — every ORM call in here would then raise once the 200 was
+    already sent (see `workflow_backend/background.py`).
+    """
+    key = (server_id, _coerce_user_id(user))
+    if key in _refreshing:
+        return
+    _refreshing.add(key)
+
+    async def _run() -> None:
+        try:
+            await MCPClientManager(server_id, user=user).list_tools(use_cache=False)
+        except Exception as e:  # noqa: BLE001
+            # A refresh that fails changes nothing: the stale entry stays
+            # readable until its hard lifetime runs out, which is strictly
+            # better than dropping a working tool list because one re-list
+            # timed out.
+            logger.info(
+                "Background refresh of MCP server %s failed, keeping stale tools: %s",
+                server_id, e,
+            )
+        finally:
+            _refreshing.discard(key)
+
+    spawn(_run())
+
+
 class MCPClientManager:
     """Connect to a single MCP server on behalf of a user."""
 
@@ -712,9 +750,16 @@ class MCPClientManager:
         user_id = _coerce_user_id(self.user)
 
         if use_cache:
-            cached = await MCPToolCache.get(self.server_id, user_id)
-            if cached is not None:
-                return cached
+            entry = await MCPToolCache.get_entry(self.server_id, user_id)
+            if entry is not None:
+                tools, stale = entry
+                if stale:
+                    # Answer from the lapsed copy and re-list behind the
+                    # answer. Blocking here is what made a two-minute pause in
+                    # a conversation cost an `npx` start before the next reply
+                    # began — a cost the user pays and never sees a reason for.
+                    _refresh_in_background(self.server_id, self.user)
+                return tools
 
         resolved = await self._resolve_credentials(server)
         async with self._session(server, resolved) as session:
@@ -794,7 +839,15 @@ async def drain_pool() -> None:
 
 
 def _visible_servers_queryset(user_id: int | None, enabled_only: bool = True):
-    qs = MCPServer.objects.all()
+    # Ordered explicitly, and it matters well beyond tidiness. This list decides
+    # the order of the MCP tool descriptors in every model request, and a
+    # provider's prompt cache keys on an exact prefix — so an unordered query,
+    # which a database is free to answer differently after any write, would
+    # reshuffle the tool block between two otherwise identical turns and miss
+    # the cache every time. The symptom is pure latency and a larger bill, with
+    # nothing anywhere reporting an error. `id` because it is the one column
+    # that never changes under a rename.
+    qs = MCPServer.objects.order_by('id')
     if enabled_only:
         qs = qs.filter(enabled=True)
         if user_id is not None:

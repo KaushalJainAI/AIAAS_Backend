@@ -180,3 +180,75 @@ class SpendAggregationTests(TestCase):
         """The same reason `rupees_for` rounds up: no unbounded free tail."""
         self._run(cost_usd=Decimal('0.000200'), cost_source='estimated')
         self.assertEqual(aggregate_rupees(ExecutionLog.objects.all()), 1)
+
+
+class CurationCostTests(TestCase):
+    """The fold is a model call, and it has to cost money like one.
+
+    Curation exists to keep a long run affordable, and it spends a little to do
+    it. That spend reached `total_tokens` from the day curation shipped — the
+    comment in `curate_node` says why — but it reached no cost column, because
+    a fold is deliberately not an `AgentTurn` and the rollup sums turns. So the
+    guardrail curation serves could not see curation's own bill.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='folder', password='pw')
+        self.agent = SubAgent.objects.create(user=self.user, name='F')
+        self.log = ExecutionLog.objects.create(
+            user=self.user, subagent=self.agent, status='running',
+            started_at=timezone.now(),
+        )
+        AgentTurn.objects.create(
+            execution=self.log, index=1, decision='answer', model_id='m',
+            cost_usd=Decimal('0.010'), cost_source='estimated',
+        )
+
+    def _close(self, **kwargs):
+        from agents.agent.runtime import _roll_up_cost
+        _roll_up_cost(self.log, **kwargs)
+        return self.log
+
+    def test_the_folds_cost_is_added_to_the_run(self):
+        log = self._close(extra_cost_usd=Decimal('0.002'),
+                          extra_cost_source='estimated')
+        self.assertEqual(log.cost_usd, Decimal('0.012'))
+
+    def test_a_run_that_never_curated_is_unaffected(self):
+        self.assertEqual(self._close().cost_usd, Decimal('0.010'))
+
+    def test_an_unpriced_fold_makes_the_run_unpriced(self):
+        """The fold model is often a different one, and may not be in the table."""
+        log = self._close(extra_cost_usd=Decimal('0'),
+                          extra_cost_source='unpriced')
+        self.assertEqual(log.cost_source, 'unpriced')
+
+    def test_the_stream_accumulates_folds_across_passes(self):
+        """A long run curates several times; each fold is its own call."""
+        from unittest.mock import AsyncMock
+
+        from agents.agent.stream import AgentRunStream
+
+        stream = AgentRunStream(self.log, broadcaster=AsyncMock())
+        for _ in range(3):
+            async_to_sync(stream.on_curation)(
+                results_compacted=1, steps_folded=2, tokens_before=100,
+                tokens_after=50, summary_tokens=30,
+                summary_cost_usd=Decimal('0.001'),
+                summary_cost_source='estimated',
+            )
+        self.assertEqual(stream.curation['cost_usd'], Decimal('0.003'))
+        self.assertEqual(stream.curation['cost_source'], 'estimated')
+
+    def test_a_fold_that_reported_no_cost_does_not_disturb_the_source(self):
+        from unittest.mock import AsyncMock
+
+        from agents.agent.stream import AgentRunStream
+
+        stream = AgentRunStream(self.log, broadcaster=AsyncMock())
+        async_to_sync(stream.on_curation)(
+            results_compacted=1, steps_folded=0, tokens_before=100,
+            tokens_after=50, summary_tokens=0,
+        )
+        self.assertEqual(stream.curation['cost_usd'], Decimal('0'))
+        self.assertEqual(stream.curation['cost_source'], '')

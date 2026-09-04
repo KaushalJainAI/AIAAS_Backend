@@ -228,3 +228,44 @@ async def delete_file(args: Dict, context: Dict) -> str:
     from inference import vfs
 
     return await _run(context, vfs.delete, args.get("path") or "")
+
+
+@tool({
+    "type": "function",
+    "function": {
+        "name": "find_files",
+        "description": (
+            "Find files anywhere in your workspace by name or by text inside "
+            "them. Use this instead of listing directories one at a time when "
+            "you know roughly what a file is called or what it says. This is "
+            "plain substring matching over your own files — it is not a "
+            "knowledge base search and does not rank by relevance, so a match "
+            "means the text is literally there."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Text to look for in file names and file contents. At least two characters.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum matches to return. Defaults to the workspace listing limit.",
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}, requires="files", parallel=True, effect="read")
+async def find_files(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    try:
+        limit = int(args.get("limit") or 0)
+    except (TypeError, ValueError):
+        # A model that sends "20 files" gets the default, not a crash: the
+        # cap is a bound we own, not something the caller has to get right.
+        limit = 0
+    return await _run(context, vfs.find, args.get("query") or "", limit=limit)

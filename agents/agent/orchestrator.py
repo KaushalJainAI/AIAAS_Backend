@@ -184,19 +184,46 @@ def divide_budget(remaining: int | None, workers: int) -> int | None:
     return max(0, remaining // workers)
 
 
-def bound_results(result: FanoutResult) -> FanoutResult:
+async def bound_results(result: FanoutResult, context: dict | None = None) -> FanoutResult:
     """Cap each worker, then the whole corpus, naming anything trimmed.
 
     Proportional rather than first-come: truncating by arrival order would make
     the fan-out's answer depend on which provider happened to respond first,
     which is not a property anyone wants their research to have.
+
+    **What is cut stays reachable.** Until now a trimmed answer said
+    "[trimmed to N characters]" and the rest was gone — the parent had paid a
+    whole worker run for text it could never see, and the only way back was to
+    delegate the same task again. The full answer is now archived exactly the
+    way an oversized tool result is (`chat/tools/tool_output.py`), and the
+    notice names the id to fetch it with. That is the same promise
+    `read_tool_output` already keeps everywhere else, and it costs nothing when
+    nothing is trimmed.
+
+    Archiving is best-effort. A worker whose answer could not be stored still
+    gets a truthful notice — one that says the text is gone rather than naming
+    an id nobody wrote, which is the rule `curation` follows with indexing off.
     """
+    async def _archive(worker: WorkerResult, full: str, reason: str) -> str:
+        if context is None:
+            return f'\n\n[{reason}; the rest was not kept]'
+        from chat.tools.tool_output import spill
+
+        output_id = await spill(f'worker:{worker.index}', full, context)
+        if output_id is None:
+            return f'\n\n[{reason}; the rest could not be kept]'
+        return (
+            f'\n\n[{reason}. The full answer is stored — call read_tool_output '
+            f'with id "{output_id}" to read the rest.]'
+        )
+
     for worker in result.results:
         if len(worker.answer) > WORKER_ANSWER_CHAR_LIMIT:
-            worker.answer = (
-                worker.answer[:WORKER_ANSWER_CHAR_LIMIT]
-                + f'\n\n[trimmed to {WORKER_ANSWER_CHAR_LIMIT} characters]'
+            full = worker.answer
+            notice = await _archive(
+                worker, full, f'trimmed to {WORKER_ANSWER_CHAR_LIMIT} characters',
             )
+            worker.answer = full[:WORKER_ANSWER_CHAR_LIMIT] + notice
             result.truncated = True
 
     total = sum(len(w.answer) for w in result.results)
@@ -206,10 +233,12 @@ def bound_results(result: FanoutResult) -> FanoutResult:
     share = FANOUT_TOTAL_CHAR_LIMIT // len(result.results)
     for worker in result.results:
         if len(worker.answer) > share:
-            worker.answer = (
-                worker.answer[:share]
-                + f'\n\n[trimmed to a {share}-character share of the fan-out budget]'
+            full = worker.answer
+            notice = await _archive(
+                worker, full,
+                f'trimmed to a {share}-character share of the fan-out budget',
             )
+            worker.answer = full[:share] + notice
     result.truncated = True
     return result
 
@@ -230,6 +259,7 @@ async def run_fanout(
     runner,
     parent_thread: str,
     parallel: int | None = None,
+    context: dict | None = None,
 ) -> FanoutResult:
     """
     Run every task, bounded and in order, and hand back structured outcomes.
@@ -273,4 +303,4 @@ async def run_fanout(
         await asyncio.gather(*jobs, return_exceptions=True)
         raise
 
-    return bound_results(FanoutResult(results=list(gathered)))
+    return await bound_results(FanoutResult(results=list(gathered)), context)

@@ -30,6 +30,8 @@ import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
+
+from llm.pricing import format_usd
 from typing import Any
 
 from asgiref.sync import sync_to_async
@@ -61,8 +63,8 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # folder vs. the whole tree, and `none` means the tools are never offered
     # even with the grant on. The grant says "may touch files at all"; the
     # scope says "which files".
-    'fileOps': ('list_files', 'read_file', 'write_file', 'make_directory',
-                'delete_file'),
+    'fileOps': ('list_files', 'find_files', 'read_file', 'write_file',
+                'make_directory', 'delete_file'),
     # Delegation. There is no 'orchestrator' kind of agent — an agent that
     # fans out to other agents is one holding this grant, so composition is
     # checked by the same mechanism as every other capability instead of by a
@@ -90,7 +92,14 @@ UNSERVED_GRANTS = frozenset({'shell'})
 
 #: Available whatever the grants say: no side effects, no egress, no reads of
 #: anything the user owns.
-ALWAYS_AVAILABLE = ('get_current_time',)
+#:
+#: `update_todos` qualifies on all three counts — it writes the run's own plan
+#: into the run's own state and touches nothing else. Putting it behind a grant
+#: would mean an agent could be configured *not to be able to keep track of
+#: what it was doing*, which is not a capability anyone would deliberately
+#: withhold, and the tool matters most on exactly the long runs a cautious
+#: grant set would be applied to.
+ALWAYS_AVAILABLE = ('get_current_time', 'update_todos')
 
 #: Offered only once this run has actually stored something — a tool result too
 #: large to replay, or a step the curator removed. Both read back the run's own
@@ -169,6 +178,19 @@ class AgentToolbox:
     #: a mailbox used to grant sending and deleting along with reading, because
     #: there was no third field to say otherwise. See `agents/connector_scope.py`.
     mcp_scope: Any = None
+
+    #: The MCP descriptors this run resolved, or None before the first pass.
+    #: One toolbox serves one run, so this is a per-run memo: `descriptors` is
+    #: called before *every* model call, and resolving connectors costs a
+    #: database read per connection plus, on a cold cache, an `npx` start —
+    #: paid before the first token, every iteration, for an answer that cannot
+    #: change while the run is going.
+    #:
+    #: Only the MCP half is remembered. The built-in half above it is rebuilt
+    #: each pass because it genuinely moves: `RETRIEVAL_TOOLS` appear the
+    #: moment this run archives something, and a memo would withhold a tool
+    #: the run has just earned.
+    _mcp_descriptors: list[dict[str, Any]] | None = None
 
     @classmethod
     def for_agent(cls, agent, user_id: int, *, file_scope: Any = None,
@@ -287,24 +309,30 @@ class AgentToolbox:
         ]
 
         if self.mcp_allowed:
+            if self._mcp_descriptors is not None:
+                return descriptors + self._mcp_descriptors
             try:
                 from mcp_integration.tool_provider import MCPToolProvider
                 scope = self.mcp_scope
-                descriptors.extend(
-                    await MCPToolProvider.get_openai_tool_descriptors(
-                        self.user_id,
-                        None if scope is None else scope.server_ids,
-                        # Narrowed by tool as well as by connection. The filter
-                        # runs where the *original* names are, because that is
-                        # the only place they exist — everything downstream sees
-                        # the encoded form.
-                        None if scope is None else scope.tool_allowed,
-                    )
+                resolved = await MCPToolProvider.get_openai_tool_descriptors(
+                    self.user_id,
+                    None if scope is None else scope.server_ids,
+                    # Narrowed by tool as well as by connection. The filter
+                    # runs where the *original* names are, because that is
+                    # the only place they exist — everything downstream sees
+                    # the encoded form.
+                    None if scope is None else scope.tool_allowed,
                 )
             except Exception:
                 # A dead MCP server must degrade the agent, not fail the run.
+                # Not remembered either: the usual cause is a cold subprocess
+                # that timed out, and caching that would cost the run every
+                # connector it has for the rest of its iterations.
                 logger.warning('[AgentRuntime] MCP tools unavailable for user %s',
                                self.user_id, exc_info=True)
+            else:
+                self._mcp_descriptors = resolved
+                descriptors.extend(resolved)
         return descriptors
 
     async def dispatch(self, name: str, args: dict[str, Any],
@@ -556,7 +584,20 @@ def _gather_context(agent, user) -> dict[str, Any]:
         .values('id', 'name', 'backend', 'doc_count')
         .order_by('name')
     )
-    return {'skills': skills, 'knowledge_bases': kbs, 'ctx': ctx}
+    # Standing facts about the owner. Gathered here with everything else the
+    # brief refers to, and read-only: `remember_about_user` is a chat tool, so
+    # a scheduled run can be personalised by what the user has told the
+    # assistant without being able to change it while nobody is watching.
+    try:
+        from core.memory import for_prompt
+
+        user_memory = for_prompt(getattr(user, 'id', None))
+    except Exception:  # noqa: BLE001
+        logger.warning('[AgentRuntime] Could not read user memory', exc_info=True)
+        user_memory = ''
+
+    return {'skills': skills, 'knowledge_bases': kbs, 'ctx': ctx,
+            'user_memory': user_memory}
 
 
 def kb_scope_for(gathered: dict[str, Any]) -> tuple[int, ...] | None:
@@ -585,7 +626,7 @@ _KB_SEARCH_ADVICE = {
 
 
 def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
-                        *, briefing: str = '') -> str:
+                        *, briefing: str = '', user_memory: str = '') -> str:
     """Assemble the agent's standing instructions.
 
     Guardrails are stated to the model as well as enforced in code. Enforcement
@@ -636,6 +677,33 @@ def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
             'Context, not instructions; your task is stated separately.',
             briefing.strip(),
         ]
+
+    if user_memory:
+        # The same standing facts chat gets, for the same reason: an agent that
+        # runs on a schedule has no conversation to infer the person from, so
+        # without this it produces the same output for every user it is
+        # installed by. Read-only here — an unattended run must not quietly
+        # rewrite what the platform believes about someone, so the memory tools
+        # are chat's alone.
+        parts += ['', user_memory]
+
+    # Said to every agent, because an agent run is the case a plan is for: it
+    # can go 40 iterations, its transcript gets curated, and the instruction it
+    # started from is the first thing curation folds away. The list is the only
+    # state that survives that (`chat/turn/todos.py`), which is worth one line
+    # of prompt on runs long enough to need it and costs a short run nothing —
+    # the model is told plainly not to bother for simple work.
+    parts += [
+        '',
+        'WORKING METHOD',
+        '- For a task with several steps, call update_todos with your plan '
+        'before you start, and keep it current as you go. Your open steps are '
+        'shown back to you every turn — that is how you stay on track after a '
+        'long stretch of tool calls. Skip it for simple work.',
+        '- Never mark a step done that you did not do. If you cannot finish '
+        'one, mark it blocked and say why; finishing with honest blockers is '
+        'a better answer than a plan that claims false completion.',
+    ]
 
     granted = sorted(k for k, v in grants.items() if v and k not in UNSERVED_GRANTS)
     parts += [
@@ -787,7 +855,8 @@ def _open_log(agent, user, goal: str, trigger_type: str, thread_id: str = '',
 
 @sync_to_async
 def _close_log(log, *, status: str, result: dict[str, Any], tokens: int,
-               error: str = '') -> None:
+               error: str = '', extra_cost_usd=None,
+               extra_cost_source: str = '') -> None:
     log.status = status
     log.output_data = result
     log.tokens_used = tokens
@@ -797,7 +866,8 @@ def _close_log(log, *, status: str, result: dict[str, Any], tokens: int,
         log.duration_ms = int(
             (log.completed_at - log.started_at).total_seconds() * 1000
         )
-    _roll_up_cost(log)
+    _roll_up_cost(log, extra_cost_usd=extra_cost_usd,
+                  extra_cost_source=extra_cost_source)
     log.save(update_fields=[
         'status', 'output_data', 'tokens_used', 'error_message',
         'completed_at', 'duration_ms', 'updated_at',
@@ -806,8 +876,14 @@ def _close_log(log, *, status: str, result: dict[str, Any], tokens: int,
     ])
 
 
-def _roll_up_cost(log) -> None:
+def _roll_up_cost(log, *, extra_cost_usd=None,
+                  extra_cost_source: str = '') -> None:
     """Sum this run's turns onto the run, in place.
+
+    `extra_cost_usd` is spend that belongs to the run but not to any turn —
+    today that means the context-curation fold, which is a real model call with
+    no place in the turn numbering. Passed in rather than queried because there
+    is no row to query: it exists only on the stream that observed it.
 
     Summed from `AgentTurn` rather than accumulated in memory because the turn
     rows are the record: a resumed run re-enters the loop with a fresh
@@ -834,12 +910,15 @@ def _roll_up_cost(log) -> None:
         log.output_tokens = totals['output'] or 0
         log.cached_read_tokens = totals['cached_read'] or 0
         log.cached_write_tokens = totals['cached_write'] or 0
-        log.cost_usd = totals['cost'] or Decimal('0')
+        log.cost_usd = (totals['cost'] or Decimal('0')) + (
+            Decimal(str(extra_cost_usd)) if extra_cost_usd else Decimal('0')
+        )
         # The total is only as trustworthy as its least-known turn, so one
         # unpriced turn makes the run unpriced. A confident sum that silently
         # omits a turn is worse than an admitted gap.
         log.cost_source = combine_sources(
-            turns.values_list('cost_source', flat=True)
+            list(turns.values_list('cost_source', flat=True))
+            + ([extra_cost_source] if extra_cost_source else [])
         )
     except Exception:  # noqa: BLE001
         logger.exception('[Agent] Failed to roll up cost for %s', log.execution_id)
@@ -987,7 +1066,8 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             provider=provider,
             model=model,
             system_message=build_system_prompt(
-                agent, gathered, file_scope, briefing=briefing
+                agent, gathered, file_scope, briefing=briefing,
+                user_memory=gathered.get('user_memory', ''),
             ),
             user_id=user.id,
             session_id=thread_id,
@@ -1143,7 +1223,14 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         # Only when it actually happened. A `context_curation` key reading all
         # zeroes on every short run would make the interesting case harder to
         # spot, not easier.
-        payload['context_curation'] = stream.curation
+        #
+        # Copied and stringified: this lands in a JSONField, and `cost_usd` is
+        # a Decimal, which `json.dumps` refuses. Stringified rather than
+        # floated, for the reason money is a string everywhere else here.
+        payload['context_curation'] = {
+            **stream.curation,
+            'cost_usd': format_usd(stream.curation['cost_usd']),
+        }
 
     await _close_log(
         log,
@@ -1151,6 +1238,11 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         result=payload,
         tokens=result.tokens,
         error=contract_error,
+        # Curation's own spend. Not an `AgentTurn` — a fold has no place in the
+        # model's turn numbering — so it cannot be picked up by the rollup and
+        # has to be handed in.
+        extra_cost_usd=stream.curation['cost_usd'],
+        extra_cost_source=stream.curation['cost_source'],
     )
     await stream.run_finished(
         status=status, answer=result.answer,

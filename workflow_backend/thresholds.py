@@ -41,6 +41,24 @@ HTML_ARTIFACT_MIN_HEIGHT = 120  # px
 HTML_ARTIFACT_DEFAULT_WIDTH = 640   # px
 HTML_ARTIFACT_DEFAULT_HEIGHT = 360  # px
 
+# ==================== Chart Limits ====================
+# `render_chart` takes data and a spec, never markup, so these bound the *data*
+# rather than a payload size. The series cap is the one with a reason beyond
+# cost: a categorical palette is a fixed, validated order of eight hues, and a
+# ninth series would have to invent a colour that no longer separates under
+# colour-vision deficiency. Past eight the honest answers are "Other", or two
+# charts.
+CHART_MAX_SERIES = 8
+#: Scatter and bubble compare every pair of series at once rather than adjacent
+#: ones, and the validated palette only clears that stricter bar for its first
+#: three slots.
+CHART_MAX_SERIES_ALL_PAIRS = 3
+CHART_MAX_POINTS_PER_SERIES = 200
+#: Across every series. A chart with more marks than the viewport has pixels is
+#: not a chart anyone reads; it is a table that has been made harder to use.
+CHART_MAX_POINTS_TOTAL = 1_000
+CHART_MAX_LABEL_CHARS = 80
+
 # ==================== File & Document Limits ====================
 IS_LARGE_FILE_THRESHOLD = 120_000  # Characters before a file is considered "large" (triggers RAG instead of direct injection)
 LARGE_FILE_PREVIEW_LENGTH = 120_000  # Characters of preview to inject into context
@@ -123,6 +141,11 @@ AGENT_FILE_LIST_LIMIT = 200
 #: A real name rather than a hidden one: these files belong to the user, and a
 #: tree they cannot see in the UI is a tree they cannot clean up.
 AGENT_HOME_ROOT = 'Agents'
+#: Root-level folder chat writes into. A sibling of `AGENT_HOME_ROOT` and not a
+#: folder underneath it, because chat is not an agent — putting its output in
+#: `/Agents/Chat/` would make the one tree the user browses lie about where
+#: their files came from.
+CHAT_HOME_ROOT = 'Chat'
 
 # ==================== Execution & Workflow Limits ====================
 DEFAULT_HITL_TIMEOUT_SECONDS = 300  # Human-in-the-loop timeout

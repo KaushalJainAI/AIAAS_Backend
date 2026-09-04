@@ -59,15 +59,28 @@ class UserProfile(models.Model):
     )
     
     # Credential/AI Preferences (Global for Orchestrator/King)
+    # Repointed from NVIDIA to OpenRouter's free router on 2026-09-03, for the
+    # reason `ChatSession` documents: every `nvidia/*` row is 410 upstream, so
+    # the old default named a model that could not answer.
     llm_provider = models.CharField(
         max_length=30,
-        default='nvidia',
+        default='openrouter',
         help_text='Global LLM provider for internal AI reasoning'
     )
     llm_model = models.CharField(
         max_length=150,
-        default='nvidia/nemotron-3-super-120b-a12b',
+        default='openrouter/free',
         help_text='Global LLM model for internal AI reasoning'
+    )
+    #: How hard that model is asked to think, from `llm.effort.LADDER`. Blank
+    #: means the model's own default; `medium` is the shipped standard, the
+    #: same rung a new chat session starts on. A model with no effort control
+    #: ignores it, so this is safe to carry across a model change.
+    llm_effort = models.CharField(
+        max_length=10,
+        blank=True,
+        default='medium',
+        help_text='Default reasoning effort (blank = let the model decide)'
     )
     llm_credential_id = models.IntegerField(
         null=True,
@@ -371,3 +384,68 @@ class PasswordOTP(models.Model):
     @property
     def is_locked(self):
         return self.failed_attempts >= self.MAX_FAILED_ATTEMPTS
+
+
+class UserMemory(models.Model):
+    """One durable fact about a user, learned in conversation.
+
+    Personalisation had no substrate before this. `UserProfile` holds tier,
+    rate limits and credits; `ChatSession.memory_enabled` only controls whether
+    *this conversation's* history is replayed. Nothing anywhere answered "what
+    do I know about this person" — so an assistant told to personalise could
+    only re-derive it from the current transcript, which is exactly the context
+    that gets curated away on a long run and thrown away entirely between
+    sessions.
+
+    Deliberately flat text, not a schema. The useful facts are things like "is
+    a Django developer", "prefers short answers", "works in IST" — a shape
+    nobody can enumerate in advance, and a schema would force every new kind of
+    fact through a migration. `category` exists only to group them for display
+    and to bound each group.
+
+    Scoped to the user, never to a session: a fact learned in one conversation
+    that cannot be recalled in the next is not memory.
+    """
+
+    CATEGORIES = [
+        ('profile', 'Who they are'),
+        ('preference', 'How they like to work'),
+        ('project', 'What they are working on'),
+        ('context', 'Anything else worth remembering'),
+    ]
+
+    #: Facts kept per category. A cap per category rather than one overall,
+    #: because a run of new project facts must not push out who the user is —
+    #: the categories are not competing for the same purpose. Enforced on
+    #: write, oldest-touched first (`core/memory.py`).
+    MAX_PER_CATEGORY = 25
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='memories',
+    )
+    text = models.CharField(max_length=500)
+    category = models.CharField(max_length=20, choices=CATEGORIES, default='context')
+    #: Where it came from, for a user auditing their own memory. 'agent' means
+    #: a model wrote it; 'user' means a person did.
+    source = models.CharField(max_length=20, default='agent')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = 'user memories'
+        # A fact stated twice is one fact. The constraint is what lets the
+        # write path be an upsert instead of an ever-growing pile of
+        # near-duplicates, which is how a memory store becomes unreadable.
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'text'],
+                                    name='unique_user_memory_text'),
+        ]
+        indexes = [
+            models.Index(fields=['user', 'category', '-updated_at']),
+        ]
+        ordering = ['category', '-updated_at']
+
+    def __str__(self):
+        return f'{self.user_id}: {self.text[:60]}'

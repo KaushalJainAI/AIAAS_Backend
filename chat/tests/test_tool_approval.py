@@ -51,7 +51,7 @@ class _Harness:
         self.dispatched: list[str] = []
         self.thread_id = f"test-{uuid.uuid4()}"
 
-    async def model(self, turn, *, prompt, history, tools):
+    async def model(self, turn, *, prompt, history, tools, **_):
         return self.scripted.pop(0) if self.scripted else Completion(content="done")
 
     async def dispatch(self, name, args, context):
@@ -176,7 +176,7 @@ class RejectionTests(TestCase):
 
         seen: list[dict] = []
 
-        async def capture(turn, *, prompt, history, tools):
+        async def capture(turn, *, prompt, history, tools, **_):
             seen.append({"prompt": prompt, "history": list(history)})
             return Completion(content="ok")
 
@@ -203,7 +203,7 @@ class RejectionTests(TestCase):
 
         seen: list[list] = []
 
-        async def capture(turn, *, prompt, history, tools):
+        async def capture(turn, *, prompt, history, tools, **_):
             seen.append(list(history))
             return Completion(content="ok")
 

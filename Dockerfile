@@ -100,4 +100,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
 # collectstatic at boot: regenerates the small Django admin + DRF CSS/JS.
 # If AWS_STORAGE_BUCKET_NAME is set, settings.py routes it to S3.
 # Otherwise it lands in /app/staticfiles and is served locally.
-CMD ["sh", "-c", "python manage.py collectstatic --noinput --clear && python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"]
+# Serve with daphne, not runserver: runserver enables StatReloader (a file
+# watcher that can restart the process mid-stream, aborting SSE/WS) and is a
+# single-threaded dev server. DJANGO_SETTINGS_MODULE comes from the ENV above
+# (asgi.py only setdefaults it), so this boots deployment settings.
+CMD ["sh", "-c", "python manage.py collectstatic --noinput --clear && python manage.py migrate --noinput && daphne -b 0.0.0.0 -p 8000 workflow_backend.asgi:application"]

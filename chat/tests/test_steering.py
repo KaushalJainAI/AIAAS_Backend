@@ -35,17 +35,76 @@ class MailboxTests(SimpleTestCase):
         self.assertEqual(steering.take('nobody'), '')
         self.assertFalse(steering.pending('nobody'))
 
-    def test_the_last_steer_wins(self):
-        """Two before a boundary means the user changed their mind.
+    def test_every_steer_is_delivered_in_order(self):
+        """Steering is usually additive, not corrective.
 
-        Delivering both would have the agent act on an instruction that was
-        already superseded.
+        This replaced `test_the_last_steer_wins`. The old behaviour dropped all
+        but the newest, on the reasoning that two steers mean the user changed
+        their mind — true of a correction and false of the normal case, which
+        is a person adding to the brief while the agent works. Three
+        instructions became one, and the API had reported success for all
+        three.
         """
-        steering.post('run-1', 'first')
-        steering.post('run-1', 'second')
+        steering.post('run-1', 'check pricing')
+        steering.post('run-1', 'and the changelog')
+        steering.post('run-1', 'and their docs')
 
-        self.assertEqual(steering.take('run-1'), 'second')
-        self.assertEqual(steering.stats('run-1')['replaced'], 1)
+        delivered = steering.take('run-1')
+        self.assertIn('check pricing', delivered)
+        self.assertIn('and the changelog', delivered)
+        self.assertIn('and their docs', delivered)
+        # Order is legible to the model, so a later instruction can refine an
+        # earlier one — which is how a correction still works without the
+        # mailbox having to guess which kind of message it is holding.
+        self.assertLess(delivered.index('check pricing'),
+                        delivered.index('and their docs'))
+        self.assertEqual(steering.stats('run-1')['delivered'], 3)
+
+    def test_one_steer_is_delivered_verbatim(self):
+        """The common case must not grow scaffolding it does not need."""
+        steering.post('run-1', 'focus on pricing')
+        self.assertEqual(steering.take('run-1'), 'focus on pricing')
+
+    def test_the_queue_is_drained_completely(self):
+        steering.post('run-1', 'one')
+        steering.post('run-1', 'two')
+        steering.take('run-1')
+
+        self.assertEqual(steering.take('run-1'), '')
+        self.assertFalse(steering.pending('run-1'))
+
+    def test_an_overfull_queue_drops_the_oldest_and_counts_it(self):
+        """Newest wins on overflow, and the loss is reported.
+
+        A mailbox this full means the run is not reaching a boundary, so the
+        instruction the user is actually waiting on is the most recent one.
+        Reporting the drop matters more than the policy: an instruction the
+        user believes was accepted and that silently vanished is the exact
+        failure this module exists to prevent.
+        """
+        for i in range(steering.MAX_QUEUED_STEERS + 3):
+            steering.post('run-1', f'message {i}')
+
+        stats = steering.stats('run-1')
+        self.assertEqual(stats['queued'], steering.MAX_QUEUED_STEERS)
+        self.assertEqual(stats['dropped'], 3)
+
+        delivered = steering.take('run-1')
+        self.assertNotIn('message 0', delivered)
+        self.assertIn(f'message {steering.MAX_QUEUED_STEERS + 2}', delivered)
+
+    def test_a_batch_is_bounded_even_when_each_steer_is_legal(self):
+        """Eight legal steers are still eight times the cost.
+
+        The batch lands as one user message that every later turn of the run
+        pays for again, so the per-message cap cannot be the only bound.
+        """
+        for i in range(steering.MAX_QUEUED_STEERS):
+            steering.post('run-1', 'x' * steering.MAX_STEER_CHARS)
+
+        delivered = steering.take('run-1')
+        self.assertLessEqual(len(delivered), steering.MAX_BATCH_CHARS + 200)
+        self.assertIn('dropped to fit', delivered)
 
     def test_an_empty_steer_is_refused(self):
         self.assertFalse(steering.post('run-1', '   '))
@@ -74,7 +133,7 @@ class _Harness:
         self.prompts: list[str] = []
         self.thread_id = f'steer-{uuid.uuid4()}'
 
-    async def model(self, turn, *, prompt, history, tools):
+    async def model(self, turn, *, prompt, history, tools, **_):
         self.seen.append(list(history))
         self.prompts.append(prompt)
         return self.scripted.pop(0) if self.scripted else Completion(content='done')

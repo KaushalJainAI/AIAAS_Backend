@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import re
+from decimal import Decimal
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 from uuid import uuid4
@@ -26,6 +27,7 @@ from workflow_backend.thresholds import (
 
 from chat import vision
 from llm import access as llm
+from llm.pricing import combine_sources
 from llm.effort import normalize as normalize_effort
 from . import agent, history, prompts
 from .agent import TurnContext, TurnResult
@@ -323,6 +325,46 @@ def _now_string() -> str:
     return timezone.localtime().strftime("%A, %B %d, %Y %I:%M %p %Z")
 
 
+async def _user_memory_block(user_id: int | None) -> str:
+    """What we know about this user, for the system prompt, or ''.
+
+    Degrades to nothing rather than failing the turn, like every other context
+    gatherer here: a memory store that cannot be read should cost the answer
+    its personalisation, not its existence.
+    """
+    try:
+        from core.memory import for_prompt
+
+        return await sync_to_async(for_prompt)(user_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("[Chat] Could not read user memory for %s", user_id,
+                       exc_info=True)
+        return ""
+
+
+async def _chat_file_scope(user):
+    """The slice of the user's document tree this chat turn may address.
+
+    Fixed rather than configured, unlike an agent's: an agent is built once and
+    run unattended, so which files it may touch is a decision worth making per
+    agent, while chat is the user's own hands on their own tree. They get the
+    whole thing to read and `/Chat/` to write into.
+
+    Degrades to `None` rather than failing the turn, which is the same rule
+    `build_file_scope` follows for agents and `descriptors` follows for MCP: a
+    tree that cannot be reached should cost the conversation its file tools,
+    not its answer. Creating the folder is a write, hence the round trip.
+    """
+    try:
+        from inference.vfs import chat_scope
+
+        return await sync_to_async(chat_scope)(user)
+    except Exception:  # noqa: BLE001
+        logger.warning("[Chat] Could not build a file scope for user %s",
+                       getattr(user, "id", None), exc_info=True)
+        return None
+
+
 def _thread_id(session: ChatSession) -> str:
     """
     Checkpointer key for this turn.
@@ -508,7 +550,12 @@ async def run_chat_turn(
             "message": "Memory is off — answering from this message only.",
         })
 
-    system_message = prompts.build_system_message(session)
+    # Read once per turn and folded into the baseline, not the per-turn update:
+    # it is standing knowledge about the person, and it changes only when a
+    # fact is written. See `build_system_message`.
+    system_message = prompts.build_system_message(
+        session, user_memory=await _user_memory_block(user.id),
+    )
 
     # ── Attachments ──
     candidates = await history.recent_attachments(past)
@@ -558,6 +605,7 @@ async def run_chat_turn(
     prompt += extracted_text
 
     turn = TurnContext(
+        file_scope=await _chat_file_scope(user),
         provider=provider,
         model=model,
         system_message=system_message,
@@ -607,6 +655,22 @@ _EMPTY_ANSWER_FALLBACK = (
 )
 
 
+@sync_to_async
+def _price_turn(model_id: str, usage):
+    """What this turn cost, and how much we trust the figure.
+
+    Wrapped in `sync_to_async` because pricing reads the model registry, and
+    guarded because a cost is telemetry about an answer the user already has:
+    a registry hiccup must cost the number, never the message.
+    """
+    from llm.pricing import cost_for_usage
+
+    try:
+        return cost_for_usage(model_id or "", usage)
+    except Exception:  # noqa: BLE001
+        logger.exception("[Turn] Pricing failed for %s", model_id)
+        return Decimal("0"), "unpriced"
+
 async def _persist_answer(
     *,
     session: ChatSession,
@@ -646,16 +710,35 @@ async def _persist_answer(
     if len(answer.split()) > ASSISTANT_SUMMARY_WORD_LIMIT:
         metadata["summary"] = context_summary(answer)
 
+    # Priced against the model that actually answered, before the row is
+    # written, so the message carries its own cost rather than having one
+    # inferred later from a session-level rate that may since have changed.
+    cost, cost_source = await _price_turn(session.llm_model, result.usage)
+
     message = await ChatMessage.objects.acreate(
         session=session,
         role="assistant",
         content=answer,
         message_type=_message_type(intent, metadata),
         metadata=metadata,
+        model_id=session.llm_model or "",
+        input_tokens=result.usage.input,
+        output_tokens=result.usage.output,
+        cached_read_tokens=result.usage.cached_read,
+        cached_write_tokens=result.usage.cached_write,
+        cost_usd=cost,
+        cost_source=cost_source,
     )
 
     session.total_tokens_used += result.tokens
-    await session.asave(update_fields=["total_tokens_used"])
+    session.total_cost_usd = (session.total_cost_usd or Decimal("0")) + cost
+    # Combined, not overwritten: one unpriced turn makes the conversation's
+    # total unpriced for good, because from then on the sum is missing money
+    # nobody can put back.
+    session.cost_source = combine_sources([session.cost_source, cost_source])
+    await session.asave(update_fields=[
+        "total_tokens_used", "total_cost_usd", "cost_source",
+    ])
 
     try:
         await persist_generated_media(user, session, message)

@@ -58,11 +58,39 @@ CORE_RULES = """
    follow-up instead of filling a gap by inference, and if the witness hedges or
    flags a reading as uncertain, pass that uncertainty on to the user rather than
    laundering it into a clean number.
-8. FORMAT: Answer in clean markdown. Use language-tagged code fences for code.
+8. FILES: You have the user's own document tree. You can read anywhere in it
+   with `list_files` / `read_file`, and you can create things under `/Chat/`
+   with `write_file` and `make_directory`. Save a file when the user asks for
+   one, or when you have produced something substantial they will plainly want
+   again — a report, a dataset, a draft. Do not save chat replies, and do not
+   announce a file you have not actually written. A file is durable and a chart
+   in the conversation is not, so the two are different jobs: render an
+   artifact to *show* something now, write a file to *keep* it.
+9. PLANNING: For a task with several distinct steps, call `update_todos` with
+   the plan before you start, and keep it current as you work — mark a step
+   done the moment it is, and blocked (with the reason) if it cannot be
+   finished. Your open steps are shown back to you each turn, which is how you
+   stay on track through a long job. Skip it entirely for anything you can
+   finish in a step or two; a plan for a one-step task is noise. Never mark a
+   step done that you did not do — say it is blocked and why.
+10. ASK BEFORE LONG WORK: If a request is ambiguous in a way that changes what
+   you would produce, ask up to three specific questions before starting —
+   never a generic "could you clarify?". This applies to work that will take
+   several steps or several tool calls; for a quick answer, just answer. One
+   round of questions, then proceed on the best reading and say which
+   assumption you made. Do not ask about anything you already know from what
+   you have been told about this user.
+11. REMEMBER THE PERSON: You are given what you know about this user above. Use
+   it — match the depth, format and language they prefer without being asked
+   again. When you learn something durable about them that would change a
+   future answer, call `remember_about_user`. When something you were told is
+   wrong, call `forget_about_user` and store the correction. Do not remember
+   the details of this conversation; that is not what memory is for.
+12. FORMAT: Answer in clean markdown. Use language-tagged code fences for code.
 """
 
 MEMORY_ON_RULE = f"""
-9. RECALL: You can see only the last {HISTORY_WINDOW} turns. The rest of this
+13. RECALL: You can see only the last {HISTORY_WINDOW} turns. The rest of this
    conversation is stored and searchable — it is not lost. If the user refers to
    anything outside your window, call `search_conversation_history` before
    answering. Replying "I don't have that in my context" without searching first
@@ -70,7 +98,7 @@ MEMORY_ON_RULE = f"""
 """
 
 MEMORY_OFF_RULE = """
-9. NO MEMORY THIS TURN: The user has switched memory off, so you can see only
+13. NO MEMORY THIS TURN: The user has switched memory off, so you can see only
    their current message. If they refer to something discussed earlier, say
    plainly that memory is off and ask them to restate it. Do not pretend to
    recall it.
@@ -94,12 +122,20 @@ MODE_RULES = {
 }
 
 
-def build_system_message(session) -> str:
+def build_system_message(session, *, user_memory: str = "") -> str:
     """
     Assemble the stable baseline system prompt for a session.
 
     Nothing here may vary turn to turn. Anything that does belongs in
     `build_context_update`, or it costs every session its cached prefix.
+
+    `user_memory` is a deliberate exception, and the bar it clears is worth
+    stating: it changes only when a fact is written, which is rare, whereas the
+    clock changed on *every* turn. Session-stable is the test, not immutable.
+    It belongs here rather than in the per-turn update because it is standing
+    knowledge — what the assistant knows about the person it is talking to —
+    and the model should read it the same way it reads its own instructions,
+    not as a bulletin about this particular turn.
     """
     base = session.system_prompt or (
         "You are a helpful, knowledgeable AI assistant. Be concise but thorough."
@@ -114,6 +150,7 @@ def build_system_message(session) -> str:
         " the most recent such report over anything earlier in this conversation.",
         CORE_RULES,
         MEMORY_ON_RULE if session.memory_enabled else MEMORY_OFF_RULE,
+        user_memory,
     ]
     return "\n".join(p for p in parts if p)
 

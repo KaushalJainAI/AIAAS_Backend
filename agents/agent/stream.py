@@ -36,7 +36,10 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+from decimal import Decimal
+
 from chat.turn.events import Event
+from llm.pricing import combine_sources
 from llm.usage import EMPTY_USAGE, TokenUsage
 from workflow_backend.thresholds import (
     TURN_CONTENT_CHAR_LIMIT,
@@ -102,6 +105,11 @@ class AgentRunStream:
         self.curation: dict[str, Any] = {
             'passes': 0, 'results_compacted': 0, 'steps_folded': 0,
             'summary_tokens': 0, 'tokens_saved': 0, 'archived_ids': [],
+            # What the folds themselves cost. The fold is a real model call and
+            # is charged for like one — it counts against the run's tokens, so
+            # it has to count against the run's money too, or the guardrail
+            # curation exists to serve cannot see curation's own spend.
+            'cost_usd': Decimal('0'), 'cost_source': '',
         }
         if broadcaster is None:
             from streaming.broadcaster import get_broadcaster
@@ -298,7 +306,9 @@ class AgentRunStream:
 
     async def on_curation(self, *, results_compacted: int, steps_folded: int,
                           tokens_before: int, tokens_after: int,
-                          summary_tokens: int, archived_ids: tuple = ()) -> None:
+                          summary_tokens: int, archived_ids: tuple = (),
+                          summary_cost_usd=None,
+                          summary_cost_source: str = '') -> None:
         """A curation observer. Announce the cut and keep a running total.
 
         Deliberately not an `AgentTurn` row: `(execution, index)` is unique on
@@ -317,6 +327,12 @@ class AgentRunStream:
         self.curation['summary_tokens'] += summary_tokens
         self.curation['tokens_saved'] += max(tokens_before - tokens_after, 0)
         self.curation['archived_ids'].extend(archived_ids)
+        if summary_cost_usd:
+            self.curation['cost_usd'] += Decimal(str(summary_cost_usd))
+        if summary_cost_source:
+            self.curation['cost_source'] = combine_sources(
+                [self.curation['cost_source'], summary_cost_source]
+            )
 
         try:
             await self._broadcaster.context_curated(

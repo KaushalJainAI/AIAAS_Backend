@@ -491,3 +491,113 @@ class ConversationMessage(models.Model):
     def __str__(self):
         preview = self.content[:50] + "..." if len(self.content) > 50 else self.content
         return f"{self.role}: {preview}"
+
+
+class SharedAgent(models.Model):
+    """One user's agent, published for others to install.
+
+    **This one is a table, and the curated gallery is not.** The distinction is
+    not taste: `agents/gallery.py` is written by us and changes when we edit a
+    file, while this is written by users, at runtime, and carries facts that
+    only exist once it is published — who published it, when, how many people
+    installed it, and whether it is still listed. None of that has anywhere to
+    live in a dict in a source file.
+
+    **It stores a snapshot, not a pointer.** `subagent` is the author's live
+    copy and is only kept so they can republish from it; everything an
+    installer reads comes from `config` and `requirements`, frozen at publish.
+    Rendering the live agent instead would mean a stranger's install screen
+    changed while they were reading it, and — worse — that an author could
+    widen the grants of something already listed without anyone re-consenting.
+    That is also why `subagent` is `SET_NULL`: deleting your own agent must not
+    silently retract something other people are installing, and a listing whose
+    source is gone is still perfectly installable.
+
+    **`config` is an allow-listed projection** built by
+    `agents/publishing.py::to_shareable`, never `to_config()` verbatim. Every
+    id is stripped and reappears as a `requirement`, so a published agent names
+    *kinds* of connections and corpora rather than rows in the author's
+    account.
+    """
+
+    VISIBILITY_CHOICES = [
+        # Listed on the explore page for everyone on the platform.
+        ('platform', 'Everyone on the platform'),
+        # Reachable only by its link. The lesser of the two on purpose: it is
+        # what someone picks to share with a colleague without publishing to
+        # strangers, and having it means "public" is a deliberate choice rather
+        # than the only way to share at all.
+        ('link', 'Anyone with the link'),
+    ]
+
+    #: Nullable so an author can delete their own agent without retracting what
+    #: other people are installing. Nothing on the install path reads it.
+    subagent = models.ForeignKey(
+        'orchestrator.SubAgent',
+        on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='shares',
+    )
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='shared_agents',
+    )
+
+    #: The public identifier. Not the agent's own slug: two users may both
+    #: publish a "Deep research", and the URL has to survive that.
+    slug = models.SlugField(max_length=220, unique=True)
+
+    name = models.CharField(max_length=200)
+    tagline = models.CharField(
+        max_length=200,
+        help_text='One line, shown on the card. What it does, not how.',
+    )
+    description = models.TextField(
+        blank=True,
+        help_text='The longer pitch, shown on the install screen.',
+    )
+
+    config = models.JSONField(
+        default=dict,
+        help_text='Allow-listed AgentConfig snapshot — see agents/publishing.py',
+    )
+    requirements = models.JSONField(
+        default=list,
+        help_text='What the installer must supply, as kinds and never as ids',
+    )
+
+    tags = models.JSONField(default=list, blank=True)
+    icon = models.CharField(max_length=50, blank=True)
+
+    visibility = models.CharField(
+        max_length=10, choices=VISIBILITY_CHOICES, default='platform',
+    )
+    #: Withdrawn rather than deleted: an install already made keeps working,
+    #: and the author can relist without minting a second URL.
+    is_listed = models.BooleanField(default=True)
+
+    #: Bumped on every republish. An installer's copy records the version it
+    #: came from, which is what a "this has been updated" prompt would read —
+    #: the notify-and-re-consent half of the design is not built yet, and this
+    #: is the column it needs.
+    version = models.IntegerField(default=1)
+
+    #: Denormalised because the alternative is counting installed agents by
+    #: tag on every listing render. It is a popularity signal, not a ledger.
+    install_count = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Shared agent'
+        verbose_name_plural = 'Shared agents'
+        ordering = ['-updated_at']
+        indexes = [
+            # The explore listing's exact predicate.
+            models.Index(fields=['is_listed', 'visibility', '-updated_at']),
+            models.Index(fields=['author', '-updated_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.name} by {self.author_id}'

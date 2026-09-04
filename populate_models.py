@@ -251,9 +251,18 @@ def populate():
             "icon": "OR",
             "models": [
                 # --- Routing (price varies by routed model; 0 here) ---
-                m("Auto Router", "openrouter/auto", caps=CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=0),
-                m("Free Models Router", "openrouter/free", True, CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=0),
-                m("Pareto Code Router", "openrouter/pareto-code", caps=CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=0),
+                # The routers carry `EFFORT_STANDARD` even though *which* model
+                # answers is decided upstream per request. `reasoning` is an
+                # OpenRouter-level abstraction: it accepts the field on a router
+                # and maps it onto whatever it routes to, dropping it for a
+                # model that has no such knob. So the rung is a request rather
+                # than a guarantee here — which is the most a router can offer,
+                # and strictly better than withholding the control on the model
+                # a new chat starts on. No `none`: a router cannot promise the
+                # model it picks is one whose thinking can be switched off.
+                m("Auto Router", "openrouter/auto", caps=CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=0, effort=EFFORT_STANDARD),
+                m("Free Models Router", "openrouter/free", True, CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=0, effort=EFFORT_STANDARD),
+                m("Pareto Code Router", "openrouter/pareto-code", caps=CHAT_CAPS, input_price="0.0000", output_price="0.0000", context=0, effort=EFFORT_STANDARD),
                 # --- OpenAI via OpenRouter (GPT-5.6 tiers: Sol > Terra > Luna) ---
                 # Pricing post Aug 21 promo: Sol $4/$20 (was $5/$30) through 2026-11-21, Terra $2/$12 (was $2.50/$15), Luna $0.20/$1.20 (was $1/$6, 80% cut Jul 30)
                 # Cache: 90% off input → Sol $0.40, Terra $0.20, Luna $0.02 — Sol promo verified 2026-08-21 against developers.openai.com

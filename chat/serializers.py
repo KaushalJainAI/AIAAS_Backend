@@ -11,24 +11,46 @@ class ChatAttachmentSerializer(serializers.ModelSerializer):
 
 class ChatMessageSerializer(serializers.ModelSerializer):
     attachments = ChatAttachmentSerializer(many=True, read_only=True)
+    #: A decimal string, never a float. JSON has no decimal type, and a cost
+    #: that picks up binary drift on the way to the browser will not add up
+    #: against the one the server recorded.
+    cost_usd = serializers.DecimalField(
+        max_digits=12, decimal_places=6, read_only=True, coerce_to_string=True,
+    )
 
     class Meta:
         model = ChatMessage
-        fields = ['id', 'role', 'content', 'message_type', 'metadata', 'attachments', 'created_at']
+        fields = [
+            'id', 'role', 'content', 'message_type', 'metadata', 'attachments',
+            'created_at',
+            # What this one answer cost. Present on assistant rows; a user
+            # message is all zeroes with an empty `cost_source`, which reads as
+            # `unpriced` on the client and renders as nothing at all.
+            'model_id', 'input_tokens', 'output_tokens', 'cached_read_tokens',
+            'cached_write_tokens', 'cost_usd', 'cost_source',
+        ]
+        read_only_fields = fields
 
 
 class ChatSessionSerializer(serializers.ModelSerializer):
     messages = ChatMessageSerializer(many=True, read_only=True)
     title = serializers.CharField(required=True, allow_blank=False, trim_whitespace=True)
-    
+    total_cost_usd = serializers.DecimalField(
+        max_digits=12, decimal_places=6, read_only=True, coerce_to_string=True,
+    )
+
     class Meta:
         model = ChatSession
         fields = [
             'id', 'title', 'intent', 'llm_provider', 'llm_model', 'llm_effort',
             'system_prompt', 'memory_enabled', 'total_tokens_used',
+            'total_cost_usd', 'cost_source',
             'created_at', 'updated_at', 'messages'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'messages', 'total_tokens_used']
+        read_only_fields = [
+            'id', 'created_at', 'updated_at', 'messages', 'total_tokens_used',
+            'total_cost_usd', 'cost_source',
+        ]
 
     def validate_llm_effort(self, value):
         """Reject a level that is not on the ladder.

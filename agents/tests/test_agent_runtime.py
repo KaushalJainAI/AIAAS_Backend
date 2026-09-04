@@ -52,10 +52,17 @@ class GrantMappingTests(SimpleTestCase):
         # actually shipped before curation existed. They are still only
         # *offered* once the run has stored something; see
         # `RetrievalToolAdvertisementTests`.
+        #
+        # `update_todos` joined them for a third version of the same argument:
+        # it writes the run's own plan into the run's own state and touches
+        # nothing else, and an agent that may not keep track of what it is
+        # doing is not a safer agent — just a more forgetful one on exactly the
+        # long runs a minimal grant set gets applied to.
         names = toolbox().allowed_names
         self.assertEqual(
             names,
-            frozenset({'get_current_time', 'read_tool_output', 'recall_context'}),
+            frozenset({'get_current_time', 'update_todos',
+                       'read_tool_output', 'recall_context'}),
         )
 
     def test_a_grant_unlocks_exactly_its_own_tools(self):
@@ -516,3 +523,78 @@ class MissingCredentialTests(APITestCase):
         log = ExecutionLog.objects.get(subagent=self.agent)
         self.assertEqual(log.status, 'failed')
         self.assertIn('OpenAI', log.error_message)
+
+
+class ToolboxMemoTests(TestCase):
+    """Connectors are resolved once per run, not once per model call.
+
+    `descriptors` runs before every model call, and an agent is allowed 40
+    iterations. Resolving MCP on each of them means a database read per
+    connection every pass, and — whenever the 120-second tool cache has
+    lapsed — an `npx` start bounded at eight seconds, all of it in front of
+    the first token. The answer cannot change while the run is going, so it is
+    resolved once and kept on the toolbox, which lives exactly as long as the
+    run does.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user('memoiser', 'memo@example.com', 'x')
+
+    def _box(self):
+        return AgentToolbox(grants={'mcp': True}, user_id=self.user.id,
+                            session_key='run-memo')
+
+    def test_descriptors_resolve_connectors_once_per_run(self):
+        calls = []
+
+        async def _fake(user_id, *args, **kwargs):
+            calls.append(user_id)
+            return [{'type': 'function',
+                     'function': {'name': 'mcp__7__fetch', 'parameters': {}}}]
+
+        box = self._box()
+        with patch('mcp_integration.tool_provider.MCPToolProvider'
+                   '.get_openai_tool_descriptors', new=_fake):
+            for _ in range(5):
+                names = {d['function']['name']
+                         for d in async_to_sync(box.descriptors)()}
+                self.assertIn('mcp__7__fetch', names)
+
+        self.assertEqual(len(calls), 1, 'connectors were re-resolved mid-run')
+
+    def test_two_runs_do_not_share_the_memo(self):
+        calls = []
+
+        async def _fake(user_id, *args, **kwargs):
+            calls.append(user_id)
+            return []
+
+        with patch('mcp_integration.tool_provider.MCPToolProvider'
+                   '.get_openai_tool_descriptors', new=_fake):
+            async_to_sync(self._box().descriptors)()
+            async_to_sync(self._box().descriptors)()
+
+        self.assertEqual(len(calls), 2, 'a memo outlived the run that owned it')
+
+    def test_a_failed_resolution_is_retried_next_pass(self):
+        """A dead connector degrades the run; it must not disarm it.
+
+        The usual cause is a cold subprocess that missed its timeout, which the
+        very next pass may well win. Remembering the failure would keep the
+        latency already paid and throw away every connector for the rest of the
+        run.
+        """
+        attempts = []
+
+        async def _boom(user_id, *args, **kwargs):
+            attempts.append(user_id)
+            raise TimeoutError('cold npx')
+
+        box = self._box()
+        with patch('mcp_integration.tool_provider.MCPToolProvider'
+                   '.get_openai_tool_descriptors', new=_boom):
+            for _ in range(3):
+                async_to_sync(box.descriptors)()
+
+        self.assertEqual(len(attempts), 3)

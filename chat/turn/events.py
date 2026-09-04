@@ -31,7 +31,15 @@ class Event(StrEnum):
     IMAGES_UPDATE = "images_update"
     VIDEOS_UPDATE = "videos_update"
     HTML_ARTIFACT = "html_artifact"
+    #: A chart the frontend draws from data. Separate from HTML_ARTIFACT
+    #: because the payloads are different in kind — markup there, a validated
+    #: spec here — and a client that can render one may not render the other.
+    CHART = "chart"
     ATTACHMENTS_BLOCKED = "attachments_blocked"
+    #: The run's plan changed. Carries the whole list every time, because the
+    #: tool that produces it replaces the whole list every time — a client
+    #: applying deltas would have to reconstruct state the server never sends.
+    TODOS_UPDATE = "todos_update"
     ASK_PERMISSION = "ask_permission"
     ERROR = "error"
     DONE = "done"

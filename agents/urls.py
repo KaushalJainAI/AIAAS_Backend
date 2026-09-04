@@ -35,14 +35,18 @@ urlpatterns = [
     path('agents/<int:agent_id>/steer/', runs.agent_steer, name='agent_steer'),
     path('agents/<int:agent_id>/autonomy/', runs.agent_autonomy, name='agent_autonomy'),
 
-    # Templates — the gallery you install a starting point from. The
-    # catalogue is code (`agents/gallery.py`), not rows, so these are reads
-    # against a dict; only the install writes anything, and it writes through
-    # the same serializer the builder saves through.
+    # Explore — everything installable, from two sources: the curated
+    # catalogue (code, `agents/gallery.py`) and agents users have published
+    # (`SharedAgent` rows). They are presented and installed identically;
+    # install writes through the same serializer the builder saves through.
     path('templates/', gallery.template_list, name='template_list'),
     path('templates/<slug:slug>/', gallery.template_detail, name='template_detail'),
     path('templates/<slug:slug>/install/', gallery.template_install,
          name='template_install'),
+    # Publishing is on the *agent*, not on the catalogue: what you share is
+    # something you own, and the ownership check is the same
+    # `user=request.user` lookup every other agent route makes.
+    path('agents/<int:agent_id>/share/', gallery.agent_share, name='agent_share'),
 
     # Triggers — how something other than the user starts a run.
     path('triggers/', triggers.trigger_list, name='trigger_list'),

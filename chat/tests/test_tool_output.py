@@ -88,7 +88,7 @@ class BoundingTests(TestCase):
         async def _no_storage(*args, **kwargs):
             return None
 
-        with patch("chat.tools.tool_output._spill", _no_storage):
+        with patch("chat.tools.tool_output.spill", _no_storage):
             result = async_to_sync(bound)("mcp_fetch", text, self.context)
 
         self.assertIn("could not be stored", result)

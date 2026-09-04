@@ -10,10 +10,14 @@ What lives where:
 
   web           the open web — search, research, fetch, scrape
   knowledge     the user's knowledge bases, through the RAG tiers
+  memory        durable facts about the user, across sessions
+  planning      the run's own plan (`update_todos`)
   conversation  reading back from this session's own record
   agents        finding and running the user's saved agents
+  authoring     creating and editing saved agents, through AgentSerializer
   sandbox       the wasm Python sandbox
   artifacts     the sandboxed-iframe HTML renderer
+  charts        `render_chart` — data and a spec, drawn by the frontend
   vision        the `ask_vision` surface over `chat.vision`
   files         the agent's virtual filesystem over `inference.vfs`
   internal      this platform's own API, called as the user
@@ -31,11 +35,15 @@ from typing import Any, Dict, List
 from . import (  # noqa: F401  — imported for their registration side effect
     agents,
     artifacts,
+    authoring,
+    charts,
     clock,
     conversation,
     files,
     internal,
     knowledge,
+    memory,
+    planning,
     sandbox,
     vision,
     web,
@@ -122,11 +130,17 @@ READ_ONLY_TOOLS: frozenset[str] = names_with_effect("read")
 PARALLEL_TOOLS: frozenset = parallel_names()
 
 
+#: Where the MCP descriptor list is parked inside a turn's memo. Namespaced so
+#: the memo can hold other per-turn work later without two writers colliding.
+_MCP_MEMO_KEY = "mcp_descriptors"
+
+
 async def _requirement_met(
     requirement: str,
     user_id: int | None,
     memory_enabled: bool,
     session_key: str | None,
+    file_scope: Any = None,
 ) -> bool:
     """
     Whether a tool's precondition holds for this caller.
@@ -140,13 +154,24 @@ async def _requirement_met(
     if requirement == "spill":
         return await conversation.has_spilled_output(user_id, session_key)
     if requirement == "files":
-        # Never met here, and that is the point. A file scope comes from an
-        # agent's `fileAccess` setting; a chat turn has none, so the tools are
-        # not offered rather than being offered and refusing. The agent toolbox
-        # does not consult requirements at all — it filters `AVAILABLE_TOOLS`
-        # by the names its grants unlock — so `fileOps` is what turns these on,
-        # and chat cannot reach them by any path.
-        return False
+        # Met when the caller brought a scope. Chat now does — `chat_scope`
+        # gives every turn the whole tree to read and `/Chat/` to write into —
+        # and a caller that brought none still gets the tools withheld rather
+        # than offered and refusing.
+        #
+        # This used to be an unconditional `False`, and the reasoning was
+        # sound at the time: the file tools chat *used* to have reached the
+        # host filesystem, and re-admitting them would have undone that
+        # deletion quietly. What changed is the tools, not the decision. These
+        # address rows in the user's own `Folder`/`Document` tree through
+        # `inference/vfs.py` and cannot name a path on any disk. The half of
+        # the old rule that still holds — no host filesystem from a chat turn —
+        # is still pinned by `test_rework.py::RemovedCapabilityTests`.
+        #
+        # The agent toolbox does not consult requirements at all: it filters
+        # `AVAILABLE_TOOLS` by the names its grants unlock, so `fileOps` is
+        # what turns these on there, and that is unchanged.
+        return file_scope is not None
     if requirement == "vision":
         if user_id is None:
             return False  # no user, no credential, no witness
@@ -188,11 +213,24 @@ async def get_available_tools(
     user_id: int | None,
     memory_enabled: bool = True,
     session_key: str | None = None,
+    mcp_memo: Dict[str, Any] | None = None,
+    file_scope: Any = None,
 ) -> List[Dict[str, Any]]:
     """
     Return the full tool list for this user: built-in tools whose requirements
     are met, plus any MCP tools the user has enabled. Safe to call on every
     agent turn (MCP tool lists are cached in Redis).
+
+    `mcp_memo` is scratch space belonging to one turn. Given one, the MCP half
+    of the list is resolved on the first call and reused on every later call
+    that shares it — which is what makes this safe to call in a loop. The Redis
+    cache underneath is not enough on its own: it holds for 120 seconds, so any
+    conversation with a pause in it pays a full reconnect, and even a hit costs
+    a database read per connection. What a memo must *not* cover is the
+    built-in half, which is why it is passed to the MCP call alone: whether a
+    tool's requirement is met can change mid-run (a result spills, and
+    `read_tool_output` becomes real), and freezing that would withhold a tool
+    the run has just earned.
     """
     disabled = await disabled_tools_for(user_id)
 
@@ -201,7 +239,7 @@ async def get_available_tools(
         if entry.name in disabled:
             continue
         if entry.requires and not await _requirement_met(
-            entry.requires, user_id, memory_enabled, session_key
+            entry.requires, user_id, memory_enabled, session_key, file_scope
         ):
             continue
         tools.append(entry.schema)
@@ -209,12 +247,24 @@ async def get_available_tools(
     if user_id is None:
         return tools
 
+    if mcp_memo is not None and _MCP_MEMO_KEY in mcp_memo:
+        tools.extend(mcp_memo[_MCP_MEMO_KEY])
+        return tools
+
     try:
         from mcp_integration.tool_provider import MCPToolProvider
 
-        tools.extend(await MCPToolProvider.get_openai_tool_descriptors(user_id))
+        mcp_tools = await MCPToolProvider.get_openai_tool_descriptors(user_id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not load MCP tools for user {user_id}: {e}")
+        # Deliberately not memoised. A failure here is usually transient — a
+        # cold subprocess that timed out, Redis blinking — and remembering it
+        # would cost the run every connector it has for the rest of the turn.
+        return tools
+
+    if mcp_memo is not None:
+        mcp_memo[_MCP_MEMO_KEY] = mcp_tools
+    tools.extend(mcp_tools)
     return tools
 
 

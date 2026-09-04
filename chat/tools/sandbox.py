@@ -36,7 +36,7 @@ def _jsonable(value: Any) -> Any:
         "type": "function",
         "function": {
             "name": "execute_python",
-            "description": "Run Python in a sandbox and get its output back. No network access. The standard library is available, plus numpy and pandas for numeric and tabular work. Use it for arithmetic, data manipulation, parsing, analysis and simulation instead of computing in your head — you are unreliable at arithmetic and this is not. Assign the answer to a variable named `result`, or print it.",
+            "description": "Run Python in a sandbox and get its output back. No network access. The standard library is available, plus numpy and pandas for numeric and tabular work. Use it for arithmetic, data manipulation, parsing, analysis and simulation instead of computing in your head — you are unreliable at arithmetic and this is not. Assign the answer to a variable named `result`, or print it. There is no plotting library: to chart what you computed, print the numbers and pass them to `render_chart`.",
             "parameters": {
                 "type": "object",
                 "properties": {

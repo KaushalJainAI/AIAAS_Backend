@@ -292,6 +292,28 @@ SANDBOX_WALL_SECONDS = int(os.environ.get('SANDBOX_WALL_SECONDS', '10'))
 SANDBOX_CPU_SECONDS = int(os.environ.get('SANDBOX_CPU_SECONDS', '8'))
 SANDBOX_MEM_MB = int(os.environ.get('SANDBOX_MEM_MB', '384'))
 
+# ---------------------------------------------------------------------------
+# Agent run checkpoints
+# ---------------------------------------------------------------------------
+# Where a run's graph state lives, and therefore whether a run survives the
+# process that started it. `memory` is in-process and loses every in-flight run
+# on restart; `sqlite` is a file beside the dev database; `postgres` is for a
+# deployment with more than one process or a replaceable container. One door,
+# no automatic fallback between them — see chat/turn/checkpoints.py.
+#
+# The dev default is `sqlite` rather than `memory` because the failure it
+# prevents is invisible: an interrupted run leaves an ExecutionLog on `running`
+# for ever and a user watching a stream attached to nothing.
+AGENT_CHECKPOINTER = os.environ.get('AGENT_CHECKPOINTER', 'sqlite')
+# Its own file, never db.sqlite3: checkpoint writes are heavy and would take
+# SQLite's single write lock on the application database on every super-step.
+AGENT_CHECKPOINT_PATH = os.environ.get('AGENT_CHECKPOINT_PATH', '')
+AGENT_CHECKPOINT_DSN = os.environ.get('AGENT_CHECKPOINT_DSN', '')
+# How often to look for runs whose process is gone.
+RUN_RECOVERY_SWEEP_SECONDS = int(
+    os.environ.get('RUN_RECOVERY_SWEEP_SECONDS', '600')
+)
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
@@ -444,6 +466,16 @@ CELERY_BEAT_SCHEDULE = {
     'sweep-recycle-bin': {
         'task': 'inference.sweep_recycle_bin',
         'schedule': RECYCLE_SWEEP_SECONDS,
+    },
+    # Runs whose process went away. Slower than the trigger sweep because a
+    # run is only judged orphaned well past its own wall-clock limit, so
+    # checking oftener would find the same nothing. Also runnable as
+    # `manage.py recover_runs` — see agents/recovery.py, where the reason that
+    # second path matters is sharpest: this is the recovery for a dead
+    # process, so a broker-only design would be missing exactly when needed.
+    'recover-orphaned-runs': {
+        'task': 'orchestrator.recover_runs',
+        'schedule': RUN_RECOVERY_SWEEP_SECONDS,
     },
 }
 

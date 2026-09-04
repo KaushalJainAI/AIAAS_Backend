@@ -8,6 +8,8 @@ about the same question, "does a field appear that should not".
 """
 from __future__ import annotations
 
+import pathlib
+
 from django.test import TestCase
 
 from llm import effort
@@ -170,3 +172,83 @@ class WireEncodingTests(TestCase):
         # No `minimal` rung locally; it lands on the cheapest one that exists.
         self.assertEqual(ollama_think("minimal"), {"think": "low"})
         self.assertEqual(ollama_think(None), {})
+
+
+class ShippedDefaultTests(TestCase):
+    """The default model, the default level, and the link between them.
+
+    A default effort is only real if the default *model* serves that rung —
+    otherwise it is snapped away on the first message and the shipped default
+    is not the shipped default. These two facts are set in different files
+    (`chat/models.py` and `populate_models.py`), so nothing but a test connects
+    them.
+    """
+
+    def test_the_chat_session_defaults_are_the_documented_trio(self):
+        from chat.models import ChatSession
+
+        fields = {f.name: f for f in ChatSession._meta.get_fields() if hasattr(f, "default")}
+        self.assertEqual(fields["llm_provider"].default, "openrouter")
+        self.assertEqual(fields["llm_model"].default, "openrouter/free")
+        self.assertEqual(fields["llm_effort"].default, "medium")
+
+    def test_the_profile_defaults_match_the_session_ones(self):
+        # Two tables, one intent. They drifted before — the profile kept a
+        # NVIDIA pair after chat had moved on — and a user whose profile is read
+        # for a default gets a different model than their chat does.
+        from chat.models import ChatSession
+        from core.models import UserProfile
+
+        for name in ("llm_provider", "llm_model", "llm_effort"):
+            self.assertEqual(
+                UserProfile._meta.get_field(name).default,
+                ChatSession._meta.get_field(name).default,
+                name,
+            )
+
+    def test_the_default_level_is_one_the_default_model_serves(self):
+        """The check that makes the default effort more than a stored string.
+
+        Read out of the seed script's source rather than out of the database,
+        because `populate_models.py` is a seed script and not a migration: a
+        fresh test database legitimately has no catalogue, and a version of this
+        test that skipped on an empty table passed vacuously in exactly the
+        environment that runs it. What is pinned is the declaration — if someone
+        drops `effort=` from the default model's row, this fails.
+        """
+        from chat.models import ChatSession
+
+        default_model = ChatSession._meta.get_field("llm_model").default
+        default_level = ChatSession._meta.get_field("llm_effort").default
+
+        source = (
+            pathlib.Path(__file__).resolve().parents[2] / "populate_models.py"
+        ).read_text(encoding="utf-8")
+        row = next(
+            (line for line in source.splitlines() if f'"{default_model}"' in line),
+            None,
+        )
+        self.assertIsNotNone(row, f"{default_model} is not in the seed catalogue")
+        self.assertIn(
+            "effort=", row,
+            f"the default model {default_model} declares no effort levels, so "
+            f"the default level {default_level!r} would be snapped away on the "
+            f"first message",
+        )
+        # And the constant it names has to contain the default rung.
+        constant = row.split("effort=")[1].split(")")[0].split(",")[0].strip()
+        self.assertIn(default_level, getattr(effort, constant.replace("EFFORT_", "")))
+
+    def test_a_seeded_catalogue_agrees_with_the_declaration(self):
+        """Belt and braces: when the row *is* present, it must match."""
+        from chat.models import ChatSession
+
+        row = AIModel.objects.filter(
+            value=ChatSession._meta.get_field("llm_model").default
+        ).first()
+        if row is None:
+            self.skipTest("catalogue not seeded in this database")
+        self.assertIn(
+            ChatSession._meta.get_field("llm_effort").default,
+            effort.clean_levels(row.effort_levels),
+        )

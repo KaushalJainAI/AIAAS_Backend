@@ -414,8 +414,10 @@ class ClientManagerListToolsTests(SimpleTestCase):
     def test_cache_hit_returns_cached_without_resolving_credentials(self):
         cached = [{"name": "search"}]
         manager = self._manager()
-        with patch("mcp_integration.client.MCPToolCache.get",
-                   new_callable=AsyncMock, return_value=cached) as mock_cache:
+        # `(tools, stale)`: a fresh hit, so nothing is re-listed behind it.
+        with patch("mcp_integration.client.MCPToolCache.get_entry",
+                   new_callable=AsyncMock,
+                   return_value=(cached, False)) as mock_cache:
             with patch.object(MCPClientManager, "_resolve_credentials",
                               new_callable=AsyncMock) as mock_creds:
                 with patch.object(MCPClientManager, "get_server_config",

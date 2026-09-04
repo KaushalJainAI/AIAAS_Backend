@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 
+from unittest.mock import patch
+
 from asgiref.sync import async_to_sync
-from django.test import SimpleTestCase
+from django.contrib.auth.models import User
+from django.test import SimpleTestCase, TestCase
 
 from agents.agent.orchestrator import (
     FANOUT_TOTAL_CHAR_LIMIT,
@@ -69,10 +72,24 @@ class BudgetTests(SimpleTestCase):
 
 
 class BoundingTests(SimpleTestCase):
+    """What a fan-out hands back, and what happens to what it cuts.
+
+    `bound_results` became async when trimming stopped being lossy: the full
+    answer is archived so the parent can still fetch it. Called with no
+    context — every case here but the last — it degrades to the old behaviour
+    and says the text was not kept, rather than naming an id nobody wrote.
+    """
+
+    def _bound(self, workers, context=None):
+        return async_to_sync(bound_results)(
+            FanoutResult(results=workers), context,
+        )
+
     def test_a_single_oversized_worker_is_trimmed_and_says_so(self):
-        result = bound_results(FanoutResult(results=[
-            WorkerResult(index=0, task='t', answer='x' * (WORKER_ANSWER_CHAR_LIMIT + 500)),
-        ]))
+        result = self._bound([
+            WorkerResult(index=0, task='t',
+                         answer='x' * (WORKER_ANSWER_CHAR_LIMIT + 500)),
+        ])
 
         self.assertTrue(result.truncated)
         self.assertIn('trimmed', result.results[0].answer)
@@ -83,21 +100,82 @@ class BoundingTests(SimpleTestCase):
             WorkerResult(index=i, task='t', answer='x' * (WORKER_ANSWER_CHAR_LIMIT - 1))
             for i in range(6)
         ]
-        result = bound_results(FanoutResult(results=workers))
+        result = self._bound(workers)
 
         total = sum(len(w.answer) for w in result.results)
-        self.assertLessEqual(total, FANOUT_TOTAL_CHAR_LIMIT + 6 * 120)
+        self.assertLessEqual(total, FANOUT_TOTAL_CHAR_LIMIT + 6 * 200)
         self.assertTrue(result.truncated)
         # Every worker keeps a share; none is dropped entirely.
         self.assertTrue(all(w.answer for w in result.results))
 
     def test_small_results_are_left_exactly_alone(self):
-        result = bound_results(FanoutResult(results=[
-            WorkerResult(index=0, task='t', answer='short'),
-        ]))
+        result = self._bound([WorkerResult(index=0, task='t', answer='short')])
 
         self.assertFalse(result.truncated)
         self.assertEqual(result.results[0].answer, 'short')
+
+    def test_without_a_context_the_notice_admits_the_text_is_gone(self):
+        """Naming an id nobody wrote is worse than admitting the loss — the
+        model would spend a turn fetching something that does not exist."""
+        result = self._bound([
+            WorkerResult(index=0, task='t',
+                         answer='x' * (WORKER_ANSWER_CHAR_LIMIT + 10)),
+        ])
+        self.assertIn('not kept', result.results[0].answer)
+        self.assertNotIn('read_tool_output', result.results[0].answer)
+
+
+class TrimmedAnswersStayReachableTests(TestCase):
+    """A trimmed worker answer used to be lost outright.
+
+    The parent had paid for a whole worker run and could see only the first N
+    characters of what it bought; the only way to the rest was to delegate the
+    same task again. It is now archived through the same store an oversized
+    tool result uses, so `read_tool_output` fetches it — which is the promise
+    that tool already makes everywhere else.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user('fanout', 'f@example.com', 'x')
+
+    def test_the_full_answer_is_stored_and_the_notice_names_the_id(self):
+        from chat.models import ToolOutput
+
+        full = 'y' * (WORKER_ANSWER_CHAR_LIMIT + 4_000)
+        context = {'user_id': self.user.id, 'session_id': 'run-42',
+                   'turn_id': 't1'}
+
+        result = async_to_sync(bound_results)(
+            FanoutResult(results=[WorkerResult(index=0, task='t', answer=full)]),
+            context,
+        )
+
+        answer = result.results[0].answer
+        self.assertIn('read_tool_output', answer)
+
+        row = ToolOutput.objects.get(user=self.user, session_key='run-42')
+        self.assertEqual(row.total_chars, len(full))
+        self.assertIn(str(row.id), answer)
+
+    def test_a_failed_archive_still_tells_the_truth(self):
+        """Best-effort, like every other archive here: failing to store must
+        not fail the fan-out, and must not claim an id either."""
+        async def _no_storage(*args, **kwargs):
+            return None
+
+        with patch('chat.tools.tool_output.spill', _no_storage):
+            result = async_to_sync(bound_results)(
+                FanoutResult(results=[
+                    WorkerResult(index=0, task='t',
+                                 answer='z' * (WORKER_ANSWER_CHAR_LIMIT + 10)),
+                ]),
+                {'user_id': self.user.id, 'session_id': 'run-43'},
+            )
+
+        answer = result.results[0].answer
+        self.assertIn('could not be kept', answer)
+        self.assertNotIn('read_tool_output', answer)
 
 
 class IsolationTests(SimpleTestCase):

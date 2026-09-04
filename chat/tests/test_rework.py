@@ -418,9 +418,9 @@ class RemovedCapabilityTests(SimpleTestCase):
     list. They are not any more, and the distinction is the whole point: those
     names reached the *host* filesystem from a chat turn. The tools carrying
     those names now address rows in the caller's own Folder/Document tree
-    through `inference/vfs.py`, cannot name a path on any disk, and are
-    unreachable from chat at all. `AgentFileToolsAreNotChatToolsTests` pins the
-    half of the original decision that is still true.
+    through `inference/vfs.py` and cannot name a path on any disk — which is
+    why chat may hold them again without reopening what was closed here.
+    `FileToolsAreGatedByAScopeTests` pins how far they reach.
     """
 
     REMOVED = [
@@ -446,27 +446,54 @@ class RemovedCapabilityTests(SimpleTestCase):
             self.assertIn("not recognized", res)
 
 
-class AgentFileToolsAreNotChatToolsTests(SimpleTestCase):
-    """The file tools exist, and chat cannot reach them.
+class FileToolsAreGatedByAScopeTests(SimpleTestCase):
+    """The file tools are reachable exactly as far as a scope says, never further.
 
-    This replaced `list_files` et al. sitting in `REMOVED`. The old assertion
-    was "these names do not exist"; the true one is "these names are not a chat
-    capability" — the host-filesystem tools they used to name are still gone,
-    and nothing here brings them back.
+    History, because the name of this class has changed twice and each change
+    was a real narrowing of what is claimed. It began as `list_files` et al.
+    sitting in `REMOVED` — "these names do not exist" — which stopped being
+    true when the virtual filesystem gave them back to agents. It then became
+    "these names are not a chat capability", which stopped being true when chat
+    got a scope of its own (`vfs.chat_scope`: read the tree, write into
+    `/Chat/`).
+
+    What has been true throughout, and is the thing actually worth pinning, is
+    narrower than either: **no caller reaches a file without a scope.** A chat
+    turn, an agent run and a bare dispatch are all the same rule.
+
+    The half of the original deletion that has never moved is separate and
+    still pinned by `RemovedCapabilityTests`: these names address rows in the
+    user's `Folder`/`Document` tree, and the *host* filesystem tools they once
+    named are gone.
     """
 
-    FILE_TOOLS = ["list_files", "read_file", "write_file", "make_directory",
-                  "delete_file"]
+    FILE_TOOLS = ["list_files", "find_files", "read_file", "write_file",
+                  "make_directory", "delete_file"]
 
-    def test_not_offered_in_chat(self):
-        # `requires="files"` is unmet in chat by construction: a chat turn has
-        # no fileAccess setting, so there is no scope to build one from.
+    def test_not_offered_without_a_scope(self):
+        # `requires="files"` is unmet for a caller that brought none — which is
+        # every caller that is not chat or an agent run with `fileOps`.
         offered = {
             t["function"]["name"]
             for t in async_to_sync(get_available_tools)(None)
         }
         for name in self.FILE_TOOLS:
             self.assertNotIn(name, offered)
+
+    def test_offered_once_a_scope_is_supplied(self):
+        """The other direction, which nothing asserted while chat had no scope.
+
+        Without this, `requires="files"` could be hard-wired to False again and
+        every test above would still pass — the tools would simply be dead, and
+        the only symptom would be an assistant explaining it cannot save a file
+        while holding a scope that says it can.
+        """
+        offered = {
+            t["function"]["name"]
+            for t in async_to_sync(get_available_tools)(None, file_scope=object())
+        }
+        for name in self.FILE_TOOLS:
+            self.assertIn(name, offered)
 
     def test_refuse_without_a_scope(self):
         # Reachable through `execute_tool` — they are ordinary registrations —

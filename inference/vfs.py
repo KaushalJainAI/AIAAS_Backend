@@ -56,6 +56,7 @@ from workflow_backend.thresholds import (
     AGENT_FILE_READ_CHARS,
     AGENT_FILE_WRITE_CHARS,
     AGENT_HOME_ROOT,
+    CHAT_HOME_ROOT,
 )
 
 from . import filesystem as fs
@@ -208,6 +209,36 @@ def build_scope(user, file_access: str, *, agent_name: str = '') -> FileScope | 
     return FileScope(
         user=user, root=None, mode=mode, label='/',
         write_prefix=(AGENT_HOME_ROOT, home.name), write_label=home_label,
+    )
+
+
+def chat_scope(user) -> FileScope:
+    """What a chat turn may address: read the whole tree, write into `/Chat/`.
+
+    Chat had no scope at all until now, which is why `requires="files"` was an
+    unconditional `False` — there was no `fileAccess` setting to build one
+    from, so the tools were withheld rather than offered and refused. That was
+    the right call while the only file tools reached the *host* filesystem.
+    These reach rows in the user's own tree, so the question is no longer
+    whether chat may touch files but which ones, and that has a fixed answer
+    rather than a configurable one.
+
+    `read_all_write_own` is that answer, and it is the same shape an agent gets
+    from the same words. Reading the whole tree is what makes "summarise my
+    notes" work at all, and it grants nothing new — the KB tools already read
+    the user's documents. Writing is confined to one visible folder, so a
+    conversation cannot scatter files through a tree the user organised, and
+    everything chat produced is in one place they can find, move or delete.
+
+    There is deliberately no folder per session. A user looking for the summary
+    they asked for yesterday should find it under `/Chat/`, not under a uuid
+    they never saw; and a conversation that cannot read what an earlier one
+    wrote is a filing cabinet that forgets.
+    """
+    fs.ensure_folder(user, CHAT_HOME_ROOT, None)
+    return FileScope(
+        user=user, root=None, mode=READ_ALL_WRITE_OWN, label='/',
+        write_prefix=(CHAT_HOME_ROOT,), write_label=f'/{CHAT_HOME_ROOT}',
     )
 
 
@@ -464,6 +495,108 @@ def write_file(scope: FileScope, path: str, content: str, *,
         'appended': append and not created,
         'chars': len(text),
     }
+
+
+def find(scope: FileScope, query: str, *, limit: int = 0) -> dict:
+    """Locate files by name or by the text inside them, anywhere in scope.
+
+    A filesystem an agent cannot search is a filing cabinet with no index: with
+    only `list_files` and `read_file`, finding last month's report means walking
+    the tree a directory at a time and reading candidates in full, which costs
+    a tool call per guess and usually ends in the model giving up and asking the
+    user where they put it.
+
+    This is deliberately **not** knowledge-base search, and the two must not be
+    confused. A KB answers "what does the corpus say about X" and costs an
+    embedding job to build; this answers "which file is called X, or mentions
+    it" and costs one indexed `LIKE`. Keeping them apart is what lets writing a
+    file stay free — the rule this module opens by stating, that folders
+    organise and KBs index, holds precisely because finding a file never needed
+    an index in the first place.
+
+    Substring matching, not ranking. `icontains` on a name and on the stored
+    text is honest about what it does and cannot pretend to relevance it has
+    not computed; a model given a ranked list of near-misses treats the top one
+    as the answer, while a model given "three files contain this string" goes
+    and reads them.
+    """
+    needle = (query or '').strip()
+    if len(needle) < 2:
+        raise VfsError('Give at least two characters to search for.')
+
+    cap = min(limit or AGENT_FILE_LIST_LIMIT, AGENT_FILE_LIST_LIMIT)
+
+    rows = Document.objects.filter(user=scope.user)
+    if scope.root is not None:
+        # Confined by the *resolved* root's id path, never by a caller string —
+        # the walk rule this module opens with is about paths a model typed,
+        # and this prefix comes from a row we already own. One indexed match,
+        # which is what `Folder.path` holding ids is for.
+        rows = rows.filter(folder__in=fs.subtree(scope.root, include_trashed=False))
+
+    from django.db.models import Q
+
+    rows = rows.filter(Q(name__icontains=needle) | Q(content_text__icontains=needle))
+    rows = rows.select_related('folder').order_by('-updated_at')
+
+    # One extra row is the difference between "there are exactly `cap` matches"
+    # and "there are more"; without it a full page and a complete result are
+    # indistinguishable and `truncated` would be a guess.
+    window = list(rows[:cap + 1])
+    truncated = len(window) > cap
+
+    # Resolved per folder, not per document: a search returns many files from
+    # few directories, and `breadcrumbs` is a query each. Bounded either way,
+    # but 200 results in one folder should cost one lookup, not 200.
+    parts_by_folder: dict[Any, list[str]] = {}
+
+    found = []
+    for doc in window[:cap]:
+        key = doc.folder_id
+        if key not in parts_by_folder:
+            parts_by_folder[key] = _folder_parts(scope, doc.folder)
+        parts = parts_by_folder[key]
+        found.append({
+            'path': render(scope, parts + [doc.name]),
+            'document_id': doc.id,
+            'chars': len(doc.content_text or ''),
+            'in_name': needle.lower() in (doc.name or '').lower(),
+            'writable': scope.may_write_at(parts),
+        })
+
+    out = {'query': needle, 'matches': found, 'count': len(found)}
+    if truncated:
+        # Named rather than silent, for the same reason `read_file` names a
+        # truncated read: a capped list and a complete one must not look alike,
+        # or the model concludes the file it wanted does not exist.
+        out['truncated'] = True
+        out['note'] = (
+            f'Showing the {cap} most recently updated matches. Narrow the '
+            f'search if what you want is not here.'
+        )
+    if not found:
+        out['note'] = 'No file in scope has that in its name or its text.'
+    return out
+
+
+def _folder_parts(scope: FileScope, folder: Folder | None) -> list[str]:
+    """A folder's name segments relative to the scope root.
+
+    A file reached by search has to describe itself the same way a file reached
+    by a walk does — same path, same answer to "may I write here?" — or the two
+    routes to one document would disagree about it.
+
+    Built from `breadcrumbs`, which resolves a whole ancestor chain in one
+    query off `Folder.ancestor_ids`, rather than by following `parent` upward a
+    row at a time.
+    """
+    if folder is None:
+        return []
+    names = [c['name'] for c in fs.breadcrumbs(folder)] + [folder.name]
+    if scope.root is None:
+        return names
+    root_names = [c['name'] for c in fs.breadcrumbs(scope.root)] + [scope.root.name]
+    return names[len(root_names):]
 
 
 def make_dir(scope: FileScope, path: str) -> dict:

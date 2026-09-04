@@ -34,7 +34,6 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -42,8 +41,12 @@ from langgraph.types import interrupt
 
 from workflow_backend.thresholds import MAX_TOOL_ITERATIONS
 
+from asgiref.sync import sync_to_async
+from decimal import Decimal
+
 from llm import access as llm
-from . import prompts
+from llm.usage import EMPTY_USAGE, TokenUsage
+from . import checkpoints, prompts, todos
 from .events import Event, EventSink, null_sink
 from llm.access import (
     Completion,
@@ -146,6 +149,21 @@ class TurnContext:
     tool_dispatch: ToolDispatch | None = None
     sensitive_tools: frozenset[str] | None = None
 
+    #: Scratch space for work that is the same on every pass of this turn's
+    #: loop, so it is paid for once instead of per iteration. Mutable inside a
+    #: frozen dataclass on purpose: the *binding* is what must not change, and
+    #: a memo that had to be threaded through `agent_node`'s signature would be
+    #: passed by every caller that has no idea what it is for.
+    #:
+    #: Today it holds one thing: the MCP tool descriptors. Resolving those is a
+    #: database read per connection plus a Redis read plus, on a cold cache, an
+    #: `npx` process start — and `agent_node` was paying all of it before every
+    #: single model call, while the answer cannot change mid-run. What may
+    #: still change between passes (whether this run has spilled a result yet)
+    #: is deliberately left out, so `read_tool_output` still appears the
+    #: iteration after it becomes real.
+    memo: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
     #: Which agents this run may delegate to (`SubAgent` ids), or None for any
     #: the user owns. Chat passes None: a human is typing and watching, and the
     #: agents are theirs. An agent run passes its own selection, because
@@ -175,9 +193,11 @@ class TurnContext:
     archive_scopes: tuple[str, ...] = ()
 
     #: The `inference.vfs.FileScope` the file tools address this turn, or None.
-    #: Chat always leaves it None — a chat turn has no `fileAccess` setting to
-    #: build one from, which is why the file tools' `requires="files"` is never
-    #: met there. The agent runtime sets it from `sandbox['fileAccess']`.
+    #: The agent runtime builds one from `sandbox['fileAccess']`; chat builds a
+    #: fixed one (`vfs.chat_scope`: read the tree, write into `/Chat/`). None
+    #: means the file tools are not offered at all, which is what a caller with
+    #: nothing to address should get — an advertised tool that cannot run is
+    #: worse than one never offered.
     file_scope: Any = None
 
     #: How many agents deep this turn already is. 0 is a run the user started;
@@ -285,6 +305,11 @@ class AgentState(TypedDict):
     tool_trace: list[dict[str, Any]]
     thinking: str
     total_tokens: int
+    #: The same tokens as `total_tokens`, split into the buckets they were
+    #: billed in. Carried separately rather than replacing the total because
+    #: every existing reader wants the scalar — and because a total that is
+    #: derived from the breakdown can never disagree with it.
+    usage: TokenUsage
 
 
 def _context(config: RunnableConfig | None) -> TurnContext:
@@ -468,6 +493,7 @@ async def _run_model(
     prompt: str,
     history: list[dict[str, Any]],
     tools: list[dict] | None,
+    timings: dict[str, int] | None = None,
 ) -> Completion:
     """
     Call the model, streaming content to the sink as it arrives.
@@ -475,8 +501,17 @@ async def _run_model(
     Content is emitted live and retracted with CONTENT_RESET if the response
     turns out to be a preamble to a tool call. Streaming optimistically and
     correcting the rare case beats withholding every answer until we know.
+
+    `timings` is an out-parameter, filled rather than returned, because the one
+    number worth having here — how long until the *first* chunk arrived — is
+    not a property of the completion and would otherwise have to be smuggled
+    onto `Completion`, where every other caller would have to ignore it. Time
+    to first token is the number that decides whether a slow turn is the
+    provider's fault or ours: generation speed is visible in the stream, and
+    everything before the first chunk is not.
     """
     accumulator = StreamAccumulator()
+    call_started = time.monotonic()
     try:
         async with asyncio.timeout(LLM_CALL_TIMEOUT):
             async for chunk in llm.stream(
@@ -492,6 +527,13 @@ async def _run_model(
                 history=history,
                 attachments=list(turn.attachments),
             ):
+                # Any chunk counts, not only a content one: a turn that opens
+                # with reasoning or with a tool call has already proved the
+                # provider answered, and waiting for prose would report a
+                # reasoning model as slower than it is.
+                if timings is not None and "ttft_ms" not in timings:
+                    timings["ttft_ms"] = int((time.monotonic() - call_started) * 1000)
+
                 match accumulator.add(chunk):
                     case "content" if not accumulator.has_tool_calls:
                         await turn.sink(
@@ -544,6 +586,50 @@ async def _run_model(
     return completion
 
 
+def _log_latency(
+    turn: TurnContext,
+    *,
+    iteration: int,
+    tools: list[dict] | None,
+    tools_ms: int,
+    timings: dict[str, int],
+    elapsed_ms: int,
+    completion: Completion,
+) -> None:
+    """One line per model call, saying where the wall clock actually went.
+
+    A turn that feels slow has three candidate causes that look identical from
+    outside — building the tool list, waiting for the provider's first token,
+    and generating the rest — and they call for three unrelated fixes. Reported
+    together they are separable at a glance; reported as one duration they are
+    a guess. `cached` is here for the fourth question the other three raise: a
+    provider that is re-reading the whole prefix every turn is slow for a
+    reason no amount of local optimisation will touch.
+
+    Deliberately `info` and deliberately one line. This runs on every model
+    call of every turn, so it has to be cheap to emit and cheap to grep.
+    """
+    usage = completion.usage
+    cached = getattr(usage, "cached_read", 0) or 0
+    prompt_total = (getattr(usage, "input", 0) or 0) + cached
+    ttft = timings.get("ttft_ms")
+    logger.info(
+        "[Latency] it=%d tools=%dms(n=%d) ttft=%sms total=%dms "
+        "prompt=%d cached=%d(%d%%) out=%d model=%s/%s",
+        iteration,
+        tools_ms,
+        len(tools or ()),
+        ttft if ttft is not None else "-",
+        elapsed_ms,
+        prompt_total,
+        cached,
+        round(100 * cached / prompt_total) if prompt_total else 0,
+        getattr(usage, "output", 0) or 0,
+        turn.provider,
+        turn.model,
+    )
+
+
 async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """One model turn: answer, or ask for tools."""
     turn = _context(config)
@@ -569,12 +655,24 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     )
     history = list(turn.history) + prior
 
+    # The plan, re-read rather than merely written. A list the model records and
+    # never sees again is theatre: it writes one, feels organised, and proceeds
+    # exactly as it would have. This lands as a trailing `system` message —
+    # after the transcript, before the prompt — which is the same shape
+    # `prompts.build_context_update` uses and for the same reason. It must not
+    # go in the system prompt: it changes on most turns, and the system prompt
+    # is the cached prefix for the whole session.
+    if (plan := todos.render(state.get("metadata", {}).get("todos") or [])):
+        history.append({"role": "system", "content": plan})
+
     # Withholding tools on the last permitted iteration is what forces an answer
     # instead of a loop that runs out of budget mid-tool-call.
     tools = None
+    tools_ms = 0
     if not at_limit:
         from chat import tools as tool_registry
 
+        tools_started = time.monotonic()
         tools = await (
             turn.tool_source()
             if turn.tool_source is not None
@@ -582,12 +680,18 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
                 turn.user_id,
                 memory_enabled=turn.memory_enabled,
                 session_key=turn.session_id,
+                mcp_memo=turn.memo,
+                file_scope=turn.file_scope,
             )
         )
+        tools_ms = int((time.monotonic() - tools_started) * 1000)
 
     started = time.monotonic()
+    timings: dict[str, int] = {}
     try:
-        completion = await _run_model(turn, prompt=prompt, history=history, tools=tools)
+        completion = await _run_model(
+            turn, prompt=prompt, history=history, tools=tools, timings=timings
+        )
     except LLMUserActionable:
         # Deliberately not caught: no credential, no credit, or a model that no
         # longer exists. No retry and no rephrasing helps. It ends the turn as
@@ -602,6 +706,12 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         completion = Completion(
             content="Something went wrong reaching the model. Please try again."
         )
+
+    _log_latency(
+        turn, iteration=iteration, tools=tools, tools_ms=tools_ms,
+        timings=timings, elapsed_ms=int((time.monotonic() - started) * 1000),
+        completion=completion,
+    )
 
     calls, content = completion.tool_calls, completion.content or ""
     if not calls and content and not at_limit:
@@ -646,6 +756,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         "messages": [message],
         "thinking": thinking,
         "total_tokens": state.get("total_tokens", 0) + completion.tokens,
+        "usage": state.get("usage", EMPTY_USAGE) + completion.usage,
     }
 
 
@@ -793,6 +904,42 @@ async def _on_deep_research(
             logger.warning("[Tools] Companion media search failed", exc_info=True)
 
 
+async def _on_chart(
+    parsed: dict, args: dict, meta: dict, sink: EventSink
+) -> None:
+    """Collect a chart spec onto the message and stream it live.
+
+    The spec is stored rather than a rendering of it, so a reloaded
+    conversation redraws the chart with today's component — including a palette
+    or an accessibility fix shipped after the chart was made. A stored SVG
+    would freeze the design at the moment the model spoke.
+    """
+    if parsed.get("type") != "chart" or not parsed.get("series"):
+        return
+    spec = {k: v for k, v in parsed.items() if k != "rendered"}
+    meta.setdefault("charts", []).append(spec)
+    await sink(Event.CHART, spec)
+
+
+async def _on_todos(
+    parsed: dict, args: dict, meta: dict, sink: EventSink
+) -> None:
+    """Store the run's plan in graph state and show it to the client.
+
+    Unlike every other entry in this table, this one is not only a UI effect:
+    `agent_node` reads it back on the next turn. It rides here anyway because
+    `metadata` *is* graph state — `tools_node` returns it, the checkpointer
+    keeps it, and `curate_node` only ever rewrites `messages`. So a plan parked
+    here is immune to curation by construction rather than by anyone
+    remembering to exclude it, which is the whole property the plan needs.
+    """
+    items = parsed.get("todos")
+    if not isinstance(items, list):
+        return
+    meta["todos"] = items
+    await sink(Event.TODOS_UPDATE, {"todos": items})
+
+
 #: tool name → side effect applied to metadata / streamed to the client.
 #: The model always gets the raw tool output regardless; these only drive the UI.
 _SIDE_EFFECTS = {
@@ -804,6 +951,8 @@ _SIDE_EFFECTS = {
     "scrape_webpage": _on_scrape,
     "search_conversation_history": _on_history_search,
     "deep_research": _on_deep_research,
+    "update_todos": _on_todos,
+    "render_chart": _on_chart,
 }
 
 
@@ -1164,6 +1313,13 @@ async def _summariser_for(turn: TurnContext):
             # the one place the knob would cost money for nothing.
             effort="none",
         )
+        # The fold is a real model call on a model of its own, so its usage is
+        # kept here rather than discarded with the rest of the completion.
+        # Without this the fold's spend reached `total_tokens` but never
+        # `cost_usd`, and the cap that curation exists to serve could not see
+        # the money curation itself was spending.
+        summarise.usage += completion.usage
+        summarise.model_id = model_
         return completion.content or "", completion.tokens
 
     async def summarise(text: str) -> tuple[str, int]:
@@ -1182,7 +1338,32 @@ async def _summariser_for(turn: TurnContext):
             )
             return await _call(turn.provider, turn.model, text)
 
+    # Attributes rather than a closure variable so `curate_node` can read them
+    # back without `curation.py` — which is deliberately provider-agnostic and
+    # knows nothing about money — having to carry them through its signature.
+    summarise.usage = EMPTY_USAGE
+    summarise.model_id = model
+
     return summarise
+
+
+@sync_to_async
+def _price_fold(summariser) -> tuple[Decimal, str]:
+    """What the fold's own model call cost.
+
+    Never raises: curation is a cost control, and failing to price it must not
+    fail the run any more than failing to perform it would.
+    """
+    from llm.pricing import cost_for_usage
+
+    usage = getattr(summariser, "usage", EMPTY_USAGE)
+    if usage.is_empty:
+        return Decimal("0"), ""
+    try:
+        return cost_for_usage(getattr(summariser, "model_id", "") or "", usage)
+    except Exception:  # noqa: BLE001
+        logger.exception("[Curation] Pricing the fold failed")
+        return Decimal("0"), "unpriced"
 
 
 async def curate_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
@@ -1204,6 +1385,7 @@ async def curate_node(state: AgentState, config: RunnableConfig) -> dict[str, An
 
     from . import curation
 
+    summariser = await _summariser_for(turn)
     try:
         result = await curation.curate(
             state["messages"],
@@ -1222,7 +1404,7 @@ async def curate_node(state: AgentState, config: RunnableConfig) -> dict[str, An
                 "session_id": turn.session_id,
                 "turn_id": turn.turn_id,
             },
-            summarise=await _summariser_for(turn),
+            summarise=summariser,
         )
     except Exception:  # noqa: BLE001
         # Curation is a cost control, not a correctness one — `clamp_input` is
@@ -1239,6 +1421,11 @@ async def curate_node(state: AgentState, config: RunnableConfig) -> dict[str, An
         "message": "Condensing earlier steps to stay inside the context window...",
     })
 
+    # Priced against the fold's own model, which is usually not the run's — a
+    # pinned cheap one. Charging it at the run's rate would overstate exactly
+    # the mechanism that exists to save money.
+    fold_cost, fold_source = await _price_fold(summariser)
+
     if turn.on_curation is not None:
         try:
             await turn.on_curation(
@@ -1248,6 +1435,8 @@ async def curate_node(state: AgentState, config: RunnableConfig) -> dict[str, An
                 tokens_after=result.tokens_after,
                 summary_tokens=result.summary_tokens,
                 archived_ids=result.archived_ids,
+                summary_cost_usd=fold_cost,
+                summary_cost_source=fold_source,
             )
         except Exception:  # noqa: BLE001
             logger.exception("[Agent] on_curation observer raised")
@@ -1290,10 +1479,36 @@ def _build_graph():
     graph.add_edge("tools", "curate")
     graph.add_edge("curate", "steering")
     graph.add_edge("steering", "agent")
-    return graph.compile(checkpointer=MemorySaver())
+    # Durability is a setting, not a constant — see `chat/turn/checkpoints.py`.
+    # In-process was fine while a run meant a chat turn; an agent run can go
+    # forty iterations across two hours, and losing that to a deploy leaves an
+    # `ExecutionLog` stuck on `running` with nothing behind it.
+    return graph.compile(checkpointer=checkpoints.build())
 
 
-chat_agent_graph = _build_graph()
+#: Built on first use, not at import. The durable savers construct an event-loop
+#: binding in `__init__` (`AsyncSqliteSaver` calls `get_running_loop()`), and
+#: module import happens on whatever thread Django starts on, with no loop —
+#: so an eagerly compiled graph could only ever have an in-process saver. Every
+#: real caller reaches the graph from async code, so deferring costs nothing.
+#:
+#: `chat_agent_graph` still resolves as a module attribute (PEP 562 below), so
+#: `from chat.turn.agent import chat_agent_graph` keeps working.
+_graph = None
+
+
+def get_graph():
+    """The compiled agent graph for this process. Built once, on first use."""
+    global _graph
+    if _graph is None:
+        _graph = _build_graph()
+    return _graph
+
+
+def __getattr__(name):
+    if name == "chat_agent_graph":
+        return get_graph()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 async def forget_thread(thread_id: str) -> bool:
@@ -1316,7 +1531,7 @@ async def forget_thread(thread_id: str) -> bool:
     already produced its answer.
     """
     try:
-        checkpointer = getattr(chat_agent_graph, "checkpointer", None)
+        checkpointer = getattr(get_graph(), "checkpointer", None)
         deleter = getattr(checkpointer, "adelete_thread", None)
         if deleter is None:
             return False
@@ -1339,6 +1554,10 @@ class TurnResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
     tokens: int = 0
+    #: What the turn consumed, in the buckets it was billed in. `tokens` is its
+    #: total; this is what the cost is computed from, because output is priced
+    #: several times input and a cache read a tenth of one.
+    usage: TokenUsage = EMPTY_USAGE
     #: True when the run paused for tool approval rather than finishing.
     awaiting_approval: bool = False
 
@@ -1440,7 +1659,7 @@ async def approve_tool_call(
         logger.warning("[HITL] Unknown approval scope %r; treating as once", scope)
         scope = "once"
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-    snapshot = await chat_agent_graph.aget_state(config)
+    snapshot = await get_graph().aget_state(config)
     if not snapshot.values:
         logger.warning("[HITL] No state for thread %s; approval ignored", thread_id)
         return
@@ -1450,7 +1669,7 @@ async def approve_tool_call(
     if call_id not in approved:
         approved.append(call_id)
     meta["approved_tool_calls"] = approved
-    await chat_agent_graph.aupdate_state(config, {"metadata": meta})
+    await get_graph().aupdate_state(config, {"metadata": meta})
 
     if scope == "once" or user_id is None:
         return
@@ -1496,7 +1715,7 @@ async def reject_tool_call(
     "declined" from "there was nothing to decline".
     """
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-    snapshot = await chat_agent_graph.aget_state(config)
+    snapshot = await get_graph().aget_state(config)
     if not snapshot.values:
         logger.warning("[HITL] No state for thread %s; rejection ignored", thread_id)
         return False
@@ -1505,7 +1724,7 @@ async def reject_tool_call(
     rejected = dict(meta.get("rejected_tool_calls", {}) or {})
     rejected[call_id] = reason
     meta["rejected_tool_calls"] = rejected
-    await chat_agent_graph.aupdate_state(config, {"metadata": meta})
+    await get_graph().aupdate_state(config, {"metadata": meta})
     logger.info("[HITL] Rejected %s on thread %s", call_id, thread_id)
     return True
 
@@ -1536,6 +1755,7 @@ async def run_turn(
         "tool_trace": list(tool_trace or []),
         "thinking": "",
         "total_tokens": 0,
+        "usage": EMPTY_USAGE,
     }
 
     # Resume only when the graph is genuinely paused mid-run. `.values` alone is
@@ -1543,12 +1763,12 @@ async def run_turn(
     # finds leftover values and would resume a finished graph — re-emitting the
     # previous answer and never reading the new message. `.next` is non-empty
     # only while nodes are still pending.
-    snapshot = await chat_agent_graph.aget_state(config)
+    snapshot = await get_graph().aget_state(config)
     resuming = bool(snapshot.values and snapshot.next)
 
     awaiting_approval = False
     try:
-        final = await chat_agent_graph.ainvoke(None if resuming else initial, config=config)
+        final = await get_graph().ainvoke(None if resuming else initial, config=config)
     except LLMUserActionable:
         # No credential, rejected key, no credit, or a retired model. The caller
         # turns this into an error the user sees as an error; swallowing it into
@@ -1559,7 +1779,7 @@ async def run_turn(
         # Pre-1.0 LangGraph surfaced a pause by raising out of `ainvoke`. Kept
         # so the pause is detected under either version.
         awaiting_approval = True
-        final = (await chat_agent_graph.aget_state(config)).values
+        final = (await get_graph().aget_state(config)).values
     except Exception:
         logger.exception("[Agent] Run failed on thread %s", thread_id)
         return TurnResult(
@@ -1587,6 +1807,7 @@ async def run_turn(
         metadata=final.get("metadata", dict(metadata or {})),
         tool_trace=final.get("tool_trace", []),
         tokens=final.get("total_tokens", 0),
+        usage=final.get("usage", EMPTY_USAGE),
         awaiting_approval=awaiting_approval,
     )
 

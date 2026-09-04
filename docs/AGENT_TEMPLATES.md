@@ -2,8 +2,7 @@
 
 Shipping and sharing **autonomous agents** instead of DAGs.
 
-Written 2026-07-29. **Phase 1 is built**, and so is the install half of
-Phase 2 (see §8). §3's data model is superseded — `Workflow` became `SubAgent`
+Written 2026-07-29. **Phases 1 and 2 are built** (see §8). §3's data model is superseded — `Workflow` became `SubAgent`
 and `WorkflowTemplate` is gone; read §8's Phase 2 note for what replaced it.
 Phases 3–4 remain design.
 
@@ -293,11 +292,47 @@ publisher. §3's data-model plan is superseded: `Workflow` was replaced by
 - `GET /api/orchestrator/templates/`, `GET .../{slug}/`,
   `POST .../{slug}/install/`. Frontend: `/templates`.
 
-Still open, and all of it belongs to publishing rather than installing:
+**Publishing landed 2026-09-04**, and it is the half that decided the data
+model. A curated template is still code; a *published* agent is a
+`SharedAgent` row, because it carries facts that only exist once it is
+published — who published it, when, how many people installed it, whether it is
+still listed — and none of those have anywhere to live in a dict in a source
+file. Four decisions worth recording:
 
-- Publish from an agent — needs `requirements` to be *written* at publish time
-  (§2 flagged the column as unwritten; it still is)
-- Pin version at install; notify on update; **re-consent when grants widen**
+- **`requirements` is now written, by code, at publish time.** §2 flagged the
+  column as unwritten and §4 assumed a human would fill it in. A human will
+  not: the author's agent is a live configuration full of their own ids and
+  nothing about saving it made them think about portability. So
+  `agents/publishing.py::to_shareable` strips every id and mints a requirement
+  in its place — and **fails** rather than drops when one no longer resolves,
+  because a dropped id is an agent arriving in a stranger's account missing the
+  corpus it was written around, answering from nothing and merely looking
+  stupid.
+- **The projection is an allow-list.** `SHAREABLE_KEYS`, not `to_config()`
+  minus a few keys. A denylist publishes every field added to `AgentConfig`
+  later, and the first one that carries something private is a leak nobody
+  wrote a line of code to cause.
+- **A listing is a snapshot, not a pointer.** Rendering the author's live agent
+  would let them widen the grants of something already listed without anyone
+  re-consenting — §5's second rule, defeated by a foreign key. It is also why
+  `subagent` is `SET_NULL`: deleting your own agent must not retract what other
+  people are installing.
+- **Two visibilities, and the lesser one is the point.** `link` shares are
+  reachable by slug and listed nowhere; without it, sharing with one colleague
+  would mean publishing to strangers, and "public" would be the only setting
+  anyone ever used.
+
+Requirement labels default to the source rows' own names — "Vendor records"
+tells an installer far more than "Knowledge base 1" — which is also a fact
+about the author's account, so the publish screen shows every one of them
+editable before anything is written. Nothing that is not on that screen
+travels.
+
+Still open:
+
+- Pin version at install; notify on update; **re-consent when grants widen**.
+  `SharedAgent.version` is the column that needs, and the install already
+  records which entry it came from as a tag.
 
 **Phase 3 — trust**
 - Aggregate the four signals across installs, show on template cards

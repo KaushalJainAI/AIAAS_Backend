@@ -102,8 +102,14 @@ def _shrink_text_field(payload: dict, output_id: str | None) -> str | None:
     return json.dumps(payload)
 
 
-async def _spill(name: str, text: str, context: dict[str, Any]) -> str | None:
-    """Persist the full text; return its id, or None if it could not be kept."""
+async def spill(name: str, text: str, context: dict[str, Any]) -> str | None:
+    """Persist the full text; return its id, or None if it could not be kept.
+
+    Public because a fan-out archives trimmed *worker answers* through it, not
+    only tool results (`agents/agent/orchestrator.py::bound_results`). Same
+    store, same retention, same `read_tool_output` on the way back — a second
+    archive would be a second thing for the retrieval tools to know about.
+    """
     from chat.models import ToolOutput
 
     try:
@@ -138,7 +144,7 @@ async def bound(name: str, output: Any, context: dict[str, Any]) -> str:
         "[ToolOutput] %s returned %d chars, over the %d limit",
         name, len(text), TOOL_OUTPUT_CHAR_LIMIT,
     )
-    output_id = await _spill(name, text, context)
+    output_id = await spill(name, text, context)
 
     try:
         payload = json.loads(text)
@@ -212,7 +218,7 @@ def readable_scopes(context: dict[str, Any]) -> list[str]:
     delegates a task that needs it, and the worker — a fresh thread — cannot
     reach the very text the parent could no longer restate.
 
-    Writing still goes to the caller's own scope alone (`archive`, `_spill`),
+    Writing still goes to the caller's own scope alone (`archive`, `spill`),
     so a worker can never put anything into its parent's archive. Ownership is
     still checked separately on every query: a scope is a session key, not a
     permission.
@@ -238,7 +244,7 @@ async def archive(
     shown and can no longer see; where is it?" — and a second store would mean a
     second expiry, a second scope check and a second reader to keep in step.
 
-    Best-effort, like `_spill`: failing to archive must not fail the run. The
+    Best-effort, like `spill`: failing to archive must not fail the run. The
     caller checks the return value, and says nothing about recall when it is
     None rather than pointing the model at an id that was never written.
     """
