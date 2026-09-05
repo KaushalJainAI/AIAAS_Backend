@@ -11,7 +11,9 @@ in the ordinary sense, which is why this needs a test rather than a comment.
 from __future__ import annotations
 
 from asgiref.sync import async_to_sync
-from django.test import SimpleTestCase
+from django.db import connection
+from django.test import SimpleTestCase, TestCase
+from django.test.utils import CaptureQueriesContext
 from langchain_core.messages import HumanMessage
 
 from chat.turn.agent import chat_agent_graph, forget_thread
@@ -92,3 +94,77 @@ class RunEndsDropCheckpointsTests(SimpleTestCase):
 
         for path in ("status='failed'", "status='cancelled'"):
             self.assertIn(path, source)
+
+
+class ThreadIdIsAddressableTests(TestCase):
+    """The indexed column, and the JSON copy it mirrors.
+
+    `thread_id` lived only inside `input_data`, and three hot paths filtered on
+    `input_data__thread_id=` — resuming a paused run, closing a HITL request,
+    and resolving a delegated run's parent step. On SQLite that is a full table
+    scan with a JSON parse per row, growing with every run the account has ever
+    made, paid on the two paths a person is actively waiting on.
+    """
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+
+        from agents.models import SubAgent
+
+        self.user = User.objects.create_user(username='threaded', password='pw')
+        self.agent = SubAgent.objects.create(
+            user=self.user, name='Threaded', prompt='Go.',
+            llm_provider='nvidia', llm_model='m',
+        )
+
+    def _open(self, thread_id: str):
+        from agents.agent.runtime import _open_log
+
+        return async_to_sync(_open_log)(
+            self.agent, self.user, 'goal', 'manual', thread_id,
+        )
+
+    def test_opening_a_run_writes_both_copies(self):
+        """The JSON copy stays: it is what historical rows carry and what the
+        run's own record shows. The column is the addressable one."""
+        log = self._open('agent-9-abcdef')
+
+        self.assertEqual(log.thread_id, 'agent-9-abcdef')
+        self.assertEqual(log.input_data['thread_id'], 'agent-9-abcdef')
+
+    def test_a_paused_run_is_found_by_the_column(self):
+        from agents.agent.runtime import _find_paused_log
+        from logs.models import ExecutionLog
+
+        log = self._open('agent-9-findme')
+        ExecutionLog.objects.filter(id=log.id).update(status='paused')
+
+        found = async_to_sync(_find_paused_log)(self.agent, 'agent-9-findme')
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, log.id)
+
+    def test_the_lookup_does_not_touch_the_json_column(self):
+        """The point of the change, pinned as SQL rather than as timing: an
+        indexed equality, not a scan with a JSON extract per row."""
+        from agents.agent.runtime import _find_paused_log
+
+        with CaptureQueriesContext(connection) as captured:
+            async_to_sync(_find_paused_log)(self.agent, 'agent-9-nothere')
+
+        sql = ' '.join(q['sql'] for q in captured).lower()
+        self.assertIn('thread_id', sql)
+        self.assertNotIn('json_extract', sql)
+        # The SELECT list always carries every column (Django fetches the
+        # whole row); what matters is the filter. The WHERE clause must hit
+        # the indexed column, never a JSON extract on `input_data`.
+        where = sql.split('where', 1)[1] if 'where' in sql else sql
+        self.assertIn('thread_id', where)
+        self.assertNotIn('input_data', where)
+
+    def test_an_over_long_thread_is_truncated_rather_than_refused(self):
+        """The column is bounded and the checkpointer key is not. Truncating
+        loses the lookup for a pathological id; raising loses the whole run."""
+        log = self._open('x' * 400)
+
+        self.assertEqual(len(log.thread_id), 200)

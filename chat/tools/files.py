@@ -176,6 +176,60 @@ async def write_file(args: Dict, context: Dict) -> str:
 @tool({
     "type": "function",
     "function": {
+        "name": "edit_file",
+        "description": (
+            "Change part of an existing file, leaving the rest exactly as it "
+            "is. Prefer this over write_file for any change to a file that "
+            "already has content — write_file replaces the whole document, so "
+            "using it to change one line means re-emitting every other line "
+            "and risks losing them. old_text must match the file character for "
+            "character, including indentation and line breaks, and must appear "
+            "exactly once unless you pass replace_all."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File to edit, relative to your workspace root. It must already exist.",
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": (
+                        "The exact text to replace, copied verbatim from the file. "
+                        "Include enough surrounding text to make it unique."
+                    ),
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "What to put in its place. Empty string deletes the matched text.",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": (
+                        "Replace every occurrence instead of requiring exactly one. "
+                        "Use for a rename that runs through the file."
+                    ),
+                },
+            },
+            "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
+        },
+    },
+}, requires="files", sensitive=True, effect="reversible")
+async def edit_file(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    return await _run(
+        context, vfs.edit_file, args.get("path") or "",
+        args.get("old_text") or "", args.get("new_text") or "",
+        replace_all=bool(args.get("replace_all")),
+    )
+
+
+@tool({
+    "type": "function",
+    "function": {
         "name": "make_directory",
         "description": (
             "Create a directory in your workspace, including any missing "

@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import re
+import time
 from decimal import Decimal
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -22,6 +23,7 @@ from asgiref.sync import sync_to_async
 
 from workflow_backend.thresholds import (
     ASSISTANT_SUMMARY_WORD_LIMIT,
+    FOLLOW_UPS_SLOW_TURN_SECONDS,
     MAX_CONTEXT_TOKENS,
 )
 
@@ -110,13 +112,20 @@ class TurnRequest:
     #: the client did not say, and `approve_tool_call` falls back to reading
     #: `remember_approval`.
     approval_scope: str = ""
+    #: The mirror of `approve_tool_call`. Chat's Deny button used to clear the
+    #: card and nothing else, so the graph stayed parked on its `interrupt()`
+    #: and the model was never told it had been refused — the same asymmetry
+    #: `agent_reject` exists to close for agent runs.
+    reject_tool_call: str | None = None
+    reject_reason: str = ""
 
     @classmethod
     def parse(cls, payload: Mapping[str, Any]) -> TurnRequest:
         """Read a request body, rejecting anything unusable up front."""
         approval = (payload.get("approve_tool_call") or "").strip() or None
+        rejection = (payload.get("reject_tool_call") or "").strip() or None
         content = (payload.get("content") or "").strip()
-        if not content and not approval:
+        if not content and not approval and not rejection:
             raise TurnError("A message is required.")
 
         requested = (payload.get("intent") or "").strip().lower()
@@ -140,6 +149,11 @@ class TurnRequest:
             approval_scope=(
                 (payload.get("approval_scope") or "").strip().lower()
                 if approval is not None else ""
+            ),
+            reject_tool_call=rejection,
+            reject_reason=(
+                str(payload.get("reject_reason") or "").strip()[:500]
+                if rejection is not None else ""
             ),
         )
 
@@ -509,14 +523,22 @@ async def run_chat_turn(
             session_key=str(session.id),
             user_id=user.id,
         )
+    elif request.reject_tool_call:
+        # Not fatal when there is no state for the thread: the user has already
+        # dismissed the card, and telling them their refusal failed leaves them
+        # nothing to do about it. The turn goes on and the model simply never
+        # sees the call it asked for.
+        await agent.reject_tool_call(
+            thread_id, request.reject_tool_call, reason=request.reject_reason,
+        )
 
     await sink(Event.STATUS, {"phase": "planning", "message": "Starting up..."})
 
-    # An approval carries no new text, so it resumes against the message that
-    # triggered the pause rather than inventing a new turn.
+    # An approval or a refusal carries no new text, so it resumes against the
+    # message that triggered the pause rather than inventing a new turn.
     user_message = (
         await ChatMessage.objects.filter(session=session, role="user").alast()
-        if request.approve_tool_call else None
+        if (request.approve_tool_call or request.reject_tool_call) else None
     ) or await ChatMessage.objects.acreate(
         session=session, role="user",
         content=question or "[Approved tool call]", message_type="chat",
@@ -623,6 +645,7 @@ async def run_chat_turn(
 
     seed_text, seed_trace = await _seed_intent_tool(intent, question, turn, metadata)
 
+    turn_started = time.monotonic()
     try:
         result = await agent.run_turn(
             turn,
@@ -639,10 +662,11 @@ async def run_chat_turn(
         # reply.
         logger.warning("[Turn] Provider error for user %s: %s", user.id, exc)
         raise TurnError(str(exc)) from exc
+    turn_elapsed_s = time.monotonic() - turn_started
 
     assistant_message = await _persist_answer(
         session=session, user=user, turn=turn, result=result,
-        question=question, intent=intent,
+        question=question, intent=intent, elapsed_s=turn_elapsed_s,
     )
     await _notify(user, session, assistant_message)
 
@@ -679,6 +703,7 @@ async def _persist_answer(
     result: TurnResult,
     question: str,
     intent: str,
+    elapsed_s: float = 0,
 ) -> ChatMessage:
     """Store the assistant's reply and everything the UI needs alongside it."""
     answer = _INTERNAL_TAGS.sub("", result.answer or "").strip()
@@ -702,10 +727,18 @@ async def _persist_answer(
     if result.awaiting_approval:
         metadata["awaiting_approval"] = True
 
-    if not result.awaiting_approval:
+    if not result.awaiting_approval and elapsed_s <= FOLLOW_UPS_SLOW_TURN_SECONDS:
         metadata["follow_ups"] = await agent.suggest_follow_ups(
             turn, question=question, answer=answer
         )
+    elif not result.awaiting_approval:
+        # The turn already ran long; a further LLM call would delay the persist
+        # for three questions nobody asked for. The answer is kept as is.
+        logger.info(
+            "[Turn] Skipping follow-ups after a %.0fs turn (over %ds)",
+            elapsed_s, FOLLOW_UPS_SLOW_TURN_SECONDS,
+        )
+        metadata["follow_ups"] = []
 
     if len(answer.split()) > ASSISTANT_SUMMARY_WORD_LIMIT:
         metadata["summary"] = context_summary(answer)

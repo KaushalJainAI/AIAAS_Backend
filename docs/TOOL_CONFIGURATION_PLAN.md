@@ -59,7 +59,7 @@ No new type enum. The library is the existing `AVAILABLE_TOOLS` `chat/tools/__in
 - `scrape`: `scrape_webpage (6 extractors), read_url` `web.py:227`
 - `rag`: `list_knowledge_bases, knowledge_base_search, keyword_search, list_documents, read_document` `knowledge.py:38`
 - `codeExecution`: `execute_python` `sandbox.py:30` (`effect=read`, not `sensitive` in chat)
-- `fileOps`: `list_files, read_file, write_file, make_directory, delete_file` `files.py:70` (`requires="files"`, VFS `inference/vfs.py`)
+- `fileOps`: `list_files, find_files, read_file, write_file, edit_file, make_directory, delete_file` `files.py:70` (`requires="files"`, VFS `inference/vfs.py`)
 - `subAgents`: `invoke_subagent, search_agents` `agents.py:180` (`sensitive+irreversible`)
 - `always`: `get_current_time` `runtime.py:82` + `read_tool_output` `conversation.py:352` (`requires="spill"`)
 - `mcp`: whole dynamic set from plugins (see 3.1)
@@ -119,7 +119,7 @@ Alternative considered and rejected: JSON on `User` or `SubAgent` — drifts, un
 ### 3.6 Security and simplicity guards kept
 
 - Standard library code review is the guarantee; no user code path to sandbox-escape. `shell` remains unserved, `wasmtime` + `RestrictedPython` claim corrected `CLAUDE.md:439` (`safe_execution.py` is AST denylist + thread swap, `wasm_sandbox.py` has no callers) — no change.
-- Plugin install still bounded by `client.py` pooled sessions + timeouts `CONNECT_TIMEOUT 25s` / `LIST_TOOLS_TIMEOUT 30s` / `AGENT_LIST_TOOLS_TIMEOUT 8s`; failed plugin → `code`+`stderr` message via `_StderrTap`, cached 60s negative.
+- Plugin install still bounded by `client.py` pooled sessions + timeouts `CONNECT_TIMEOUT 25s` / `LIST_TOOLS_TIMEOUT 30s` / `AGENT_LIST_TOOLS_TIMEOUT 5s` (env `MCP_AGENT_LIST_TIMEOUT`); failed plugin → `code`+`stderr` message via `_StderrTap`, cached 60s negative.
 - `ToolConfig` changes invalidate per-user descriptor cache immediately (direct delete + publish) so toggle takes effect on next turn — no 2-min stale `tool_cache.py:53` issue.
 
 ## 4. Implementation phases — shippable increments

@@ -15,6 +15,7 @@ that was already right.
 from __future__ import annotations
 
 import asyncio
+import os
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -195,6 +196,92 @@ class FileTypeNormalisationTests(TestCase):
         # as text.
         self.assertEqual(extract_text_from_file('/nonexistent.png', 'image'), '')
 
+
+# ---------------------------------------------------------------------------
+# 3b. a .docx was read as UTF-8 zip noise
+# ---------------------------------------------------------------------------
+
+class DocxExtractionTests(TestCase):
+    """
+    `.docx` has been in `ALLOWED_MIME_TYPES` and in `FILE_TYPE_CHOICES` since the
+    first migration, and `extract_text_from_file` had no branch for it — so a
+    Word document fell to the `else`, was opened as UTF-8 with `errors='ignore'`,
+    and its zip container was stored as `content_text`, chunked and embedded.
+    The failure was silent in both directions: the upload succeeded and the
+    index filled with noise that matched nothing.
+    """
+
+    W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
+    def _docx(self, body_xml: str) -> str:
+        """A minimal .docx on disk. Only `word/document.xml` is ever read."""
+        import tempfile
+        import zipfile
+
+        path = os.path.join(tempfile.mkdtemp(), 'sample.docx')
+        with zipfile.ZipFile(path, 'w') as z:
+            z.writestr(
+                'word/document.xml',
+                f'<?xml version="1.0"?><w:document xmlns:w="{self.W}">'
+                f'<w:body>{body_xml}</w:body></w:document>',
+            )
+        return path
+
+    @staticmethod
+    def _para(*runs: str) -> str:
+        inner = ''.join(f'<w:r><w:t>{r}</w:t></w:r>' for r in runs)
+        return f'<w:p>{inner}</w:p>'
+
+    def test_paragraphs_come_back_as_text_not_zip_noise(self):
+        from inference.utils import extract_text_from_file
+
+        path = self._docx(self._para('Quarterly review') + self._para('Revenue rose.'))
+        text = extract_text_from_file(path, 'docx')
+
+        self.assertIn('Quarterly review', text)
+        self.assertIn('Revenue rose.', text)
+        # The tell of the old behaviour: a zip's local file header signature.
+        self.assertNotIn('PK', text)
+
+    def test_runs_within_one_paragraph_join_without_a_gap(self):
+        from inference.utils import extract_docx_text
+
+        # Word splits a styled word across runs; joining with a space would
+        # invent one that the document does not contain.
+        path = self._docx(self._para('un', 'break', 'able'))
+        self.assertEqual(extract_docx_text(path).strip(), 'unbreakable')
+
+    def test_a_table_row_stays_one_line(self):
+        from inference.utils import extract_docx_text
+
+        row = (
+            '<w:tbl><w:tr>'
+            f'<w:tc>{self._para("Q1")}</w:tc>'
+            f'<w:tc>{self._para("120")}</w:tc>'
+            '</w:tr></w:tbl>'
+        )
+        lines = extract_docx_text(self._docx(row)).splitlines()
+        # One line, not two: which value belonged to which column is the whole
+        # reason the table exists.
+        self.assertEqual(lines, ['Q1\t120'])
+
+    def test_a_legacy_doc_yields_nothing_rather_than_garbage(self):
+        from inference.utils import extract_text_from_file
+
+        # `normalize_file_type` files a legacy `.doc` as 'docx' too, and OLE2 is
+        # not a zip. Empty is the honest answer — `vfs.read_file` already
+        # explains a document with no extracted text.
+        import tempfile
+
+        path = os.path.join(tempfile.mkdtemp(), 'old.doc')
+        with open(path, 'wb') as fh:
+            fh.write(bytes([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) + bytes(64))
+        self.assertEqual(extract_text_from_file(path, 'docx'), '')
+
+    def test_a_missing_file_is_empty_not_an_exception(self):
+        from inference.utils import extract_docx_text
+
+        self.assertEqual(extract_docx_text('/nonexistent/sample.docx'), '')
 
 # ---------------------------------------------------------------------------
 # 4. doc_count only ever counted up

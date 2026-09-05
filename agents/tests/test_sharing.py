@@ -349,3 +349,147 @@ class ExploreTests(APITestCase):
             reverse('orchestrator:template_install', args=['reconciler']),
             {}, format='json')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class PublicCatalogueTests(APITestCase):
+    """The unauthenticated surface. Everything here is about what leaks.
+
+    This is the second route in the app reachable with no account, after the
+    webhook receiver, and it inherits that route's rule: every refusal is the
+    same 404. A `link` share, a `platform` share, a withdrawn one and a slug
+    that never existed have to be indistinguishable from outside, or the
+    endpoint becomes a way to enumerate what people published privately.
+    """
+
+    def setUp(self):
+        self.author = User.objects.create_user('author', 'a@example.com', 'pw')
+        self.agent = SubAgent.objects.create(
+            user=self.author, name='Reconciler', prompt='Reconcile.',
+            tool_grants={'webSearch': True},
+        )
+        self.share_url = reverse('orchestrator:agent_share', args=[self.agent.id])
+        self.list_url = reverse('orchestrator:public_agent_list')
+
+    def publish(self, visibility):
+        self.client.force_authenticate(user=self.author)
+        response = self.client.post(
+            self.share_url,
+            {'tagline': 'Reconciles invoices.', 'visibility': visibility},
+            format='json')
+        assert response.status_code == status.HTTP_200_OK, response.data
+        self.client.force_authenticate(user=None)
+        return response
+
+    def detail_url(self, slug='reconciler'):
+        return reverse('orchestrator:public_agent_detail', args=[slug])
+
+    # ---- what is reachable ------------------------------------------------
+
+    def test_a_public_agent_is_readable_with_no_account(self):
+        self.publish('public')
+        response = self.client.get(self.detail_url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['name'], 'Reconciler')
+
+    def test_the_public_listing_needs_no_account(self):
+        self.publish('public')
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([e['slug'] for e in response.data['results']],
+                         ['reconciler'])
+        self.assertFalse(response.data['truncated'])
+
+    # ---- what is not ------------------------------------------------------
+
+    def test_a_platform_share_is_not_public(self):
+        """Publishing to the platform is not publishing to the internet."""
+        self.publish('platform')
+        self.assertEqual(self.client.get(self.detail_url()).status_code,
+                         status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(self.list_url).data['results'], [])
+
+    def test_a_link_share_is_not_public(self):
+        self.publish('link')
+        self.assertEqual(self.client.get(self.detail_url()).status_code,
+                         status.HTTP_404_NOT_FOUND)
+
+    def test_a_withdrawn_public_agent_stops_being_public(self):
+        self.publish('public')
+        self.client.force_authenticate(user=self.author)
+        self.client.delete(self.share_url)
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get(self.detail_url()).status_code,
+                         status.HTTP_404_NOT_FOUND)
+
+    def test_every_refusal_is_the_same_answer(self):
+        """Otherwise the endpoint is an oracle for private slugs."""
+        self.publish('link')
+        private = self.client.get(self.detail_url('reconciler'))
+        missing = self.client.get(self.detail_url('no-such-agent'))
+        self.assertEqual(private.status_code, missing.status_code)
+        self.assertEqual(private.data, missing.data)
+
+    # ---- what the payload carries -----------------------------------------
+
+    def test_the_author_is_credited_by_name_never_by_email(self):
+        self.publish('public')
+        response = self.client.get(self.detail_url())
+        self.assertEqual(response.data['author'], 'author')
+        self.assertNotIn('@', str(response.data))
+
+    def test_the_public_payload_carries_no_account_shaped_fields(self):
+        """A narrower projection than the signed-in one, deliberately.
+
+        `candidates` are computed from a caller, and here there is none; a
+        response carrying an empty pool would be inviting a picker that cannot
+        work. `is_mine` is meaningless without a viewer.
+        """
+        self.publish('public')
+        response = self.client.get(self.detail_url())
+        self.assertNotIn('is_mine', response.data)
+        self.assertNotIn('visibility', response.data)
+        for req in response.data['requirements']:
+            self.assertNotIn('candidates', req)
+
+    def test_the_public_payload_still_says_what_the_agent_may_do(self):
+        """A visitor deciding whether to sign up needs the permission envelope."""
+        self.publish('public')
+        response = self.client.get(self.detail_url())
+        self.assertTrue(response.data['config']['tools']['webSearch'])
+        self.assertIn('autonomy', response.data['config'])
+
+    def test_no_row_id_reaches_an_anonymous_reader(self):
+        kb = KnowledgeBase.objects.create(user=self.author, name='Vendors')
+        self.agent.tool_grants = {'rag': True}
+        self.agent.agent_context = {'knowledgeBases': [kb.id]}
+        self.agent.save()
+        self.publish('public')
+        response = self.client.get(self.detail_url())
+        self.assertNotIn('knowledgeBases', response.data['config'])
+        self.assertEqual(response.data['requirements'][0]['type'],
+                         'knowledge_base')
+
+    # ---- the signed-in side still agrees ----------------------------------
+
+    def test_a_public_agent_is_also_listed_to_signed_in_users(self):
+        """`public` is wider than `platform`, not parallel to it."""
+        self.publish('public')
+        viewer = User.objects.create_user('viewer', 'v@example.com', 'pw')
+        self.client.force_authenticate(user=viewer)
+        response = self.client.get(reverse('orchestrator:template_list'))
+        self.assertIn('reconciler', {t['slug'] for t in response.data})
+
+    def test_installing_still_requires_an_account(self):
+        self.publish('public')
+        response = self.client.post(
+            reverse('orchestrator:template_install', args=['reconciler']),
+            {}, format='json')
+        self.assertIn(response.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+        self.assertEqual(SubAgent.objects.count(), 1)
+
+    def test_publishing_publicly_is_a_deliberate_choice(self):
+        """The default must never be the widest rung."""
+        self.client.force_authenticate(user=self.author)
+        self.client.post(self.share_url, {'tagline': 'Mine.'}, format='json')
+        self.assertEqual(SharedAgent.objects.get().visibility, 'platform')

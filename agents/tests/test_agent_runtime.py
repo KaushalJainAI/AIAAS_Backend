@@ -58,10 +58,15 @@ class GrantMappingTests(SimpleTestCase):
         # nothing else, and an agent that may not keep track of what it is
         # doing is not a safer agent — just a more forgetful one on exactly the
         # long runs a minimal grant set gets applied to.
+        #
+        # `render_chart` joined on the same terms: it hands the client a spec
+        # to draw, so the drawing happens in the reader's browser from data the
+        # agent already had. There is no blast radius to gate, and an agent that
+        # can only describe numbers in prose writes a worse report.
         names = toolbox().allowed_names
         self.assertEqual(
             names,
-            frozenset({'get_current_time', 'update_todos',
+            frozenset({'get_current_time', 'update_todos', 'render_chart',
                        'read_tool_output', 'recall_context'}),
         )
 

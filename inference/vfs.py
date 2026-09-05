@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
 from workflow_backend.thresholds import (
@@ -139,22 +139,46 @@ class FileScope:
     #: wherever the two subtrees coincide.
     write_label: str = ''
 
+    #: A *second* writable subtree: the delegating agent's home, granted to a
+    #: worker for the length of a delegated run. `None` for every other scope.
+    #:
+    #: Named rather than folded into a list of prefixes, because the two are
+    #: not interchangeable — one is "your own files", the other is "the folder
+    #: you share with whoever asked", and both the system prompt and
+    #: `list_dir`'s per-directory `writable` flag need to say which is which. A
+    #: list would make them the same thing with different indices.
+    #:
+    #: It is what lets delegation hand back *paths* instead of prose. Without
+    #: it a worker's findings could only come back through the transcript, so
+    #: every fan-out paid its whole result into the parent's context window —
+    #: and anything over the cap was archived and had to be fetched back out
+    #: again. A shared folder makes the answer "wrote findings-2.md", and the
+    #: parent reads it only if it needs to.
+    shared_prefix: tuple[str, ...] | None = None
+    shared_label: str = ''
+
     @property
     def writable(self) -> bool:
         """Whether anything at all may be written in this scope."""
-        return self.write_prefix is not None
+        return self.write_prefix is not None or self.shared_prefix is not None
 
     def may_write_at(self, parts: Sequence[str]) -> bool:
-        """Whether a write at `parts` (scope-relative) lands in the writable subtree.
+        """Whether a write at `parts` (scope-relative) lands in a writable subtree.
 
-        A path shorter than the prefix is *not* writable: standing at `/` with a
+        A path shorter than a prefix is *not* writable: standing at `/` with a
         prefix of `Agents/Reporter` means the agent may not create siblings of
         its own home, only descend into it.
+
+        Both subtrees are checked because a worker legitimately has two — its
+        own home and the shared workspace — and confinement still comes from
+        the walk: each prefix names segments under a root that was resolved
+        from a row the user owns, so neither one widens *where* the scope can
+        reach, only what may be written once it is there.
         """
-        prefix = self.write_prefix
-        if prefix is None:
-            return False
-        return tuple(parts[:len(prefix)]) == prefix
+        for prefix in (self.write_prefix, self.shared_prefix):
+            if prefix is not None and tuple(parts[:len(prefix)]) == prefix:
+                return True
+        return False
 
 
 def build_scope(user, file_access: str, *, agent_name: str = '') -> FileScope | None:
@@ -209,6 +233,62 @@ def build_scope(user, file_access: str, *, agent_name: str = '') -> FileScope | 
     return FileScope(
         user=user, root=None, mode=mode, label='/',
         write_prefix=(AGENT_HOME_ROOT, home.name), write_label=home_label,
+    )
+
+
+def with_shared_workspace(
+    scope: FileScope | None,
+    prefix: Sequence[str],
+    label: str = '',
+) -> FileScope | None:
+    """Grant `scope` write access to a second subtree — the caller's own folder.
+
+    This is what lets a worker hand its parent a *path* instead of prose. The
+    parent already writes in that folder, so a worker that can write there too
+    has somewhere to leave a report the parent reads on demand rather than pays
+    for in its context window.
+
+    `prefix` is the delegating scope's own `write_prefix`, passed straight
+    through rather than rebuilt from an agent name. Deriving it from the caller
+    is what keeps the two halves from disagreeing: the shared folder is *by
+    definition* the one the parent writes to, so there is no second rule that
+    could drift — and it works unchanged when the delegator is chat, whose
+    folder is `/Chat/` and not an agent home at all.
+
+    **It only ever adds, and only where it can mean something.** Four cases are
+    left exactly as they were, each for its own reason:
+
+    * a worker rooted at its own home (`fileAccess='scoped'`) — its
+      configuration says "confine me to my folder", and re-rooting it would
+      make one brief write to different places depending on who called it;
+    * a `readonly` worker — its configuration says it writes nothing, and
+      being delegated to is not consent to change that;
+    * an empty `prefix` — a parent that writes everywhere (`full`, chat's own
+      root) has no particular folder to share, and `()` would match every path,
+      quietly upgrading the worker to write anywhere;
+    * a prefix the worker already writes to — nothing to add.
+
+    Returns the scope unchanged in all of them, so a caller never has to ask
+    whether it applied: a worker without a workspace answers the way it always
+    did.
+    """
+    if scope is None:
+        return scope
+    prefix = tuple(str(p) for p in (prefix or ()) if str(p))
+    if not prefix:
+        return scope
+    # Rooted somewhere other than the tree: the walk starts inside the agent's
+    # own home and can never address the parent's, so a prefix here would name
+    # segments no path can reach.
+    if scope.root is not None:
+        return scope
+    if scope.write_prefix is None or prefix == scope.write_prefix:
+        return scope
+
+    return replace(
+        scope,
+        shared_prefix=prefix,
+        shared_label=label or '/' + '/'.join(prefix),
     )
 
 
@@ -494,6 +574,95 @@ def write_file(scope: FileScope, path: str, content: str, *,
         'created': created,
         'appended': append and not created,
         'chars': len(text),
+    }
+
+
+def edit_file(scope: FileScope, path: str, old_text: str, new_text: str,
+              *, replace_all: bool = False) -> dict:
+    """Replace an exact run of text inside one file, leaving the rest untouched.
+
+    The alternative was the only thing on offer: `write_file`, which replaces
+    the whole document. Changing one line of a long note therefore meant
+    reading every character in and emitting every character back out — two full
+    payloads billed per edit, and the model silently dropping the parts it
+    decided to paraphrase on the way through. The longer the file, the more
+    likely an edit was to quietly lose something.
+
+    So the contract is exact-match-or-refuse, and it is deliberately strict in
+    both directions:
+
+    * text that is not present is an error, never a no-op reported as success —
+      a model told "done" about an edit that changed nothing will build its
+      next three steps on a file it believes it has already fixed;
+    * text that appears more than once is an error too, unless `replace_all`
+      says the caller meant all of them. Silently taking the first occurrence
+      is how an edit lands in the wrong paragraph, and nothing downstream can
+      detect that it did.
+
+    Both refusals name the count, because the model's next move differs: zero
+    means re-read the file, several means include more surrounding text.
+    """
+    if not old_text:
+        raise VfsError(
+            'old_text is empty. Give the exact text to replace — to create a '
+            'file or overwrite one entirely, use write_file instead.'
+        )
+
+    parent_parts, name = _split_leaf(scope, path)
+    # Checked before the file is even looked up, so a read-only scope gets the
+    # same answer for a file that exists and one that does not — an editable
+    # location is not something to probe for.
+    _require_write_at(scope, parent_parts, 'edit')
+
+    folder = _folder_at(scope, parent_parts)
+    doc = _document_in(scope, folder, name)
+    if doc is None:
+        raise VfsError(
+            f'No such file: {render(scope, parent_parts + [name])}. '
+            f'List the directory to see what is there.'
+        )
+
+    body = doc.content_text or ''
+    if not body:
+        raise VfsError(
+            f'{render(scope, parent_parts + [name])} has no text to edit. It '
+            f'may be a binary upload (PDF, image) rather than an empty file.'
+        )
+
+    found = body.count(old_text)
+    if found == 0:
+        raise VfsError(
+            'That exact text is not in the file. Read it again and copy the '
+            'text to replace verbatim — whitespace and line breaks included.'
+        )
+    if found > 1 and not replace_all:
+        raise VfsError(
+            f'That text appears {found} times. Include more of the surrounding '
+            f'text so it matches once, or pass replace_all=true to change all '
+            f'{found}.'
+        )
+
+    updated = body.replace(old_text, new_text) if replace_all else \
+        body.replace(old_text, new_text, 1)
+
+    # The same ceiling a write is held to. An edit is a write; a growing
+    # replacement is the one way it can push a file past the cap.
+    if len(updated) > AGENT_FILE_WRITE_CHARS:
+        raise VfsError(
+            f'That edit would make this file {len(updated):,} characters, over '
+            f'the {AGENT_FILE_WRITE_CHARS:,} limit.'
+        )
+
+    doc.content_text = updated
+    doc.file_size = len(updated.encode('utf-8'))
+    doc.save(update_fields=['content_text', 'file_size', 'updated_at'])
+
+    return {
+        'path': render(scope, parent_parts + [name]),
+        'document_id': doc.id,
+        'replacements': found if replace_all else 1,
+        'chars': len(updated),
+        'chars_before': len(body),
     }
 
 

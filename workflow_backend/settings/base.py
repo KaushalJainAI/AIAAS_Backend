@@ -435,6 +435,55 @@ else:
         },
     }
 
+# ── Cache ───────────────────────────────────────────────────────────────────
+#
+# There was no `CACHES` block here at all, which is not the same as there being
+# no cache: Django falls back to `LocMemCache`, silently, per process. Every
+# `django.core.cache` user was therefore holding a private copy that died with
+# the worker — and the most expensive of them is `mcp_integration/tool_cache.py`,
+# whose whole purpose is to keep a ~21-second cold `npx` off the front of a
+# user's first token. A per-process cache means that cost is paid again by every
+# worker, and again after every deploy.
+#
+# Two other things only work on a shared backend. `tool_cache.invalidate_user`
+# needs `delete_pattern`, which LocMem does not implement — so editing a
+# connection left stale tools advertised until the TTL lapsed (`imporvements.md`
+# §3.3). And `llm/access.py`'s effort-support cache, primed by `preflight` and
+# read synchronously on the hot path, was primed in one process and read in
+# another.
+#
+# Opt-in by URL rather than by environment name: `USE_REDIS_CACHE` defaults on
+# wherever the channel layer is already on Redis, because a deployment with a
+# broker has one. Local dev with no Redis keeps LocMem and needs no config —
+# the same rule the channel layer above follows, and for the same reason.
+USE_REDIS_CACHE = os.environ.get(
+    'USE_REDIS_CACHE', 'True' if USE_REDIS_CHANNEL_LAYER else 'False',
+) == 'True'
+
+if USE_REDIS_CACHE:
+    CACHES = {
+        'default': {
+            # Django's own backend (5.x), so no `django-redis` dependency and
+            # no second connection-pool implementation to reason about.
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            # A different logical database from the channel layer and Celery:
+            # a `flushdb` while debugging a queue must not also drop every
+            # cached tool list and re-cold-start every connector.
+            'LOCATION': os.environ.get('CACHE_URL', REDIS_URL.rsplit('/', 1)[0] + '/1'),
+            'KEY_PREFIX': 'aiaas',
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            # Named, so two processes in one dev box at least agree on the
+            # name — and so the fallback is visible in `settings.CACHES`
+            # rather than being an absence someone has to know about.
+            'LOCATION': 'aiaas-local',
+        }
+    }
+
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', REDIS_URL)
 CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', REDIS_URL)
 CELERY_ACCEPT_CONTENT = ['json']

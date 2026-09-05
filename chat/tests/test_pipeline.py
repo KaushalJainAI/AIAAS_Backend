@@ -420,3 +420,55 @@ class ContextSummaryTests(TestCase):
 
     def test_length_is_bounded(self):
         self.assertLessEqual(len(context_summary("word " * 500).split()), 132)
+
+
+class SlowTurnFollowUpTests(TestCase):
+    """A turn that already ran long skips the follow-up suggestion call.
+
+    Follow-ups are a separate LLM call that `_persist_answer` awaits before
+    writing the message row — on a slow turn it delays persistence for three
+    questions nobody asked for. The answer is kept; only the extra call is
+    dropped (latency plan §4).
+    """
+
+    def setUp(self) -> None:
+        self.user = User.objects.create_user(
+            username="slow", email="s@example.com", password="pw"
+        )
+        self.session = ChatSession.objects.create(user=self.user, title="Test")
+
+    def _persist(self, elapsed_s: float, follow_mock) -> ChatMessage:
+        from chat.turn.agent import TurnContext, TurnResult
+        from chat.turn.pipeline import _persist_answer
+
+        turn = TurnContext(
+            provider="p", model="m", system_message="s",
+            user_id=self.user.id, session_id=str(self.session.id),
+            intent="chat", user_text="q",
+        )
+        result = TurnResult(
+            answer="A considered answer. " * 50, metadata={}, tool_trace=[],
+        )
+        with patch("chat.turn.agent.suggest_follow_ups", follow_mock):
+            return async_to_sync(_persist_answer)(
+                session=self.session, user=self.user, turn=turn,
+                result=result, question="q", intent="chat",
+                elapsed_s=elapsed_s,
+            )
+
+    @staticmethod
+    async def _three(*_args, **_kwargs) -> list[str]:
+        return ["a?", "b?", "c?"]
+
+    def test_a_fast_turn_still_suggests_follow_ups(self):
+        msg = self._persist(5, self._three)
+        self.assertEqual(msg.metadata["follow_ups"], ["a?", "b?", "c?"])
+
+    def test_a_slow_turn_skips_the_extra_call(self):
+        from workflow_backend.thresholds import FOLLOW_UPS_SLOW_TURN_SECONDS
+
+        async def _boom(*_args, **_kwargs) -> list[str]:
+            raise AssertionError("the follow-up call must not run on a slow turn")
+
+        msg = self._persist(FOLLOW_UPS_SLOW_TURN_SECONDS + 10, _boom)
+        self.assertEqual(msg.metadata["follow_ups"], [])

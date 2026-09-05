@@ -78,13 +78,19 @@ class TriggerSerializer(serializers.ModelSerializer):
     agent_allows_unattended = serializers.BooleanField(
         source='subagent.allow_unattended', read_only=True,
     )
+    #: Whether the agent carries an instruction of its own. A webhook with no
+    #: goal falls back to it, so this is what the editor needs to know whether
+    #: the goal field is optional or the only thing standing between this hook
+    #: and a permanent, opaque 404.
+    agent_has_prompt = serializers.SerializerMethodField()
     description = serializers.SerializerMethodField()
     upcoming = serializers.SerializerMethodField()
 
     class Meta:
         model = Trigger
         fields = (
-            'id', 'subagent', 'agent_name', 'agent_allows_unattended', 'mode',
+            'id', 'subagent', 'agent_name', 'agent_allows_unattended',
+            'agent_has_prompt', 'mode',
             'config', 'cron', 'schedule_cron', 'timezone', 'name', 'goal',
             'enabled', 'overlap', 'origin', 'starts_at', 'ends_at',
             'last_fired_at', 'next_due_at', 'queued_for', 'consecutive_failures',
@@ -96,6 +102,9 @@ class TriggerSerializer(serializers.ModelSerializer):
             'consecutive_failures', 'last_outcome', 'last_error',
             'created_at', 'updated_at',
         )
+
+    def get_agent_has_prompt(self, obj) -> bool:
+        return bool((obj.subagent.prompt or '').strip())
 
     def get_webhook_url(self, obj) -> str | None:
         """The secret is only ever shown through this field, to the owner."""
@@ -154,6 +163,23 @@ class TriggerSerializer(serializers.ModelSerializer):
                              f'month fields.'}
                 )
             attrs['config'] = dict(attrs.get('config') or {}, cron=cron)
+
+        if mode == 'webhook':
+            # The receiver answers 404 when there is nothing to ask the agent,
+            # and that 404 is deliberately indistinguishable from a wrong
+            # secret — so a hook saved with no instruction is silently dead for
+            # ever, and the only evidence is a line in a log the owner cannot
+            # read. Refuse it here, where there is somewhere to say why.
+            agent = attrs.get('subagent') or getattr(self.instance, 'subagent', None)
+            goal = attrs.get('goal', getattr(self.instance, 'goal', '') or '')
+            if not (goal or '').strip() and not (
+                agent and (agent.prompt or '').strip()
+            ):
+                raise serializers.ValidationError(
+                    {'goal': 'A webhook needs something to ask the agent. Give '
+                             'this trigger a goal, or a description to the agent '
+                             'itself.'}
+                )
 
         starts = attrs.get('starts_at', getattr(self.instance, 'starts_at', None))
         ends = attrs.get('ends_at', getattr(self.instance, 'ends_at', None))
@@ -381,6 +407,45 @@ def trigger_run_now(request, trigger_id: int):
 
 @extend_schema(
     methods=['POST'],
+    responses={200: TriggerSerializer},
+    description='Issue a new secret for a webhook trigger, revoking the old URL.',
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def trigger_rotate_secret(request, trigger_id: int):
+    """Give a webhook trigger a new URL, and make the old one a 404.
+
+    The secret in the path is the *only* credential on an endpoint that spends
+    the owner's model credits, so it has to be replaceable: a URL pasted into a
+    third-party form, a CI log or a screenshot is disclosed for good otherwise.
+    Before this the only remedy was delete-and-recreate, which throws away the
+    row — `last_fired_at`, the failure count, and the identity every calling
+    system was pointed at — to change one string.
+
+    Rotation is instant and unannounced by design. There is no grace period
+    where both secrets work: a leaked credential that keeps working for an hour
+    is a leaked credential, and the caller that needs updating is one the owner
+    controls.
+    """
+    trigger = get_object_or_404(
+        Trigger, id=trigger_id, subagent__user=request.user,
+    )
+    if trigger.mode != 'webhook':
+        return Response(
+            {'error': f'Only webhook triggers have a secret; this one is '
+                      f'"{trigger.mode}".'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # `save()` mints one when the column is blank, so clearing it is how a new
+    # secret is asked for — there is one generator, not two.
+    trigger.secret = ''
+    trigger.save(update_fields=['secret', 'updated_at'])
+    return Response(TriggerSerializer(trigger).data)
+
+
+@extend_schema(
+    methods=['POST'],
     responses={202: OpenApiResponse(description='Run accepted')},
     description='Public webhook receiver. The secret in the path is the only credential.',
     auth=[],
@@ -417,6 +482,10 @@ async def webhook_receive(request, secret: str):
     goal = (trigger.goal or agent.prompt or '').strip()
     if not goal:
         logger.warning('[Webhook] Trigger %s has nothing to ask the agent.', trigger.id)
+        # Counted like every other refusal: the 404 is opaque by design, so the
+        # failure counter on the row is the owner's only way to see that this
+        # hook has been answering nothing since the day it was made.
+        await _note_failure(trigger)
         return Response({'error': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     # The body is context, never the instruction. A caller who could set the

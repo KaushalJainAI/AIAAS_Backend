@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from rest_framework.test import APITestCase
 
 from core import memory
 from core.models import UserMemory
@@ -239,3 +240,54 @@ class PromptWiringTests(TestCase):
         granted |= set(ALWAYS_AVAILABLE)
         self.assertNotIn("remember_about_user", granted)
         self.assertNotIn("forget_about_user", granted)
+
+
+class MemoryApiTests(APITestCase):
+    """A store the user cannot see is one they cannot correct.
+
+    Every row here is injected into the system prompt of every future turn, so
+    a fact that is wrong keeps being wrong in every conversation until somebody
+    removes it. `forget_about_user` only helps if the user knows what is there.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="auditor", email="aud@example.test", password="pw"
+        )
+        self.client.force_authenticate(user=self.user)
+        memory.remember(self.user, "Prefers short answers", "preference")
+        memory.remember(self.user, "Works in IST", "profile")
+
+    def test_the_user_can_read_what_is_remembered(self):
+        response = self.client.get("/api/memory/")
+        self.assertEqual(response.status_code, 200)
+        texts = {m["text"] for m in response.json()["memories"]}
+        self.assertEqual(texts, {"Prefers short answers", "Works in IST"})
+
+    def test_one_fact_can_be_forgotten(self):
+        target = UserMemory.objects.get(text="Works in IST")
+        response = self.client.delete(f"/api/memory/{target.id}/")
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(UserMemory.objects.filter(id=target.id).exists())
+        self.assertTrue(UserMemory.objects.filter(user=self.user).exists())
+
+    def test_everything_can_be_forgotten_at_once(self):
+        response = self.client.delete("/api/memory/")
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(UserMemory.objects.filter(user=self.user).exists())
+
+    def test_another_users_memory_is_a_404_not_a_403(self):
+        """"Exists but not yours" is an ownership oracle."""
+        other = get_user_model().objects.create_user(
+            username="other", email="o@example.test", password="pw"
+        )
+        theirs = memory.remember(other, "Secret fact", "profile")[0]
+
+        response = self.client.delete(f"/api/memory/{theirs.id}/")
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(UserMemory.objects.filter(id=theirs.id).exists())
+
+    def test_it_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+        self.assertIn(self.client.get("/api/memory/").status_code, (401, 403))

@@ -109,3 +109,48 @@ class TurnContextTests(TestCase):
             session_id="s", intent="chat", user_text="hi", effort="minimal",
         )
         self.assertEqual(turn.effort, "minimal")
+
+
+class IterationEffortTests(TestCase):
+    """The tool loop thinks hardest where thinking shapes the most.
+
+    The first pass plans the turn and the last permitted pass synthesises the
+    answer, so both run at the chosen level; the dispatch passes in between
+    run one rung down. Pinned here rather than as timing because the saving
+    is in reasoning tokens the provider bills, not in wall clock we can
+    assert on.
+    """
+
+    def _effort(self, base, iteration, at_limit=False):
+        from chat.turn.agent import iteration_effort
+
+        return iteration_effort(base, iteration, at_limit=at_limit)
+
+    def test_the_first_pass_plans_at_full_effort(self):
+        self.assertEqual(self._effort("high", 0), "high")
+
+    def test_middle_passes_step_down_exactly_one_rung(self):
+        self.assertEqual(self._effort("high", 1), "medium")
+        self.assertEqual(self._effort("medium", 3), "low")
+        self.assertEqual(self._effort("low", 2), "minimal")
+
+    def test_the_final_pass_answers_at_full_effort(self):
+        # Tools are withheld on this pass, so it is pure synthesis — the one
+        # pass besides the first where the level is the answer's quality.
+        self.assertEqual(self._effort("high", 7, at_limit=True), "high")
+
+    def test_no_level_means_no_level_on_every_pass(self):
+        self.assertIsNone(self._effort(None, 0))
+        self.assertIsNone(self._effort(None, 4))
+        # `""` is the explicit request for the model default, not an absent
+        # level — it passes through exactly as `None` does.
+        self.assertEqual(self._effort("", 2), "")
+
+    def test_an_unknown_name_passes_through_untouched(self):
+        # The snap in `llm.access` is what keeps a bad level off the wire;
+        # guessing here would be a second copy of that rule.
+        self.assertEqual(self._effort("turbo", 2), "turbo")
+
+    def test_the_floor_holds_at_none(self):
+        self.assertEqual(self._effort("none", 5), "none")
+        self.assertEqual(self._effort("minimal", 5), "none")

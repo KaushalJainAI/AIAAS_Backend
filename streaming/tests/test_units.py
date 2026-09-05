@@ -178,6 +178,30 @@ class ProgressUpdateTests(SimpleTestCase):
         self.assertEqual(ev.data["percentage"], 30)
 
 
+class WorkflowQueuedTests(SimpleTestCase):
+    """`workflow_queued` is the before to `workflow_start`'s after."""
+
+    _original_channel_layer_property = SSEBroadcaster.channel_layer
+
+    def tearDown(self):
+        SSEBroadcaster.channel_layer = type(self).__dict__['_original_channel_layer_property']
+
+    def test_queued_frame_carries_queued_status(self):
+        b = SSEBroadcaster()
+        b._channel_layer = None
+        type(b).channel_layer = property(lambda s: None)
+        SSEBroadcaster._subscribers = {}
+
+        async def scenario():
+            q = await b.subscribe("e-queued")
+            await b.workflow_queued("e-queued")
+            return await asyncio.wait_for(q.get(), timeout=1.0)
+
+        ev = _run(scenario())
+        self.assertEqual(ev.event_type, "workflow_queued")
+        self.assertEqual(ev.data, {"status": "queued"})
+
+
 class ConsumerResponseHandlingTests(SimpleTestCase):
     """
     Regression: response.get('value', response) used to crash when response

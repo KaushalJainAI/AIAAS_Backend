@@ -48,6 +48,15 @@ urlpatterns = [
     # `user=request.user` lookup every other agent route makes.
     path('agents/<int:agent_id>/share/', gallery.agent_share, name='agent_share'),
 
+    # The public catalogue: the second unauthenticated surface in this app,
+    # after the webhook receiver. Reads only, `visibility='public'` only, and
+    # 404 for everything else — a `link` share, a `platform` share, a withdrawn
+    # one and a slug that never existed must be indistinguishable from outside,
+    # or this becomes an oracle for enumerating what people published privately.
+    path('public/agents/', gallery.public_agent_list, name='public_agent_list'),
+    path('public/agents/<slug:slug>/', gallery.public_agent_detail,
+         name='public_agent_detail'),
+
     # Triggers — how something other than the user starts a run.
     path('triggers/', triggers.trigger_list, name='trigger_list'),
     # Dry-run a cron expression before it is saved. Sits above the
@@ -60,6 +69,10 @@ urlpatterns = [
     # out whether a schedule works without waiting for its next slot.
     path('triggers/<int:trigger_id>/run/', triggers.trigger_run_now,
          name='trigger_run_now'),
+    # Re-issue a webhook's secret. The URL is the only credential on the
+    # public receiver, so it has to be revocable without losing the row.
+    path('triggers/<int:trigger_id>/rotate/', triggers.trigger_rotate_secret,
+         name='trigger_rotate_secret'),
     # The one unauthenticated route. The secret in the path is the credential;
     # see agents/views/triggers.py for why it answers 404 for every refusal.
     path('hooks/<str:secret>/', triggers.webhook_receive, name='webhook_receive'),

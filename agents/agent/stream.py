@@ -197,25 +197,33 @@ class AgentRunStream:
         """
         call_id = payload.get('call_id', '')
         tool = payload.get('tool', 'this tool')
-        message = (
-            f"The agent wants to call {tool}. "
-            'It will not run until you approve it.'
-        )
+        args = payload.get('args') or {}
+
+        # The message used to be built from the tool name alone, and `args`
+        # was dropped here — so the Inbox could not have shown what was being
+        # sent even if it had wanted to. A row reading "The agent wants to call
+        # mcp__7__send_email_ab12cd34" asks someone to consent to a string.
+        from chat.tools.describe import describe_call_async
+
+        detail = await describe_call_async(tool, args)
+        message = f"{detail['sentence']} It will not run until you approve it."
 
         from .hitl import open_request
 
         await open_request(
             self._log, call_id=call_id, tool=tool, message=message,
+            title=detail['title'], detail=detail, args=args,
         )
 
         await self._broadcaster.hitl_request(
             self.execution_id,
             request_id=call_id,
             request_type='tool_approval',
-            title=f'Approve {tool}?',
+            title=detail['title'],
             message=message,
             options=[{'label': 'Approve', 'value': 'approve'},
                      {'label': 'Reject', 'value': 'reject'}],
+            detail=detail,
         )
 
     async def _run_failed(self, payload: dict[str, Any]) -> None:
@@ -430,6 +438,13 @@ class AgentRunStream:
         )
 
     # ── run lifecycle ────────────────────────────────────────────────────────
+
+    async def run_queued(self) -> None:
+        """The run is waiting for an admission slot. Best-effort like every
+        frame here: a run must not fail because nobody could be told it is
+        waiting, and `workflow_start` on admission is still the signal that
+        it began executing."""
+        await self._safe(self._broadcaster.workflow_queued(self.execution_id))
 
     async def run_started(self, goal: str) -> None:
         # A resumed run continues an execution that already has steps. Starting

@@ -55,6 +55,37 @@ class TwoLifetimeTests(SimpleTestCase):
         async_to_sync(MCPToolCache.set)(1, 5, TOOLS)
         self.assertEqual(async_to_sync(MCPToolCache.get)(1, 5), TOOLS)
 
+    def test_the_soft_lifetime_is_thirty_minutes(self):
+        """Pinned: the latency plan §2 raised this from 120s to 1800s.
+
+        A two-minute soft TTL meant every resumed conversation paid a cold
+        `npx` in front of its first token; freshness here is enforced by
+        invalidation on edit, not by ageing out.
+        """
+        self.assertEqual(tool_cache.SOFT_TTL_SECONDS, 1800)
+        self.assertEqual(tool_cache.TTL_SECONDS, tool_cache.SOFT_TTL_SECONDS)
+
+    def test_a_warm_cache_path_lists_nothing_live(self):
+        """A fresh entry answers with no live listing behind it.
+
+        The credentials check is the tell: resolving them is the first step
+        of a live `list_tools`, so if they were touched the answer was not
+        served from cache — and TTFT paid for an `npx`.
+        """
+        from mcp_integration import client
+
+        manager = client.MCPClientManager(1, user=5)
+        with patch.object(
+            client.MCPClientManager, "get_server_config",
+            new_callable=AsyncMock,
+        ), patch.object(
+            client.MCPClientManager, "_resolve_credentials",
+            new_callable=AsyncMock,
+        ) as creds:
+            async_to_sync(MCPToolCache.set)(1, 5, TOOLS)
+            self.assertEqual(_run(manager.list_tools()), TOOLS)
+            creds.assert_not_called()
+
     def test_a_foreign_shape_is_ignored_rather_than_returned(self):
         """A v2 bare list left in a shared Redis must not be read as an entry."""
         cache.set(tool_cache._key(1, 5), TOOLS, 60)
@@ -118,3 +149,74 @@ class RefreshBehindTheAnswerTests(SimpleTestCase):
                 client._refresh_in_background(1, 5)
 
         self.assertEqual(len(started), 1)
+
+
+class WarmOnConfigureTests(SimpleTestCase):
+    """Configuring a connector pre-lists its tools off the request path.
+
+    The stale-serving cache cannot hide the very first listing — nothing has
+    been cached yet — so without a warm the first turn after connecting pays
+    the full cold `npx` in front of its first token.
+    """
+
+    def setUp(self):
+        from mcp_integration import client
+
+        client._refreshing.clear()
+
+    def _warm_and_wait(self, *args, **kwargs):
+        """Run `warm_cache` and wait for its thread to finish its listing."""
+        import threading
+
+        from mcp_integration import client
+
+        done = threading.Event()
+        real_list = client.MCPClientManager.list_tools
+
+        async def _listing(self, use_cache=True):
+            kwargs['seen'].append(use_cache)
+            done.set()
+            return TOOLS
+
+        with patch.object(client.MCPClientManager, "list_tools", _listing):
+            client.warm_cache(*args)
+            self.assertTrue(
+                done.wait(timeout=30),
+                "the warm thread never listed — it died or never started",
+            )
+        # The thread's `finally` runs just after `done.set()`; wait for the
+        # key to clear rather than sleeping a fixed span.
+        deadline = time.time() + 30
+        while (1, 5) in client._refreshing and time.time() < deadline:
+            time.sleep(0.01)
+        return kwargs['seen']
+
+    def test_a_warm_lists_live_and_releases_its_key(self):
+        from mcp_integration import client
+
+        seen = self._warm_and_wait(1, 5, seen=[])
+        self.assertEqual(seen, [False], "a warm must force a live listing")
+        self.assertNotIn((1, 5), client._refreshing)
+
+    def test_a_failing_warm_never_raises_and_still_releases(self):
+        from mcp_integration import client
+
+        async def _boom(self, use_cache=True):
+            raise RuntimeError("npx not found")
+
+        with patch.object(client.MCPClientManager, "list_tools", _boom):
+            # Must return promptly and must not raise: this runs on saves.
+            client.warm_cache(1, 5)
+        deadline = time.time() + 30
+        while (1, 5) in client._refreshing and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertNotIn((1, 5), client._refreshing)
+
+    def test_concurrent_warms_list_once(self):
+        """Two enables racing each other pay one cold start, not two."""
+        from mcp_integration import client
+
+        with patch("mcp_integration.client.threading.Thread") as thread:
+            client.warm_cache(1, 5)
+            client.warm_cache(1, 5)
+        self.assertEqual(thread.call_count, 1)

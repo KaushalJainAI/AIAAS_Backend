@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -63,6 +64,15 @@ logger = logging.getLogger(__name__)
 # Connection pool
 # ---------------------------------------------------------------------------
 
+def _float_env(name: str, default: float) -> float:
+    """A timeout knob overridable without a rebuild. A bad value keeps the
+    default rather than refusing to boot the process over one knob."""
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 SESSION_TTL: float = 300.0  # seconds a session stays alive without activity
 # `npx -y <pkg>` resolves and installs before the server prints a byte: measured
 # 8.5 s for a working connector on this catalogue and 7.7 s for npm to report
@@ -71,7 +81,11 @@ SESSION_TTL: float = 300.0  # seconds a session stays alive without activity
 # indistinguishable, both surfacing as a bare `TimeoutError` with no message.
 CONNECT_TIMEOUT: float = 25.0
 LIST_TOOLS_TIMEOUT: float = 30.0
-CLOSE_TIMEOUT: float = 10.0
+# Short on purpose: close runs on the request's hot path (eviction during a
+# turn), and a wedged transport that needs more than a few seconds is never
+# going to close cleanly — the cancellation below still runs in the worker's
+# own task. 10s here turned every listing timeout into a second timeout.
+CLOSE_TIMEOUT: float = _float_env("MCP_CLOSE_TIMEOUT", 5.0)
 # How long a connection failure is remembered. Without this every open of a
 # broken connector's card spawns another npx that takes ~8 s to fail; a user
 # clicking around a catalogue of eleven can have a dozen in flight.
@@ -83,9 +97,12 @@ RPC_TIMEOUT: float = 15.0
 CALL_TOOL_TIMEOUT: float = 120.0
 # What an agent turn will wait for a *cold* connector before going without it.
 # Deliberately far below LIST_TOOLS_TIMEOUT: a person watching a spinner on the
-# Connections page can wait for npx to install, a chat turn cannot, and eleven
-# connectors at the discovery budget would be half a minute of dead air.
-AGENT_LIST_TOOLS_TIMEOUT: float = 8.0
+# Connections page can wait for npx to install, a chat turn cannot. 5s because
+# a warm `npx` answers in 2.4–3.7s (passes with margin) while a cold one needs
+# ~21s (fails fast instead of holding the turn for 8s); the failure is then
+# remembered for FAILURE_TTL and the cache warms behind the turn, so the dead
+# air is paid once a minute, not once a turn.
+AGENT_LIST_TOOLS_TIMEOUT: float = _float_env("MCP_AGENT_LIST_TIMEOUT", 5.0)
 
 # ---------------------------------------------------------------------------
 # Subprocess environment
@@ -483,6 +500,11 @@ class _StderrTap:
 #: their own `npx` — the stampede the cache exists to prevent, moved from the
 #: foreground to the background where it is harder to notice.
 _refreshing: set[tuple[int, int | None]] = set()
+#: Guards `_refreshing` across the loop thread and the daemon threads
+#: `warm_cache` starts below. Set add/discard is atomic under the GIL, but
+#: check-then-add is not — without this, two enables racing each other both
+#: see an empty set and both pay a cold `npx`.
+_refresh_lock = threading.Lock()
 
 
 def _refresh_in_background(server_id: int, user: Any) -> None:
@@ -494,9 +516,10 @@ def _refresh_in_background(server_id: int, user: Any) -> None:
     already sent (see `workflow_backend/background.py`).
     """
     key = (server_id, _coerce_user_id(user))
-    if key in _refreshing:
-        return
-    _refreshing.add(key)
+    with _refresh_lock:
+        if key in _refreshing:
+            return
+        _refreshing.add(key)
 
     async def _run() -> None:
         try:
@@ -514,6 +537,64 @@ def _refresh_in_background(server_id: int, user: Any) -> None:
             _refreshing.discard(key)
 
     spawn(_run())
+
+
+def warm_cache(server_id: int, user: Any) -> None:
+    """Pre-list a connector's tools after it is configured, without blocking.
+
+    Enabling a connection and then immediately asking the agent something is
+    the normal order, and without this the first turn pays the full cold
+    `npx` start (~21s) in front of its first token — the one latency the
+    stale-serving cache cannot hide, because nothing has been cached yet.
+
+    Safe to call from sync DRF views, which is the whole point: `spawn`
+    needs a running loop and there is none in a sync view thread, so this
+    runs the refresh on a daemon thread with its own loop instead. The
+    thread holds no request state — it re-reads the server row and the
+    user's credentials itself — so nothing outlives the response that
+    started it. Best-effort throughout: a connector that fails to list
+    simply stays cold, exactly as if nothing had been warmed.
+    """
+    from asgiref.sync import ThreadSensitiveContext
+    from django.db import close_old_connections
+
+    key = (server_id, _coerce_user_id(user))
+    with _refresh_lock:
+        if key in _refreshing:
+            return
+        _refreshing.add(key)
+
+    async def _warm() -> None:
+        # One thread for all of the ORM: without the context every
+        # `sync_to_async` fans out onto the default executor and each call
+        # pins its own connection — the same rule `background._detached`
+        # exists to enforce, applied here because there is no `spawn`.
+        async with ThreadSensitiveContext():
+            try:
+                await MCPClientManager(server_id, user=user).list_tools(use_cache=False)
+            except Exception as e:  # noqa: BLE001
+                logger.info(
+                    "Pre-warm of MCP server %s failed, leaving it cold: %s",
+                    server_id, e,
+                )
+            finally:
+                with _refresh_lock:
+                    _refreshing.discard(key)
+                try:
+                    await sync_to_async(close_old_connections)()
+                except Exception:  # noqa: BLE001
+                    logger.exception("[MCP] Failed to close warm-thread connections")
+
+    def _main() -> None:
+        try:
+            asyncio.run(_warm())
+        except Exception:  # noqa: BLE001 — never fail a save over a warm
+            logger.exception("[MCP] Warm thread for server %s died", server_id)
+
+    thread = threading.Thread(
+        target=_main, name=f'mcp-warm:{server_id}', daemon=True,
+    )
+    thread.start()
 
 
 class MCPClientManager:
@@ -906,6 +987,8 @@ async def get_servers_for_user(user) -> list[MCPServer]:
 
 async def get_all_tools_from_all_servers(user) -> list[dict[str, Any]]:
     """Aggregate tools from every server visible to `user`, with origin tags."""
+    if os.environ.get("MCP_DISABLED", "False").lower() in ("true", "1", "yes"):
+        return []
     servers = await get_servers_for_user(user)
     tools: list[dict[str, Any]] = []
 

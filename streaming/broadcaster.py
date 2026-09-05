@@ -96,6 +96,11 @@ class SSEBroadcaster:
     # thirty steps and a run that was curated look identical from outside,
     # and only one of them is working as designed.
     EVENT_CONTEXT_CURATED = 'context_curated'
+    # The run exists but holds no admission slot yet — every slot is taken,
+    # so it waits. Announced because until `workflow_start` a queued run and
+    # a run whose task died between the 202 and its first frame look
+    # identical from outside, and only one of them is still alive.
+    EVENT_WORKFLOW_QUEUED = 'workflow_queued'
     
     # In-memory subscribers (for single instance)
     # Format: {execution_id: [asyncio.Queue, ...]}
@@ -267,6 +272,19 @@ class SSEBroadcaster:
     
     # Convenience methods for common events
     
+    async def workflow_queued(self, execution_id: str) -> None:
+        """The run is waiting for an admission slot, not executing yet.
+
+        A client that subscribed on the 202 and has seen nothing is otherwise
+        left guessing whether the run is queued or its task died silently.
+        `workflow_start` is still the executing signal; this is the before.
+        """
+        await self.send_event(
+            execution_id,
+            self.EVENT_WORKFLOW_QUEUED,
+            {'status': 'queued'},
+        )
+
     async def workflow_started(
         self,
         execution_id: str,
@@ -439,9 +457,17 @@ class SSEBroadcaster:
         request_type: str,
         title: str,
         message: str,
-        options: Optional[list] = None
+        options: Optional[list] = None,
+        detail: Optional[dict] = None,
     ):
-        """Send HITL request event."""
+        """Send HITL request event.
+
+        `detail` is `chat.tools.describe.describe_call`'s output — what the
+        agent is asking to do, as named fields. It rides alongside `message`
+        rather than replacing it so a client that predates it still renders a
+        sentence, and it is built on the server so the socket frame, the queue
+        row and the chat card cannot describe one call three different ways.
+        """
         await self.send_event(
             execution_id,
             self.EVENT_HITL_REQUEST,
@@ -451,6 +477,7 @@ class SSEBroadcaster:
                 'title': title,
                 'message': message,
                 'options': options or [],
+                'detail': detail or None,
             }
         )
     

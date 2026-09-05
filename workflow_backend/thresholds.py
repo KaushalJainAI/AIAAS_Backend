@@ -1,3 +1,20 @@
+from __future__ import annotations
+
+import os
+
+
+def _int_env(name: str, default: int) -> int:
+    """An integer limit overridable from the environment, falling back safely.
+
+    A non-integer value is a misconfiguration, not a crash: it keeps the
+    default rather than refusing to boot the whole process over one knob.
+    """
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 # ==================== Chat Context & Window Limits ====================
 MAX_CONTEXT_TOKENS = 100_000  # 100K token hard limit
 # How many *conversational* turns (user + assistant only, never system) get
@@ -328,6 +345,14 @@ WORKER_DEADLINE_SHARE = 0.8
 #: on their first model call.
 MIN_WORKER_SECONDS = 60
 
+# ==================== Follow-up Suggestions ====================
+# Follow-ups are a separate cheap LLM call after the answer is on screen, and
+# `_persist_answer` awaits it before writing the message row — so on a turn
+# that already ran long, it delays persistence for three questions nobody
+# asked for. Above this age of the main turn they are skipped (the answer is
+# kept; only the suggestions are dropped).
+FOLLOW_UPS_SLOW_TURN_SECONDS = _int_env('FOLLOW_UPS_SLOW_TURN_SECONDS', 60)
+
 # ==================== Agent Admission ====================
 # What stops one user's runs from being every run on the box. Per-process, so
 # these bound one ASGI worker rather than the cluster — which is the shape of
@@ -337,9 +362,22 @@ MIN_WORKER_SECONDS = 60
 # Only *top-level* runs are gated. A delegated worker must never queue behind
 # its own parent: the parent holds a slot while awaiting the worker, so gating
 # the worker on the same semaphore is a deadlock, not a limit.
-MAX_CONCURRENT_RUNS_PER_USER = 3
-MAX_CONCURRENT_RUNS_TOTAL = 12
+#
+# Environment-overridable so a larger box can raise the ceiling without an
+# edit: `RUNS_PER_USER_LIMIT`, `RUNS_TOTAL_LIMIT`, `ADMISSION_WAIT_SECONDS`.
+# Read once at import — changing them needs a process restart, which is also
+# true of every other limit in this file.
+MAX_CONCURRENT_RUNS_PER_USER = _int_env('RUNS_PER_USER_LIMIT', 3)
+MAX_CONCURRENT_RUNS_TOTAL = _int_env('RUNS_TOTAL_LIMIT', 12)
 #: How long a run waits for a slot before it is refused. Bounded because the
 #: caller already has a 202 and an execution id: a run that waits for ever is
 #: indistinguishable, from the outside, from one that is running.
-ADMISSION_WAIT_SECONDS = 120
+ADMISSION_WAIT_SECONDS = _int_env('ADMISSION_WAIT_SECONDS', 120)
+
+#: How many publicly shared agents the unauthenticated catalogue returns.
+#: Capped because DRF's pagination never applies to `@api_view` function views
+#: and this one is reachable with no account at all — an unbounded list is a
+#: free full-table scan for anyone who finds the URL. The response says
+#: `truncated` when it cut, because a capped list and a complete one must not
+#: look alike.
+PUBLIC_CATALOGUE_LIMIT = 60

@@ -468,7 +468,7 @@ class FileToolsAreGatedByAScopeTests(SimpleTestCase):
     """
 
     FILE_TOOLS = ["list_files", "find_files", "read_file", "write_file",
-                  "make_directory", "delete_file"]
+                  "edit_file", "make_directory", "delete_file"]
 
     def test_not_offered_without_a_scope(self):
         # `requires="files"` is unmet for a caller that brought none — which is

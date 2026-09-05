@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import uuid
+import zipfile
+from xml.etree import ElementTree
 
 import bleach
 import magic
@@ -88,6 +90,85 @@ def normalize_file_type(filename: str, mime_type: str = '') -> str:
     return DEFAULT_FILE_TYPE
 
 
+#: WordprocessingML namespace. A .docx is a zip of XML parts; the text lives in
+#: `word/document.xml` under this one namespace.
+_W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+
+
+def _docx_paragraph_text(para) -> str:
+    """Visible text of one `w:p`, in document order.
+
+    `w:t` runs carry the characters; `w:tab` and `w:br` carry layout that would
+    otherwise silently concatenate two words into one.
+    """
+    out = []
+    for node in para.iter():
+        if node.tag == _W + 't':
+            out.append(node.text or '')
+        elif node.tag == _W + 'tab':
+            out.append('\t')
+        elif node.tag == _W + 'br':
+            out.append('\n')
+    return ''.join(out)
+
+
+def _docx_blocks(parent):
+    """Yield one line of text per paragraph and per table row, in order.
+
+    Tables are walked as rows rather than flattened paragraph-by-paragraph: a
+    four-column row rendered as four separate lines loses which value belonged
+    to which heading, which is exactly the association a table exists to carry.
+    """
+    for child in parent:
+        if child.tag == _W + 'p':
+            yield _docx_paragraph_text(child)
+        elif child.tag == _W + 'tbl':
+            for row in child.findall(_W + 'tr'):
+                cells = [
+                    ' '.join(
+                        t for t in (
+                            _docx_paragraph_text(p)
+                            for p in cell.findall(_W + 'p')
+                        ) if t
+                    )
+                    for cell in row.findall(_W + 'tc')
+                ]
+                yield '\t'.join(cells)
+
+
+def extract_docx_text(file_path) -> str:
+    """Plain text of a .docx, using the standard library only.
+
+    Deliberately not `python-docx`: the whole job is `w:t` runs in document
+    order, the format is a stable OOXML part, and a new wheel in the image is a
+    real cost on a 1.9 GB box for about forty lines of walking.
+
+    Returns `''` for anything that is not a readable .docx — above all a legacy
+    OLE2 `.doc`, which `normalize_file_type` also files as `docx` and which is
+    not a zip at all. An empty string is the honest answer: `vfs.read_file`
+    already explains a document with no extracted text, whereas the previous
+    behaviour (falling through to `open(..., errors='ignore')`) read the zip
+    container as UTF-8 and stored binary noise as the document's content.
+    """
+    try:
+        with zipfile.ZipFile(file_path) as z:
+            xml = z.read('word/document.xml')
+    except (zipfile.BadZipFile, KeyError, OSError) as e:
+        logger.warning('Not a readable .docx (%s): %s', file_path, e)
+        return ''
+
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError as e:
+        logger.warning('Malformed word/document.xml in %s: %s', file_path, e)
+        return ''
+
+    body = root.find(_W + 'body')
+    if body is None:
+        return ''
+    return '\n'.join(_docx_blocks(body))
+
+
 class DocumentProcessor:
     ALLOWED_MIME_TYPES = [
         'application/pdf',
@@ -153,6 +234,13 @@ class DocumentProcessor:
                     data = json.load(f)
                     text = json.dumps(data, indent=2)
 
+            elif file_type == 'docx':
+                # Accepted at upload since the first migration and handled
+                # nowhere: a .docx fell to the `else` below, which read the zip
+                # container as UTF-8 with errors ignored and stored the noise
+                # as `content_text` — then chunked and embedded it.
+                text = extract_docx_text(file_path)
+
             elif file_type == 'csv':
                 with open(file_path, 'r', encoding='utf-8') as f:
                     reader = csv.reader(f)
@@ -175,7 +263,7 @@ ALLOWED_MIME_TYPES = DocumentProcessor.ALLOWED_MIME_TYPES
 validate_file_upload = DocumentProcessor.validate_file_upload
 __all__ = [
     'ALLOWED_MIME_TYPES', 'DEFAULT_FILE_TYPE', 'DocumentProcessor',
-    'extract_text_from_file', 'normalize_file_type',
+    'extract_docx_text', 'extract_text_from_file', 'normalize_file_type',
     'sanitize_document_content', 'user_document_path', 'validate_file_upload',
 ]
 sanitize_document_content = DocumentProcessor.sanitize_document_content

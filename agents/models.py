@@ -520,15 +520,29 @@ class SharedAgent(models.Model):
     account.
     """
 
+    #: Three rungs, each strictly wider than the last, and the widest is the
+    #: only one that leaves the platform.
+    #:
+    #: `link`     — reachable by slug, listed nowhere, still requires an
+    #:              account. What you pick to send one colleague.
+    #: `platform` — listed on Explore to signed-in users.
+    #: `public`   — listed on Explore *and* readable with no account at all,
+    #:              through `agents/views/gallery.py`'s unauthenticated pair.
+    #:
+    #: The ladder is why `link` exists: without it, sharing with one person and
+    #: publishing to the open internet would be the same act, and everyone
+    #: would perform the second while meaning the first.
     VISIBILITY_CHOICES = [
-        # Listed on the explore page for everyone on the platform.
-        ('platform', 'Everyone on the platform'),
-        # Reachable only by its link. The lesser of the two on purpose: it is
-        # what someone picks to share with a colleague without publishing to
-        # strangers, and having it means "public" is a deliberate choice rather
-        # than the only way to share at all.
         ('link', 'Anyone with the link'),
+        ('platform', 'Everyone on the platform'),
+        ('public', 'Anyone, including people without an account'),
     ]
+
+    #: The visibilities that appear in the signed-in Explore listing. `public`
+    #: is included because it is *wider* than `platform`, not parallel to it —
+    #: spelling this as a set rather than as `!= 'link'` is what stops a fourth
+    #: rung added later from silently becoming listed.
+    LISTED_VISIBILITIES = ('platform', 'public')
 
     #: Nullable so an author can delete their own agent without retracting what
     #: other people are installing. Nothing on the install path reads it.

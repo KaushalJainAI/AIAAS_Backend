@@ -95,6 +95,11 @@ async def agent_execute(request, agent_id: int):
     Blocking here until the run finished would make that stream
     pointless — nobody can subscribe to an id they have not been given yet.
 
+    The first frame on a busy box is `workflow_queued`, not `workflow_start`:
+    the run waits for an admission slot before anything executes, and a client
+    that subscribed on the 202 and has seen nothing can otherwise not tell a
+    queued run from one whose task died silently.
+
     Guardrails and the provider credential are still checked *before*
     responding, so a run that cannot be paid for is refused while the caller is
     listening rather than dying quietly in the background a moment later.

@@ -265,6 +265,130 @@ class ReadWriteTests(VfsTestCase):
 
 # ─────────────────────────────────────────────────────────────────────────
 # Mode enforcement
+class EditTests(VfsTestCase):
+    """
+    `edit_file` exists because `write_file` is whole-file replacement, so the
+    only way to change one line was to re-emit every other line. What is tested
+    here is mostly the *refusals*: an edit that silently does nothing, or that
+    lands on the wrong one of several matches, is invisible to everything
+    downstream.
+    """
+
+    def test_replaces_one_run_and_leaves_the_rest(self):
+        scope = self.scope()
+        vfs.write_file(scope, 'notes.md', '# Q1\nRevenue rose.\nCosts fell.\n')
+
+        out = vfs.edit_file(scope, 'notes.md', 'Revenue rose.', 'Revenue doubled.')
+
+        self.assertEqual(out['replacements'], 1)
+        self.assertEqual(
+            vfs.read_file(scope, 'notes.md')['content'],
+            '# Q1\nRevenue doubled.\nCosts fell.\n',
+        )
+
+    def test_it_edits_in_place_rather_than_making_a_second_file(self):
+        scope = self.scope()
+        written = vfs.write_file(scope, 'n.md', 'one')
+        edited = vfs.edit_file(scope, 'n.md', 'one', 'two')
+        self.assertEqual(written['document_id'], edited['document_id'])
+        self.assertEqual(Document.objects.filter(user=self.user, name='n.md').count(), 1)
+
+    def test_file_size_follows_the_new_text(self):
+        scope = self.scope()
+        doc_id = vfs.write_file(scope, 'n.md', 'short')['document_id']
+        vfs.edit_file(scope, 'n.md', 'short', 'considerably longer')
+        doc = Document.objects.get(pk=doc_id)
+        self.assertEqual(doc.file_size, len('considerably longer'.encode('utf-8')))
+
+    def test_text_that_is_not_there_is_an_error_not_a_silent_no_op(self):
+        # The failure this refusal prevents: a model told "done" builds its
+        # next three steps on a file it believes it has already changed.
+        scope = self.scope()
+        vfs.write_file(scope, 'n.md', 'hello')
+        with self.assertRaises(vfs.VfsError) as cm:
+            vfs.edit_file(scope, 'n.md', 'goodbye', 'hi')
+        self.assertIn('not in the file', str(cm.exception))
+        self.assertEqual(vfs.read_file(scope, 'n.md')['content'], 'hello')
+
+    def test_an_ambiguous_match_is_refused_and_says_how_many(self):
+        scope = self.scope()
+        vfs.write_file(scope, 'n.md', 'todo\ntodo\ntodo\n')
+        with self.assertRaises(vfs.VfsError) as cm:
+            vfs.edit_file(scope, 'n.md', 'todo', 'done')
+        # The count is the point: zero means re-read, several means give more
+        # context, and the model cannot tell them apart from "no match".
+        self.assertIn('3 times', str(cm.exception))
+        self.assertEqual(vfs.read_file(scope, 'n.md')['content'], 'todo\ntodo\ntodo\n')
+
+    def test_replace_all_takes_every_occurrence(self):
+        scope = self.scope()
+        vfs.write_file(scope, 'n.md', 'todo\ntodo\ntodo\n')
+        out = vfs.edit_file(scope, 'n.md', 'todo', 'done', replace_all=True)
+        self.assertEqual(out['replacements'], 3)
+        self.assertEqual(vfs.read_file(scope, 'n.md')['content'], 'done\ndone\ndone\n')
+
+    def test_empty_new_text_deletes_the_match(self):
+        scope = self.scope()
+        vfs.write_file(scope, 'n.md', 'keep DROP keep')
+        vfs.edit_file(scope, 'n.md', ' DROP', '')
+        self.assertEqual(vfs.read_file(scope, 'n.md')['content'], 'keep keep')
+
+    def test_empty_old_text_is_refused(self):
+        scope = self.scope()
+        vfs.write_file(scope, 'n.md', 'body')
+        with self.assertRaises(vfs.VfsError) as cm:
+            vfs.edit_file(scope, 'n.md', '', 'x')
+        self.assertIn('write_file', str(cm.exception))
+
+    def test_editing_a_missing_file_says_what_to_do(self):
+        scope = self.scope()
+        with self.assertRaises(vfs.VfsError) as cm:
+            vfs.edit_file(scope, 'nope.md', 'a', 'b')
+        self.assertIn('No such file', str(cm.exception))
+
+    def test_a_file_with_no_extracted_text_is_explained(self):
+        scope = self.scope()
+        Document.objects.create(
+            user=self.user, folder=scope.root, name='scan.pdf', file='',
+            file_type='pdf', file_size=10, content_text='', status='stored',
+        )
+        with self.assertRaises(vfs.VfsError) as cm:
+            vfs.edit_file(scope, 'scan.pdf', 'a', 'b')
+        self.assertIn('binary upload', str(cm.exception))
+
+    def test_an_edit_over_the_cap_is_refused_and_leaves_the_file_intact(self):
+        scope = self.scope()
+        vfs.write_file(scope, 'n.md', 'seed')
+        with self.assertRaises(vfs.VfsError):
+            vfs.edit_file(scope, 'n.md', 'seed', 'x' * (AGENT_FILE_WRITE_CHARS + 1))
+        self.assertEqual(vfs.read_file(scope, 'n.md')['content'], 'seed')
+
+    def test_readonly_cannot_edit(self):
+        # The grant/scope split: `fileOps` says it may touch files, the scope
+        # says it may not write, and an edit is a write.
+        writer = self.scope()
+        vfs.write_file(writer, 'n.md', 'original')
+
+        reader = self.scope(vfs.READONLY)
+        with self.assertRaises(vfs.VfsError):
+            vfs.edit_file(reader, 'n.md', 'original', 'changed')
+
+    def test_read_all_write_own_cannot_edit_outside_its_home(self):
+        # The one mode where readable and writable differ: an edit reaching a
+        # file it can only read would make that distinction meaningless.
+        other_doc = Document.objects.create(
+            user=self.user, folder=None, name='user-note.md', file='',
+            file_type='md', file_size=4, content_text='mine', status='stored',
+        )
+        scope = vfs.build_scope(self.user, vfs.READ_ALL_WRITE_OWN, agent_name='Researcher')
+        self.assertIn('mine', vfs.read_file(scope, '/user-note.md')['content'])
+
+        with self.assertRaises(vfs.VfsError):
+            vfs.edit_file(scope, '/user-note.md', 'mine', 'theirs')
+        other_doc.refresh_from_db()
+        self.assertEqual(other_doc.content_text, 'mine')
+
+
 # ─────────────────────────────────────────────────────────────────────────
 
 class ReadOnlyTests(VfsTestCase):

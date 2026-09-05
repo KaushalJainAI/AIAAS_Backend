@@ -317,10 +317,24 @@ file. Four decisions worth recording:
   re-consenting — §5's second rule, defeated by a foreign key. It is also why
   `subagent` is `SET_NULL`: deleting your own agent must not retract what other
   people are installing.
-- **Two visibilities, and the lesser one is the point.** `link` shares are
-  reachable by slug and listed nowhere; without it, sharing with one colleague
-  would mean publishing to strangers, and "public" would be the only setting
-  anyone ever used.
+- **Three visibilities, and the lesser ones are the point.** `link` (by slug,
+  still needs an account) < `platform` (listed to signed-in users) < `public`
+  (readable with no account at all, at `/a/<slug>`). Without the narrow rungs,
+  sharing with one colleague would be the same act as publishing to the open
+  internet, and everyone would perform the second while meaning the first. The
+  default is `platform`, never the widest.
+
+`public` adds the app's second unauthenticated surface, after the webhook
+receiver, and it inherits that route's rules because the reasoning is
+identical. **Every refusal is the same 404** — link-only, platform-only,
+withdrawn and never-existed are indistinguishable from outside, or the
+endpoint becomes a way to enumerate what people published privately. The
+anonymous projection is a **separate function**, not the signed-in one with a
+flag: `candidates` and `is_mine` are computed from a caller who does not
+exist there, and a flag is how those fields eventually leak. The listing is
+capped, because DRF pagination never reaches `@api_view` function views and an
+uncapped list behind no auth is a free full-table scan. Installing is still
+authenticated — there is no public install route, and the public page says so.
 
 Requirement labels default to the source rows' own names — "Vendor records"
 tells an installer far more than "Knowledge base 1" — which is also a fact

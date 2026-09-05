@@ -41,8 +41,11 @@ class AgentHITLTestCase(TestCase):
         )
 
     def execution(self, agent, thread_id='thread-1'):
+        # Both copies, as `_open_log` writes them: closing a request filters
+        # on the indexed column, not the JSON path.
         return ExecutionLog.objects.create(
             user=self.user, subagent=agent, status='paused',
+            thread_id=thread_id,
             input_data={'thread_id': thread_id, 'goal': 'do the thing'},
         )
 

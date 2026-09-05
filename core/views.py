@@ -620,3 +620,65 @@ class UsageTrackingView(generics.ListAPIView):
     
     def get_queryset(self):
         return UsageTracking.objects.filter(user=self.request.user)[:30]  # Last 30 days
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What the assistant remembers about you
+# ─────────────────────────────────────────────────────────────────────────────
+
+class UserMemoryView(APIView):
+    """List and delete the durable facts stored about the requesting user.
+
+    A memory store the person cannot see is one they cannot correct, and every
+    fact here is injected into the system prompt of every future turn — so a
+    wrong one keeps being wrong, in every conversation, until someone removes
+    it. The model can call `forget_about_user`, but that only helps if the user
+    knows what is there to forget.
+
+    Read and delete only. There is deliberately no create: a fact typed into a
+    settings screen is a preference, and preferences belong on the profile
+    where they are validated. This surface exists to *audit and correct* what
+    the assistant inferred, which is a different job.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import UserMemory
+
+        rows = UserMemory.objects.filter(user=request.user)
+        return Response({
+            'memories': [
+                {
+                    'id': row.id,
+                    'text': row.text,
+                    'category': row.category,
+                    'source': row.source,
+                    'updated_at': row.updated_at,
+                }
+                for row in rows
+            ],
+            # So a UI can say "24 of 25" rather than leaving the user to guess
+            # why an old fact vanished.
+            'max_per_category': UserMemory.MAX_PER_CATEGORY,
+        })
+
+    def delete(self, request, memory_id=None):
+        """Forget one fact, or all of them.
+
+        Scoped by `user=request.user` in the query rather than checked after
+        the fetch, so somebody else's id and a nonexistent id are the same
+        404 — a distinguishable "exists but not yours" is an oracle.
+        """
+        from .models import UserMemory
+
+        rows = UserMemory.objects.filter(user=request.user)
+        if memory_id is not None:
+            deleted, _ = rows.filter(id=memory_id).delete()
+            if not deleted:
+                return Response({'detail': 'No such memory.'},
+                                status=status.HTTP_404_NOT_FOUND)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        rows.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

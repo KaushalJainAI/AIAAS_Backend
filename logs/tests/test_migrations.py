@@ -185,3 +185,95 @@ class BackfillTurnsMigrationTests(TransactionTestCase):
         apps = self._migrate([('logs', '0015_backfill_turns_from_config')])
         AgentTurn = apps.get_model('logs', 'AgentTurn')
         self.assertEqual(AgentTurn.objects.filter(execution_id=run.id).count(), 0)
+
+
+class ThreadIdBackfillMigrationTests(TransactionTestCase):
+    """Drives `logs.0018` over rows that carry their thread only in JSON.
+
+    Worth a migration test for the same reason 0015 is: the column it adds is
+    read on the *next* request, by `_find_paused_log`. A paused run whose
+    `thread_id` did not come across looks like a run with no thread, so the
+    approval the user just clicked resumes nothing at all — silently, because
+    the checkpoint is still sitting there and nothing errors.
+    """
+
+    available_apps = None
+
+    before = [('logs', '0017_add_cost_breakdown')]
+    after = [('logs', '0018_executionlog_thread_id')]
+
+    def _migrate(self, targets):
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(targets)
+        executor.loader.build_graph()
+        return executor.loader.project_state(targets).apps
+
+    def setUp(self):
+        self.apps_before = self._migrate(self.before)
+
+    def tearDown(self):
+        self._migrate(ThreadIdBackfillMigrationTests._tip())
+
+    @staticmethod
+    def _tip():
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        return [n for n in executor.loader.graph.leaf_nodes() if n[0] == 'logs']
+
+    def _seed(self, apps, **rows):
+        User = apps.get_model('auth', 'User')
+        SubAgent = apps.get_model('orchestrator', 'SubAgent')
+        ExecutionLog = apps.get_model('logs', 'ExecutionLog')
+
+        user = User.objects.create(username='historic-threads')
+        agent = SubAgent.objects.create(user=user, name='Old Agent')
+        made = {}
+        for key, (status, input_data) in rows.items():
+            made[key] = ExecutionLog.objects.create(
+                user=user, subagent=agent, status=status, input_data=input_data,
+            ).id
+        return made
+
+    def test_a_paused_run_carries_its_thread_across(self):
+        ids = self._seed(self.apps_before, paused=(
+            'paused', {'goal': 'do it', 'thread_id': 'agent-1-abc'},
+        ))
+
+        apps_after = self._migrate(self.after)
+        ExecutionLog = apps_after.get_model('logs', 'ExecutionLog')
+
+        self.assertEqual(
+            ExecutionLog.objects.get(id=ids['paused']).thread_id, 'agent-1-abc',
+        )
+
+    def test_completed_runs_are_backfilled_too(self):
+        """Not only the paused ones: `chat/tools/agents.py` resolves a parent
+        step against a run that has long since finished."""
+        ids = self._seed(self.apps_before, done=(
+            'completed', {'goal': 'done', 'thread_id': 'agent-2-xyz'},
+        ))
+
+        apps_after = self._migrate(self.after)
+        ExecutionLog = apps_after.get_model('logs', 'ExecutionLog')
+
+        self.assertEqual(
+            ExecutionLog.objects.get(id=ids['done']).thread_id, 'agent-2-xyz',
+        )
+
+    def test_a_run_with_no_thread_gets_a_blank_not_a_crash(self):
+        """DAG-era rows, and any run opened before threads were stored."""
+        ids = self._seed(
+            self.apps_before,
+            empty=('completed', {}),
+            goal_only=('completed', {'goal': 'no thread here'}),
+            wrong_type=('completed', {'thread_id': 12345}),
+        )
+
+        apps_after = self._migrate(self.after)
+        ExecutionLog = apps_after.get_model('logs', 'ExecutionLog')
+
+        for key in ids:
+            self.assertEqual(
+                ExecutionLog.objects.get(id=ids[key]).thread_id, '', msg=key,
+            )

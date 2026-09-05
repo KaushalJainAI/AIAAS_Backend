@@ -32,13 +32,31 @@ from django.core.cache import cache
 logger = logging.getLogger(__name__)
 
 #: How long an entry is served without anyone re-listing behind it.
-SOFT_TTL_SECONDS = 120
+#:
+#: 30 minutes: tool lists change when a user edits a connection, and that
+#: path invalidates the key outright, so freshness here is not why anyone
+#: waits — lengthening it only moves re-lists off the front of resumed
+#: turns and into the background refresh. See the latency plan §2.
+SOFT_TTL_SECONDS = 1800
 
 #: How long a stale entry may still be served while a refresh runs. Beyond
-#: this the entry is gone and the caller has to wait for a live listing —
-#: which is the right trade for a connector nobody has touched in half an
-#: hour, since by then it is as likely to be gone as slow.
-HARD_TTL_SECONDS = 1800
+#: this the entry is gone and the caller has to wait for a live listing.
+#:
+#: Was 1800 (half an hour), on the reasoning that a connector nobody had
+#: touched for that long was as likely to be gone as slow. That reasoning
+#: assumed a cache that rarely held anything older anyway — which was true
+#: while `CACHES` was an unconfigured `LocMemCache`, because the *process*
+#: usually died before the entry did. With a shared Redis cache the population
+#: of half-hour-old entries is real and large, and every one of them is a
+#: ~21-second cold `npx` in front of somebody's first token.
+#:
+#: A day is the right ceiling because being wrong is cheap and being slow is
+#: not: a stale list costs one failed tool call, which the model sees and can
+#: react to, while the miss costs twenty-one seconds of silence in front of an
+#: answer. An entry is refreshed behind the response the moment it lapses the
+#: soft TTL, and a user editing a connection invalidates the key outright, so
+#: nothing here waits a day to notice a change someone made on purpose.
+HARD_TTL_SECONDS = 86400
 
 #: Retained under its old name: `TTL_SECONDS` was the whole contract before
 #: there were two, and it means the same thing the soft one now does.

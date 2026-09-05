@@ -40,8 +40,9 @@ async def _parent_step_id(context: Dict) -> int | None:
     def _lookup() -> int | None:
         return (
             AgentStep.objects
-            .filter(call_id=call_id,
-                    execution__input_data__thread_id=session_id)
+            # Indexed column rather than the JSON path: this resolves once
+            # per delegation, inside the call the user is waiting on.
+            .filter(call_id=call_id, execution__thread_id=session_id)
             .order_by('-id')
             .values_list('id', flat=True)
             .first()
@@ -603,6 +604,14 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
 
     parent_step_id = await _parent_step_id(context)
 
+    # The folder this run writes to, handed down so workers can write there
+    # too. Derived from the caller's own scope rather than from its name: the
+    # shared folder is by definition the one the parent writes to, so there is
+    # no second rule to drift — and it works unchanged when the delegator is
+    # chat, whose folder is `/Chat/`.
+    parent_scope = context.get("file_scope")
+    workspace = tuple(getattr(parent_scope, "write_prefix", None) or ())
+
     async def runner(task: str, index: int, thread_id: str) -> WorkerResult:
         run = await run_agent(
             worker_agent, task, user=user, thread_id=thread_id,
@@ -626,6 +635,9 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
             # the fan-out as a whole bounded rather than each worker bounded
             # and the fan-out unbounded in their number.
             deadline=worker_deadline,
+            # Write access to the parent's own folder, so a worker can leave a
+            # report there and answer with its path instead of its contents.
+            workspace=workspace,
         )
         return WorkerResult(
             index=index, task=task, answer=run.answer or "",

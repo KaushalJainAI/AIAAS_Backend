@@ -19,15 +19,27 @@ class HITLRequestSerializer(serializers.ModelSerializer):
     type = serializers.CharField(source='request_type', read_only=True)
     execution_id = serializers.SerializerMethodField()
     workflow_name = serializers.SerializerMethodField()
+    detail = serializers.SerializerMethodField()
 
     class Meta:
         model = HITLRequest
         fields = [
             'request_id', 'request_type', 'type', 'title', 'message', 'options',
-            'node_id', 'execution_id', 'workflow_name', 'timeout_seconds',
-            'created_at', 'status', 'response', 'responded_at'
+            'detail', 'node_id', 'execution_id', 'workflow_name',
+            'timeout_seconds', 'created_at', 'status', 'response', 'responded_at'
         ]
         read_only_fields = ['request_id', 'created_at']
+
+    def get_detail(self, obj):
+        """What the agent is asking to do, as named fields.
+
+        Lifted out of `context_data` rather than exposing that column, which
+        also carries the thread id and the agent id — routing the client needs
+        no part of. Absent on every row written before `describe_call` existed,
+        so the Inbox falls back to `message`.
+        """
+        detail = (obj.context_data or {}).get('detail')
+        return detail if isinstance(detail, dict) and detail else None
 
     def get_execution_id(self, obj):
         return str(obj.execution.execution_id) if obj.execution else None

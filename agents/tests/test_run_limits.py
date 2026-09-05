@@ -300,6 +300,92 @@ class AdmissionTests(SimpleTestCase):
         async_to_sync(scenario)()
 
 
+class QueuedTelemetryTests(TestCase):
+    """A run that waits for a slot says so on its own stream.
+
+    Until `workflow_start` a queued run and a run whose task died between the
+    202 and its first frame look identical from outside. The queued frame is
+    what separates them — so it is announced before waiting, not after being
+    admitted, and a failure to announce it never fails the run.
+    """
+
+    def test_a_run_is_announced_queued_before_it_waits_for_a_slot(self):
+        import unittest.mock
+
+        import agents.agent.runtime as runtime
+        import agents.agent.stream as stream_module
+        import workflow_backend.background as background
+
+        user = User.objects.create_user(username='queued', password='pw')
+        agent = SubAgent.objects.create(user=user, name='A')
+
+        events: list[str] = []
+
+        class _FakeStream:
+            def __init__(self, log):
+                pass
+
+            async def run_queued(self):
+                events.append('queued')
+
+            async def run_finished(self, **kwargs):
+                events.append('finished')
+
+        async def _fake_run_agent(*args, **kwargs):
+            events.append('admitted')
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        spawned = []
+        real = (
+            runtime.run_agent, runtime.check_guardrails,
+            runtime._check_unattended, background.spawn, stream_module.AgentRunStream,
+        )
+        runtime.run_agent = _fake_run_agent
+        runtime.check_guardrails = _noop
+        runtime._check_unattended = _noop
+        background.spawn = lambda coro, name='': spawned.append(coro)
+        stream_module.AgentRunStream = _FakeStream
+        try:
+            with unittest.mock.patch('llm.access.preflight', new=_noop):
+                execution_id = async_to_sync(runtime.start_agent_run)(
+                    agent, 'do it', user=user,
+                )
+                self.assertTrue(execution_id)
+
+                async def _drive():
+                    await spawned[0]
+
+                # `spawn` is stubbed, so drive the detached coroutine here.
+                async_to_sync(_drive)()
+        finally:
+            (
+                runtime.run_agent, runtime.check_guardrails,
+                runtime._check_unattended, background.spawn,
+                stream_module.AgentRunStream,
+            ) = real
+
+        self.assertEqual(events, ['queued', 'admitted'])
+
+    def test_a_queued_announcement_cannot_fail_the_run(self):
+        # Best-effort like every other frame: a broken channel must not fail
+        # a run that is otherwise fine.
+        import unittest.mock
+
+        import agents.agent.stream as stream_module
+
+        class _FailingBroadcaster:
+            async def workflow_queued(self, execution_id):
+                raise RuntimeError('boom')
+
+        log = unittest.mock.Mock(execution_id='exec-1')
+        stream = stream_module.AgentRunStream(
+            log, broadcaster=_FailingBroadcaster(),
+        )
+        async_to_sync(stream.run_queued)()
+
+
 class WorkerAdmissionTests(SimpleTestCase):
     """Workers are deliberately outside the gate — see agents/admission.py."""
 

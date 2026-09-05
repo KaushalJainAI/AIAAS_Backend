@@ -37,8 +37,16 @@ logger = logging.getLogger(__name__)
 
 
 async def open_request(execution_log, *, call_id: str, tool: str,
-                       message: str, options: list | None = None) -> None:
+                       message: str, options: list | None = None,
+                       title: str = '', detail: dict | None = None,
+                       args: dict | None = None) -> None:
     """Record a paused tool call so it can be answered from the Inbox.
+
+    `title` and `detail` come from `chat.tools.describe`; `args` is kept raw in
+    `context_data` for the "show raw arguments" disclosure. The title used to
+    be built here as `f'Approve {tool}?'`, which for the calls that matter most
+    read `Approve mcp__7__send_email_ab12cd34?` — a question nobody can answer
+    on its merits, about a tool whose real name is not even in the string.
 
     Best-effort: a run that has already stopped and asked must not then fail
     because the queue write did. The user still has the live WebSocket prompt,
@@ -53,7 +61,7 @@ async def open_request(execution_log, *, call_id: str, tool: str,
             defaults={
                 'user_id': execution_log.user_id,
                 'request_type': 'approval',
-                'title': f'Approve {tool}?',
+                'title': (title or f'Approve {tool}?')[:200],
                 'message': message,
                 'options': options or [
                     {'label': 'Approve', 'value': 'approve'},
@@ -62,6 +70,13 @@ async def open_request(execution_log, *, call_id: str, tool: str,
                 'context_data': {
                     'tool': tool,
                     'call_id': call_id,
+                    # What the agent is asking to do, already rendered. Stored
+                    # rather than recomputed at read time because naming the
+                    # connection needs a row that may be gone by then, and an
+                    # approval screen must describe the call as it was when it
+                    # paused, not as the catalogue looks today.
+                    'detail': detail or {},
+                    'args': args or {},
                     # The two things answering it needs. `agents/{id}/approve/`
                     # is keyed on the thread, not on the execution, so a queue
                     # entry that did not carry it could be read and not acted
@@ -95,7 +110,9 @@ async def resolve_request(*, thread_id: str, call_id: str, user_id: int,
             user_id=user_id,
             node_id=call_id,
             status='pending',
-            execution__input_data__thread_id=thread_id,
+            # Indexed column rather than the JSON path — this is on the
+            # click path for every approval and rejection.
+            execution__thread_id=thread_id,
         ).afirst()
         if request is None:
             # Normal for a chat approval, and for any run that paused before

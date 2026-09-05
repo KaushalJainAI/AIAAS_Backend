@@ -300,7 +300,7 @@ async def start_suite_run(suite, agent, user, *, notes: str = '') -> str:
     `agents.agent.runtime.start_agent_run` — see the fail-before-you-look-busy
     note in CLAUDE.md.
     """
-    from agents.agent.runtime import check_guardrails
+    from agents.agent.runtime import check_guardrails, resolve_agent_model
     from llm import access as llm
     from workflow_backend.background import spawn
 
@@ -311,9 +311,10 @@ async def start_suite_run(suite, agent, user, *, notes: str = '') -> str:
         )
 
     await check_guardrails(agent, user)
+    provider, model = await resolve_agent_model(agent, user)
     await llm.preflight(
-        provider=agent.llm_provider or 'openrouter',
-        model=agent.llm_model or '',
+        provider=provider,
+        model=model,
         user_id=user.id,
     )
 

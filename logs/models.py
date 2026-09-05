@@ -209,6 +209,26 @@ class ExecutionLog(models.Model):
         help_text='Execution duration in milliseconds',
     )
 
+    #: The LangGraph checkpointer key for this run, promoted out of
+    #: `input_data` into an indexed column.
+    #:
+    #: It was only ever stored inside the `input_data` JSON, and three hot
+    #: paths looked it up there — resuming a paused run, closing a HITL request
+    #: on approval or rejection, and resolving the parent step of a delegated
+    #: run. On SQLite a `input_data__thread_id=` filter is a full table scan
+    #: with a JSON parse per row, so the cost grew with every run the account
+    #: had ever made, and it was paid on the two paths a person is actively
+    #: waiting on: clicking approve, and delegating.
+    #:
+    #: `input_data['thread_id']` is still written, because it is what the
+    #: historical rows carry and what the run's own record shows. This column
+    #: is the *addressable* copy; `logs/models.py` is the only place that has
+    #: to know they are the same string.
+    thread_id = models.CharField(
+        max_length=200, blank=True, default='', db_index=True,
+        help_text='Checkpointer thread key; indexed copy of input_data.thread_id',
+    )
+
     # ── Input/output ──
     input_data = models.JSONField(
         default=dict, blank=True, help_text='Input data passed to the run'

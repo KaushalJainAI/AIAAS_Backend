@@ -42,7 +42,7 @@ from django.utils.text import slugify
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from inference.models import KnowledgeBase
@@ -52,6 +52,7 @@ from skills.models import Skill
 from agents import gallery, publishing
 from agents.models import SharedAgent, SubAgent
 from agents.triggers import zone_is_valid
+from workflow_backend.thresholds import PUBLIC_CATALOGUE_LIMIT
 from agents.views.agents import AgentSerializer, _with_stats
 
 logger = logging.getLogger(__name__)
@@ -166,15 +167,16 @@ def _present_shared(share: SharedAgent, candidates: dict[str, list[dict]],
 def _listed_for(user):
     """Shared agents this user may see in a listing.
 
-    Only `visibility='platform'` is listed. A `link` share is deliberately
-    absent — it is reachable by its slug and nowhere else, which is the whole
-    difference between the two. The author's own rows are included regardless
-    of visibility so that publishing something unlisted does not look like it
-    silently failed.
+    `link` shares are deliberately absent — reachable by slug and nowhere
+    else, which is the whole difference between them and the wider rungs. The
+    author's own rows are included regardless of visibility so that publishing
+    something unlisted does not look like it silently failed.
     """
     return (
         SharedAgent.objects
-        .filter(Q(is_listed=True, visibility='platform') | Q(author=user))
+        .filter(Q(is_listed=True,
+                  visibility__in=SharedAgent.LISTED_VISIBILITIES)
+                | Q(author=user))
         .select_related('author')
         .order_by('-install_count', '-updated_at')
     )
@@ -525,3 +527,105 @@ def agent_share(request, agent_id: int):
     return Response(
         _present_shared(share, _candidates(request.user), viewer=request.user)
     )
+
+
+# --------------------------------------------------------------- public reads
+#
+# The second unauthenticated surface in this app, after the webhook receiver,
+# and it follows that route's rules because the reasoning is the same.
+#
+# **404 for everything that is not public.** A `link` share, a `platform`
+# share, a withdrawn one and a slug that never existed are indistinguishable
+# from outside. Anything else turns this into an oracle for enumerating what
+# people have published privately — the exact failure `webhook_receive`
+# documents.
+#
+# **A narrower projection, not the same one.** `_present_public` is its own
+# function rather than `_present_shared` with a flag: the signed-in shape
+# carries `is_mine` and per-requirement `candidates`, both of which are
+# computed from a caller that does not exist here, and a flag on one function
+# is how the account-shaped fields eventually leak into the anonymous
+# response.
+#
+# **Bounded.** DRF's `DEFAULT_PAGINATION_CLASS` never applies to `@api_view`
+# function views, so the cap is this module's to set — the rule the rest of
+# this codebase states as "nothing returns an unbounded list".
+#
+# Throttling *is* inherited: `DEFAULT_THROTTLE_CLASSES` applies to function
+# views, so `AnonRateThrottle` (100/hour) covers these without further wiring.
+
+
+def _present_public(share: SharedAgent) -> dict:
+    """One published agent, as somebody with no account may see it.
+
+    Deliberately absent: `candidates` (there is no caller whose rows could fill
+    them), `is_mine`, and anything counting the author's own activity. What is
+    kept is what a stranger needs to decide whether to sign up for it — what it
+    does, what it would be able to reach, and what they would have to supply.
+    """
+    return {
+        'slug': share.slug,
+        'source': 'community',
+        'name': share.name,
+        'tagline': share.tagline,
+        'description': share.description,
+        'icon': share.icon,
+        'tags': share.tags or [],
+        'author': _author_name(share.author),
+        'install_count': share.install_count,
+        'version': share.version,
+        'updated_at': share.updated_at,
+        # The kinds only — the labels and the `why`, without any pool to pick
+        # from. It is what tells a visitor "you will need a mailbox for this".
+        'requirements': [
+            {k: v for k, v in req.items() if k != 'candidates'}
+            for req in (share.requirements or [])
+        ],
+        'config': share.config,
+    }
+
+
+@extend_schema(
+    methods=['GET'],
+    responses={200: OpenApiResponse(description='Publicly shared agents.')},
+    description='Agents published for anyone, including people without an '
+                'account. No authentication.',
+    auth=[],
+)
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def public_agent_list(request):
+    shares = (
+        SharedAgent.objects
+        .filter(is_listed=True, visibility='public')
+        .select_related('author')
+        .order_by('-install_count', '-updated_at')[:PUBLIC_CATALOGUE_LIMIT + 1]
+    )
+    shares = list(shares)
+    truncated = len(shares) > PUBLIC_CATALOGUE_LIMIT
+    return Response({
+        'results': [_present_public(s) for s in shares[:PUBLIC_CATALOGUE_LIMIT]],
+        # A capped list and a complete one must not look alike.
+        'truncated': truncated,
+    })
+
+
+@extend_schema(
+    methods=['GET'],
+    responses={200: OpenApiResponse(description='One publicly shared agent.'),
+               404: OpenApiResponse(description='No public agent at this slug.')},
+    description='One publicly shared agent. No authentication.',
+    auth=[],
+)
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def public_agent_detail(request, slug: str):
+    share = (SharedAgent.objects.select_related('author')
+             .filter(slug=slug, is_listed=True, visibility='public')
+             .first())
+    if share is None:
+        # Deliberately the same answer for "never existed", "not public",
+        # "withdrawn" and "link-only". See the note above this section.
+        return Response({'error': 'Not found.'},
+                        status=status.HTTP_404_NOT_FOUND)
+    return Response(_present_public(share))

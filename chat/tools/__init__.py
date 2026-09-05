@@ -224,9 +224,10 @@ async def get_available_tools(
     `mcp_memo` is scratch space belonging to one turn. Given one, the MCP half
     of the list is resolved on the first call and reused on every later call
     that shares it — which is what makes this safe to call in a loop. The Redis
-    cache underneath is not enough on its own: it holds for 120 seconds, so any
-    conversation with a pause in it pays a full reconnect, and even a hit costs
-    a database read per connection. What a memo must *not* cover is the
+    cache underneath is not enough on its own: even a hit costs a database
+    read per connection, and a lapsed entry still answers from the stale copy
+    while refreshing behind the turn (see `mcp_integration/tool_cache.py`).
+    What a memo must *not* cover is the
     built-in half, which is why it is passed to the MCP call alone: whether a
     tool's requirement is met can change mid-run (a result spills, and
     `read_tool_output` becomes real), and freezing that would withhold a tool

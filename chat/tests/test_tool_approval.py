@@ -224,3 +224,53 @@ class RejectionTests(TestCase):
         self.assertFalse(
             async_to_sync(reject_tool_call)("no-such-thread", "call-x")
         )
+
+
+class RequestPlumbingTests(TestCase):
+    """The half that was missing: a way for the client to reach any of this.
+
+    `reject_tool_call` and the three approval scopes were built, tested and
+    unreachable — chat's Deny button called `clearPendingToolCall()` and
+    stopped, so the graph stayed parked and the model was never told it had
+    been refused, and the card sent a boolean where the pipeline had taken
+    `once | session | always` for months.
+    """
+
+    def parse(self, **body):
+        from chat.turn.pipeline import TurnRequest
+
+        return TurnRequest.parse(body)
+
+    def test_a_rejection_is_a_complete_request_on_its_own(self):
+        """It carries no new text. Requiring one would mean inventing a message
+        on the user's behalf to record their refusal."""
+        request = self.parse(reject_tool_call="call-1")
+
+        self.assertEqual(request.reject_tool_call, "call-1")
+        self.assertEqual(request.content, "")
+
+    def test_a_reason_rides_along_and_is_bounded(self):
+        request = self.parse(reject_tool_call="call-1", reject_reason="x" * 900)
+        self.assertEqual(len(request.reject_reason), 500)
+
+    def test_a_reason_without_a_rejection_is_dropped(self):
+        request = self.parse(content="hello", reject_reason="not this")
+        self.assertIsNone(request.reject_tool_call)
+        self.assertEqual(request.reject_reason, "")
+
+    def test_an_empty_body_is_still_refused(self):
+        from chat.turn.pipeline import TurnError
+
+        with self.assertRaises(TurnError):
+            self.parse(reject_tool_call="", content="")
+
+    def test_the_three_approval_scopes_survive_parsing(self):
+        for scope in ("once", "session", "always"):
+            with self.subTest(scope=scope):
+                request = self.parse(approve_tool_call="call-1", approval_scope=scope)
+                self.assertEqual(request.approval_scope, scope)
+
+    def test_a_scope_without_an_approval_is_dropped(self):
+        """Otherwise a plain message could carry a standing allowance."""
+        request = self.parse(content="hello", approval_scope="always")
+        self.assertEqual(request.approval_scope, "")

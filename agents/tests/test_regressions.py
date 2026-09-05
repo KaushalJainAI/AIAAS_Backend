@@ -249,6 +249,9 @@ class ResumeDepthTests(TestCase):
         agent = SubAgent.objects.create(user=user, name='A')
         ExecutionLog.objects.create(
             subagent=agent, user=user, status='paused', depth=1,
+            # Both copies, as `_open_log` writes them: `_find_paused_log`
+            # filters on the indexed column, not the JSON path.
+            thread_id='th-1',
             input_data={'goal': 'g', 'thread_id': 'th-1'},
         )
 

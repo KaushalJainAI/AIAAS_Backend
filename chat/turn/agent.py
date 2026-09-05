@@ -22,7 +22,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Awaitable, Callable, Sequence, TypedDict
 from uuid import uuid4
 
@@ -615,7 +615,7 @@ def _log_latency(
     ttft = timings.get("ttft_ms")
     logger.info(
         "[Latency] it=%d tools=%dms(n=%d) ttft=%sms total=%dms "
-        "prompt=%d cached=%d(%d%%) out=%d model=%s/%s",
+        "prompt=%d cached=%d(%d%%) out=%d model=%s/%s effort=%s",
         iteration,
         tools_ms,
         len(tools or ()),
@@ -627,7 +627,35 @@ def _log_latency(
         getattr(usage, "output", 0) or 0,
         turn.provider,
         turn.model,
+        turn.effort or "-",
     )
+
+
+def iteration_effort(base: str | None, iteration: int, *, at_limit: bool) -> str | None:
+    """The effort rung for one pass of the tool loop.
+
+    The first pass plans the whole turn and the last permitted pass synthesises
+    the final answer from everything gathered, so both run at the chosen level.
+    The passes in between are mostly dispatch and incorporation — issuing the
+    calls the plan already justified and reading back their results — so they
+    run one rung down the ladder.
+
+    One rung rather than a floor like `low`, because the step has to stay
+    proportional to what was asked for: `high` still reasons at `medium` in
+    the middle, while `low` steps to `minimal`, which `llm.access` snaps back
+    to `low` on any model that does not serve it. Nothing is ever refused —
+    an unknown name passes through untouched, and the snap is what keeps a
+    stepped level from 400-ing on a model with fewer rungs.
+    """
+    from llm.effort import LADDER
+
+    if not base or iteration == 0 or at_limit:
+        return base
+    try:
+        rank = LADDER.index(base)
+    except ValueError:
+        return base
+    return LADDER[max(0, rank - 1)]
 
 
 async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
@@ -688,9 +716,15 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
 
     started = time.monotonic()
     timings: dict[str, int] = {}
+    # The middle passes think one rung down (see `iteration_effort`). `replace`
+    # rather than mutation: the context is frozen, and the caller's level is
+    # what the next turn — and the latency line below — must still report.
+    effective = replace(
+        turn, effort=iteration_effort(turn.effort, iteration, at_limit=at_limit)
+    )
     try:
         completion = await _run_model(
-            turn, prompt=prompt, history=history, tools=tools, timings=timings
+            effective, prompt=prompt, history=history, tools=tools, timings=timings
         )
     except LLMUserActionable:
         # Deliberately not caught: no credential, no credit, or a model that no
@@ -708,7 +742,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         )
 
     _log_latency(
-        turn, iteration=iteration, tools=tools, tools_ms=tools_ms,
+        effective, iteration=iteration, tools=tools, tools_ms=tools_ms,
         timings=timings, elapsed_ms=int((time.monotonic() - started) * 1000),
         completion=completion,
     )
@@ -796,8 +830,26 @@ async def _collect_media(
     await sink(event, {key: merged})
 
 
+async def _fetch_companion_images(query: str) -> list:
+    """The image strip for a web search query. Never raises.
+
+    Split out of `_on_web_search` so `tools_node` can start it while the
+    web search itself is still running (see Pass 3): the two are independent
+    network round trips, and awaiting one after the other added +1–2s after
+    the tool the model actually needed, before the next model iteration.
+    """
+    try:
+        from chat.sources.search import image_search
+
+        return await image_search(query)
+    except Exception:
+        logger.warning("[Tools] Companion image search failed", exc_info=True)
+        return []
+
+
 async def _on_web_search(
-    result: dict, args: dict, meta: dict, sink: EventSink
+    result: dict, args: dict, meta: dict, sink: EventSink,
+    *, companion_images: list | None = None,
 ) -> None:
     if result.get("type") != "search_results":
         return
@@ -812,16 +864,22 @@ async def _on_web_search(
     # A web search also fills the image strip. The model rarely calls
     # image_search of its own accord, and a Perplexity-style answer with an
     # empty visual panel reads as broken rather than as restraint.
-    if query := args.get("query"):
-        from chat.sources.search import image_search
-
-        try:
-            await _collect_media(
-                {"images": await image_search(query)}, meta, sink,
-                key="images", event=Event.IMAGES_UPDATE,
-            )
-        except Exception:
-            logger.warning("[Tools] Companion image search failed", exc_info=True)
+    #
+    # When `tools_node` pre-fetched the strip alongside the search itself,
+    # `companion_images` is that result (possibly `[]` on failure) and nothing
+    # is awaited here — the +1–2s serial cost is gone. When None, this is a
+    # direct caller outside the batch path, and the search runs inline as
+    # before rather than leaving the panel empty.
+    if companion_images is not None:
+        await _collect_media(
+            {"images": companion_images}, meta, sink,
+            key="images", event=Event.IMAGES_UPDATE,
+        )
+    elif query := args.get("query"):
+        await _collect_media(
+            {"images": await _fetch_companion_images(query)}, meta, sink,
+            key="images", event=Event.IMAGES_UPDATE,
+        )
 
 
 async def _on_image_search(
@@ -892,14 +950,36 @@ async def _on_deep_research(
 
     # Same reasoning as the companion image search: research answers carry a
     # visual panel, and the topic is the right query for it.
+    #
+    # The two searches are awaited *together*. They were sequential, which cost
+    # the sum of two independent network round trips — around 1.5s added to a
+    # turn that had already finished its research — for no ordering reason: the
+    # image strip and the video strip are separate panels, filled from separate
+    # providers, and neither reads the other's result.
+    #
+    # Still awaited rather than detached. Backgrounding them is what the
+    # latency plan asked for, and it is wrong here: `meta` is read-modify-write
+    # and is handed to the observer that persists the message, so a task still
+    # running when the turn closes writes its images into a dict nobody will
+    # save and emits an event down a sink whose run has ended. Concurrency is
+    # the part of the win that is free; detaching is the part that trades a
+    # visible panel for a lost one.
     if topic := args.get("topic"):
         from chat.sources.search import image_search, video_search
 
         try:
-            await _collect_media({"images": await image_search(topic)}, meta, sink,
-                                 key="images", event=Event.IMAGES_UPDATE)
-            await _collect_media({"videos": await video_search(topic)}, meta, sink,
-                                 key="videos", event=Event.VIDEOS_UPDATE)
+            images, videos = await asyncio.gather(
+                image_search(topic), video_search(topic),
+                # One provider failing must not empty the other's panel, so
+                # each result is inspected rather than the pair being abandoned.
+                return_exceptions=True,
+            )
+            if not isinstance(images, BaseException):
+                await _collect_media({"images": images}, meta, sink,
+                                     key="images", event=Event.IMAGES_UPDATE)
+            if not isinstance(videos, BaseException):
+                await _collect_media({"videos": videos}, meta, sink,
+                                     key="videos", event=Event.VIDEOS_UPDATE)
         except Exception:
             logger.warning("[Tools] Companion media search failed", exc_info=True)
 
@@ -957,7 +1037,8 @@ _SIDE_EFFECTS = {
 
 
 async def _apply_side_effects(
-    name: str, args: dict, raw_result: str, meta: dict, sink: EventSink
+    name: str, args: dict, raw_result: str, meta: dict, sink: EventSink,
+    *, companion_images: list | None = None,
 ) -> None:
     handler = _SIDE_EFFECTS.get(name)
     if handler is None:
@@ -969,7 +1050,12 @@ async def _apply_side_effects(
     if not isinstance(parsed, dict):
         return
     try:
-        await handler(parsed, args, meta, sink)
+        if name == "web_search":
+            await _on_web_search(
+                parsed, args, meta, sink, companion_images=companion_images,
+            )
+        else:
+            await handler(parsed, args, meta, sink)
     except Exception:
         # A UI side effect must never fail the turn — the model already has the
         # result, which is what actually answers the user.
@@ -982,6 +1068,13 @@ async def _require_approval(call: ToolCall, turn: TurnContext, meta: dict) -> No
         return
 
     logger.info("[Tools] Pausing for approval of %s", call.name)
+
+    # Built once, read by the notification row, the SSE frame and the card. The
+    # three used to phrase the same pause three ways, and the card's way was
+    # `JSON.stringify(args, null, 2)`.
+    from chat.tools.describe import describe_call_async
+
+    detail = await describe_call_async(call.name, call.arguments)
     # An agent run queues the pause as a `HITLRequest` instead (see
     # `agents/agent/hitl.py`), and the reminder ladder hanging off that row is
     # what notifies — honouring the agent's `notifyOnHitl`, the user's device
@@ -998,10 +1091,14 @@ async def _require_approval(call: ToolCall, turn: TurnContext, meta: dict) -> No
                 create_notification(
                     user=get_user_model().objects.get(id=turn.user_id),
                     type="hitl_request",
-                    title="Permission required",
-                    message=f"The assistant wants to run: {call.name}",
-                    data={"tool": call.name, "args": call.arguments,
-                          "thread_id": turn.session_id},
+                    title=detail["title"],
+                    message=f"{detail['sentence']} Waiting for your approval.",
+                    # `args` deliberately absent. This payload is rendered in
+                    # the notification list, where it was printed verbatim as a
+                    # JSON block under every row — a tool call's arguments are
+                    # not a thing to put on a settings screen for ever.
+                    data={"tool": call.name, "thread_id": turn.session_id,
+                          "action_url": "/chat"},
                 )
 
             await notify()
@@ -1009,7 +1106,11 @@ async def _require_approval(call: ToolCall, turn: TurnContext, meta: dict) -> No
             logger.exception("[Tools] HITL notification failed")
 
     await turn.sink(Event.ASK_PERMISSION, {
+        # `args` still ships: the card keeps a raw disclosure behind the
+        # readable fields, because that view is the one an engineer needs when
+        # the sentence is wrong.
         "tool": call.name, "args": call.arguments, "call_id": call.id,
+        "detail": detail,
     })
     interrupt(f"Permission required for {call.name}")
 
@@ -1180,31 +1281,77 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     #
     # A model issues every call in a turn before seeing any result, so nothing
     # in this batch can depend on anything else in it and overlapping is safe
-    # by construction. Only for tools that say so: `PARALLEL_TOOLS` is an
-    # allow-list, so an unknown name — every MCP tool, since theirs are minted
-    # at runtime — stays serial. Sensitive calls are excluded whatever they
-    # declare, because a tool worth pausing a human for is a tool with a side
-    # effect, and two of those in one turn may well be ordered.
+    # by construction. Sensitive calls are excluded whatever else is true,
+    # because a tool worth pausing a human for is a tool with a side effect,
+    # and two of those in one turn may well be ordered.
+    #
+    # Two ways in, and the difference between them is who is making the claim.
+    # A built-in declares `parallel=True` on `@tool()` — a statement by whoever
+    # wrote it. An MCP tool cannot declare anything: its name is minted at
+    # runtime by a third party, which is why `PARALLEL_TOOLS` alone left every
+    # connector call serial, and three read calls to one server cost three
+    # round trips end to end.
+    #
+    # `mcp_reads_only` is the second way in, and it is a *guess from the name*,
+    # which needs justifying because the docs elsewhere say unknown means
+    # serial. The justification is that this codebase already trusts exactly
+    # this guess for a strictly stronger decision — `default_policy` uses it to
+    # decide whether a credentialed call is gated at all, and the connector
+    # `read` scope uses it to decide which tools an agent is even offered. What
+    # a wrong guess costs here is far less than what it costs there: mis-reading
+    # a destructive name means an unapproved deletion when it decides gating,
+    # but only means that a deletion already issued in this turn overlapped a
+    # sibling when it decides scheduling. No name can cause a call the model
+    # did not make.
     def _may_overlap(call) -> bool:
-        return call.name in tool_registry.PARALLEL_TOOLS and call.name not in sensitive
+        if call.name in sensitive:
+            return False
+        if call.name in tool_registry.PARALLEL_TOOLS:
+            return True
+        return permissions.mcp_reads_only(call.name)
 
     concurrent = [(c, a) for c, a in planned if _may_overlap(c)]
     serial = [(c, a) for c, a in planned if not _may_overlap(c)]
 
-    outcomes: dict[str, tuple[str, str, int]] = {}
-    if len(concurrent) > 1:
-        logger.info("[Tools] iter=%d dispatching %d calls in parallel: %s",
-                    iteration, len(concurrent), [c.name for c, _ in concurrent])
-        gathered = await asyncio.gather(
-            *(_dispatch_one(c, a) for c, a in concurrent)
-        )
-        outcomes.update({c.id: o for (c, _), o in zip(concurrent, gathered)})
-    else:
-        serial = concurrent + serial      # a lone call gains nothing from gather
+    # Companion image strips start here, alongside the searches they belong
+    # to, rather than after every dispatch has finished (see
+    # `_fetch_companion_images`). The query is known at plan time, the strip
+    # is an independent network round trip, and the strip is only ever read
+    # in Pass 4 below — which writes `meta` and persists it — so nothing here
+    # outlives the turn the way a detached background task would. Skipped
+    # when the model already asked for images itself: `_on_image_search`
+    # fills the same panel, and a second query for it would be pure spend.
+    companions: dict[str, asyncio.Task] = {}
+    if not any(c.name == "image_search" for c, _ in planned):
+        for call, arguments in planned:
+            if call.name == "web_search" and arguments.get("query"):
+                companions[call.id] = asyncio.create_task(
+                    _fetch_companion_images(arguments["query"])
+                )
 
-    for call, arguments in serial:
-        logger.info("[Tools] iter=%d %s(%s)", iteration, call.name, sorted(arguments))
-        outcomes[call.id] = await _dispatch_one(call, arguments)
+    outcomes: dict[str, tuple[str, str, int]] = {}
+    try:
+        if len(concurrent) > 1:
+            logger.info("[Tools] iter=%d dispatching %d calls in parallel: %s",
+                        iteration, len(concurrent), [c.name for c, _ in concurrent])
+            gathered = await asyncio.gather(
+                *(_dispatch_one(c, a) for c, a in concurrent)
+            )
+            outcomes.update({c.id: o for (c, _), o in zip(concurrent, gathered)})
+        else:
+            serial = concurrent + serial      # a lone call gains nothing from gather
+
+        for call, arguments in serial:
+            logger.info("[Tools] iter=%d %s(%s)", iteration, call.name, sorted(arguments))
+            outcomes[call.id] = await _dispatch_one(call, arguments)
+    finally:
+        # Never leave a companion running past the dispatches: Pass 4 awaits
+        # each one it needs below, and anything unneeded (a declined call, a
+        # non-search result) is cancelled here rather than writing into a
+        # `meta` nobody will persist.
+        for call_id, task in companions.items():
+            if call_id not in outcomes and not task.done():
+                task.cancel()
 
     # ── Pass 4: observe and record, in call order ──
     #
@@ -1238,7 +1385,23 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             except Exception:  # noqa: BLE001
                 logger.exception("[Tools] on_tool_result observer raised")
 
-        await _apply_side_effects(call.name, arguments, output, meta, turn.sink)
+        # The companion has been running since Pass 3, alongside the search
+        # itself — by now it is usually already done, so this await costs
+        # nothing and the strip lands in the same `meta` write as the sources.
+        companion_images: list | None = None
+        if (task := companions.get(call.id)) is not None:
+            try:
+                async with asyncio.timeout(15):
+                    companion_images = await task
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                companion_images = []
+            except Exception:  # noqa: BLE001 — never fail a search over its strip
+                companion_images = []
+
+        await _apply_side_effects(
+            call.name, arguments, output, meta, turn.sink,
+            companion_images=companion_images,
+        )
 
         # Bounded here and nowhere earlier: the observer above wants the whole
         # result for its durable log, and the side effects parse it as JSON to

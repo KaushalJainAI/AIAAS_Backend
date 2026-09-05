@@ -90,6 +90,17 @@ langchain-protocol==0.0.15
 langchain-text-splitters==1.1.2
 langgraph==1.1.10
 langgraph-checkpoint==4.1.0
+# Durable run state. Without one of these the checkpointer is in-process, so a
+# deploy or a crash loses every in-flight agent run and leaves its ExecutionLog
+# stuck on `running` — see chat/turn/checkpoints.py and agents/recovery.py.
+# sqlite is the dev default; postgres is what a deployment with more than one
+# process needs. Must stay in step with requirements.txt: this file missing
+# these three lines is how production lost sqlite and fell back to memory with
+# "[Checkpoints] SQLite checkpointer unavailable" (ModuleNotFoundError:
+# langgraph.checkpoint.sqlite).
+langgraph-checkpoint-sqlite==3.1.1
+langgraph-checkpoint-postgres==3.1.2
+aiosqlite==0.22.1
 langgraph-prebuilt==1.0.13
 langgraph-sdk==0.3.14
 langsmith==0.8.3

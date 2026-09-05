@@ -11,7 +11,7 @@ from rest_framework.response import Response
 
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse
 
-from .client import LIST_TOOLS_TIMEOUT, MCPClientManager, MCPConnectionError
+from .client import LIST_TOOLS_TIMEOUT, MCPClientManager, MCPConnectionError, warm_cache
 from .credential_injector import (
     CredentialInjector,
     CredentialInvalidError,
@@ -122,6 +122,9 @@ class MCPServerViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+        if serializer.instance.enabled:
+            # The first turn after connecting must not pay the cold `npx`.
+            warm_cache(serializer.instance.id, self.request.user)
 
     def _assert_owner(self, server: MCPServer):
         if server.user_id is None:
@@ -133,6 +136,8 @@ class MCPServerViewSet(viewsets.ModelViewSet):
         self._assert_owner(serializer.instance)
         serializer.save()
         async_to_sync(MCPToolCache.invalidate)(serializer.instance.id, serializer.instance.user_id)
+        if serializer.instance.enabled:
+            warm_cache(serializer.instance.id, self.request.user)
 
     def perform_destroy(self, instance):
         self._assert_owner(instance)
@@ -175,6 +180,10 @@ class MCPServerViewSet(viewsets.ModelViewSet):
             defaults={"enabled": enabled},
         )
         async_to_sync(MCPToolCache.invalidate)(server.id, self.request.user.id)
+        if enabled and server.enabled:
+            # Warming a connector that stays off would pay `npx` for a tool
+            # list nothing is allowed to read.
+            warm_cache(server.id, self.request.user)
         serializer = self.get_serializer(server)
         data = dict(serializer.data)
         # The context set was computed before this write, so report the new state
@@ -203,6 +212,8 @@ class MCPServerViewSet(viewsets.ModelViewSet):
             server.enabled = enabled
             server.save(update_fields=["enabled", "updated_at"])
             async_to_sync(MCPToolCache.invalidate)(server.id, server.user_id)
+            if enabled:
+                warm_cache(server.id, self.request.user)
             return Response(self.get_serializer(server).data)
         return self._write_preference(server, enabled)
 

@@ -119,10 +119,23 @@ shutdown         → drain_pool() closes all subprocesses cleanly
 |---|---|---|
 | `CONNECT_TIMEOUT` | 25 s | Opening a session (spawn + install + handshake) |
 | `LIST_TOOLS_TIMEOUT` | 30 s | `GET /tools/` — a person is watching a spinner |
-| `AGENT_LIST_TOOLS_TIMEOUT` | 8 s | An agent turn — dead air the user did not ask for |
+| `AGENT_LIST_TOOLS_TIMEOUT` | 5 s (`MCP_AGENT_LIST_TIMEOUT`) | An agent turn — dead air the user did not ask for |
 | `RPC_TIMEOUT` | 15 s | `list_tools` on an open session |
 | `CALL_TOOL_TIMEOUT` | 120 s | One tool call |
-| `CLOSE_TIMEOUT` | 10 s | Waiting for a worker to unwind before cancelling it |
+| `CLOSE_TIMEOUT` | 5 s (`MCP_CLOSE_TIMEOUT`) | Waiting for a worker to unwind before cancelling it |
+
+Listing fans out concurrently with one shared budget each — deliberately
+*unbounded*: batching cold spawns through a semaphore turns one 8s timeout
+into ceil(n/k)*8s of dead air when all of them are cold, which is the hang
+this path must not produce. An agent-budget timeout now also records a
+`FAILURE_TTL` entry and schedules a background warm with the full connect
+budget — otherwise a connector whose cache never filled costs every turn 8s
+for zero tools, because the agent path times out before a cold `npx` (~21s)
+could ever populate the cache. `MCP_DISABLED=True` is the emergency brake:
+every listing path returns no tools without spawning anything.
+`@isaacphi/mcp-gdrive` writes `Starting server` to stdout before the
+handshake; the SDK logs a parse error for that line and carries on
+(harmless, filtered in `apps.ready`).
 
 `drain_pool()` exists and is exercised by tests, but is **not wired into app teardown** — a hard-killed dev server can orphan stdio subprocesses; kill them manually or restart the shell.
 

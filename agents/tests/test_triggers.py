@@ -457,3 +457,163 @@ class RunNowTests(APITestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(started, [])
+
+
+class WebhookCreationTests(APITestCase):
+    """Making a webhook over the API — the half that had no caller until the
+    Schedules page grew a mode picker."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='hookmaker', password='pw')
+        self.client.force_authenticate(user=self.user)
+        self.agent = SubAgent.objects.create(
+            user=self.user, name='Hooked', prompt='Handle the event.',
+            allow_unattended=True,
+        )
+        self.mute = SubAgent.objects.create(
+            user=self.user, name='Silent', prompt='', allow_unattended=True,
+        )
+
+    def test_a_webhook_needs_no_cron(self):
+        response = self.client.post(
+            reverse('orchestrator:trigger_list'),
+            {'subagent': self.agent.id, 'mode': 'webhook', 'goal': 'Go.'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.data['webhook_url'])
+        self.assertIn(response.data['webhook_url'].strip('/').split('/')[-1],
+                      Trigger.objects.get(id=response.data['id']).secret)
+
+    def test_a_webhook_is_not_armed_and_shows_no_schedule_reading(self):
+        """`next_due_at` belongs to the sweep, which never sees this row."""
+        response = self.client.post(
+            reverse('orchestrator:trigger_list'),
+            {'subagent': self.agent.id, 'mode': 'webhook', 'goal': 'Go.'},
+            format='json',
+        )
+
+        self.assertIsNone(response.data['next_due_at'])
+        self.assertEqual(response.data['description'], '')
+        self.assertEqual(response.data['upcoming'], [])
+
+    def test_a_webhook_with_nothing_to_ask_is_refused_at_save(self):
+        """The receiver's own 404 for this is indistinguishable from a wrong
+        secret, so the hook would be silently dead for ever."""
+        response = self.client.post(
+            reverse('orchestrator:trigger_list'),
+            {'subagent': self.mute.id, 'mode': 'webhook'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('goal', response.data)
+
+    def test_the_agents_own_prompt_counts_as_the_instruction(self):
+        response = self.client.post(
+            reverse('orchestrator:trigger_list'),
+            {'subagent': self.agent.id, 'mode': 'webhook'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+    def test_a_goal_cannot_be_emptied_by_patch_when_the_agent_is_silent(self):
+        hook = Trigger.objects.create(subagent=self.mute, mode='webhook',
+                                      goal='Go.')
+
+        response = self.client.patch(
+            reverse('orchestrator:trigger_detail', args=[hook.id]),
+            {'goal': ''}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+
+class RotateSecretTests(APITestCase):
+    """A URL that is the only credential has to be replaceable without
+    throwing away the row it addresses."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='rotator', password='pw')
+        self.other = User.objects.create_user(username='bystander', password='pw')
+        self.client.force_authenticate(user=self.user)
+        self.agent = SubAgent.objects.create(
+            user=self.user, name='Hooked', prompt='Handle it.',
+            allow_unattended=True,
+        )
+        self.hook = Trigger.objects.create(
+            subagent=self.agent, mode='webhook', goal='Handle it.',
+        )
+        self.url = reverse('orchestrator:trigger_rotate_secret',
+                           args=[self.hook.id])
+
+    def test_it_issues_a_new_secret(self):
+        before = self.hook.secret
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.hook.refresh_from_db()
+        self.assertNotEqual(self.hook.secret, before)
+        self.assertGreaterEqual(len(self.hook.secret), 32)
+        self.assertIn(self.hook.secret, response.data['webhook_url'])
+
+    def test_the_old_url_stops_working_immediately(self):
+        old = reverse('orchestrator:webhook_receive', args=[self.hook.secret])
+
+        self.client.post(self.url)
+        self.client.force_authenticate(user=None)
+
+        self.assertEqual(self.client.post(old, {}, format='json').status_code, 404)
+
+    def test_the_row_survives_rotation(self):
+        """The whole point: the alternative was delete-and-recreate, which
+        loses the history and the identity every caller was pointed at."""
+        Trigger.objects.filter(id=self.hook.id).update(
+            consecutive_failures=2, name='Prod',
+        )
+
+        self.client.post(self.url)
+
+        self.hook.refresh_from_db()
+        self.assertEqual(self.hook.id, self.hook.id)
+        self.assertEqual(self.hook.name, 'Prod')
+        self.assertEqual(self.hook.consecutive_failures, 2)
+
+    def test_a_schedule_has_no_secret_to_rotate(self):
+        schedule = Trigger.objects.create(
+            subagent=self.agent, mode='schedule', config={'cron': '0 9 * * *'},
+        )
+
+        response = self.client.post(
+            reverse('orchestrator:trigger_rotate_secret', args=[schedule.id]),
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_someone_elses_hook_is_not_found(self):
+        self.client.force_authenticate(user=self.other)
+
+        self.assertEqual(self.client.post(self.url).status_code, 404)
+
+
+class SilentWebhookIsCountedTests(APITestCase):
+    """A hook whose agent lost its prompt after the hook was saved."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='wentquiet', password='pw')
+        self.agent = SubAgent.objects.create(
+            user=self.user, name='Quiet', prompt='', allow_unattended=True,
+        )
+        self.hook = Trigger.objects.create(subagent=self.agent, mode='webhook')
+
+    def test_having_nothing_to_ask_counts_as_a_failure(self):
+        url = reverse('orchestrator:webhook_receive', args=[self.hook.secret])
+
+        response = self.client.post(url, {}, format='json')
+
+        self.assertEqual(response.status_code, 404)
+        self.hook.refresh_from_db()
+        self.assertEqual(self.hook.consecutive_failures, 1)

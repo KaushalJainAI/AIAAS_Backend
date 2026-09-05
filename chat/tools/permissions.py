@@ -137,6 +137,36 @@ async def _original_name(tool_name: str) -> str:
     return strip_encoded_digest(decoded[1])
 
 
+def mcp_reads_only(tool_name: str) -> bool:
+    """Whether this is an MCP call whose *name* claims it only observes.
+
+    Synchronous and I/O-free on purpose: the caller is the dispatch planner in
+    `chat/turn/agent.py`, which runs once per call per turn and must not grow a
+    database round trip to decide how to schedule work.
+
+    This is the same claim `default_policy` already trusts to decide whether a
+    call is gated, applied to a weaker question. The two failure modes are not
+    comparable, which is why reusing it here is defensible where widening the
+    approval exemption would not be: mis-reading `list_and_purge` as a read
+    means an unapproved deletion when it decides *gating*, but only means that
+    a deletion which was going to happen in this turn anyway overlapped a
+    sibling call when it decides *scheduling*. Nothing about a name can make a
+    call happen that was not already issued.
+
+    Returns False for built-in tools — those declare `parallel` on `@tool()`,
+    which is a statement by the person who wrote them and beats any guess.
+    """
+    from mcp_integration.tool_provider import decode_tool_name, is_mcp_tool
+
+    if not is_mcp_tool(tool_name):
+        return False
+    decoded = decode_tool_name(tool_name)
+    if decoded is None:
+        # Fails closed: an unparseable name stays serial.
+        return False
+    return looks_read_only(strip_encoded_digest(decoded[1]))
+
+
 async def is_remembered(tool_name: str, context: dict[str, Any]) -> bool:
     """Whether the user has already said "always allow" for this tool."""
     from django.db.models import Q

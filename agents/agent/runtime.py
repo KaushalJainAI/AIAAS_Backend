@@ -64,7 +64,7 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # even with the grant on. The grant says "may touch files at all"; the
     # scope says "which files".
     'fileOps': ('list_files', 'find_files', 'read_file', 'write_file',
-                'make_directory', 'delete_file'),
+                'edit_file', 'make_directory', 'delete_file'),
     # Delegation. There is no 'orchestrator' kind of agent — an agent that
     # fans out to other agents is one holding this grant, so composition is
     # checked by the same mechanism as every other capability instead of by a
@@ -99,7 +99,13 @@ UNSERVED_GRANTS = frozenset({'shell'})
 #: what it was doing*, which is not a capability anyone would deliberately
 #: withhold, and the tool matters most on exactly the long runs a cautious
 #: grant set would be applied to.
-ALWAYS_AVAILABLE = ('get_current_time', 'update_todos')
+#: `render_chart` is here for the same reason: it writes nothing, reaches
+#: nothing, and hands the client a validated spec to draw. An agent that has
+#: analysed something and can only describe the numbers in prose produces a
+#: worse report than one that can show them, and there is no blast radius to
+#: gate — the drawing happens in the reader's browser, from data the agent
+#: already had.
+ALWAYS_AVAILABLE = ('get_current_time', 'update_todos', 'render_chart')
 
 #: Offered only once this run has actually stored something — a tool result too
 #: large to replay, or a step the curator removed. Both read back the run's own
@@ -363,7 +369,7 @@ class AgentToolbox:
         return await execute_tool(name, args, context)
 
 
-async def build_file_scope(agent, user):
+async def build_file_scope(agent, user, *, workspace=()):
     """The virtual-filesystem scope for this run, or None.
 
     Two settings have to agree before an agent touches files: the `fileOps`
@@ -382,9 +388,18 @@ async def build_file_scope(agent, user):
     try:
         from inference.vfs import build_scope
 
-        return await sync_to_async(build_scope)(
+        from inference.vfs import with_shared_workspace
+
+        scope = await sync_to_async(build_scope)(
             user, file_access, agent_name=agent.name or '',
         )
+        # A delegated worker also gets write access to the folder of whoever
+        # asked, so it can hand back a path instead of pouring its whole answer
+        # into the parent's context window. Adds only, and only where it can
+        # mean something — see `with_shared_workspace`.
+        if workspace:
+            scope = with_shared_workspace(scope, workspace)
+        return scope
     except Exception:
         logger.warning('[AgentRuntime] Could not build a file scope for agent %s',
                        agent.id, exc_info=True)
@@ -554,6 +569,40 @@ def _check_unattended(agent, caller: str) -> None:
             f'"allow unattended" in its settings if you want a trigger or '
             f'another agent to be able to run it.'
         )
+
+
+async def resolve_agent_model(agent, user) -> tuple[str, str]:
+    """Which provider/model this run actually uses.
+
+    A blank on the agent means "the account default" (Settings ->
+    `UserProfile.llm_provider` / `llm_model`), which is what the builder shows
+    for a blank board and what `create_agent` promises when the model is left
+    out. Only when the profile also says nothing does this fall back to the
+    shipped `openrouter` + blank (the handler's own default). Resolved here —
+    the one place every run passes — so the picker, the preflight and the turn
+    cannot disagree about what a blank means.
+    """
+    provider = (agent.llm_provider or '').strip()
+    model = (agent.llm_model or '').strip()
+    if provider and model:
+        return provider, model
+    try:
+        from core.models import UserProfile
+
+        profile = await sync_to_async(
+            lambda: UserProfile.objects.filter(user_id=user.id)
+            .only('llm_provider', 'llm_model').first()
+        )()
+    except Exception:  # noqa: BLE001
+        logger.warning('[AgentRuntime] Could not read user model default', exc_info=True)
+        profile = None
+    if not provider:
+        provider = (profile.llm_provider.strip()
+                    if profile and profile.llm_provider else '') or 'openrouter'
+    if not model:
+        model = (profile.llm_model.strip()
+                 if profile and profile.llm_model else '') or ''
+    return provider, model
 
 
 # ── The brief ────────────────────────────────────────────────────────────────
@@ -738,6 +787,19 @@ def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
         else:
             parts.append(f'- Your files live under {file_scope.label}. You can '
                          f'read and write there.')
+        # The second writable subtree, and the reason it exists. Stated as a
+        # *preference*, not just a permission: a worker that can write here and
+        # is not told to will still return its whole report in the transcript,
+        # which is the cost the shared folder exists to avoid.
+        if getattr(file_scope, 'shared_prefix', None):
+            parts.append(
+                f'- You are working for another agent, and you share its '
+                f'folder {file_scope.shared_label}. When your answer is long — '
+                f'a report, a dataset, a list of findings — write it there and '
+                f'reply with the path and a two-line summary instead of the '
+                f'whole thing. Whoever asked can read the file. Keep short '
+                f'answers in your reply as normal.'
+            )
     unserved = sorted(g for g in UNSERVED_GRANTS if grants.get(g))
     if unserved:
         parts.append(
@@ -848,6 +910,13 @@ def _open_log(agent, user, goal: str, trigger_type: str, thread_id: str = '',
         # and resuming an approved run has to find the *same* log so the trace
         # stays one execution instead of splitting into two the canvas cannot
         # join back up.
+        #
+        # Written twice, deliberately. The column is what every lookup filters
+        # on — it is indexed, where `input_data__thread_id` was a full scan
+        # with a JSON parse per row on the two paths a person waits on
+        # (approving a pause, and delegating). The JSON copy stays because it
+        # is what the historical rows carry and what a run's own record shows.
+        thread_id=(thread_id or '')[:200],
         input_data={'goal': goal, 'thread_id': thread_id},
         started_at=timezone.now(),
     )
@@ -984,7 +1053,8 @@ async def run_agent(agent, goal: str, *, user, sink=None,
                     delegation_index: int = 0,
                     deadline=None,
                     briefing: str = '',
-                    parent_session_key: str = '') -> AgentRun:
+                    parent_session_key: str = '',
+                    workspace=()) -> AgentRun:
     """Run `agent` against `goal` and record the run.
 
     `thread_id` keys the checkpointer, so passing the id of a paused run is how
@@ -1037,8 +1107,7 @@ async def run_agent(agent, goal: str, *, user, sink=None,
     stream = AgentRunStream(log)
     await stream.run_started(goal)
 
-    provider = agent.llm_provider or 'openrouter'
-    model = agent.llm_model or ''
+    provider, model = await resolve_agent_model(agent, user)
 
     try:
         # Repeated from `start_agent_run` for the callers that arrive here
@@ -1051,7 +1120,7 @@ async def run_agent(agent, goal: str, *, user, sink=None,
 
         guards = agent.guardrails or {}
         autonomy = guards.get('autonomy', 'ask')
-        file_scope = await build_file_scope(agent, user)
+        file_scope = await build_file_scope(agent, user, workspace=workspace)
         # `plan` is the one level that changes which tools exist rather than
         # which ones pause, so it has to be known before the toolbox is built.
         toolbox = AgentToolbox.for_agent(
@@ -1215,6 +1284,14 @@ async def run_agent(agent, goal: str, *, user, sink=None,
     payload: dict[str, Any] = {
         'answer': result.answer, 'tool_trace': result.tool_trace,
     }
+    # What the run produced for a person to *look at*, not just read. Carried
+    # on `output_data` because that is what the run view reads: a chart the
+    # agent drew and the plan it worked to exist only in the turn's metadata
+    # otherwise, which nothing outside the graph can reach once the run ends.
+    if charts := (result.metadata or {}).get('charts'):
+        payload['charts'] = charts
+    if todos := (result.metadata or {}).get('todos'):
+        payload['todos'] = todos
     if structured is not None:
         payload['structured'] = structured
     if contract_error:
@@ -1324,9 +1401,10 @@ async def start_agent_run(agent, goal: str, *, user,
     # exists, it reaches the view as an error naming the provider — instead of
     # a 202 followed by a run that dies on its first model call, where the only
     # trace is a failed execution the user has to go and open.
+    provider, model = await resolve_agent_model(agent, user)
     await llm.preflight(
-        provider=agent.llm_provider or 'openrouter',
-        model=agent.llm_model or '',
+        provider=provider,
+        model=model,
         user_id=user.id,
     )
     thread_id = thread_id or f'agent-{agent.id}-{uuid.uuid4()}'
@@ -1349,6 +1427,16 @@ async def start_agent_run(agent, goal: str, *, user,
             # Only top-level runs come through here. Workers reach `run_agent`
             # directly from `invoke_subagent`, and must: a worker queueing
             # behind the parent that is awaiting it would deadlock.
+            #
+            # The queued frame first: until `run_agent` broadcasts
+            # `workflow_start` on admission, a client subscribed on the 202
+            # cannot tell a run that is waiting for a slot from one whose
+            # task died silently. Best-effort — a run must not fail because
+            # nobody could be told it is waiting.
+            try:
+                await AgentRunStream(log).run_queued()
+            except Exception:  # noqa: BLE001
+                logger.exception('[AgentRuntime] Could not announce queued run')
             async with admission.slot(user.id):
                 await run_agent(agent, goal, user=user, thread_id=thread_id,
                                 trigger_type=trigger_type, caller=caller,
@@ -1424,8 +1512,12 @@ async def resume_agent_run(agent, *, user, thread_id: str) -> str | None:
 def _find_paused_log(agent, thread_id: str):
     from logs.models import ExecutionLog
 
+    # Indexed column, not the JSON path it mirrors: this runs on every
+    # approval, and the JSON filter scanned every run the account had ever
+    # made. Migration `logs.0018` backfilled the column, so a row that
+    # predates it is still found.
     return ExecutionLog.objects.filter(
-        subagent=agent, status='paused', input_data__thread_id=thread_id,
+        subagent=agent, status='paused', thread_id=thread_id,
     ).order_by('-started_at').first()
 
 
