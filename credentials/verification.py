@@ -211,12 +211,14 @@ class CredentialVerifier:
     @staticmethod
     def _verify_postgres(data):
         try:
-            import psycopg2
+            # psycopg 3 — the driver Django and the checkpointer already use;
+            # psycopg2 is no longer installed.
+            import psycopg
         except ImportError:
-            return False, "psycopg2 not installed on server"
+            return False, "psycopg not installed on server"
             
         try:
-            conn = psycopg2.connect(
+            conn = psycopg.connect(
                 host=data.get('host'),
                 port=data.get('port'),
                 dbname=data.get('database'),
@@ -234,7 +236,13 @@ class CredentialVerifier:
         """
         Specific validator for 'website-login' using Selenium.
         """
-        from .browser_utils import login_and_extract_tokens
+        # Selenium drives a local Chrome, and the deployed image has neither
+        # (requirements-linux.txt omits it), so this is a dev-only verifier.
+        # Answer that plainly rather than 500 on the import.
+        try:
+            from .browser_utils import login_and_extract_tokens
+        except ImportError:
+            return False, "Browser login verification is not available on this server"
         
         url = data.get('loginUrl') or data.get('login_url')
         username = data.get('username') or data.get('user_name') or data.get('email')

@@ -39,6 +39,8 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 
 import httpx
 
+from workflow_backend.httpclient import shared_client
+
 from .base import BaseNodeHandler, NodeExecutionResult
 from ..usage import DEFAULT_CONVENTION
 from .llm_base import ChatChunkParser, iter_sse_chunks
@@ -439,17 +441,17 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
             )
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    url, headers=self.auth_headers(api_key), json=payload,
+            response = await shared_client().post(
+                url, headers=self.auth_headers(api_key), json=payload,
+                timeout=self.timeout,
+            )
+            if response.status_code != 200:
+                return NodeExecutionResult(
+                    success=False,
+                    error=f"{self.api_label} API error: {response.text}",
+                    status_code=response.status_code,
                 )
-                if response.status_code != 200:
-                    return NodeExecutionResult(
-                        success=False,
-                        error=f"{self.api_label} API error: {response.text}",
-                        status_code=response.status_code,
-                    )
-                data = response.json()
+            data = response.json()
         except httpx.TimeoutException:
             return NodeExecutionResult(
                 success=False,
@@ -531,24 +533,24 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
         )
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                async with client.stream(
-                    "POST", self._chat_url(),
-                    headers=self.auth_headers(api_key), json=payload,
-                ) as response:
-                    if response.status_code != 200:
-                        body = (await response.aread()).decode("utf-8", "replace")
-                        # `status` rides along so the chat layer can tell "out of
-                        # credit" from "provider hiccup" without parsing prose.
-                        yield {
-                            "type": "error",
-                            "message": f"{self.api_label} API error: {body}",
-                            "status": response.status_code,
-                        }
-                        return
-                    async for chunk in iter_sse_chunks(response):
-                        for event in parser.feed(chunk):
-                            yield event
+            async with shared_client().stream(
+                "POST", self._chat_url(),
+                headers=self.auth_headers(api_key), json=payload,
+                timeout=self.timeout,
+            ) as response:
+                if response.status_code != 200:
+                    body = (await response.aread()).decode("utf-8", "replace")
+                    # `status` rides along so the chat layer can tell "out of
+                    # credit" from "provider hiccup" without parsing prose.
+                    yield {
+                        "type": "error",
+                        "message": f"{self.api_label} API error: {body}",
+                        "status": response.status_code,
+                    }
+                    return
+                async for chunk in iter_sse_chunks(response):
+                    for event in parser.feed(chunk):
+                        yield event
             for event in parser.flush():
                 yield event
         except httpx.TimeoutException:

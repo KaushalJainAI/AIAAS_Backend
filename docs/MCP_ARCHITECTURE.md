@@ -49,13 +49,13 @@ There is **no workflow node** any more. `MCPToolNode` (`nodes/mcp_integration/no
 
 | Field | Purpose |
 |---|---|
-| `type` | `stdio` (subprocess) or `sse` (HTTP stream) |
+| `type` | `stdio` (subprocess), `http` (streamable HTTP), `sse` (deprecated HTTP stream), or `native` (built-in tools — see below) |
 | `command` / `args` | Executable + arguments for stdio servers |
 | `url` | Endpoint for SSE servers |
 | `env` | Non-secret environment variables (write-only over the API) |
 | `required_credential_types` | List of credential slugs that must exist before any tool call |
 | `credential_env_map` | Maps `ENV_VAR_NAME → "slug:field"` for stdio injection |
-| `credential_header_map` | Maps `Header-Name → "Bearer {slug:field}"` for SSE injection |
+| `credential_header_map` | Maps `Header-Name → "Bearer {slug:field}"` for `http`/`sse` injection |
 | `user` | `NULL` = system-wide (visible to everyone); set = user-private |
 | `display_name`, `category`, `tagline`, `icon_slug`, `help_url` | Presentation metadata — the Connections catalog is data, not frontend code |
 
@@ -129,6 +129,47 @@ shutdown         → drain_pool() closes all subprocesses cleanly
 (2026-09-17) along with the spawn it bounded; see below. `MCP_DISABLED=True`
 remains the emergency brake: every listing path returns no tools without
 spawning anything.
+
+## Native connectors — a card is not a process (2026-09-17)
+
+Gmail, Google Drive, Google Sheets and Google Calendar are `type='native'`
+rows (migration `0019`). Their tools are registered built-ins in
+`chat/tools/google/` that call Google's REST APIs from the web process with the
+user's `google-oauth2` token; each declares `@tool(connector=<icon_slug>)`.
+
+Why: every curated connector was an `npx` server — 70-150 MB of Node — on a
+384 MB container. That killed daphne (2026-09-16), and the memory budget that
+followed meant tool lists were never built, so connectors silently never
+appeared. Google's own hosted MCP servers (`gmailmcp.googleapis.com` etc.) were
+checked the same day and are still a Workspace *Developer Preview* needing a
+per-project MCP service enablement, so REST was the stable base.
+
+The row stays because it is what *governs* the connector:
+
+| Concern | Mechanism | Unchanged? |
+|---|---|---|
+| On/off per user | `MCPServerPreference` via `_visible_servers_queryset` | yes |
+| Needs an account | `required_credential_types=['google-oauth2']` | yes |
+| Agent scope | `agent_context['connectors']` server ids; `read` mode uses the tool's declared `effect` | extended (`native_tool_allowed`) |
+| Approval | `permissions.carries_credentials` is True, so unattended runs gate reads | extended |
+
+`mcp_integration/native.py::live_native_connectors` answers which cards are
+live (enabled for the user **and** credential held); chat's
+`get_available_tools` and `execute_tool`, and the agent toolbox's
+`descriptors`/`dispatch`, all consult it — both doors, as for MCP. A native row
+is excluded from `get_openai_tool_descriptors` (or every tool would be offered
+twice as `mcp__` names), `list_tools` answers from the registry, and `_session`
+refuses it outright.
+
+The four no-credential utility rows (Filesystem, Fetch, Memory, Sequential
+Thinking) were disabled in the same migration as duplicates of built-ins.
+`MCP_ALLOW_STDIO` (False in `settings/deployment.py`) refuses stdio rows at save
+and at connect; the image carries no Node. The supervisor, pool and `launch.py`
+below still apply to local dev and to hosted sessions.
+
+Scopes: Gmail's (`gmail.modify`, `gmail.send`) and `drive.readonly` are Google
+*restricted* scopes — past 100 users the OAuth app needs a CASA assessment,
+whichever way the API is called. Calendar and `drive.file` are not restricted.
 
 ## Listing never starts a connector (2026-09-17)
 

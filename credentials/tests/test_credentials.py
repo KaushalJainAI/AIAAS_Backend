@@ -373,3 +373,99 @@ class CredentialAuditSnapshotTests(APITestCase):
         data = CredentialAuditLogSerializer(log).data
         self.assertEqual(data['credential_name'], 'Gone')
         self.assertEqual(data['credential_type_name'], 'Audit Service')
+
+
+class GoogleReconsentTests(APITestCase):
+    """
+    Re-connecting Google must not destroy the refresh token.
+
+    Google omits `refresh_token` on some re-consents. The callback used to write
+    an encrypted '' over the stored one, leaving a credential that worked for an
+    hour and could never refresh again — and the native Google connector tools
+    (`chat/tools/google/`) all depend on refreshing.
+    """
+    REDIRECT = 'http://localhost:5173/oauth/callback'
+
+    def setUp(self):
+        from cryptography.fernet import Fernet
+        from django.conf import settings
+        from django.core import signing
+        self.fernet = Fernet(settings.CREDENTIAL_ENCRYPTION_KEY)
+        self.user = User.objects.create_user(username='reconsent', password='password123')
+        self.client.force_authenticate(user=self.user)
+        self.cred = Credential(
+            user=self.user,
+            credential_type=CredentialType.objects.get(slug='google-oauth2'),
+            name='Google Account',
+            access_token=self.fernet.encrypt(b'old-access'),
+            refresh_token=self.fernet.encrypt(b'1//keep-me'),
+        )
+        self.cred.set_credential_data({})
+        self.cred.save()
+        self.state = signing.dumps(
+            {'user_id': self.user.id, 'redirect_uri': self.REDIRECT}, salt='oauth-state',
+        )
+
+    def _callback(self, token_data):
+        from unittest.mock import AsyncMock, patch
+        with patch('credentials.oauth.GoogleOAuthProvider.exchange_code',
+                   new=AsyncMock(return_value=token_data)), \
+             patch('credentials.oauth.GoogleOAuthProvider.get_user_info',
+                   new=AsyncMock(return_value={'email': 'me@x.com'})):
+            return self.client.post(
+                reverse('google-credentials-callback'),
+                {'code': 'c', 'redirect_uri': self.REDIRECT, 'state': self.state,
+                 'name': 'Google Account'},
+                format='json',
+            )
+
+    def test_a_reconsent_without_a_refresh_token_keeps_the_old_one(self):
+        res = self._callback({
+            'access_token': 'new-access', 'expires_in': 3600,
+            'scope': 'openid https://www.googleapis.com/auth/calendar',
+        })
+        self.assertEqual(res.status_code, 200, res.data)
+        self.cred.refresh_from_db()
+        self.assertEqual(self.fernet.decrypt(bytes(self.cred.refresh_token)), b'1//keep-me')
+        self.assertEqual(self.fernet.decrypt(bytes(self.cred.access_token)), b'new-access')
+        self.assertEqual(
+            self.cred.public_metadata['scopes'],
+            ['https://www.googleapis.com/auth/calendar', 'openid'],
+        )
+
+    def test_a_new_refresh_token_replaces_the_old_one(self):
+        self._callback({'access_token': 'a', 'refresh_token': '1//fresh', 'expires_in': 3600})
+        self.cred.refresh_from_db()
+        self.assertEqual(self.fernet.decrypt(bytes(self.cred.refresh_token)), b'1//fresh')
+
+
+class ForcedRefreshTests(TestCase):
+    """A 401 from Google is better evidence than our own expiry clock."""
+
+    def setUp(self):
+        from cryptography.fernet import Fernet
+        from django.conf import settings
+        self.fernet = Fernet(settings.CREDENTIAL_ENCRYPTION_KEY)
+        user = get_user_model().objects.create_user(username='forced', password='x')
+        self.cred = Credential(
+            user=user,
+            credential_type=CredentialType.objects.get(slug='google-oauth2'),
+            name='Google Account',
+            access_token=self.fernet.encrypt(b'looks-fresh'),
+            refresh_token=self.fernet.encrypt(b'1//r'),
+        )
+        self.cred.set_credential_data({})
+        self.cred.save()
+        self.cred = Credential.objects.get(pk=self.cred.pk)  # BinaryField as memoryview
+
+    def test_an_unexpired_token_is_returned_without_a_refresh(self):
+        with patch('requests.post') as post:
+            self.assertEqual(self.cred.get_valid_access_token(), 'looks-fresh')
+        post.assert_not_called()
+
+    def test_force_refresh_exchanges_even_an_unexpired_token(self):
+        response = MagicMock(status_code=200)
+        response.json.return_value = {'access_token': 'brand-new', 'expires_in': 3600}
+        with patch('requests.post', return_value=response) as post:
+            self.assertEqual(self.cred.get_valid_access_token(force_refresh=True), 'brand-new')
+        post.assert_called_once()

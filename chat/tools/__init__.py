@@ -22,8 +22,11 @@ What lives where:
   files         the agent's virtual filesystem over `inference.vfs`
   internal      this platform's own API, called as the user
   clock         wall-clock time
+  google        native Gmail / Drive / Sheets / Calendar connector tools
 
-MCP tools are not registered here. They are minted at runtime from a
+Connector tools (`google`) *are* registered here, and carry `connector=` so the
+Connections card they belong to still governs them — see
+`mcp_integration/native.py`. MCP tools are not registered here. They are minted at runtime from a
 third-party catalogue, so they are resolved on every call and every listing
 instead — see `mcp_integration.tool_provider`.
 """
@@ -40,6 +43,7 @@ from . import (  # noqa: F401  — imported for their registration side effect
     clock,
     conversation,
     files,
+    google,
     internal,
     knowledge,
     memory,
@@ -73,6 +77,7 @@ __all__ = [
     "execute_tool",
     "get",
     "get_available_tools",
+    "live_connectors",
     "names_with_effect",
     "PARALLEL_TOOLS",
     "schemas",
@@ -133,6 +138,27 @@ PARALLEL_TOOLS: frozenset = parallel_names()
 #: Where the MCP descriptor list is parked inside a turn's memo. Namespaced so
 #: the memo can hold other per-turn work later without two writers colliding.
 _MCP_MEMO_KEY = "mcp_descriptors"
+_NATIVE_MEMO_KEY = "native_connectors"
+
+
+async def live_connectors(
+    user_id: int | None, memo: Dict[str, Any] | None = None,
+) -> Dict[str, int]:
+    """Native connector cards live for this user, memoised per turn if asked.
+
+    Memoised on the same terms as the MCP half: whether a card is switched on
+    or a credential exists does not change while a turn is running, and the
+    listing is called before every model call. `execute_tool` reads it fresh,
+    so a switch flipped mid-run still refuses the next call.
+    """
+    if memo is not None and _NATIVE_MEMO_KEY in memo:
+        return memo[_NATIVE_MEMO_KEY]
+    from mcp_integration.native import live_native_connectors
+
+    live = await live_native_connectors(user_id)
+    if memo is not None:
+        memo[_NATIVE_MEMO_KEY] = live
+    return live
 
 
 async def _requirement_met(
@@ -234,10 +260,16 @@ async def get_available_tools(
     the run has just earned.
     """
     disabled = await disabled_tools_for(user_id)
+    live = await live_connectors(user_id, mcp_memo)
 
     tools: List[Dict[str, Any]] = []
     for entry in all_tools():
         if entry.name in disabled:
+            continue
+        if entry.connector is not None and entry.connector not in live:
+            # The card is off, or the user has not connected the account it
+            # needs. Not offered — an advertised tool that can only answer
+            # "not connected" is worse than one never offered.
             continue
         if entry.requires and not await _requirement_met(
             entry.requires, user_id, memory_enabled, session_key, file_scope
@@ -306,6 +338,15 @@ async def execute_tool(
             f"Error: '{func_name}' is switched off in this workspace's tool "
             f"settings. Do not try it again; solve the task with the tools you "
             f"have, or say what you would need."
+        )
+
+    if entry.connector is not None and entry.connector not in await live_connectors(
+        context.get("user_id")
+    ):
+        return (
+            f"Error: '{func_name}' needs a connection that is switched off or not "
+            f"connected for this user. Do not try it again; tell the user to turn it "
+            f"on or connect it on the Connections page if they want it used."
         )
 
     try:

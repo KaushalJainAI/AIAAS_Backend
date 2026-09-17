@@ -101,3 +101,42 @@ class CancelledRunTests(TransactionTestCase):
         """
         log = await self._cancel_mid_run()
         self.assertEqual(log.status, 'cancelled')  # reached via `raise`, not a return
+
+
+class CrashedTurnTests(TransactionTestCase):
+    """A graph that raised is a failed run, not a completed one with an apology.
+
+    Found by the benchmark: `run_turn` catches every exception and returns an
+    apology as the answer, and `run_agent` closed that as `completed` — so an
+    internal crash looked like success on /runs.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='crasher', password='pw')
+        self.agent = SubAgent.objects.create(
+            user=self.user, name='Crashy', prompt='x', tool_grants={}, guardrails={},
+            llm_provider='nvidia', llm_model='test/model',
+        )
+
+    async def test_the_log_is_failed_and_the_caller_sees_an_error(self):
+        from agents.agent.runtime import AgentTurnFailed, _open_log, run_agent
+        from chat.turn.agent import TurnResult
+
+        log = await _open_log(self.agent, self.user, 'go', 'manual', 'thread-crash')
+
+        async def crashed_turn(turn, *, prompt, thread_id):
+            return TurnResult(answer='I hit an internal error on that turn. Please try again.',
+                              error='RuntimeError: lock bound to a different event loop')
+
+        async def no_preflight(**kwargs):
+            return None
+
+        with patch('chat.turn.agent.run_turn', crashed_turn), \
+                patch('llm.access.preflight', no_preflight):
+            with self.assertRaises(AgentTurnFailed):
+                await run_agent(self.agent, 'go', user=self.user,
+                                thread_id='thread-crash', log=log)
+
+        await sync_to_async(log.refresh_from_db)()
+        self.assertEqual(log.status, 'failed')
+        self.assertIn('different event loop', log.error_message)

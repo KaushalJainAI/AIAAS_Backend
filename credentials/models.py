@@ -229,9 +229,14 @@ class Credential(models.Model):
         # 5 minute buffer
         return timezone.now() > (self.token_expires_at - timedelta(minutes=5))
 
-    def get_valid_access_token(self):
+    def get_valid_access_token(self, force_refresh: bool = False):
         """
         Get valid access token, refreshing if necessary.
+
+        `force_refresh` skips the expiry check. A provider answering 401 is
+        better evidence that a token is dead than our own clock, which only
+        knows what `expires_in` said at issue — a revoked or rotated token
+        looks unexpired right up until it is used.
 
         OAuth on this platform is Google-only by design: the client credentials
         come from Django settings (GOOGLE_OAUTH_CLIENT_ID/SECRET), so refreshing
@@ -258,15 +263,17 @@ class Credential(models.Model):
         # 1. Decrypt current token
         try:
             fernet = Fernet(self._get_encryption_key())
+            # `bytes()` because SQLite and Postgres hand a BinaryField back as
+            # a memoryview, which Fernet refuses.
             if self.access_token:
-                current_token = fernet.decrypt(self.access_token).decode()
+                current_token = fernet.decrypt(bytes(self.access_token)).decode()
             else:
                 return None
         except Exception:
             return None
 
         # 2. Check expiry
-        if not self.is_token_expired():
+        if not force_refresh and not self.is_token_expired():
             return current_token
             
         # 3. Refresh if expired
@@ -275,8 +282,11 @@ class Credential(models.Model):
             return None
             
         try:
-            refresh_token = fernet.decrypt(self.refresh_token).decode()
+            refresh_token = fernet.decrypt(bytes(self.refresh_token)).decode()
         except Exception:
+            return None
+        if not refresh_token:
+            logger.warning(f"Credential {self.id} has an empty refresh token")
             return None
             
         config = self.credential_type.oauth_config
@@ -291,9 +301,11 @@ class Credential(models.Model):
                 locked_cred = Credential.objects.select_for_update().get(id=self.id)
                 
                 # Double-check: another thread may have already refreshed
-                if not locked_cred.is_token_expired():
+                # A forced refresh skips this: the token it would return is
+                # the one the provider just rejected.
+                if not force_refresh and not locked_cred.is_token_expired():
                     try:
-                        return fernet.decrypt(locked_cred.access_token).decode()
+                        return fernet.decrypt(bytes(locked_cred.access_token)).decode()
                     except Exception:
                         pass
                 

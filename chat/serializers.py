@@ -78,3 +78,22 @@ class ChatSessionSerializer(serializers.ModelSerializer):
         if not title:
             raise serializers.ValidationError("Title is required and cannot be blank.")
         return title
+
+
+class ChatSessionListSerializer(ChatSessionSerializer):
+    """A session as the history list shows it: everything but the transcript.
+
+    The list used to be `ChatSessionSerializer`, whose nested `messages` put
+    every message of every listed conversation — each with its attachments — in
+    one response, one query per session plus one per message, to render a
+    sidebar that reads `id` and `title`. The transcript is the detail route's
+    job, and both clients already fetch it there when a conversation is opened.
+    Subclassed rather than restated so a field added to the session stays in
+    the list too.
+    """
+
+    class Meta(ChatSessionSerializer.Meta):
+        fields = [f for f in ChatSessionSerializer.Meta.fields if f != 'messages']
+        read_only_fields = [
+            f for f in ChatSessionSerializer.Meta.read_only_fields if f != 'messages'
+        ]

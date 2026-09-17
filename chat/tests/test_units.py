@@ -141,6 +141,19 @@ class TextToolCallFallbackTests(SimpleTestCase):
             extract_text_tool_calls('Config: {"timeout": 30, "retries": 2}'), ()
         )
 
+    def test_a_json_answer_is_not_a_call_to_a_tool_nobody_offered(self):
+        # Regression: {"name": "Priya", "age": 29} was recovered as a call to a
+        # tool named "Priya" and looped the run into GraphRecursionError.
+        answer = '{"name": "Priya", "age": 29}'
+        calls, cleaned = split_text_tool_calls(answer, allowed={"web_search"})
+        self.assertEqual(calls, ())
+        self.assertEqual(cleaned, answer)
+
+    def test_an_offered_tool_is_still_recovered(self):
+        text = '{"name": "web_search", "arguments": {"query": "x"}}'
+        calls, _ = split_text_tool_calls(text, allowed={"web_search"})
+        self.assertEqual(calls[0].name, "web_search")
+
     def test_empty_input(self):
         self.assertEqual(extract_text_tool_calls(""), ())
         self.assertEqual(split_text_tool_calls(""), ((), ""))

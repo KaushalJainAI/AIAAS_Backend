@@ -44,7 +44,11 @@ from .turn.pipeline import (
     persist_interrupted_answer,
     run_chat_turn,
 )
-from .serializers import ChatAttachmentSerializer, ChatSessionSerializer
+from .serializers import (
+    ChatAttachmentSerializer,
+    ChatSessionListSerializer,
+    ChatSessionSerializer,
+)
 from .transport.streaming_http import (
     authenticate,
     empty_stream,
@@ -67,7 +71,17 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return ChatSession.objects.filter(user=self.request.user)
+        sessions = ChatSession.objects.filter(user=self.request.user)
+        if self.action == 'list':
+            return sessions
+        # The transcript and each message's attachments, in two queries rather
+        # than one per message.
+        return sessions.prefetch_related('messages__attachments')
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ChatSessionListSerializer
+        return ChatSessionSerializer
 
     def perform_create(self, serializer) -> None:
         serializer.save(user=self.request.user)

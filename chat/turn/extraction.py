@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Iterator
+from typing import Any, Collection, Iterator
 
 from llm.access import ToolCall
 
@@ -76,14 +76,26 @@ def extract_text_tool_calls(text: str) -> tuple[ToolCall, ...]:
     return tuple(call for call, _ in _find(text))
 
 
-def split_text_tool_calls(text: str) -> tuple[tuple[ToolCall, ...], str]:
+def split_text_tool_calls(
+    text: str, allowed: Collection[str] | None = None,
+) -> tuple[tuple[ToolCall, ...], str]:
     """
     Return the tool calls found in `text` and `text` with them removed.
 
     Leaving the raw call in the message body would show the user the model's
     internal syntax, so the two always travel together.
+
+    `allowed` is the set of tool names actually offered this turn, and a call
+    naming anything else is not a call. Without it, an *answer* that happens to
+    be JSON with a `name` key -- `{"name": "Priya", "age": 29}`, exactly what a
+    user asking for JSON gets -- was recovered as a call to a tool called
+    `Priya`, refused, answered again with the same JSON, and looped until the
+    graph hit its recursion limit. Found by the benchmark
+    (`eval/benchmarks/suites/instructions.py`, "Strict JSON output").
     """
     found = _find(text)
+    if allowed is not None:
+        found = [(call, raw) for call, raw in found if call.name in allowed]
     remaining = text
     for _, raw in found:
         remaining = remaining.replace(raw, "")

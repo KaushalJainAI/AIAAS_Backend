@@ -74,6 +74,11 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # grant unlocks the whole user-configured set. Their names are namespaced by
     # `mcp_integration.tool_provider`, which is what keeps them from colliding
     # with a built-in and slipping past the allow-list.
+    #
+    # The same grant unlocks the *native* connector tools (`connector=` on
+    # `@tool`, e.g. Gmail over REST). They are added in `allowed_names` rather
+    # than listed here because which ones exist is the registry's answer, and
+    # whether each is live is the card's — see `mcp_integration/native.py`.
     'mcp': (),
 }
 
@@ -198,6 +203,11 @@ class AgentToolbox:
     #: the run has just earned.
     _mcp_descriptors: list[dict[str, Any]] | None = None
 
+    #: Native connector cards live for this run (`icon_slug -> server id`), or
+    #: None before the first read. Per-run for the reason `_mcp_descriptors`
+    #: is; dispatch reads it too, and `execute_tool` re-checks the card fresh.
+    _native_live: dict[str, int] | None = None
+
     @classmethod
     def for_agent(cls, agent, user_id: int, *, file_scope: Any = None,
                   read_only: bool = False, session_key: str = '',
@@ -219,6 +229,14 @@ class AgentToolbox:
         for grant, tools in GRANT_TOOLS.items():
             if self.grants.get(grant):
                 names.update(tools)
+        if self.grants.get('mcp'):
+            # Every native connector tool the registry knows. Which of them are
+            # live and in scope is decided in `descriptors` / `dispatch`, which
+            # can await; this property cannot. Unlike MCP, these survive `plan`
+            # through the `READ_ONLY_TOOLS` intersection below, because each
+            # one declares its own effect and a declared read is a read.
+            from chat.tools.registry import connector_tool_names
+            names.update(connector_tool_names())
         if self.read_only:
             from chat.tools import READ_ONLY_TOOLS
             names &= set(READ_ONLY_TOOLS)
@@ -282,6 +300,35 @@ class AgentToolbox:
             return False, self.mcp_scope.describe(server_id)
         return True, ''
 
+    async def native_live(self) -> dict[str, int]:
+        if self._native_live is None:
+            from chat.tools import live_connectors
+            self._native_live = await live_connectors(self.user_id)
+        return self._native_live
+
+    async def native_call_allowed(self, name: str) -> tuple[bool, str]:
+        """Whether this native connector tool is live and inside the scope.
+
+        The native half of `mcp_call_allowed`, keyed the same way — by the
+        card's server id — so one stored `connectors` selection governs a
+        connector whichever way its tools are served.
+        """
+        from chat.tools.registry import connector_of
+
+        slug = connector_of(name)
+        if slug is None:
+            return True, ''
+        server_id = (await self.native_live()).get(slug)
+        if server_id is None:
+            return False, 'that connection (it is switched off or not connected)'
+        if self.mcp_scope is None:
+            return True, ''
+        if not self.mcp_scope.native_tool_allowed(server_id, name):
+            if not self.mcp_scope.server_allowed(server_id):
+                return False, 'that connection'
+            return False, self.mcp_scope.describe(server_id)
+        return True, ''
+
     async def descriptors(self) -> list[dict[str, Any]]:
         """The tool list the model is offered this turn."""
         from chat.tools import AVAILABLE_TOOLS
@@ -308,6 +355,12 @@ class AgentToolbox:
         from chat.tools import disabled_tools_for
 
         allowed -= set(await disabled_tools_for(self.user_id))
+
+        from chat.tools.registry import connector_of
+
+        for name in [n for n in allowed if connector_of(n) is not None]:
+            if not (await self.native_call_allowed(name))[0]:
+                allowed.discard(name)
 
         descriptors = [
             t for t in AVAILABLE_TOOLS
@@ -364,6 +417,10 @@ class AgentToolbox:
 
         if name not in self.allowed_names:
             return _denied(name, name)
+
+        permitted, refusal = await self.native_call_allowed(name)
+        if not permitted:
+            return _denied(name, refusal)
 
         from chat.tools import execute_tool
         return await execute_tool(name, args, context)
@@ -549,6 +606,10 @@ CALLERS = frozenset({'chat', 'orchestrator', 'trigger', 'api'})
 #: attendedness of whatever started *it*, and is treated as unattended because
 #: the safe answer is the one that asks more often, not less.
 UNATTENDED_CALLERS = frozenset({'trigger', 'orchestrator'})
+
+
+class AgentTurnFailed(RuntimeError):
+    """The agent graph raised mid-run. Recorded as `failed`, never `completed`."""
 
 
 class UnattendedNotPermitted(AgentRunRefused):
@@ -1231,6 +1292,11 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             deadline.remaining() + budget.RUN_WRAPUP_SECONDS
         ) as clock:
             result = await run_turn(turn, prompt=goal, thread_id=thread_id)
+        if result.error:
+            # `run_turn` turns a crash into an apology for chat's sake. A run
+            # is a record, so it goes down the failure path below instead of
+            # being closed as `completed` with the apology as its answer.
+            raise AgentTurnFailed(result.error)
     except TimeoutError:
         if not clock.expired():
             # Somebody else's TimeoutError — a socket, a subprocess — that

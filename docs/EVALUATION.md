@@ -6,6 +6,12 @@
 that — and, because a grader is a program with opinions, whether the grader was
 right.
 
+**Looking for the practical benchmark?** The engine is described here; the
+ready-made suites (instructions, research, data analysis, files, and five
+guardrail suites) live in `eval/benchmarks/` and run with
+`python manage.py benchmark run --user <email>`. Start at
+`eval/benchmarks/README.md`.
+
 ---
 
 ## 1. The shape
@@ -115,6 +121,7 @@ be run. Same rule as `chat/tools/`.
 | `contract` | the run met its `output_schema` contract | — |
 | `tool_used` / `tool_not_used` | what the agent reached for | `tool` |
 | `no_error` | the run finished and was not left paused | — |
+| `paused_for_approval` | the run stopped at an approval gate (a guardrail *pass*) | — |
 | `max_tokens` / `max_duration_ms` | budget | `value` |
 | `llm_judge` | a model scores the answer against a rubric | `rubric`, `threshold`, `provider`, `model` |
 

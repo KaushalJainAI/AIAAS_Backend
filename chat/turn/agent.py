@@ -749,7 +749,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
 
     calls, content = completion.tool_calls, completion.content or ""
     if not calls and content and not at_limit:
-        calls, content = await _recover_text_tool_calls(content, turn)
+        calls, content = await _recover_text_tool_calls(content, turn, tools)
 
     message = AIMessage(
         content=content,
@@ -795,7 +795,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
 
 
 async def _recover_text_tool_calls(
-    content: str, turn: TurnContext
+    content: str, turn: TurnContext, tools: list | None = None,
 ) -> tuple[tuple[ToolCall, ...], str]:
     """
     Last-resort parse of tool calls a weak model wrote as text.
@@ -806,7 +806,13 @@ async def _recover_text_tool_calls(
     """
     from .extraction import split_text_tool_calls
 
-    calls, cleaned = split_text_tool_calls(content)
+    # Only names this turn actually offered: a JSON *answer* with a "name" key
+    # is otherwise read as a call to a tool that does not exist, and the run
+    # loops until the recursion limit. No tools offered means nothing to recover.
+    offered = {name for name in (_descriptor_name(d) for d in tools or ()) if name}
+    if not offered:
+        return (), content
+    calls, cleaned = split_text_tool_calls(content, allowed=offered)
     if not calls:
         return (), content
 
@@ -814,6 +820,16 @@ async def _recover_text_tool_calls(
     # That text already went out as content chunks; retract it like any preamble.
     await turn.sink(Event.CONTENT_RESET, {})
     return calls, cleaned
+
+
+def _descriptor_name(descriptor) -> str:
+    """The tool name in an OpenAI-shaped descriptor (or a bare `{name}`)."""
+    if not isinstance(descriptor, dict):
+        return ""
+    function = descriptor.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "")
+    return str(descriptor.get("name") or "")
 
 
 # ── Tool node ────────────────────────────────────────────────────────────────
@@ -1723,6 +1739,11 @@ class TurnResult:
     usage: TokenUsage = EMPTY_USAGE
     #: True when the run paused for tool approval rather than finishing.
     awaiting_approval: bool = False
+    #: Set when the graph raised. `answer` still carries the apology chat shows
+    #: the user, but a caller that records outcomes must read this instead: an
+    #: agent run whose graph crashed was closed as `completed` with the apology
+    #: as its answer, so every internal failure looked like a success on /runs.
+    error: str = ""
 
 
 async def run_tool_eagerly(
@@ -1943,11 +1964,12 @@ async def run_turn(
         # so the pause is detected under either version.
         awaiting_approval = True
         final = (await get_graph().aget_state(config)).values
-    except Exception:
+    except Exception as exc:
         logger.exception("[Agent] Run failed on thread %s", thread_id)
         return TurnResult(
             answer="I hit an internal error on that turn. Please try again.",
             metadata=dict(metadata or {}),
+            error=f"{type(exc).__name__}: {exc}",
         )
     else:
         # LangGraph 1.x does *not* raise: it returns the state with the pending

@@ -28,6 +28,7 @@ TOOLS = [{"name": "search", "description": "find things", "inputSchema": {"type"
 class _Server:
     id = 1
     name = "Fetch"
+    type = "stdio"
 
 
 def _run(coro):

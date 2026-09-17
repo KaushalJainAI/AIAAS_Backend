@@ -111,6 +111,28 @@ class PathWalkTests(VfsTestCase):
     def test_backslashes_are_separators_too(self):
         self.assertEqual(vfs.segments(r'notes\2026\q1.md'), ['notes', '2026', 'q1.md'])
 
+    def test_a_scoped_agent_can_use_the_path_it_was_shown(self):
+        # Regression (benchmark, files suite): the tools print paths under the
+        # home's label, and reading that exact path back used to say "No such
+        # file" -- while writing to it nested a second home inside the first.
+        scope = self.scope(name='Clerk')
+        written = vfs.write_file(scope, '/bench/roundtrip.txt', 'ok-7731')
+        shown = f'{scope.label}/bench/roundtrip.txt'
+        self.assertIn('ok-7731', vfs.read_file(scope, shown)['content'])
+
+        vfs.write_file(scope, f'{scope.label}/bench/second.txt', 'two')
+        self.assertIn('two', vfs.read_file(scope, '/bench/second.txt')['content'])
+        home = scope.root
+        self.assertFalse(Folder.objects.filter(parent=home, name=AGENT_HOME_ROOT).exists())
+        self.assertTrue(written)
+
+    def test_the_label_prefix_cannot_reach_a_sibling_agent(self):
+        mine = self.scope(name='Alpha')
+        theirs = self.scope(name='Beta')
+        vfs.write_file(theirs, 'theirs.md', 'theirs')
+        with self.assertRaises(vfs.VfsError):
+            vfs.read_file(mine, f'{theirs.label}/theirs.md')
+
     def test_traversal_cannot_reach_a_sibling_agent(self):
         mine = self.scope(name='Alpha')
         vfs.write_file(mine, 'secret.md', 'mine')

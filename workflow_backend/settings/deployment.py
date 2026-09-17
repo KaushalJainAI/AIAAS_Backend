@@ -24,12 +24,33 @@ load_dotenv(_BASE_DIR / '.env.deployment', override=True)
 os.environ.setdefault('DEBUG', 'False')
 os.environ.setdefault('USE_REDIS_CHANNEL_LAYER', 'True')
 os.environ.setdefault('CORS_ALLOW_ALL_ORIGINS', 'False')
+# No local-process MCP servers in production: see MCP_ALLOW_STDIO in base.py.
+os.environ.setdefault('MCP_ALLOW_STDIO', 'False')
 os.environ.setdefault('GOOGLE_OAUTH_REDIRECT_URI', 'https://aiaas.kaushaljain.com/auth/google/callback')
 
 from .base import *  # noqa: F401, F403, E402
 
+# ── Static files ─────────────────────────────────────────────────────────────
+# With S3 off (production), WhiteNoise was serving STATIC_ROOT through Django's
+# plain storage: no compressed copies, and unhashed names it can only mark
+# cacheable for 60 s. The manifest storage writes gzip siblings (brotli too,
+# if the `brotli` package is installed) and
+# content-hashed names at collectstatic (which the image runs at boot), and
+# WhiteNoise then serves those with a year's immutable caching. Deployment only:
+# a manifest has to exist before `{% static %}` can resolve, and tests and
+# runserver never run collectstatic. Non-strict so a template naming a file
+# that is not in the manifest renders its plain URL rather than a 500.
+if not USE_S3:  # noqa: F405
+    STORAGES = {
+        'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {
+            'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+        },
+    }
+    WHITENOISE_MANIFEST_STRICT = False
+
 # ── Security headers (only meaningful behind HTTPS) ──────────────────────────
-SECURE_BROWSER_XSS_FILTER = True
+# (SECURE_BROWSER_XSS_FILTER was removed from Django in 4.0 and did nothing.)
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 SESSION_COOKIE_SECURE = True

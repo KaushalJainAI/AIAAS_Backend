@@ -193,6 +193,8 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
         # an error condition to the graders so `no_error` catches it instead of
         # the empty answer being graded as a bad one.
         error='run paused for approval' if agent_run.awaiting_approval else '',
+        awaiting_approval=agent_run.awaiting_approval,
+        reasoning=agent_run.thinking or '',
         reference=case.reference or '',
         goal=case.goal or '',
         user_id=user.id,

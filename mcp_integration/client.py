@@ -45,6 +45,7 @@ from typing import Any
 import asyncio
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.db.models import Q
 from mcp import ClientSession, StdioServerParameters
@@ -871,6 +872,11 @@ class MCPClientManager:
         immediately, without dialling, while a recent failure for this key is
         still remembered.
         """
+        if server.type == "native":
+            raise MCPConnectionError(
+                f"'{server.name}' is a native connector; its tools are called "
+                f"directly, not through an MCP session."
+            )
         user_id = _coerce_user_id(self.user)
         key: _PoolKey = (self.server_id, user_id)
 
@@ -967,6 +973,13 @@ class MCPClientManager:
 
     @asynccontextmanager
     async def _connect_stdio(self, server: MCPServer, resolved: ResolvedCredentials):
+        if not getattr(settings, "MCP_ALLOW_STDIO", True):
+            # Checked at connect time, not only at save, so a stdio row created
+            # before the setting was turned off cannot start a process either.
+            raise MCPConnectionError(
+                f"'{server.name}' runs as a local process, which this deployment "
+                f"does not allow. Use a hosted (HTTP) MCP server instead."
+            )
         command = server.command
         if not command:
             raise ValueError(f"MCP server '{server.name}' is stdio but has no command")
@@ -1112,6 +1125,14 @@ class MCPClientManager:
         """
         server = await self.get_server_config(require_enabled=False)
         user_id = _coerce_user_id(self.user)
+
+        if server.type == "native":
+            # Our own tools, answered from the registry. Nothing to connect to,
+            # nothing to cache, and — the reason this row type exists — nothing
+            # to spawn. See `mcp_integration/native.py`.
+            from .native import tools_for_row
+
+            return tools_for_row(server)
 
         if use_cache:
             entry = await MCPToolCache.get_entry(self.server_id, user_id)
@@ -1286,7 +1307,7 @@ async def get_all_tools_from_all_servers(user) -> list[dict[str, Any]]:
     """Aggregate tools from every server visible to `user`, with origin tags."""
     if os.environ.get("MCP_DISABLED", "False").lower() in ("true", "1", "yes"):
         return []
-    servers = await get_servers_for_user(user)
+    servers = [s for s in await get_servers_for_user(user) if s.type != "native"]
     tools: list[dict[str, Any]] = []
 
     async def collect_server_tools(server: MCPServer) -> list[dict[str, Any]]:

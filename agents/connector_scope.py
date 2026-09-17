@@ -96,6 +96,26 @@ class ConnectorScope:
             return looks_read_only(normalise(tool_name))
         return normalise(tool_name) in self.tools.get(server_id, frozenset())
 
+    def native_tool_allowed(self, server_id: int, tool_name: str) -> bool:
+        """`tool_allowed` for a native connector tool (`chat/tools/google/`).
+
+        Same three modes, one difference: `read` asks the tool's own declared
+        `effect` instead of guessing from its name. `looks_read_only` exists
+        because an MCP name is a third party's claim about itself; a native
+        tool is one we wrote and declared, and `gmail_search_threads` would
+        fail the name test while being exactly the read the mode is for.
+        """
+        if server_id not in self.server_ids:
+            return False
+        mode = self.modes.get(server_id, 'all')
+        if mode == 'all':
+            return True
+        if mode == 'read':
+            from chat.tools.registry import effect_of
+
+            return effect_of(tool_name) == 'read'
+        return normalise(tool_name) in self.tools.get(server_id, frozenset())
+
     def describe(self, server_id: int) -> str:
         """For a refusal the model can act on rather than retry."""
         mode = self.modes.get(server_id, 'all')

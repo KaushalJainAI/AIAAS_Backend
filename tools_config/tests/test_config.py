@@ -185,7 +185,7 @@ class SchemaIsWiredTests(TestCase):
     def test_every_declared_setting_is_read_somewhere_in_chat_tools(self):
         source = '\n'.join(
             p.read_text(encoding='utf-8')
-            for p in (Path(__file__).resolve().parents[2] / 'chat' / 'tools').glob('*.py')
+            for p in (Path(__file__).resolve().parents[2] / 'chat' / 'tools').rglob('*.py')
         )
         for tool_name, settings in TOOL_SETTINGS.items():
             for setting in settings:

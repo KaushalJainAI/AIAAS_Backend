@@ -21,6 +21,8 @@ import logging
 from typing import AsyncIterator
 
 import httpx
+
+from workflow_backend.httpclient import shared_client
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -164,58 +166,57 @@ async def stream_guest_chat(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            async with client.stream(
-                "POST", f"{NIM_BASE_URL}/chat/completions",
-                headers=headers, json=payload,
-            ) as response:
-                if response.status_code == 429:
-                    yield {"type": "error", "message": "The demo is rate-limited right now. Try again shortly."}
-                    return
-                if response.status_code >= 500:
-                    yield {"type": "error", "message": f"Upstream service error ({response.status_code})."}
-                    return
-                if response.status_code != 200:
-                    from llm.access import humanize_provider_body
+        async with shared_client().stream(
+            "POST", f"{NIM_BASE_URL}/chat/completions",
+            headers=headers, json=payload, timeout=120,
+        ) as response:
+            if response.status_code == 429:
+                yield {"type": "error", "message": "The demo is rate-limited right now. Try again shortly."}
+                return
+            if response.status_code >= 500:
+                yield {"type": "error", "message": f"Upstream service error ({response.status_code})."}
+                return
+            if response.status_code != 200:
+                from llm.access import humanize_provider_body
 
-                    body = (await response.aread()).decode("utf-8", "replace")[:300]
-                    if response.status_code == 410:
-                        # The *server's* model reached end of life, not one the
-                        # guest chose — they have no picker and nothing to fix.
-                        # So they get an apology and the operator gets the body.
-                        logger.error(
-                            "Guest chat model %s is retired: %s",
-                            GUEST_MODEL,
-                            humanize_provider_body(body),
-                        )
-                        yield {
-                            "type": "error",
-                            "message": (
-                                "This demo's model is no longer available. Sign in "
-                                "to pick your own model, or try again later."
-                            ),
-                        }
-                        return
+                body = (await response.aread()).decode("utf-8", "replace")[:300]
+                if response.status_code == 410:
+                    # The *server's* model reached end of life, not one the
+                    # guest chose — they have no picker and nothing to fix.
+                    # So they get an apology and the operator gets the body.
+                    logger.error(
+                        "Guest chat model %s is retired: %s",
+                        GUEST_MODEL,
+                        humanize_provider_body(body),
+                    )
                     yield {
                         "type": "error",
                         "message": (
-                            f"Upstream API error {response.status_code}: "
-                            f"{humanize_provider_body(body)}"
+                            "This demo's model is no longer available. Sign in "
+                            "to pick your own model, or try again later."
                         ),
                     }
                     return
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"Upstream API error {response.status_code}: "
+                        f"{humanize_provider_body(body)}"
+                    ),
+                }
+                return
 
-                # The provider quirks — `data:` framing, reasoning keys, tags
-                # torn across chunks — are the shared parser's job. This used to
-                # be a private copy of NvidiaNode's loop, which is precisely the
-                # duplication that let the two drift apart.
-                parser = ChatChunkParser(emit_tool_calls=False)
-                async for chunk in iter_sse_chunks(response):
-                    for event in parser.feed(chunk):
-                        if event["type"] in ("content", "thinking"):
-                            yield event
-                for event in parser.flush():
-                    yield event
+            # The provider quirks — `data:` framing, reasoning keys, tags
+            # torn across chunks — are the shared parser's job. This used to
+            # be a private copy of NvidiaNode's loop, which is precisely the
+            # duplication that let the two drift apart.
+            parser = ChatChunkParser(emit_tool_calls=False)
+            async for chunk in iter_sse_chunks(response):
+                for event in parser.feed(chunk):
+                    if event["type"] in ("content", "thinking"):
+                        yield event
+        for event in parser.flush():
+            yield event
 
         yield {"type": "done"}
     except httpx.TimeoutException:

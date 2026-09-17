@@ -249,6 +249,11 @@ class GmailConnectorEndToEndTests(TestCase):
     what broke before (`get_credential_data()` reads only the blob, so an
     OAuth-connected account looked empty) and it is the combination no unit
     test can catch.
+
+    Since `0019` the row is `type='native'`: its tools are
+    `chat/tools/google/gmail.py`, called from this process, so what matters is
+    that the card goes live for the user who connected Google and that the
+    token those tools use is that user's own.
     """
 
     def setUp(self):
@@ -268,23 +273,19 @@ class GmailConnectorEndToEndTests(TestCase):
         cred.set_credential_data({})
         cred.save()
 
-    @override_settings(
-        GOOGLE_OAUTH_CLIENT_ID='platform-id',
-        GOOGLE_OAUTH_CLIENT_SECRET='platform-secret',
-    )
-    def test_the_curated_row_resolves_to_what_the_package_reads(self):
-        """
-        `@shinzolabs/gmail-mcp` reads exactly CLIENT_ID / CLIENT_SECRET /
-        REFRESH_TOKEN and falls back to an interactive browser flow if any is
-        missing. Getting the *names* wrong is silent: the server starts, waits
-        for an auth it will never get, and the run times out.
-        """
-        resolved = async_to_sync(CredentialInjector.resolve)(self.server, self.user)
-        self.assertEqual(resolved.env_vars, {
-            'CLIENT_ID': 'platform-id',
-            'CLIENT_SECRET': 'platform-secret',
-            'REFRESH_TOKEN': '1//real-refresh-token',
-        })
+    def test_the_curated_row_is_native_and_live_for_its_owner(self):
+        """No process to start, and live only for someone who connected Google."""
+        from mcp_integration.native import live_native_connectors
+
+        self.assertEqual(self.server.type, 'native')
+        self.assertFalse(self.server.command)
+        self.assertEqual(self.server.credential_env_map, {})
+
+        live = async_to_sync(live_native_connectors)(self.user.id)
+        self.assertEqual(live.get('gmail'), self.server.id)
+
+        stranger = User.objects.create_user(username='gmail-stranger', password='x')
+        self.assertNotIn('gmail', async_to_sync(live_native_connectors)(stranger.id))
 
     @override_settings(
         GOOGLE_OAUTH_CLIENT_ID='platform-id',
@@ -303,22 +304,21 @@ class GmailConnectorEndToEndTests(TestCase):
 
     def test_one_users_token_is_never_resolved_for_another(self):
         """
-        The per-user property, asserted rather than assumed: resolution is keyed
-        on the user, and the session pool is keyed on (server_id, user_id), so
-        two accounts sharing a curated row never share a token.
+        The per-user property, asserted rather than assumed: the Google client
+        resolves the token from the caller's own user id, so two accounts using
+        the same curated card never share a token.
         """
+        from chat.tools.google.client import _access_token
+
         other = User.objects.create_user(username='gmail-other', password='x')
         cred_type = CredentialType.objects.get(slug='google-oauth2')
         cred = Credential(
             user=other, credential_type=cred_type, name='Google Account',
-            refresh_token=_encrypt('1//OTHER-USERS-TOKEN'), is_verified=True,
+            refresh_token=_encrypt('1//OTHER-USERS-TOKEN'),
+            access_token=_encrypt('ya29.OTHER-USERS-TOKEN'), is_verified=True,
         )
         cred.set_credential_data({})
         cred.save()
 
-        with override_settings(GOOGLE_OAUTH_CLIENT_ID='i', GOOGLE_OAUTH_CLIENT_SECRET='s'):
-            mine = async_to_sync(CredentialInjector.resolve)(self.server, self.user)
-            theirs = async_to_sync(CredentialInjector.resolve)(self.server, other)
-
-        self.assertEqual(mine.env_vars['REFRESH_TOKEN'], '1//real-refresh-token')
-        self.assertEqual(theirs.env_vars['REFRESH_TOKEN'], '1//OTHER-USERS-TOKEN')
+        self.assertEqual(async_to_sync(_access_token)(self.user.id), 'ya29.real-access-token')
+        self.assertEqual(async_to_sync(_access_token)(other.id), 'ya29.OTHER-USERS-TOKEN')

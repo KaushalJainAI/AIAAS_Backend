@@ -379,6 +379,31 @@ def segments(path: str) -> list[str]:
     return out
 
 
+def _scope_parts(scope: FileScope, path: str) -> list[str]:
+    """`segments(path)`, accepting the paths this module itself prints.
+
+    A scope rooted at an agent's home is *labelled* `/Agents/<name>`, and every
+    message and listing renders paths under that label -- but a path was only
+    ever resolved relative to the home. So an agent that wrote `/bench/a.txt`,
+    was told it wrote `/Agents/<name>/bench/a.txt`, and read that path back got
+    "No such file"; writing to it created `/Agents/<name>/Agents/<name>/bench/`
+    inside its own home. Found by the benchmark (files suite, "Write then read
+    back"), and the reason a correctly scoped agent told users it could not
+    write where it could.
+
+    Stripping the label is safe by construction: it only ever maps a path onto
+    the scope's own root, which the walk already confines, so it cannot reach
+    anything the unprefixed path could not.
+    """
+    parts = segments(path)
+    if scope.root is None:
+        return parts
+    label = segments(scope.label)
+    if label and parts[:len(label)] == label:
+        return parts[len(label):]
+    return parts
+
+
 def render(scope: FileScope, parts: Sequence[str]) -> str:
     """A scope-relative path as the model should see it, for messages."""
     tail = '/'.join(parts)
@@ -412,7 +437,7 @@ def _document_in(scope: FileScope, folder: Folder | None, name: str) -> Document
 
 def _split_leaf(scope: FileScope, path: str) -> tuple[list[str], str]:
     """`parts-to-the-parent, leaf name`, refusing a path that names the root."""
-    parts = segments(path)
+    parts = _scope_parts(scope, path)
     if not parts:
         raise VfsError(
             f'That path names the directory {scope.label}, not a file. '
@@ -427,7 +452,7 @@ def _split_leaf(scope: FileScope, path: str) -> tuple[list[str], str]:
 
 def list_dir(scope: FileScope, path: str = '/') -> dict:
     """Directories and files directly inside `path`."""
-    parts = segments(path)
+    parts = _scope_parts(scope, path)
     folder = _folder_at(scope, parts)
 
     dirs = list(fs.children(scope.user, folder)[: AGENT_FILE_LIST_LIMIT + 1])
@@ -770,7 +795,7 @@ def _folder_parts(scope: FileScope, folder: Folder | None) -> list[str]:
 
 def make_dir(scope: FileScope, path: str) -> dict:
     """Create a directory and any missing parents. Idempotent."""
-    parts = segments(path)
+    parts = _scope_parts(scope, path)
     if not parts:
         raise VfsError('Give a directory name to create.')
     _require_write_at(scope, parts, 'create directories')
@@ -786,7 +811,7 @@ def delete(scope: FileScope, path: str) -> dict:
     goes through — so it gets the same retention window, drops the same vectors,
     and shows up in the same trash view.
     """
-    parts = segments(path)
+    parts = _scope_parts(scope, path)
     if not parts:
         raise VfsError(f'Refusing to delete {scope.label} itself.')
     _require_write_at(scope, parts, 'delete')

@@ -318,15 +318,21 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
             from datetime import timedelta
             token_expires_at = timezone.now() + timedelta(seconds=expires_in)
         
+        defaults = {
+            'credential_type': cred_type,
+            'access_token': fernet.encrypt(token_data.get('access_token', '').encode()),
+            'token_expires_at': token_expires_at,
+        }
+        # Google sends a refresh token only when the user is shown the consent
+        # screen, and omits it on some re-consents. Writing '' over the stored
+        # one used to leave a credential that worked for an hour and then could
+        # never refresh again — every native Google tool depends on it.
+        if token_data.get('refresh_token'):
+            defaults['refresh_token'] = fernet.encrypt(token_data['refresh_token'].encode())
         credential, _ = await sync_to_async(Credential.objects.update_or_create)(
             user=request.user,
             name=name,
-            defaults={
-                'credential_type': cred_type,
-                'access_token': fernet.encrypt(token_data.get('access_token', '').encode()),
-                'refresh_token': fernet.encrypt(token_data.get('refresh_token', '').encode()),
-                'token_expires_at': token_expires_at,
-            },
+            defaults=defaults,
         )
             
         # Verify immediately - use async info fetch
@@ -336,7 +342,12 @@ class GoogleCredentialOAuthViewSet(viewsets.ViewSet):
             credential.public_metadata = {
                 'email': user_info.get('email'),
                 'picture': user_info.get('picture'),
-                'name': user_info.get('name')
+                'name': user_info.get('name'),
+                # What the token was actually granted. With
+                # `include_granted_scopes` this is the union across every card
+                # connected so far, so it answers "does this account cover
+                # Calendar yet" without a call to Google.
+                'scopes': sorted((token_data.get('scope') or '').split()),
             }
             credential.is_verified = True
         except Exception:

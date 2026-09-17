@@ -113,14 +113,32 @@ class FreshInstallConnectionsPageTests(TestCase):
                     )
         self.assertEqual(unconnectable, [], '\n'.join(unconnectable))
 
-    def test_built_in_connections_need_no_setup(self):
-        """Something must work on day one, before the user connects anything."""
-        ready = [
-            row
-            for row in self.client.get('/api/mcp/servers/').data['servers']
-            if not row.get('required_credential_types') and row['effective_enabled']
+    def test_no_curated_connection_starts_a_process(self):
+        """
+        Replaces "something must work before the user connects anything".
+
+        That test was satisfied by four no-credential stdio rows — Filesystem,
+        Fetch, Memory, Sequential Thinking — each a Node process duplicating a
+        built-in tool. `0019` retired them, and the property worth pinning now
+        is the one the 2026-09-16 OOM was about: a fresh install offers no
+        enabled curated connection that is served by spawning something.
+        """
+        from mcp_integration.models import MCPServer as Row
+
+        spawning = [
+            row.name for row in Row.objects.filter(user__isnull=True, enabled=True)
+            if row.type == 'stdio'
         ]
-        self.assertGreater(len(ready), 0)
+        self.assertEqual(spawning, [])
+
+    def test_every_native_card_has_tools_behind_it(self):
+        """A native card whose `icon_slug` names no registered tool is an empty promise."""
+        from chat.tools.registry import connector_tool_names
+        from mcp_integration.models import MCPServer as Row
+
+        for row in Row.objects.filter(user__isnull=True, type='native'):
+            with self.subTest(card=row.name):
+                self.assertTrue(connector_tool_names(row.icon_slug))
 
 
 class CuratedPackageTests(TestCase):

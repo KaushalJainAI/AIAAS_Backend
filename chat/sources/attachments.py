@@ -38,9 +38,11 @@ def extract_pdf_text(data: bytes, max_pages: int = 100) -> str:
     import io
 
     try:
-        from PyPDF2 import PdfReader
+        # pypdf, not PyPDF2: the latter is its deprecated predecessor, and the
+        # knowledge base (`inference/utils.py`) already reads PDFs with pypdf.
+        from pypdf import PdfReader
     except ImportError:
-        return "[PDF extraction needs PyPDF2: pip install PyPDF2]"
+        return "[PDF extraction needs pypdf: pip install pypdf]"
 
     try:
         reader = PdfReader(io.BytesIO(data))

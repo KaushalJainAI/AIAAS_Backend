@@ -7,6 +7,8 @@ with method whitelisting and validation.
 import ast
 import logging
 import builtins
+import importlib
+import types
 import threading
 from typing import Any
 
@@ -83,6 +85,37 @@ BLOCKED_MODULES = {
     'importlib', 'runpy', 'code', 'codeop',
     'builtins', '__builtins__',
 }
+
+
+def _restricted_module(module_name: str):
+    """A proxy exposing only the allow-listed attributes of one module."""
+    module = importlib.import_module(module_name)
+    proxy = types.SimpleNamespace()
+    for attr in ALLOWED_MODULES[module_name]:
+        if hasattr(module, attr):
+            setattr(proxy, attr, getattr(module, attr))
+    return proxy
+
+
+def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """`__import__` for the sandbox: allow-listed modules, as restricted proxies."""
+    if level != 0 or name not in ALLOWED_MODULES:
+        allowed = ', '.join(sorted(ALLOWED_MODULES))
+        raise ImportError(
+            f"Module '{name}' is not available in this sandbox. Available: {allowed}."
+        )
+    proxy = _restricted_module(name)
+    if fromlist or '.' not in name:
+        return proxy
+    # `import urllib.parse` binds the top-level name and reaches the leaf
+    # through attributes, so build that chain out of proxies too.
+    head, *rest = name.split('.')
+    root = node = types.SimpleNamespace()
+    for part in rest[:-1]:
+        setattr(node, part, types.SimpleNamespace())
+        node = getattr(node, part)
+    setattr(node, rest[-1], proxy)
+    return root
 
 
 # ======================== AST Validator ========================
@@ -203,6 +236,15 @@ class CodeSandbox:
         
         # Override input to prevent blocking
         safe['input'] = lambda *args: ""
+
+        # An `import` statement compiles to a call to `__import__`, so leaving
+        # it out of the builtins made *every* import fail -- including the
+        # allow-listed ones (`from datetime import datetime` raised
+        # "ImportError: __import__ not found"), which meant only code that
+        # happened to import nothing ever ran. Found by the benchmark
+        # (data-analysis suite). This hands back the same restricted proxies
+        # `_create_safe_globals` exposes, and refuses everything else.
+        safe['__import__'] = _restricted_import
         
         # Add None, True, False
         safe['None'] = None

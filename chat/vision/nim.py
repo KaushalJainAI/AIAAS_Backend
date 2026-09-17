@@ -23,6 +23,8 @@ import logging
 
 import httpx
 
+from workflow_backend.httpclient import shared_client
+
 logger = logging.getLogger(__name__)
 
 NIM_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -110,8 +112,10 @@ async def parse_image(attachment, *, api_key: str, model: str) -> str | None:
 
     for attempt in range(PARSE_ATTEMPTS):
         try:
-            async with httpx.AsyncClient(timeout=PARSE_TIMEOUT_SECONDS) as client:
-                response = await client.post(NIM_CHAT_URL, json=payload, headers=headers)
+            response = await shared_client().post(
+                NIM_CHAT_URL, json=payload, headers=headers,
+                timeout=PARSE_TIMEOUT_SECONDS,
+            )
             if response.status_code == 404:
                 # Not entitled for this account. Retrying will not change that.
                 logger.info("[Vision] Parser %s not available for this account", model)

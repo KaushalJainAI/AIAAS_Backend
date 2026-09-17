@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework import serializers
 
 from .models import MCPServer
@@ -115,6 +116,20 @@ class MCPServerSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         server_type = attrs.get("type") or (self.instance.type if self.instance else "stdio")
+        if server_type == "native":
+            # A native card is a pointer at tools compiled into this backend.
+            # A user-made one would name tools that are not theirs to wire up,
+            # so the type is curated-only (migrations), never API-writable.
+            raise serializers.ValidationError({
+                "type": "Native connectors are built in and cannot be created or edited here.",
+            })
+        if server_type == "stdio" and not getattr(settings, "MCP_ALLOW_STDIO", True):
+            raise serializers.ValidationError({
+                "type": (
+                    "Local-process (stdio) MCP servers are not allowed on this "
+                    "deployment. Add a hosted server by its HTTP URL instead."
+                ),
+            })
         if server_type == "stdio":
             command = attrs.get("command") if "command" in attrs else (self.instance.command if self.instance else None)
             if not command:

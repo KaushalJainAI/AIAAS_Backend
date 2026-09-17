@@ -97,6 +97,14 @@ async def carries_credentials(tool_name: str) -> bool:
     """
     from mcp_integration.tool_provider import is_mcp_tool
 
+    from .registry import connector_of
+
+    if connector_of(tool_name) is not None:
+        # A native connector tool (Gmail over REST) holds the same authority an
+        # MCP one does — the user's own token — so it is judged the same way.
+        # Without this an unattended run would read a mailbox ungated simply
+        # because the tool moved out of a subprocess.
+        return True
     if not is_mcp_tool(tool_name):
         return False
 
@@ -200,7 +208,14 @@ async def default_policy(name: str, args: dict, context: dict[str, Any]) -> bool
     """
     if not await carries_credentials(name):
         return False
-    if looks_read_only(await _original_name(name)):
+    from .registry import connector_of, effect_of
+
+    if connector_of(name) is not None:
+        # Declared, not guessed: `gmail_search_threads` would fail the name
+        # test while being exactly the read this exemption is for.
+        if effect_of(name) == "read":
+            return False
+    elif looks_read_only(await _original_name(name)):
         return False
     return not await is_remembered(name, context)
 

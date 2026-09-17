@@ -85,6 +85,10 @@ class ChatSession(models.Model):
     
     class Meta:
         ordering = ['-updated_at']
+        indexes = [
+            # The history list: one user's sessions, newest first.
+            models.Index(fields=['user', '-updated_at'], name='chat_session_user_recent'),
+        ]
         
     def __str__(self):
         return f"{self.title} ({self.id})"

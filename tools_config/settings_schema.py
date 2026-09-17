@@ -84,6 +84,42 @@ TOOL_SETTINGS: dict[str, tuple[Setting, ...]] = {
                 'Default number of pages a run reads when it does not ask for one.',
                 15, 5, 50, 'pages'),
     ),
+    # Native Google connectors (`chat/tools/google/`). One knob per shape of
+    # result: how many items a listing returns, and how much text a read
+    # keeps. Sibling tools share a knob where they return the same thing —
+    # `gmail_get_message` reads `gmail_get_thread`'s, `drive_list_recent_files`
+    # reads `drive_search_files'` — so one setting does not quietly apply to
+    # half of what the user thinks it covers.
+    'gmail_search_threads': (
+        Setting('maxResults', 'Threads per search',
+                'How many email threads one search brings back.',
+                10, 1, 50),
+    ),
+    'gmail_get_thread': (
+        Setting('charLimit', 'Email text kept',
+                'How much message text one thread or message read keeps.',
+                20_000, 2_000, 60_000, 'characters'),
+    ),
+    'drive_search_files': (
+        Setting('maxResults', 'Files per search',
+                'How many Drive files one search or recent-files listing returns.',
+                15, 1, 50),
+    ),
+    'drive_read_file_content': (
+        Setting('charLimit', 'Characters per read',
+                'How much of a Drive file one read returns. Longer files are read in windows.',
+                20_000, 2_000, 60_000, 'characters'),
+    ),
+    'sheets_get_values': (
+        Setting('maxRows', 'Rows per read',
+                'How many spreadsheet rows one read returns.',
+                500, 20, 5_000, 'rows'),
+    ),
+    'calendar_list_events': (
+        Setting('maxResults', 'Events per listing',
+                'How many calendar events one listing returns.',
+                25, 1, 100),
+    ),
     # 20k mirrors `chat.tools.sandbox.MAX_CODE_OUTPUT_CHARS`, which stays as
     # the floor under a failed overlay read.
     'execute_python': (

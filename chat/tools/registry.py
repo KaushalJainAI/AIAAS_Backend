@@ -72,6 +72,17 @@ class Tool:
     #: autonomy ladder would quietly hand unknown tools the loosest treatment.
     effect: Effect = "irreversible"
 
+    #: The connector card this tool belongs to, as that `MCPServer` row's
+    #: `icon_slug` (`gmail`, `google-drive`, ...), or None for a tool that
+    #: reaches nothing of the user's outside this platform.
+    #:
+    #: A connector tool is one we wrote against a vendor's REST API instead of
+    #: spawning the vendor's MCP server — see `mcp_integration/native.py`. It
+    #: stays tied to a card so the Connections page switch, the credential it
+    #: needs and an agent's `connectors` scope govern it exactly as they govern
+    #: an MCP tool; the only thing that changed is where the tool comes from.
+    connector: str | None = None
+
 
 _REGISTRY: Dict[str, Tool] = {}
 
@@ -83,6 +94,7 @@ def tool(
     sensitive: bool = False,
     parallel: bool = False,
     effect: Effect = "irreversible",
+    connector: str | None = None,
 ) -> Callable[[ToolFunc], ToolFunc]:
     """
     Register a tool from its own schema and return the function unchanged.
@@ -100,6 +112,7 @@ def tool(
             )
         _REGISTRY[name] = Tool(
             name, schema, func, requires, sensitive, parallel, effect,
+            connector,
         )
         return func
 
@@ -148,3 +161,17 @@ def effect_of(name: str) -> Effect:
     """
     entry = _REGISTRY.get(name)
     return entry.effect if entry is not None else "irreversible"
+
+
+def connector_of(name: str) -> str | None:
+    """The connector slug a registered tool belongs to, or None."""
+    entry = _REGISTRY.get(name)
+    return entry.connector if entry is not None else None
+
+
+def connector_tool_names(slug: str | None = None) -> frozenset[str]:
+    """Every tool belonging to `slug`, or to any connector when `slug` is None."""
+    return frozenset(
+        t.name for t in _REGISTRY.values()
+        if t.connector is not None and (slug is None or t.connector == slug)
+    )

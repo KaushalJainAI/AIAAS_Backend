@@ -65,7 +65,7 @@ GRANT_META: dict[str, dict[str, str]] = {
     },
     'mcp': {
         'label': 'Plugins',
-        'description': 'Tools from connected plugins (MCP servers) using your credentials.',
+        'description': 'Tools from your connected accounts (Gmail, Drive, Calendar and MCP servers), using your credentials.',
         'icon': 'plug',
     },
     'shell': {
@@ -145,8 +145,14 @@ def _display_name(tool_name: str) -> str:
 
 def _grant_for_tool(tool_name: str) -> str | None:
     from agents.agent.runtime import ALWAYS_AVAILABLE
+    from chat.tools.registry import connector_of
     if tool_name in ALWAYS_AVAILABLE:
         return 'system'
+    if connector_of(tool_name) is not None:
+        # Native connector tools (Gmail, Drive, ...) are unlocked by the `mcp`
+        # grant, so they belong with it; listing them by name here would be a
+        # second copy of what `@tool(connector=...)` already declares.
+        return 'mcp'
     for grant, tools in LIBRARY_GROUPS.items():
         if tool_name in tools:
             return grant

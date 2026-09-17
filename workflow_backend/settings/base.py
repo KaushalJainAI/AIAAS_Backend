@@ -16,6 +16,57 @@ def _split_env_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(',') if item.strip()]
 
 
+# SQLite is the dev database (production is PostgreSQL). Three processes can
+# still share the file — runserver, a Celery worker, a management command — and
+# in its default rollback-journal mode every writer blocks every reader. WAL
+# lets readers proceed during a write, and IMMEDIATE takes the write lock at
+# BEGIN rather than on the first write, which is what turns a mid-transaction
+# lock upgrade ("database is locked", after the full timeout) into an ordinary
+# wait at the start. Both are Django 5.1+ options.
+_SQLITE_OPTIONS = {
+    'timeout': 20,
+    'transaction_mode': 'IMMEDIATE',
+    'init_command': (
+        'PRAGMA journal_mode=WAL;'
+        'PRAGMA synchronous=NORMAL;'
+    ),
+}
+
+
+def _postgres_connection(sslmode: str) -> dict:
+    """`CONN_MAX_AGE` and `OPTIONS` for a PostgreSQL connection.
+
+    Pooled by default. Under ASGI Django's docs say to disable persistent
+    connections and use the backend's own pool, and production had done only
+    the first half: `DB_CONN_MAX_AGE=0` (a held connection per Daphne thread
+    exhausted Postgres), which means every request connected and authenticated
+    from scratch — and a chat turn makes fifteen-odd ORM hops before its first
+    token. Django 5.1's psycopg 3 pool reuses them instead.
+
+    `max_size` is a hard ceiling per process, which is the property the old
+    setting was protecting: it must stay under the server's `max_connections`
+    (25 in docker-compose.prod.yml) with room for psql, migrations and a
+    checkpointer. A detached run holds its connection until `spawn()` releases
+    it, so the pool is sized for concurrent runs, not concurrent requests.
+    `DB_POOL=False` restores per-request connections and honours
+    `DB_CONN_MAX_AGE`; the pool refuses a non-zero one.
+    """
+    options: dict = {}
+    if sslmode:
+        options['sslmode'] = sslmode
+    if os.environ.get('DB_POOL', 'True') == 'True':
+        options['pool'] = {
+            'min_size': int(os.environ.get('DB_POOL_MIN_SIZE', '2')),
+            'max_size': int(os.environ.get('DB_POOL_MAX_SIZE', '12')),
+            'timeout': float(os.environ.get('DB_POOL_TIMEOUT', '20')),
+        }
+        return {'CONN_MAX_AGE': 0, 'OPTIONS': options}
+    return {
+        'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '0')),
+        'OPTIONS': options,
+    }
+
+
 def _database_config():
     database_url = os.environ.get('DATABASE_URL', '').strip()
 
@@ -34,14 +85,11 @@ def _database_config():
             return {
                 'ENGINE': engine,
                 'NAME': db_name.lstrip('/'),
-                'OPTIONS': {'timeout': 20},
+                'OPTIONS': _SQLITE_OPTIONS,
             }
 
         if engine:
-            options = {}
             sslmode = query_params.get('sslmode', [os.environ.get('DB_SSLMODE', '')])[0]
-            if sslmode:
-                options['sslmode'] = sslmode
             return {
                 'ENGINE': engine,
                 'NAME': parsed.path.lstrip('/'),
@@ -49,16 +97,11 @@ def _database_config():
                 'PASSWORD': parsed.password or '',
                 'HOST': parsed.hostname or '',
                 'PORT': str(parsed.port or ''),
-                'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
-                'OPTIONS': options,
+                **_postgres_connection(sslmode),
             }
 
     db_engine = os.environ.get('DB_ENGINE', 'sqlite').strip().lower()
     if db_engine in {'postgres', 'postgresql'}:
-        options = {}
-        sslmode = os.environ.get('DB_SSLMODE', '').strip()
-        if sslmode:
-            options['sslmode'] = sslmode
         return {
             'ENGINE': 'django.db.backends.postgresql',
             'NAME': os.environ.get('POSTGRES_DB', 'aiaas'),
@@ -66,8 +109,7 @@ def _database_config():
             'PASSWORD': os.environ.get('POSTGRES_PASSWORD', ''),
             'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
             'PORT': os.environ.get('POSTGRES_PORT', '5432'),
-            'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
-            'OPTIONS': options,
+            **_postgres_connection(os.environ.get('DB_SSLMODE', '').strip()),
         }
 
     # Resolve a relative SQLITE_PATH against BASE_DIR, never against the current
@@ -81,7 +123,7 @@ def _database_config():
     return {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': sqlite_path,
-        'OPTIONS': {'timeout': 20},
+        'OPTIONS': _SQLITE_OPTIONS,
     }
 
 
@@ -549,6 +591,14 @@ if not CREDENTIAL_ENCRYPTION_KEY:
     from django.core.exceptions import ImproperlyConfigured
     raise ImproperlyConfigured("CREDENTIAL_ENCRYPTION_KEY must be set in environment variables.")
 
+# Whether an MCP connection may start a local process (`type='stdio'`). A stdio
+# server is a Node or Python process per connection — 70-150 MB each — and on
+# the production box that is what killed daphne (2026-09-16). Deployment turns
+# it off; hosted (`http`) servers and native connectors are unaffected. Read
+# at save time by the serializer and at connect time by `client._connect_stdio`,
+# so a row created before the switch cannot start a process either.
+MCP_ALLOW_STDIO = os.environ.get('MCP_ALLOW_STDIO', 'True').lower() in ('true', '1', 'yes')
+
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get('GOOGLE_OAUTH_CLIENT_ID', '')
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get('GOOGLE_OAUTH_CLIENT_SECRET', '')
 GOOGLE_OAUTH_REDIRECT_URI = os.environ.get('GOOGLE_OAUTH_REDIRECT_URI', '')
@@ -643,12 +693,14 @@ IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD'
 
 # ==================== Evaluation ====================
 # Default provider/model for the `llm_judge` grader when a case does not name
-# one. Left blank, `llm.access` resolves the provider's own default model. A
-# judge deliberately defaults to a *different* call than the agent under test:
-# same-model self-grading is the one configuration where a rubric failure and
-# an agent failure cannot be told apart.
+# one. Pinned to Meta Muse Spark 1.3 Contributor
+# (`meta/muse-spark-1.3-contributor`) at the user's direction 2026-09-17 — see
+# "Model IDs" in CLAUDE.md, the one place model ids are decided. The benchmark's
+# agents deliberately run on a *different* model (`eval/benchmarks/agents.py`),
+# because a judge grading its own model's answers cannot tell a rubric failure
+# from an agent failure. It is a reasoning model: see `JUDGE_MAX_TOKENS`.
 EVAL_JUDGE_PROVIDER = os.environ.get('EVAL_JUDGE_PROVIDER', 'openrouter')
-EVAL_JUDGE_MODEL = os.environ.get('EVAL_JUDGE_MODEL', '')
+EVAL_JUDGE_MODEL = os.environ.get('EVAL_JUDGE_MODEL', 'meta/muse-spark-1.3-contributor')
 
 
 # ==================== Context curation ====================

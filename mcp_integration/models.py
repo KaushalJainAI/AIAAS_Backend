@@ -25,10 +25,17 @@ class MCPServer(models.Model):
     #: because rows may still point at an older endpoint; new remote rows should
     #: be `http`. Both are URL-based and share `url` / `credential_header_map`,
     #: so moving a row between them is a one-column change.
+    #:
+    #: `native` is not a transport: the card's tools are registered built-ins
+    #: that call the vendor's REST API from this process (`chat/tools/google/`),
+    #: matched to the row by `icon_slug`. The row exists so the Connections
+    #: switch, the credential and an agent's `connectors` scope keep governing
+    #: the connector. Curated only — see `mcp_integration/native.py`.
     SERVER_TYPES = (
         ('stdio', 'Standard Input/Output (Subprocess)'),
         ('http', 'Streamable HTTP'),
         ('sse', 'Server-Sent Events (HTTP, deprecated)'),
+        ('native', 'Native (built-in tools)'),
     )
 
     #: The two transports that reach a server over the network rather than by

@@ -120,12 +120,30 @@ async def grade_execution(execution, specs: list[dict[str, Any]], *,
         # A run that failed is an error condition to the graders, so `no_error`
         # catches it rather than its empty answer being scored as a bad one.
         'error': execution.error_message or '',
+        'awaiting_approval': execution.status == 'paused',
         'goal': (execution.input_data or {}).get('goal', '') or '',
         'reference': reference,
         'user_id': execution.user_id,
+        'reasoning': await _run_reasoning(execution),
     }
     context.update(overrides)
     return await grade_answer(payload.get('answer') or '', specs, **context)
+
+
+async def _run_reasoning(execution) -> str:
+    """The run's per-turn reasoning, in turn order, for the judge.
+
+    Read from `AgentTurn` rather than `output_data`: the turn row is where the
+    runtime records reasoning in full (`logs/models.py`), and a run graded after
+    the fact has nothing else to show it.
+    """
+    from asgiref.sync import sync_to_async
+
+    def read() -> str:
+        rows = execution.turns.order_by('index').values_list('index', 'reasoning')
+        return '\n\n'.join(f'[turn {i}] {text}' for i, text in rows if text)
+
+    return await sync_to_async(read)()
 
 
 __all__ = [

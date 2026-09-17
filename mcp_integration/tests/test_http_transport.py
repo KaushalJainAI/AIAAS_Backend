@@ -59,7 +59,9 @@ class TransportVocabularyTests(TestCase):
         transport is missing from it, that transport skips validation."""
         self.assertEqual(MCPServer.REMOTE_TYPES, frozenset({"http", "sse"}))
         for name, _label in MCPServer.SERVER_TYPES:
-            if name != "stdio":
+            # `native` is not a transport — nothing is dialled, so there is no
+            # URL for the SSRF guard to check.
+            if name not in ("stdio", "native"):
                 self.assertIn(name, MCPServer.REMOTE_TYPES, name)
 
 
@@ -79,6 +81,9 @@ class DispatchTests(TestCase):
         transport to the model without one here is a runtime-only failure."""
         manager = MCPClientManager(server_id=1, user=self.user)
         for name, _label in MCPServer.SERVER_TYPES:
+            if name == "native":
+                # Refused before dispatch by `_session`; see test_native_connectors.
+                continue
             self.assertTrue(
                 hasattr(manager, f"_connect_{name}"),
                 f"{name} is a declared server type with no _connect_{name}",
