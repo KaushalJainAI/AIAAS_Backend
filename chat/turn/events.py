@@ -43,6 +43,11 @@ class Event(StrEnum):
     ASK_PERMISSION = "ask_permission"
     ERROR = "error"
     DONE = "done"
+    #: Steers that arrived after the run's last tool boundary, so the model never
+    #: read them. Sent after DONE, carrying `messages` as the user wrote them, so
+    #: the client can put them back in front of the user. Before this, they sat in
+    #: the mailbox and landed mid-way through the session's *next* turn.
+    STEERS_RETURNED = "steers_returned"
 
 
 class EventSink(Protocol):

@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from workflow_backend.background import spawn
 
+from . import steering
 from .events import Event, EventSink
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,12 @@ class ChatRun:
 
     async def sink(self, event: Event, payload: dict[str, Any]) -> None:
         """`EventSink` implementation handed to the agent. Must not raise."""
+        self._append(event, payload)
+
+    def _append(self, event: Event, payload: dict[str, Any]) -> None:
+        """Record a frame and push it to live listeners. Synchronous on purpose:
+        `finish` uses it and must not yield between closing the run and
+        draining its mailbox."""
         index = len(self.frames)
         self.frames.append((event, payload))
         for queue in self.listeners:
@@ -108,6 +115,13 @@ def start(
     if existing is not None and existing.gc_handle is not None:
         existing.gc_handle.cancel()
 
+    # A steer can only be posted to a running turn and `finish` drains what is
+    # left, so anything still queued here was meant for a turn that is over
+    # (one whose process died before finishing). Delivering it into this turn
+    # is the bug `finish` exists to prevent, so it is dropped.
+    if stale := steering.drain_messages(key):
+        logger.warning("[Run] Dropped %d stale steer(s) for session %s", len(stale), key)
+
     run = ChatRun(key=key, user_id=user_id)
     _runs[key] = run
     # `spawn`, not `ensure_future`: the turn outlives the response that
@@ -140,6 +154,15 @@ def finish(run: ChatRun, status: RunStatus, error: str | None = None) -> None:
         return
     run.status = status
     run.error = error
+    # Steers are read on the tools -> agent edge, so one sent while the model
+    # was writing its final answer is never read. Hand it back rather than
+    # leave it queued for the next turn. The status flips first and nothing
+    # here awaits, so the steer endpoint (which checks `status == "running"`)
+    # cannot slip a message in between the drain and the close; a later steer
+    # gets a 404 and the client keeps the text.
+    if leftovers := steering.drain_messages(run.key):
+        logger.info("[Run] Returning %d unread steer(s) for session %s", len(leftovers), run.key)
+        run._append(Event.STEERS_RETURNED, {"messages": leftovers})
     for queue in run.listeners:
         queue.put_nowait(_SENTINEL)
     _arm_gc(run)

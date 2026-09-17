@@ -229,6 +229,24 @@ def stats(key: str) -> dict[str, int]:
     }
 
 
+def drain_messages(key: str) -> list[str]:
+    """Remove and return every undelivered steer for `key`, unjoined.
+
+    For a run that is ending with steers it never reached a boundary to read.
+    Unlike `take`, the messages come back as the user wrote them, because they
+    are going back to the *user*, not into a transcript. The autonomy level is
+    left alone: it is a standing answer for the session, not an instruction.
+    """
+    slot = _slots.get(key)
+    if slot is None or not slot.messages:
+        return []
+    items = list(slot.messages)
+    slot.messages.clear()
+    if not slot.autonomy and not slot.extras:
+        _slots.pop(key, None)
+    return items
+
+
 def discard(key: str) -> None:
     """Drop a run's slot. Called when the run reaches a terminal state."""
     _slots.pop(key, None)
