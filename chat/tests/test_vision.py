@@ -191,6 +191,15 @@ class TextModelDescriptionTests(SimpleTestCase):
 
 class ResolveWitnessTests(TestCase):
     def setUp(self):
+        # Resolution is cached per user id (`resolve.WITNESS_CACHE_TTL`), and a
+        # test database restarts its sequences — so user 1 in one case is a
+        # different person from user 1 in the next, while the cache key is the
+        # same string. Exactly the trap `CredentialManager`'s process-global
+        # cache documents. Clearing here is what keeps these cases independent.
+        from django.core.cache import cache
+
+        cache.clear()
+        self.addCleanup(cache.clear)
         self.user = User.objects.create_user("seer", "seer@example.com", "pw")
 
     def test_platform_key_is_enough(self):
@@ -437,3 +446,85 @@ class WitnessLoopTests(TestCase):
             )
         self.assertIn("No question", out)
         resolved.assert_not_awaited()
+
+
+class WitnessCacheTests(TestCase):
+    """Resolution is three uncached queries, and it ran on every agent pass.
+
+    `resolve_witness` was called once in `run_chat_turn` and then again inside
+    `get_available_tools` via `_requirement_met("vision")` on *every* iteration
+    — for an answer that cannot change while a run is going. The pre-model
+    latency line put it at the whole of the pre-model segment on an empty test
+    database, before any real credential table existed to scan.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.user = User.objects.create_user("cached", "c@example.com", "pw")
+
+    def test_a_second_call_does_not_resolve_again(self):
+        with patch("credentials.resolution.resolve_api_key_sync",
+                   return_value="k") as key_lookup:
+            first = async_to_sync(resolve.resolve_witness)(self.user.id)
+            second = async_to_sync(resolve.resolve_witness)(self.user.id)
+
+        self.assertEqual(first, second)
+        self.assertEqual(key_lookup.call_count, 1, "the second call should be cached")
+
+    def test_the_absence_of_a_witness_is_cached_too(self):
+        """The common case, and the one worth caching most.
+
+        A user with no vision credential is the caller that pays the full three
+        queries. Caching only the hit would leave exactly that person resolving
+        live on every iteration.
+        """
+        from credentials.resolution import CredentialUnavailable
+
+        with patch("credentials.resolution.resolve_api_key_sync",
+                   side_effect=CredentialUnavailable("none")) as key_lookup:
+            self.assertIsNone(async_to_sync(resolve.resolve_witness)(self.user.id))
+            self.assertIsNone(async_to_sync(resolve.resolve_witness)(self.user.id))
+
+        self.assertEqual(key_lookup.call_count, 1)
+
+    def test_witness_available_shares_the_cache(self):
+        """The two entry points must not each pay their own resolution.
+
+        `run_chat_turn` calls `witness_available` and the tool filter calls it
+        again; they resolve the same thing for the same user in the same turn.
+        """
+        with patch("credentials.resolution.resolve_api_key_sync",
+                   return_value="k") as key_lookup:
+            async_to_sync(resolve.resolve_witness)(self.user.id)
+            self.assertTrue(async_to_sync(resolve.witness_available)(self.user.id))
+
+        self.assertEqual(key_lookup.call_count, 1)
+
+    def test_one_user_s_witness_is_not_served_to_another(self):
+        from credentials.resolution import CredentialUnavailable
+
+        other = User.objects.create_user("other", "o@example.com", "pw")
+
+        with patch("credentials.resolution.resolve_api_key_sync", return_value="k"):
+            self.assertIsNotNone(async_to_sync(resolve.resolve_witness)(self.user.id))
+
+        with patch("credentials.resolution.resolve_api_key_sync",
+                   side_effect=CredentialUnavailable("none")):
+            self.assertIsNone(async_to_sync(resolve.resolve_witness)(other.id))
+
+    def test_a_broken_cache_resolves_live_rather_than_blinding_the_user(self):
+        """Losing the fast path must not silently take away someone's eyes.
+
+        The failure mode to avoid is a cache error reading as "no witness",
+        which would withdraw `ask_vision` for as long as the cache was unwell.
+        """
+        with patch("django.core.cache.cache.get", side_effect=OSError("down")), \
+             patch("django.core.cache.cache.set", side_effect=OSError("down")), \
+             patch("credentials.resolution.resolve_api_key_sync", return_value="k"):
+            found = async_to_sync(resolve.resolve_witness)(self.user.id)
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.provider, "nvidia")

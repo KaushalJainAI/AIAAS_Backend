@@ -123,7 +123,68 @@ def _retired(provider: str, models: tuple[str, ...]) -> frozenset[str]:
         return frozenset()
 
 
+#: How long a resolved witness is reused for one user.
+#:
+#: Resolution is three uncached queries (`_configured`, `_has_key`,
+#: `_retired`), and it was run *twice* per chat turn and then again on every
+#: agent iteration — once in `run_chat_turn` and once per pass inside
+#: `get_available_tools` via `_requirement_met("vision")` — for an answer that
+#: cannot change while a run is going. The pre-model latency line put it at the
+#: whole of the pre-model segment on an empty test database, before any real
+#: credential table existed to scan.
+#:
+#: Sixty seconds, matching `tools_config.overlay`, and for its reason: there is
+#: no natural invalidation hook here (a witness changes when someone saves a
+#: credential or a model is retired upstream, neither of which calls this
+#: module), so the TTL is the whole bound. A minute is short enough that adding
+#: a vision key feels immediate and long enough that a forty-iteration run pays
+#: the three queries once.
+WITNESS_CACHE_TTL = 60
+
+#: Cached stand-in for "no witness". Distinguishes a stored negative from a
+#: cache miss: without it the most common answer — no vision credential at all —
+#: is exactly the one that can never be cached, which is the case this exists
+#: for.
+_NO_WITNESS = "none"
+
+
+def _witness_key(user_id: int) -> str:
+    return f"vision:witness:v1:{user_id}"
+
+
 async def resolve_witness(user_id: int) -> Witness | None:
+    """The vision model to interrogate for this user, or None if there is none.
+
+    Cached per user; see `WITNESS_CACHE_TTL`. A cache that cannot be read or
+    written degrades to resolving live — which is what every caller did before
+    there was a cache — rather than to "no witness". Losing the fast path must
+    not silently take away someone's eyes.
+    """
+    from django.core.cache import cache
+
+    key = _witness_key(user_id)
+    try:
+        cached = await sync_to_async(cache.get)(key)
+    except Exception:  # noqa: BLE001
+        logger.warning("[Vision] Witness cache read failed", exc_info=True)
+        cached = None
+
+    if cached is not None:
+        return None if cached == _NO_WITNESS else cached
+
+    witness = await _resolve_witness(user_id)
+
+    try:
+        await sync_to_async(cache.set)(
+            key, _NO_WITNESS if witness is None else witness, WITNESS_CACHE_TTL,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[Vision] Witness cache write failed", exc_info=True)
+
+    return witness
+
+
+async def _resolve_witness(user_id: int) -> Witness | None:
     """
     The vision model to interrogate for this user, or None if there is none.
 

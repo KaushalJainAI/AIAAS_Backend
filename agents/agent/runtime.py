@@ -752,6 +752,18 @@ def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
         '- Never mark a step done that you did not do. If you cannot finish '
         'one, mark it blocked and say why; finishing with honest blockers is '
         'a better answer than a plan that claims false completion.',
+        # The runtime has dispatched a turn's safe calls in parallel since the
+        # batching passes landed (`tools_node`, `chat/tests/test_parallel_tools.py`),
+        # but nothing ever asked the model to *use* that. Parallelism only helps
+        # within one batch: a model that calls one tool, waits, then calls the
+        # next gets none of it, and on a run that may go 40 iterations each
+        # avoidable turn is a whole model round trip. Said here as well as in
+        # chat's `CORE_RULES` because an agent run shares none of that prompt.
+        '- When you need several things that do not depend on one another, ask '
+        'for them in the same turn rather than one at a time: calls issued '
+        'together are run in parallel, while one call per turn costs a full '
+        'round trip each. Chain them only when one truly needs another\'s '
+        'result.',
     ]
 
     granted = sorted(k for k, v in grants.items() if v and k not in UNSERVED_GRANTS)

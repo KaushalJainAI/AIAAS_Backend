@@ -471,6 +471,44 @@ async def _notify(user, session: ChatSession, message: ChatMessage) -> None:
 
 # ── The turn ─────────────────────────────────────────────────────────────────
 
+
+class _PhaseTimer:
+    """Wall clock for the work a turn does *before* the model is called.
+
+    `agent._log_latency` starts inside `agent_node`, so everything here — the
+    preflight, the user-message write, history, memory, attachments, the file
+    scope, recall and intent seeding — was invisible to the only latency
+    instrument the project had. That is 15-20 sequential awaits on the path to
+    the first token, and a number nobody can see is a number nobody optimises.
+
+    Deliberately one line and only non-zero phases, the same contract
+    `_log_latency` keeps: it runs on every turn, so it has to be cheap to emit
+    and cheap to grep.
+    """
+
+    __slots__ = ("marks", "_t0", "_last")
+
+    def __init__(self) -> None:
+        self.marks: dict[str, int] = {}
+        self._t0 = self._last = time.monotonic()
+
+    def mark(self, phase: str) -> None:
+        now = time.monotonic()
+        self.marks[phase] = int((now - self._last) * 1000)
+        self._last = now
+
+    @property
+    def total_ms(self) -> int:
+        return int((time.monotonic() - self._t0) * 1000)
+
+    def log(self, intent: str) -> None:
+        detail = " ".join(f"{k}={v}ms" for k, v in self.marks.items() if v)
+        logger.info(
+            "[Latency] pre-model total=%dms intent=%s %s",
+            self.total_ms, intent, detail,
+        )
+
+
 async def run_chat_turn(
     *,
     session: ChatSession,
@@ -497,7 +535,10 @@ async def run_chat_turn(
         else classify_intent(request.content)
     )
 
+    phases = _PhaseTimer()
+
     await _guard_media_intent(intent, model)
+    phases.mark("media_guard")
 
     # Before anything is persisted or streamed. A turn with no credential
     # behind it used to get all the way to the model call — the client had
@@ -509,8 +550,10 @@ async def run_chat_turn(
         await llm.preflight(provider=provider, model=model, user_id=user.id)
     except llm.LLMUnavailable as exc:
         raise TurnError(str(exc)) from exc
+    phases.mark("preflight")
 
     await _sync_model_choice(session, request, provider, model, effort)
+    phases.mark("sync_choice")
 
     thread_id = _thread_id(session)
     if request.approve_tool_call:
@@ -543,6 +586,7 @@ async def run_chat_turn(
         session=session, role="user",
         content=question or "[Approved tool call]", message_type="chat",
     )
+    phases.mark("user_message")
 
     await sink(Event.STATUS, {
         "phase": "thinking",
@@ -554,6 +598,7 @@ async def run_chat_turn(
 
     model_entry = await AIModel.objects.filter(value=model, is_active=True).afirst()
     supports_docs = bool(model_entry and model_entry.supports_document_input)
+    phases.mark("model_entry")
 
     # Memory off answers from this message alone. Nothing is deleted — the turns
     # stay in the DB and return the moment it is switched back on.
@@ -571,6 +616,7 @@ async def run_chat_turn(
             "phase": "memory_off",
             "message": "Memory is off — answering from this message only.",
         })
+    phases.mark("history")
 
     # Read once per turn and folded into the baseline, not the per-turn update:
     # it is standing knowledge about the person, and it changes only when a
@@ -578,12 +624,14 @@ async def run_chat_turn(
     system_message = prompts.build_system_message(
         session, user_memory=await _user_memory_block(user.id),
     )
+    phases.mark("user_memory")
 
     # ── Attachments ──
     candidates = await history.recent_attachments(past)
     # Resolved once per turn rather than per attachment: it is a profile read
     # plus a credential lookup, and the answer cannot change mid-turn.
     witness = await vision.witness_available(user.id)
+    phases.mark("vision_witness")
     sendable, blocked = await history.partition_attachments(
         candidates, model=model, witness=witness
     )
@@ -615,6 +663,7 @@ async def run_chat_turn(
     attachments, extracted_text = await agent.prepare_attachments(
         sendable, model=model, provider=provider, user_id=user.id
     )
+    phases.mark("attachments")
 
     # ── Prompt ──
     prompt = question
@@ -624,10 +673,14 @@ async def run_chat_turn(
             f"{request.reference_message_id}; prioritise that context.]\n\n{prompt}"
         )
     prompt += await _recall_block(session, question)
+    phases.mark("recall")
     prompt += extracted_text
 
+    file_scope = await _chat_file_scope(user)
+    phases.mark("file_scope")
+
     turn = TurnContext(
-        file_scope=await _chat_file_scope(user),
+        file_scope=file_scope,
         provider=provider,
         model=model,
         system_message=system_message,
@@ -644,6 +697,8 @@ async def run_chat_turn(
     )
 
     seed_text, seed_trace = await _seed_intent_tool(intent, question, turn, metadata)
+    phases.mark("intent_seed")
+    phases.log(intent)
 
     turn_started = time.monotonic()
     try:

@@ -92,12 +92,16 @@ class MCPToolCache:
             logger.warning("MCP tool cache get failed for server %s: %s", server_id, e)
             return None
 
-        if not isinstance(entry, dict) or "tools" not in entry:
-            return None
-        tools = entry.get("tools")
-        if not isinstance(tools, list):
-            return None
-        return tools, time.time() >= entry.get("fresh_until", 0)
+        if isinstance(entry, dict) and isinstance(entry.get("tools"), list):
+            return entry["tools"], time.time() >= entry.get("fresh_until", 0)
+
+        # Redis knows nothing about this connection. Before this tier existed
+        # that meant a cold `npx` start in front of the first token *and* a turn
+        # with no connector tools at all. The stored listing answers in one
+        # indexed read with a full toolbox, and is always reported stale so the
+        # caller re-lists behind the answer and repopulates Redis.
+        stored = await _stored_tools(server_id, user_id)
+        return None if stored is None else (stored, True)
 
     @staticmethod
     async def get(server_id: int, user_id: int | None) -> list[dict[str, Any]] | None:
@@ -114,21 +118,89 @@ class MCPToolCache:
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("MCP tool cache set failed for server %s: %s", server_id, e)
+        await _store_tools(server_id, user_id, tools)
 
     @staticmethod
     async def invalidate(server_id: int, user_id: int | None = None) -> None:
         try:
             if user_id is not None:
                 await sync_to_async(cache.delete)(_key(server_id, user_id))
-                return
-
-            pattern = f"{KEY_PREFIX}{server_id}:user:*"
-            delete_pattern = getattr(cache, "delete_pattern", None)
-            if callable(delete_pattern):
-                await sync_to_async(delete_pattern)(pattern)
+            elif callable(delete_pattern := getattr(cache, "delete_pattern", None)):
+                await sync_to_async(delete_pattern)(f"{KEY_PREFIX}{server_id}:user:*")
             else:
                 # LocMemCache and several simple backends do not expose wildcard
                 # deletion. v2 keys keep old entries short-lived and user-scoped.
                 logger.debug("Cache backend cannot wildcard-delete MCP tools for server %s", server_id)
         except Exception as e:  # noqa: BLE001
             logger.warning("MCP tool cache invalidate failed for server %s: %s", server_id, e)
+        # The stored copy goes too. This tier exists to survive *cache loss*,
+        # never to survive an *edit*: a user who has just changed a connection
+        # must not be answered from the list it had before, and falling through
+        # to a live handshake here is exactly the behaviour that predates this
+        # tier. `warm_cache` re-lists on save, so the window is one listing
+        # long.
+        await _forget_tools(server_id, user_id)
+
+
+# ── The durable tier ─────────────────────────────────────────────────────────
+#
+# Every function below degrades to "no stored copy" rather than raising. A
+# missing table (a deploy where migrations have not run yet) or a locked
+# database must cost a turn its *fast path*, never its tools and never its
+# answer — the same posture `disabled_tools_for` takes, and for the same
+# reason.
+
+def _read_stored(server_id: int, user_id: int | None) -> list[dict[str, Any]] | None:
+    from .models import MCPToolCatalogue
+
+    row = MCPToolCatalogue.objects.filter(
+        server_id=server_id, user_id=user_id,
+    ).values_list('tools', flat=True).first()
+    return row if isinstance(row, list) else None
+
+
+async def _stored_tools(server_id: int, user_id: int | None) -> list[dict[str, Any]] | None:
+    try:
+        return await sync_to_async(_read_stored)(server_id, user_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MCP tool catalogue read failed for server %s: %s", server_id, e)
+        return None
+
+
+def _write_stored(server_id: int, user_id: int | None, tools: list[dict[str, Any]]) -> None:
+    from .models import MCPToolCatalogue
+
+    MCPToolCatalogue.objects.update_or_create(
+        server_id=server_id, user_id=user_id, defaults={'tools': tools},
+    )
+
+
+async def _store_tools(
+    server_id: int, user_id: int | None, tools: list[dict[str, Any]]
+) -> None:
+    # An empty listing is not evidence of an empty server: every failure path
+    # in `get_openai_tool_descriptors` returns `[]`, so storing one would write
+    # "this connector has no tools" into the durable tier on the strength of a
+    # timeout, and keep answering that way.
+    if not tools:
+        return
+    try:
+        await sync_to_async(_write_stored)(server_id, user_id, tools)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MCP tool catalogue write failed for server %s: %s", server_id, e)
+
+
+def _delete_stored(server_id: int, user_id: int | None) -> None:
+    from .models import MCPToolCatalogue
+
+    rows = MCPToolCatalogue.objects.filter(server_id=server_id)
+    if user_id is not None:
+        rows = rows.filter(user_id=user_id)
+    rows.delete()
+
+
+async def _forget_tools(server_id: int, user_id: int | None) -> None:
+    try:
+        await sync_to_async(_delete_stored)(server_id, user_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MCP tool catalogue delete failed for server %s: %s", server_id, e)

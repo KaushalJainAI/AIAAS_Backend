@@ -32,16 +32,55 @@ class MCPAccessControlTests(TestCase):
 class MCPToolCacheTests(TestCase):
     def setUp(self):
         cache.clear()
+        # Real rows rather than invented ids. `set` now writes through to
+        # `MCPToolCatalogue` as well as to Redis, and that row carries real
+        # foreign keys so a catalogue dies with the connection or the user it
+        # was derived from. Production always passes ids that exist —
+        # `list_tools` has already resolved the server and coerced the user —
+        # so using fictional ones here tested a path no caller can reach.
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="cache-owner", password="pw")
+        self.server = MCPServer.objects.create(
+            name="Scoped", type="stdio", command="npx",
+        )
 
     def tearDown(self):
         cache.clear()
 
     def test_tool_cache_is_scoped_by_user(self):
-        async_to_sync(MCPToolCache.set)(1, 10, [{"name": "private"}])
+        async_to_sync(MCPToolCache.set)(
+            self.server.id, self.owner.id, [{"name": "private"}],
+        )
 
-        self.assertEqual(async_to_sync(MCPToolCache.get)(1, 10), [{"name": "private"}])
-        self.assertIsNone(async_to_sync(MCPToolCache.get)(1, 11))
-        self.assertIsNone(async_to_sync(MCPToolCache.get)(1, None))
+        self.assertEqual(
+            async_to_sync(MCPToolCache.get)(self.server.id, self.owner.id),
+            [{"name": "private"}],
+        )
+        self.assertIsNone(
+            async_to_sync(MCPToolCache.get)(self.server.id, self.owner.id + 1)
+        )
+        self.assertIsNone(async_to_sync(MCPToolCache.get)(self.server.id, None))
+
+    def test_scoping_survives_a_cache_miss(self):
+        """The durable tier must not widen what the cache narrowed.
+
+        A second tier under the cache is only safe if it answers the same
+        question: were it keyed by server alone, a Redis eviction would start
+        handing one user's tool list — resolved with their credentials — to
+        everybody else on that connection.
+        """
+        async_to_sync(MCPToolCache.set)(
+            self.server.id, self.owner.id, [{"name": "private"}],
+        )
+        cache.clear()
+
+        self.assertEqual(
+            async_to_sync(MCPToolCache.get)(self.server.id, self.owner.id),
+            [{"name": "private"}],
+        )
+        self.assertIsNone(
+            async_to_sync(MCPToolCache.get)(self.server.id, self.owner.id + 1)
+        )
 
 
 class MCPToolNameTests(SimpleTestCase):

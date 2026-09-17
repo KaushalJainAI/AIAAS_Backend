@@ -328,3 +328,65 @@ class MCPOAuthToken(models.Model):
 
     def __str__(self):
         return f"oauth token for user {self.user_id} on server {self.server_id}"
+
+
+class MCPToolCatalogue(models.Model):
+    """The last good `list_tools` answer for a connection, kept durably.
+
+    The Redis cache had nothing underneath it, so the fallback chain was
+    **Redis -> nothing**. A restart, an eviction, a deploy, the 24h hard TTL
+    lapsing, or a user's first turn all landed on the same cliff: a cold `npx`
+    start (~21s, cut off at `AGENT_LIST_TOOLS_TIMEOUT`) in front of the first
+    token, and a turn that ran with *no connector tools at all* — slower and
+    less capable at once, with nothing able to say why.
+
+    A tool list is neither secret nor volatile: it changes when someone edits a
+    connection, and that path already invalidates explicitly. There was never a
+    reason for it to live only somewhere that evicts. With this row the chain is
+    **Redis -> database -> live handshake**, so a cache miss costs one indexed
+    read and still yields a full toolbox.
+
+    Keyed `(server, user)` to mirror the Redis key exactly, so adding this tier
+    changes no semantics — `user` is null for a system-level listing, the same
+    case `_coerce_user_id` already returns None for.
+
+    Open question, deliberately not assumed: whether `list_tools` really
+    differs per user, or whether credentials only decide whether a *call*
+    succeeds. If it turns out to be server-level, a null-user row becomes a
+    shared baseline that a user with no row of their own can fall back to, and
+    the constraints below already allow exactly one such row per server.
+    """
+
+    server = models.ForeignKey(
+        MCPServer, on_delete=models.CASCADE, related_name='tool_catalogues',
+    )
+    #: Null means a system-level listing, not "everyone".
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.CASCADE, related_name='mcp_tool_catalogues',
+    )
+    tools = models.JSONField(default=list)
+    listed_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # Two constraints rather than one `unique_together`, because SQL
+            # treats NULLs as distinct: `unique_together('server', 'user')`
+            # would happily allow a hundred rows with user=NULL for one server,
+            # which is precisely the row that has to be unique for a shared
+            # baseline to mean anything.
+            models.UniqueConstraint(
+                fields=['server', 'user'],
+                condition=models.Q(user__isnull=False),
+                name='uniq_mcp_catalogue_per_user',
+            ),
+            models.UniqueConstraint(
+                fields=['server'],
+                condition=models.Q(user__isnull=True),
+                name='uniq_mcp_catalogue_system',
+            ),
+        ]
+        indexes = [models.Index(fields=['server', 'user'])]
+
+    def __str__(self):
+        return f"{len(self.tools or [])} tools for server {self.server_id}"

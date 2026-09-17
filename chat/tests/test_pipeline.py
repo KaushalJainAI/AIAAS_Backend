@@ -472,3 +472,56 @@ class SlowTurnFollowUpTests(TestCase):
 
         msg = self._persist(FOLLOW_UPS_SLOW_TURN_SECONDS + 10, _boom)
         self.assertEqual(msg.metadata["follow_ups"], [])
+
+
+class PreModelLatencyInstrumentTests(ChatTurnTests):
+    """The pre-model segment has to be measurable, or it cannot be optimised.
+
+    `agent._log_latency` starts inside `agent_node`, so the 15-20 sequential
+    awaits `run_chat_turn` performs before the graph — preflight, the user
+    message write, history, memory, attachments, the file scope, recall and
+    intent seeding — were invisible to it. Every "current state" number in
+    `docs/ORCHESTRATOR_LATENCY_OPTIMIZATION_PLAN.md` was an estimate for that
+    reason.
+
+    These pin the instrument itself, not a duration: a threshold would fail on
+    a slow CI box and teach everyone to ignore it.
+    """
+
+    def test_a_turn_logs_what_it_spent_before_the_model(self):
+        recorder = Recorder()
+        with patch("llm.access.stream", text_stream("ok")):
+            with self.assertLogs("chat.turn.pipeline", level="INFO") as logs:
+                self._run("hello there", recorder)
+
+        line = next(
+            (m for m in logs.output if "[Latency] pre-model" in m), None
+        )
+        self.assertIsNotNone(line, f"no pre-model latency line in {logs.output}")
+        self.assertIn("total=", line)
+        self.assertIn("intent=chat", line)
+
+    def test_intent_seeding_is_reported_as_pre_model_work(self):
+        """The finding this instrument exists to make visible.
+
+        `_seed_intent_tool` runs a full `web_search` *before* the first model
+        call, and `classify_intent` routes a large share of ordinary questions
+        ("what is", "how to", "tell me about") into it. That cost belongs to the
+        pre-model segment and has to show up there, or the seeding phase stays
+        as invisible as it has been.
+        """
+        import asyncio
+
+        async def _slow_tool(name, args, context) -> str:
+            await asyncio.sleep(0.05)
+            return json.dumps({"type": "search_results", "text": "t", "sources": []})
+
+        recorder = Recorder()
+        with patch("chat.tools.execute_tool", _slow_tool):
+            with patch("llm.access.stream", text_stream("ok")):
+                with self.assertLogs("chat.turn.pipeline", level="INFO") as logs:
+                    self._run("tell me about rust", recorder)
+
+        line = next(m for m in logs.output if "[Latency] pre-model" in m)
+        self.assertIn("intent=search", line)
+        self.assertIn("intent_seed=", line)
