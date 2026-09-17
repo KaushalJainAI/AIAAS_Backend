@@ -55,7 +55,7 @@ def _decode(data: str | None) -> str:
 def _html_to_text(html: str) -> str:
     try:
         from bs4 import BeautifulSoup
-    except ImportError:  # pragma: no cover — bs4 is a hard requirement
+    except ImportError:  # pragma: no cover — pinned in both requirements files (2026-09-17)
         return html
     return BeautifulSoup(html, "html.parser").get_text(separator="\n", strip=True)
 
