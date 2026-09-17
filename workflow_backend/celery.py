@@ -14,6 +14,10 @@ from celery import Celery
 # default only bites someone running the worker by hand.
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'workflow_backend.settings.local')
 
+from workflow_backend.observability import init_error_reporting  # noqa: E402
+
+init_error_reporting('worker')
+
 app = Celery('workflow_backend')
 
 # Load task modules from all registered Django apps

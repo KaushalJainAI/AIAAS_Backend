@@ -14,6 +14,10 @@ from channels.routing import ProtocolTypeRouter, URLRouter
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'workflow_backend.settings.local')
 
+from workflow_backend.observability import init_error_reporting  # noqa: E402
+
+init_error_reporting('web')
+
 # Initialize Django ASGI application early to populate AppRegistry
 django_asgi_app = get_asgi_application()
 

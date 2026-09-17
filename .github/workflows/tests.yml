@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [agent, main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-linux.txt
+
+      # python-magic needs the libmagic shared library.
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libmagic1
+
+      # requirements.txt pins Windows-only wheels (pywin32, python-magic-bin);
+      # requirements-linux.txt is the set the Docker image installs.
+      - name: Install dependencies
+        run: pip install -r requirements-linux.txt
+
+      # settings/test.py supplies throwaway keys and the in-memory checkpointer,
+      # so the suite needs no Redis, no database server and no network.
+      - name: Check migrations match models
+        env:
+          DJANGO_SETTINGS_MODULE: workflow_backend.settings.test
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Run tests
+        run: python -m pytest -q -p no:cacheprovider --ignore=sandbox_service

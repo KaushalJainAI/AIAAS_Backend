@@ -285,6 +285,12 @@ REVISION_TIMELINE_LIMIT = 200
 # mid-tier default this assumes.
 RUPEES_PER_MILLION_TOKENS = 85
 
+# ==================== Credits ====================
+# One credit = this many tokens on a *paid* model through the *platform* key.
+# Calls on the user's own key and on free models are not metered — see
+# `llm/credits.py`. A new profile starts with 100 credits, i.e. 100k tokens.
+TOKENS_PER_CREDIT = 1_000
+
 # ==================== Evaluation ====================
 # A sweep runs the agent once per case, so every number here is a bound on how
 # much one button press can cost. Concurrency is capped separately from the

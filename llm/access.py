@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable
 
-from . import budget, effort as effort_levels
+from . import budget, credits, effort as effort_levels
 from .providers import PROVIDER_LABELS, SUPPORTED_PROVIDERS
 from .usage import DEFAULT_CONVENTION, EMPTY_USAGE, TokenUsage
 from .usage import normalize as normalize_usage
@@ -514,6 +514,14 @@ async def preflight(*, provider: str, model: str, user_id: int) -> None:
     if await _resolve_credential(provider, user_id) is not None:
         return
     if _platform_api_key(provider) is not None:
+        # The platform pays for this call, so it is metered — refused here,
+        # while nothing is on screen, rather than after a turn has started.
+        if not await credits.has_credit(user_id=user_id, model=model):
+            raise LLMQuotaExhausted(
+                "You have used all your credits. Pick a free model, or add your "
+                f"own {PROVIDER_LABELS.get(provider, provider).split(' (')[0]} "
+                "key in Settings to keep going."
+            )
         return
 
     label = PROVIDER_LABELS.get(provider, provider).split(" (")[0]
@@ -620,6 +628,9 @@ async def complete(
     pending = [c for c in raw_calls if "function" in c]
     executed = [c for c in raw_calls if "function" not in c and "tool" in c]
 
+    if request.config.get("api_key_override"):
+        await credits.charge(user_id=user_id, model=model, tokens=usage.total)
+
     return Completion(
         content=data.get("content") or "",
         thinking=data.get("thinking") or "",
@@ -663,8 +674,19 @@ async def stream(
         attachments=attachments,
     )
     handler = get_registry().get_handler(request.node_type)
+    metered = bool(request.config.get("api_key_override"))
+    usage = EMPTY_USAGE
     async for chunk in handler.stream_execute({}, request.config, _execution_context(user_id)):
+        if metered and chunk.get("type") == "metadata" and chunk.get("usage"):
+            usage += normalize_usage(
+                chunk["usage"], chunk.get("usage_convention") or DEFAULT_CONVENTION,
+            )
         yield chunk
+    # Charged once the stream is exhausted. A consumer that stops early never
+    # reaches this line — providers report usage in the final frame, so there
+    # would usually be nothing to charge anyway.
+    if metered:
+        await credits.charge(user_id=user_id, model=model, tokens=usage.total)
 
 
 @dataclass(slots=True)

@@ -144,3 +144,6 @@ __pycache__/
 # assets — collect it and you publish 1.3GB at /static/model_cache/.
 # Always: manage.py collectstatic --ignore=model_cache
 staticfiles/
+
+# Local database backups (manage.py backup_db)
+backups/
