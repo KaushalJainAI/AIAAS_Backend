@@ -90,7 +90,7 @@ was caught.
 | Concern | Where |
 |---|---|
 | Error reporting | Sentry, enabled by `SENTRY_DSN` (`workflow_backend/observability.py`) |
-| Backups | `python manage.py backup_db --keep 7`: consistent online snapshot, gzip, optional S3 upload via `BACKUP_S3_BUCKET` |
+| Backups | `pg_dump -Fc` from the database container before every deploy; `python manage.py backup_db` for SQLite installs (online snapshot, gzip, retention, optional S3 upload) |
 | Health check | `GET /api/health/` |
 | Crashed runs | `recover_runs` resumes or closes runs orphaned by a restart |
 | Cost control | Per-user credits on the platform key (`llm/credits.py`); per-agent monthly spend caps |

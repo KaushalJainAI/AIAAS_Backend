@@ -2,11 +2,17 @@
 `manage.py backup_db` — a consistent copy of the database, kept locally and
 optionally shipped off the box.
 
-Production runs SQLite on a Docker volume on a single EC2 instance, and the
-only backup instruction was a hand-run `tar` of that volume in DEPLOYMENT.md.
-Two things were wrong with that. Nothing ran it, so there was no backup. And a
-`tar` of a live SQLite file can capture it mid-write, producing a copy that
-opens fine and is missing the last transaction — or does not open at all.
+The only backup instruction was a hand-run `tar` of a data volume in
+DEPLOYMENT.md, and nothing ran it. A `tar` of a live database file can also
+capture it mid-write, producing a copy that opens fine and is missing the last
+transaction — or does not open at all.
+
+**Production caveat (verified 2026-09-17):** prod runs PostgreSQL in its own
+`aiaas-db` container, and the backend image does *not* ship `pg_dump`, so this
+command refuses there. On the box, back up through the database container
+instead — `docker exec aiaas-db pg_dump -Fc ...` — which is what every
+pre-deploy dump (`~/predeploy_<date>.dump`) already uses. This command is for
+SQLite installs and for environments that have `pg_dump` on the PATH.
 
 So this command:
 
@@ -21,9 +27,9 @@ So this command:
   same disk as the database does not survive losing that disk, which is the
   failure that matters most on a single-instance deployment.
 
-Run it from cron on the host, e.g. nightly:
+Run it from cron where the database is SQLite, e.g. nightly:
 
-    0 3 * * * docker exec aiaas-backend python manage.py backup_db --keep 7
+    0 3 * * * python manage.py backup_db --keep 7
 """
 from __future__ import annotations
 

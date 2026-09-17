@@ -165,17 +165,19 @@ It found a real bug on its first run.
 
 ## Where it stops scaling today
 
-Current deployment: one 1.9 GB EC2 instance behind Cloudflare, running the web
-server, Celery worker and beat, Redis, the sandbox, and **SQLite** on a Docker
-volume. That's the right cost for early access, but it has clear limits.
+Current deployment: one small EC2 instance (913 MB RAM, 2 vCPU) with Caddy
+terminating TLS, running the web server, Redis, the code sandbox and
+**PostgreSQL**, each in its own container. Images are built and smoke-tested
+off the box, pushed to Docker Hub, and pulled on deploy, with a `pg_dump` taken
+first. That's the right cost for early access, but it has clear limits.
 
 | Limit | Why | Next step |
 |---|---|---|
 | **One web process holds live run state** | Active chat runs (`chat/turn/runs.py`) and the steering mailbox (`chat/turn/steering.py`) are in-process dicts. With two replicas, "stop" or "steer" can reach the replica that isn't running the turn. | **Short term:** sticky sessions at the load balancer (route by user), which needs no code, since run *state* is already durable in the checkpointer. **Long term:** Redis-backed mailbox and a Redis pub/sub cancel signal, with the event stream written to a Redis stream so any replica can re-attach. |
-| **SQLite** | One writer at a time; every write in a turn queues behind every other. | Move to PostgreSQL + PgBouncer. Settings, the Postgres checkpointer and a migration plan (`docs/POSTGRES_PRODUCTION_MIGRATION_PLAN.md`) already exist. |
-| **Single instance** | The box is a single point of failure; a hardware loss loses data. | Nightly `manage.py backup_db` to S3 now; a managed database later, so the app tier can be replaced freely. |
+| **Database shares the box** | PostgreSQL runs beside the app on 913 MB, so a memory spike in the web process competes with the database for the same RAM. | A managed database (RDS) so the app tier can be resized or replaced freely; PgBouncer once there is more than one app process. |
+| **Single instance, manual backups** | The box is a single point of failure, and database dumps are only taken by hand before each deploy. | A nightly `docker exec aiaas-db pg_dump -Fc` job shipped to S3 now; point-in-time recovery comes with a managed database. |
 | **Connectors are memory-bound** | Each connector session is a 70–150 MB process, so concurrent connector users scale with RAM, not CPU. | Native REST implementations for the most-used connectors (Gmail, Drive, Sheets, Calendar are already native); move remaining stdio connectors to a separate host. |
-| **Pre-model latency** | Up to 20 sequential awaits before the first token, each a thread hop onto a locked SQLite. Now measured per turn (`[Latency] pre-model`). | Postgres removes the lock; batch the pre-model reads; stop seeding a web search for questions that don't need one. |
+| **Pre-model latency** | Up to 20 sequential awaits before the first token, each a sync-to-async thread hop into the ORM. Now measured per turn (`[Latency] pre-model`). | Batch the pre-model reads into fewer queries; stop seeding a web search for questions that don't need one. |
 
 What already works across processes: run state (durable checkpointer),
 orphaned-run recovery (`agents/recovery.py`), the cache (Redis), WebSocket
