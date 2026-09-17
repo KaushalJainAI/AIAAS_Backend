@@ -1,3 +1,6 @@
+import sys
+from unittest import skipUnless
+
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -6,6 +9,14 @@ from credentials.verification import CredentialVerifier
 from credentials.models import Credential, CredentialType
 
 User = get_user_model()
+
+#: Selenium is dev-only (absent from requirements-linux.txt, so from the image
+#: and CI). Tests that patch into `credentials.browser_utils` need it importable.
+try:
+    import selenium  # noqa: F401
+    HAS_SELENIUM = True
+except ImportError:
+    HAS_SELENIUM = False
 
 class CredentialVerifierTests(TestCase):
     def setUp(self):
@@ -115,6 +126,19 @@ class CredentialVerifierTests(TestCase):
         self.assertTrue(valid)
         self.assertIn("Verified Google Account: test@gmail.com", msg)
 
+    def test_website_login_without_selenium_says_unavailable(self):
+        # The deployed image has no selenium; the verifier must answer plainly
+        # rather than 500 on the import.
+        with patch.dict(sys.modules, {
+            "selenium": None, "credentials.browser_utils": None,
+        }):
+            valid, msg = CredentialVerifier._verify_website_login(
+                {"loginUrl": "http://test.com", "username": "u", "password": "p"},
+            )
+        self.assertFalse(valid)
+        self.assertIn("not available", msg)
+
+    @skipUnless(HAS_SELENIUM, "selenium is a dev-only dependency")
     @patch('credentials.browser_utils.login_and_extract_tokens')
     def test_verify_website_login_browser(self, mock_browser):
         cred = Credential(user=self.user, credential_type=self.type_custom, name="Web Test")

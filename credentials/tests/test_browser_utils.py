@@ -9,9 +9,16 @@ are ordinary tests.
 `_collect_tokens` is covered with a stub driver rather than a browser: it takes
 only the three calls it needs, so a fake object is enough.
 """
+import pytest
 from django.test import SimpleTestCase
 
-from credentials.browser_utils import (
+# Selenium is dev-only: requirements-linux.txt (the image and CI) omits it, and
+# `verification._verify_website_login` answers "not available" without it. The
+# helper imports selenium at module scope, so without the package there is
+# nothing here to test — skip rather than fail collection.
+pytest.importorskip("selenium")
+
+from credentials.browser_utils import (  # noqa: E402
     _IGNORED_KEYS,
     _STRONG_SIGNALS,
     _collect_tokens,
