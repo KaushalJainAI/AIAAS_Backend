@@ -68,7 +68,33 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # An enabled connector missing from this list is one that times out on its
 # first use in production: cold `npx -y` is ~21 s and `client.CONNECT_TIMEOUT`
 # is 25 s, so it is a coin flip, not a margin.
+#
+# 2026-09-17: the packages are now also *installed*, to `/opt/mcp`, and
+# `mcp_integration/launch.py` starts them with `node` directly. `npx -y <pkg>`
+# is two Node processes — the launcher, which then sits there holding a pipe for
+# the life of the session, and the server — so on a 384 MB container with a
+# 150 MB connector budget roughly half the ceiling was being spent on
+# launchers. The npx pre-warm below stays for the rows the install does not
+# cover (a user's own server, a package added to the catalogue but not here):
+# those still work, just the slow way.
 ENV NPM_CONFIG_CACHE=/opt/npm-cache
+ENV MCP_PACKAGE_ROOT=/opt/mcp/node_modules
+RUN mkdir -p /opt/mcp \
+    && cd /opt/mcp \
+    && npm init -y >/dev/null 2>&1 \
+    && npm install --omit=dev --no-audit --no-fund \
+        @modelcontextprotocol/server-filesystem \
+        @modelcontextprotocol/server-memory \
+        @modelcontextprotocol/server-sequential-thinking \
+        @modelcontextprotocol/server-slack \
+        @notionhq/notion-mcp-server \
+        @tokenizin/mcp-npx-fetch \
+        @shinzolabs/gmail-mcp \
+        @isaacphi/mcp-gdrive \
+        @cocal/google-calendar-mcp \
+        >/dev/null 2>&1 || true \
+    && chmod -R a+rX /opt/mcp
+
 RUN mkdir -p /opt/npm-cache \
     && for pkg in \
         @modelcontextprotocol/server-filesystem \

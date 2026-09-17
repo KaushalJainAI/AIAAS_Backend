@@ -234,7 +234,7 @@ class ProviderFilterTests(TestCase):
 
         from mcp_integration.tool_provider import MCPToolProvider
 
-        async def fake_list_tools(self):
+        async def fake_list_tools(self, **kwargs):
             return [
                 {'name': f'tool_{self.server_id}', 'inputSchema': {'type': 'object'}},
                 {'name': 'send_message', 'inputSchema': {'type': 'object'}},

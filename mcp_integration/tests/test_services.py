@@ -391,7 +391,7 @@ class ToolProviderDescriptorsTests(SimpleTestCase):
         s2 = self._mock_server(2, "Bad")
         tools = [{"name": "do", "description": "do it", "inputSchema": {"type": "object", "properties": {}}}]
 
-        async def list_tools_side_effect(self_obj):
+        async def list_tools_side_effect(self_obj, **kwargs):
             if self_obj.server_id == 2:
                 raise ConnectionError("down")
             return tools

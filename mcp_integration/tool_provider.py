@@ -30,11 +30,10 @@ from typing import Any
 
 from django.core.exceptions import PermissionDenied
 
-from .client import MCPClientManager, get_servers_for_user, AGENT_LIST_TOOLS_TIMEOUT
+from .client import MCPClientManager, get_servers_for_user
 from .credential_injector import (
     CredentialInvalidError,
     CredentialMissingError,
-    _coerce_user_id,
 )
 from .models import MCPServer
 
@@ -146,42 +145,26 @@ class MCPToolProvider:
             return tool_filter is None or tool_filter(server_id, tool.get('name') or '')
 
         async def _descriptors_for(server) -> list[dict[str, Any]]:
-            # Bound each server: a hung/absent stdio server must not stall the
-            # whole agent turn. All servers are queried concurrently under one
-            # shared 8s budget each — deliberately *unbounded*: batching them
-            # through a semaphore turns one 8s timeout into ceil(n/k)*8s of
-            # dead air when all of them are cold, which is exactly the hang
-            # this path must not produce.
+            # Storage only: Redis, then the stored catalogue, and otherwise no
+            # tools from this connector for this turn. **Listing never starts a
+            # connector.**
+            #
+            # It used to, under a 5s budget that a cold start (~21s) could not
+            # meet anyway — so the common case was a turn paying 5s of silence
+            # per cold connector and getting nothing for it, while spawning the
+            # Node processes that took the box down on 2026-09-16. Which tools
+            # exist is a question about a catalogue, and the catalogue is on
+            # disk; a miss queues a refresh (serialised, budgeted) behind the
+            # answer and the tools are there on the next turn.
+            #
+            # The wait_for is gone with the spawn: a storage read has no
+            # subprocess to hang on, and `list_tools` still bounds its own I/O.
             try:
                 manager = MCPClientManager(server.id, user=user)
-                tools = await asyncio.wait_for(manager.list_tools(), timeout=AGENT_LIST_TOOLS_TIMEOUT)
+                tools = await manager.list_tools(cached_only=True)
             except CredentialMissingError as e:
                 # Don't advertise a tool the user can't actually call.
                 logger.info("Skipping MCP server %s for user %s: %s", server.name, getattr(user, "id", None), e)
-                return []
-            except (asyncio.TimeoutError, TimeoutError):
-                # The 8s agent budget is far below a cold `npx` start
-                # (~21s), so a cold connector times out here by design and
-                # returns no tools for this turn. Two things keep that from
-                # becoming every turn: remember the failure so the next
-                # turn backs off for FAILURE_TTL instead of paying another
-                # 8s immediately, and warm the cache behind the turn with
-                # the full 25s+15s budget so the retry hits instead of
-                # re-dialling cold. Without both, a connector whose cache
-                # never filled costs every turn 8s for nothing.
-                logger.warning("Timed out listing tools for MCP server %s", server.name)
-                try:
-                    from .client import _record_failure, _refresh_in_background
-                    from .client import AGENT_LIST_TOOLS_TIMEOUT as _budget
-
-                    _record_failure(
-                        (server.id, _coerce_user_id(user)),
-                        f"Timed out after {_budget:.0f}s listing tools for "
-                        f"'{server.name}' (warming in background).",
-                    )
-                    _refresh_in_background(server.id, user)
-                except Exception:  # noqa: BLE001 — backoff must never break listing
-                    logger.debug("Failed to schedule MCP background warm", exc_info=True)
                 return []
             except Exception as e:  # noqa: BLE001
                 logger.warning("Failed to list tools for MCP server %s: %s", server.name, e)

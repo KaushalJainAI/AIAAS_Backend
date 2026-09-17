@@ -14,7 +14,7 @@ a connector the user edited keeps offering tools it no longer has.
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from asgiref.sync import async_to_sync
 from django.core.cache import cache
@@ -93,6 +93,18 @@ class TwoLifetimeTests(SimpleTestCase):
         self.assertIsNone(async_to_sync(MCPToolCache.get)(1, 5))
 
 
+def _closed(coro):
+    """Swallow a coroutine that a patched `spawn` will never run.
+
+    Returns a stand-in for the task, since `_ensure_refresh_worker` asks the
+    consumer whether it is still alive before reusing the queue.
+    """
+    coro.close()
+    task = MagicMock()
+    task.done.return_value = False
+    return task
+
+
 class RefreshBehindTheAnswerTests(SimpleTestCase):
     """`list_tools` answers from the stale copy and re-lists in the background."""
 
@@ -100,6 +112,9 @@ class RefreshBehindTheAnswerTests(SimpleTestCase):
         from mcp_integration import client
 
         client._refreshing.clear()
+        # The queue and its consumer are per-loop; each test runs its own.
+        client._refresh_queue = None
+        client._refresh_worker = None
 
     def _list(self, entry):
         from mcp_integration.client import MCPClientManager
@@ -138,17 +153,36 @@ class RefreshBehindTheAnswerTests(SimpleTestCase):
         """
         from mcp_integration import client
 
-        started = []
-
-        def _fake_spawn(coro):
-            started.append(coro)
-            coro.close()  # never actually run it; we are counting intents
-
-        with patch("mcp_integration.client.spawn", _fake_spawn):
+        async def _scenario():
+            queue = client._ensure_refresh_worker()
             for _ in range(5):
                 client._refresh_in_background(1, 5)
+            return queue.qsize()
 
-        self.assertEqual(len(started), 1)
+        with patch("mcp_integration.client.spawn", lambda coro, **kw: _closed(coro)):
+            self.assertEqual(_run(_scenario()), 1)
+
+    def test_refreshes_are_drained_one_at_a_time(self):
+        """Eight stale connectors are eight re-lists, not eight concurrent starts.
+
+        This was one detached task per connector, which is the same eight-way
+        cold start the foreground had just been taught not to do — with the
+        memory budget it would now mostly *refuse*, turning a slow refresh into
+        a failed one.
+        """
+        from mcp_integration import client
+
+        async def _scenario():
+            queue = client._ensure_refresh_worker()
+            for server_id in range(8):
+                client._refresh_in_background(server_id, 5)
+            return queue.qsize(), client._refresh_worker
+
+        with patch("mcp_integration.client.spawn", lambda coro, **kw: _closed(coro)):
+            size, worker = _run(_scenario())
+
+        self.assertEqual(size, 8, "all eight queued")
+        self.assertIsNotNone(worker, "behind exactly one consumer")
 
 
 class WarmOnConfigureTests(SimpleTestCase):

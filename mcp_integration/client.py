@@ -37,6 +37,7 @@ import shutil
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -55,7 +56,15 @@ from mcp.types import CallToolResult
 from workflow_backend.background import spawn
 
 from .credential_injector import CredentialInjector, ResolvedCredentials, _coerce_user_id
+from .launch import resolve_launch
 from .models import MCPServer, MCPServerPreference
+from .supervisor import (
+    ConnectorBudgetExceeded,
+    descendants,
+    kill_tree,
+    proc_available,
+    supervisor,
+)
 from .tool_cache import MCPToolCache
 
 logger = logging.getLogger(__name__)
@@ -73,7 +82,31 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-SESSION_TTL: float = 300.0  # seconds a session stays alive without activity
+#: Seconds a session stays alive without activity.
+#:
+#: Env-driven since 2026-09-17: on a RAM-tight box an idle connector holding a
+#: Node process for five minutes is five minutes of budget nobody is using, and
+#: the restart it saves costs ~1-2 s once packages are launched directly (see
+#: `launch.py`). Production sets 120; the default is unchanged so no other
+#: environment quietly changes behaviour.
+SESSION_TTL: float = _float_env("MCP_SESSION_TTL", 300.0)
+#: How many live sessions the pool may hold at once.
+#:
+#: The pool had a TTL and no size cap, so the number of live stdio subprocesses
+#: was bounded by user behaviour rather than by configuration: N users x M
+#: connectors all stay resident until each happens to idle out. Every stdio
+#: entry is a Node process on a RAM-tight box, so that is the shape of an OOM,
+#: not of a cache.
+#:
+#: The cap and the TTL answer different questions and both are kept. The cap is
+#: "how many may live at once"; the TTL is "how long may a session nobody is
+#: using hold a subprocess". A cap alone would keep the N most recent sessions
+#: resident for ever on a quiet box; a TTL alone is what we had.
+#:
+#: Six because the box holds ~1.9 GB total beside Redis, the sandbox sidecar and
+#: Django, and a connector's Node process is tens of megabytes. Raise it on a
+#: larger host — this is a memory ceiling, not a correctness bound.
+MAX_POOLED_SESSIONS: int = int(_float_env("MCP_MAX_POOLED_SESSIONS", 6))
 # `npx -y <pkg>` resolves and installs before the server prints a byte: measured
 # 8.5 s for a working connector on this catalogue and 7.7 s for npm to report
 # E404 on a missing one. The old 5 s budget was shorter than either, so *every*
@@ -90,19 +123,25 @@ CLOSE_TIMEOUT: float = _float_env("MCP_CLOSE_TIMEOUT", 5.0)
 # broken connector's card spawns another npx that takes ~8 s to fail; a user
 # clicking around a catalogue of eleven can have a dozen in flight.
 FAILURE_TTL: float = 60.0
+# A memory refusal is a different claim from a broken connector: it says "not
+# now", and what it waits on (an idle session timing out, a turn finishing) is
+# measured in seconds. Remembering it for a full minute would take a working
+# connector away long after the room came back.
+BUDGET_FAILURE_TTL: float = _float_env("MCP_BUDGET_FAILURE_TTL", 10.0)
 # Budgets for RPCs on an already-open session. Separate from the connect budget
 # because a server that handshook and then went mute is a different failure from
 # one that never started.
 RPC_TIMEOUT: float = 15.0
 CALL_TOOL_TIMEOUT: float = 120.0
-# What an agent turn will wait for a *cold* connector before going without it.
-# Deliberately far below LIST_TOOLS_TIMEOUT: a person watching a spinner on the
-# Connections page can wait for npx to install, a chat turn cannot. 5s because
-# a warm `npx` answers in 2.4–3.7s (passes with margin) while a cold one needs
-# ~21s (fails fast instead of holding the turn for 8s); the failure is then
-# remembered for FAILURE_TTL and the cache warms behind the turn, so the dead
-# air is paid once a minute, not once a turn.
-AGENT_LIST_TOOLS_TIMEOUT: float = _float_env("MCP_AGENT_LIST_TIMEOUT", 5.0)
+# Retired 2026-09-17: what an agent turn would wait for a *cold* connector
+# before going without it. There is no such wait any more — a listing is
+# answered from storage or not at all (`list_tools(cached_only=True)`), so the
+# turn spawns nothing and waits for nothing. The budget it named could never be
+# met by the thing it was bounding: a cold start is ~21s against a 5s ceiling,
+# so every cold connector bought 5s of silence and returned no tools anyway.
+# `MCP_AGENT_LIST_TIMEOUT` is therefore read by nothing; it is left documented
+# here rather than as a constant, because a knob that moves nothing is the same
+# lie as a switch that writes an unread row.
 
 # ---------------------------------------------------------------------------
 # Subprocess environment
@@ -243,16 +282,29 @@ class _SessionWorker:
     worker parks on `_closing` in between and unwinds its own exit stack.
     """
 
-    def __init__(self, manager: "MCPClientManager", server: "MCPServer", resolved: "ResolvedCredentials"):
+    def __init__(
+        self,
+        manager: "MCPClientManager",
+        server: "MCPServer",
+        resolved: "ResolvedCredentials",
+        key: "_PoolKey | None" = None,
+    ):
         self._manager = manager
         self._server = server
         self._resolved = resolved
+        self._key = key
         self._ready = asyncio.Event()
         self._closing = asyncio.Event()
         self.session: ClientSession | None = None
         self.error: BaseException | None = None
         self.task: asyncio.Task | None = None
         self._cred_dir: str | None = None
+        #: Subprocesses this session started, so eviction can make sure they
+        #: are gone rather than trusting the transport's own unwind. Captured
+        #: as the difference in our descendants across the spawn, which is
+        #: unambiguous because `supervisor.MAX_CONCURRENT_STARTS` serialises
+        #: starts — that is the second reason it exists, after the memory spike.
+        self.pids: set[int] = set()
 
     async def _run(self) -> None:
         """
@@ -308,39 +360,61 @@ class _SessionWorker:
 
     async def start(self) -> None:
         """Spawn the worker and wait for the session to become usable."""
+        before = descendants() if proc_available() else set()
         # Detached: this task outlives the request that opened it, so it must
         # not inherit that request's asgiref executor (see background.spawn).
         self.task = spawn(self._run(), name=f"mcp-session-{self._server.id}")
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=CONNECT_TIMEOUT)
         except asyncio.TimeoutError:
+            self._capture_pids(before)
             await self.close()
             raise MCPConnectionError(
                 f"Timed out after {CONNECT_TIMEOUT:.0f}s connecting to "
                 f"'{self._server.name}'."
             ) from None
+        self._capture_pids(before)
         if self.session is None:
             await self.close()
             raise MCPConnectionError(
                 f"Could not connect to '{self._server.name}': {_describe(self.error)}"
             )
 
-    async def close(self) -> None:
-        """Ask the worker to unwind, and wait briefly for it to finish."""
-        self._closing.set()
-        task = self.task
-        if task is None or task.done():
+    def _capture_pids(self, before: set[int]) -> None:
+        """Record the subprocesses this spawn added, if any."""
+        if not proc_available():
             return
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=CLOSE_TIMEOUT)
-        except asyncio.TimeoutError:
-            # The transport is wedged. Cancel and move on: blocking a request on
-            # a dead subprocess is worse than leaving the cleanup to the
-            # cancellation, which still runs in the worker's own task.
-            task.cancel()
-            logger.warning("MCP session for server %s did not close in time", self._server.id)
-        except BaseException:  # noqa: BLE001 — closing must never raise
-            logger.debug("Error awaiting MCP session close", exc_info=True)
+            self.pids |= descendants() - before
+        except Exception:  # noqa: BLE001 — accounting must never fail a connect
+            logger.debug("Could not capture MCP subprocess pids", exc_info=True)
+
+    async def close(self) -> None:
+        """Ask the worker to unwind, and wait briefly for it to finish.
+
+        Whatever happens to the transport, the accounting is released and any
+        process this session started is made sure of. A cancel that leaves a
+        Node process resident is how the budget drifts away from reality — and
+        `did not close in time` says that is not a hypothetical.
+        """
+        self._closing.set()
+        task = self.task
+        try:
+            if task is None or task.done():
+                return
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=CLOSE_TIMEOUT)
+            except asyncio.TimeoutError:
+                # The transport is wedged. Cancel and move on: blocking a request on
+                # a dead subprocess is worse than leaving the cleanup to the
+                # cancellation, which still runs in the worker's own task.
+                task.cancel()
+                logger.warning("MCP session for server %s did not close in time", self._server.id)
+            except BaseException:  # noqa: BLE001 — closing must never raise
+                logger.debug("Error awaiting MCP session close", exc_info=True)
+        finally:
+            if self._key is not None:
+                supervisor.release(self._key)
 
 
 def _describe(exc: BaseException | None) -> str:
@@ -399,7 +473,13 @@ class _PoolEntry:
 
 
 # Keyed by (server_id, user_id).  Entries are created lazily.
-_pool: dict[_PoolKey, _PoolEntry] = {}
+#
+# An `OrderedDict` rather than a plain one because the order *is* the eviction
+# policy: `_touch` moves a key to the end when its session is actually borrowed,
+# so iterating front-to-back yields least-recently-used first. Insertion order
+# alone would evict by age, which would throw out the connector being used on
+# every turn and keep one touched once an hour ago.
+_pool: "OrderedDict[_PoolKey, _PoolEntry]" = OrderedDict()
 # One lock per key so only one coroutine creates/evicts an entry at a time.
 _creation_locks: dict[_PoolKey, asyncio.Lock] = {}
 # Recent connection failures, so a broken connector is not re-dialled on every
@@ -424,8 +504,8 @@ def _recent_failure(key: _PoolKey) -> str | None:
     return message
 
 
-def _record_failure(key: _PoolKey, message: str) -> None:
-    _failures[key] = (time.monotonic() + FAILURE_TTL, message)
+def _record_failure(key: _PoolKey, message: str, ttl: float = FAILURE_TTL) -> None:
+    _failures[key] = (time.monotonic() + ttl, message)
 
 
 async def _evict(key: _PoolKey) -> None:
@@ -436,6 +516,128 @@ async def _evict(key: _PoolKey) -> None:
             await entry.worker.close()
         except Exception:  # noqa: BLE001 — eviction must never raise
             logger.debug("Error closing MCP session for %s", key, exc_info=True)
+
+
+def _touch(key: _PoolKey) -> None:
+    """Mark a session as most recently used.
+
+    Called where the session is actually borrowed rather than where the entry
+    is looked up, because "recently used" has to mean used. Keying recency off
+    creation instead would make the cap evict by age and throw out the
+    connector every turn is calling.
+    """
+    if key in _pool:
+        _pool.move_to_end(key)
+
+
+async def _close_evicted(
+    key: _PoolKey, entry: "_PoolEntry", pids: set[int] | None = None,
+) -> None:
+    try:
+        await entry.worker.close()
+    except Exception:  # noqa: BLE001 — eviction must never raise
+        logger.debug("Error closing evicted MCP session for %s", key, exc_info=True)
+    finally:
+        # The accounting was already freed by the eviction; this is the reap.
+        # A transport that unwound cleanly leaves nothing here, and one that had
+        # to be cancelled leaves a Node process that the budget has stopped
+        # counting — which is the worst of the two states to be in.
+        if pids:
+            kill_tree(pids)
+
+
+def _evict_lru_idle(protect: _PoolKey | None = None) -> bool:
+    """Drop the least-recently-used session nobody is mid-call on.
+
+    The supervisor calls this when a start does not fit in the memory budget.
+    It is the pool's half of admission control and it lives here for the reason
+    the supervisor's docstring gives: that module knows about megabytes, this
+    one knows which session is least recently used and which is being borrowed
+    right now. Returns whether anything was actually freed, because "there is
+    nothing left to evict" is what turns a wait into a refusal.
+
+    Prefers a dead or expired entry over a live one — those cost nothing to
+    lose — and only then takes the front of the LRU order.
+    """
+    for key in list(_pool):
+        entry = _pool.get(key)
+        if entry is None or key == protect or entry.lock.locked():
+            continue
+        if entry.expired() or not entry.alive():
+            _pool.pop(key, None)
+            _detach_and_close(key, entry)
+            return True
+
+    for key in list(_pool):
+        entry = _pool.get(key)
+        if entry is None or key == protect or entry.lock.locked():
+            continue
+        _pool.pop(key, None)
+        logger.info("Evicting MCP session %s to free connector memory", key)
+        _detach_and_close(key, entry)
+        return True
+
+    return False
+
+
+def _detach_and_close(key: _PoolKey, entry: "_PoolEntry") -> None:
+    """Free a session's budget now; close its transport behind the caller.
+
+    The two halves are deliberately split. Accounting has to be released
+    *synchronously*, because the caller is usually an admission that is about
+    to re-measure and would otherwise refuse a start it has just made room for
+    — a close waits up to `CLOSE_TIMEOUT`, which is longer than any admission
+    waits. The transport unwind is detached for the reason `_trim_pool` gives:
+    it must not sit in front of a live request.
+    """
+    pids = supervisor.release(key, kill=False)
+    spawn(_close_evicted(key, entry, pids), name=f"mcp-evict-{key[0]}")
+
+
+def _trim_pool(protect: _PoolKey | None = None) -> None:
+    """Drop expired sessions, then least-recently-used ones over the cap.
+
+    Synchronous, and the closing is detached, because this runs while a caller
+    is waiting to acquire a session: `close()` waits up to `CLOSE_TIMEOUT` for
+    a worker to unwind, and putting a dead connector's close budget in front of
+    a live turn is the sort of thing this whole change exists to remove. The
+    worker unwinds its own exit stack in its own task either way, which is what
+    `_SessionWorker` is for, so nothing is orphaned by not awaiting here.
+
+    Expired entries go first and regardless of the cap. The TTL was only ever
+    enforced when somebody asked for that same key again, so an idle connector
+    on a quiet box held its subprocess indefinitely — the cap alone would not
+    have fixed that, and this is what makes "the TTL still means something"
+    true rather than merely stated.
+
+    A session someone is mid-call on is never evicted, so the cap is soft by
+    design: sitting one over it for the length of a call is a far better
+    outcome than breaking the call. `entry.lock` is the same lock `_session`
+    holds while a borrowed session is in use.
+    """
+    for key in list(_pool):
+        entry = _pool.get(key)
+        if entry is None or key == protect or entry.lock.locked():
+            continue
+        if entry.expired() or not entry.alive():
+            _pool.pop(key, None)
+            _detach_and_close(key, entry)
+
+    if MAX_POOLED_SESSIONS <= 0:
+        return
+
+    for key in list(_pool):
+        if len(_pool) <= MAX_POOLED_SESSIONS:
+            return
+        entry = _pool.get(key)
+        if entry is None or key == protect or entry.lock.locked():
+            continue
+        _pool.pop(key, None)
+        logger.info(
+            "Evicting least-recently-used MCP session %s (pool cap %d)",
+            key, MAX_POOLED_SESSIONS,
+        )
+        _detach_and_close(key, entry)
 
 
 # stderr lines that are always padding around the real message.
@@ -507,36 +709,68 @@ _refreshing: set[tuple[int, int | None]] = set()
 _refresh_lock = threading.Lock()
 
 
-def _refresh_in_background(server_id: int, user: Any) -> None:
-    """Re-list a connector's tools without making anyone wait for it.
+#: Connectors waiting to be re-listed, and the single task draining them.
+#:
+#: This used to be one detached task per connector, which meant a turn that
+#: found eight stale entries started eight connectors at once — the background
+#: copy of the same stampede the foreground was careful to avoid. The queue
+#: makes re-listing strictly serial: the memory budget would refuse the extras
+#: anyway, and a refusal is remembered, so racing them only turns a slow
+#: refresh into a failed one.
+_refresh_queue: "asyncio.Queue[tuple[int, Any]] | None" = None
+_refresh_worker: asyncio.Task | None = None
 
-    `spawn` rather than `create_task`: this outlives the request that noticed
-    the staleness, and a bare task inherits an executor that dies with the
-    response — every ORM call in here would then raise once the 200 was
-    already sent (see `workflow_backend/background.py`).
-    """
+
+def _ensure_refresh_worker() -> "asyncio.Queue[tuple[int, Any]]":
+    """The refresh queue, with its consumer running on this loop."""
+    global _refresh_queue, _refresh_worker
+
+    if _refresh_queue is None or _refresh_worker is None or _refresh_worker.done():
+        _refresh_queue = asyncio.Queue()
+
+        async def _drain() -> None:
+            assert _refresh_queue is not None
+            while True:
+                server_id, user = await _refresh_queue.get()
+                key = (server_id, _coerce_user_id(user))
+                try:
+                    await MCPClientManager(server_id, user=user).list_tools(use_cache=False)
+                except Exception as e:  # noqa: BLE001
+                    # A refresh that fails changes nothing: the stale entry
+                    # stays readable until its hard lifetime runs out, which is
+                    # strictly better than dropping a working tool list because
+                    # one re-list timed out.
+                    logger.info(
+                        "Background refresh of MCP server %s failed, keeping stale tools: %s",
+                        server_id, e,
+                    )
+                finally:
+                    with _refresh_lock:
+                        _refreshing.discard(key)
+                    _refresh_queue.task_done()
+
+        # Detached: this outlives the request that queued the first refresh, so
+        # it must not inherit that request's asgiref executor — every ORM call
+        # in the drain would raise once the response had been sent (see
+        # `workflow_backend/background.py`).
+        _refresh_worker = spawn(_drain(), name="mcp-refresh-queue")
+    return _refresh_queue
+
+
+def _refresh_in_background(server_id: int, user: Any) -> None:
+    """Queue a connector re-list, without making anyone wait for it."""
     key = (server_id, _coerce_user_id(user))
     with _refresh_lock:
         if key in _refreshing:
             return
         _refreshing.add(key)
 
-    async def _run() -> None:
-        try:
-            await MCPClientManager(server_id, user=user).list_tools(use_cache=False)
-        except Exception as e:  # noqa: BLE001
-            # A refresh that fails changes nothing: the stale entry stays
-            # readable until its hard lifetime runs out, which is strictly
-            # better than dropping a working tool list because one re-list
-            # timed out.
-            logger.info(
-                "Background refresh of MCP server %s failed, keeping stale tools: %s",
-                server_id, e,
-            )
-        finally:
+    try:
+        _ensure_refresh_worker().put_nowait((server_id, user))
+    except Exception:  # noqa: BLE001 — a refresh is best effort by definition
+        with _refresh_lock:
             _refreshing.discard(key)
-
-    spawn(_run())
+        logger.debug("Could not queue MCP refresh for server %s", server_id, exc_info=True)
 
 
 def warm_cache(server_id: int, user: Any) -> None:
@@ -649,9 +883,30 @@ class MCPClientManager:
                 cached_failure = _recent_failure(key)
                 if cached_failure is not None:
                     raise MCPConnectionError(cached_failure)
-                worker = _SessionWorker(self, server, resolved)
+                worker = _SessionWorker(self, server, resolved, key=key)
                 try:
-                    await worker.start()
+                    # Admission before spawn, not after: every process this
+                    # start is about to create is invisible to the pool cap
+                    # until it connects, and eight of them starting at once is
+                    # precisely what took the box down. `_evict_lru_idle` is
+                    # handed over so the supervisor can make room out of the
+                    # cache rather than refusing while an idle connector holds
+                    # the megabytes it needs.
+                    async with supervisor.admit(
+                        key, server.id,
+                        evict_lru=lambda: _evict_lru_idle(protect=key),
+                    ) as admission:
+                        await worker.start()
+                        admission.commit(worker.pids)
+                except ConnectorBudgetExceeded as exc:
+                    # Remembered like any other connect failure so a turn under
+                    # pressure does not re-queue behind the same wall on every
+                    # tool call — but for a fraction of FAILURE_TTL, because
+                    # this one says "not right now" rather than "this connector
+                    # is broken", and the memory it is waiting on is freed by an
+                    # idle timeout measured in seconds.
+                    _record_failure(key, str(exc), ttl=BUDGET_FAILURE_TTL)
+                    raise MCPConnectionError(str(exc)) from exc
                 except MCPConnectionError as exc:
                     _record_failure(key, str(exc))
                     raise
@@ -668,6 +923,10 @@ class MCPClientManager:
                 )
                 _pool[key] = entry
                 _failures.pop(key, None)
+                # Only ever after a successful insert: trimming on the lookup
+                # path would let a burst of misses evict live sessions before
+                # any of them had been replaced by anything.
+                _trim_pool(protect=key)
 
         async with entry.lock:
             if _pool.get(key) is not entry:
@@ -680,6 +939,7 @@ class MCPClientManager:
                 )
             try:
                 entry.refresh()
+                _touch(key)
                 yield session
             except BaseException:
                 # A session that errored mid-call is not trustworthy, and
@@ -705,11 +965,17 @@ class MCPClientManager:
         if not command:
             raise ValueError(f"MCP server '{server.name}' is stdio but has no command")
 
+        args = list(server.args or [])
+        # `npx -y <pkg>` is two Node processes: the launcher, which stays
+        # resident doing nothing, and the server. Where the image holds the
+        # package, start it directly and pay for one.
+        command, args = resolve_launch(command, args)
+
         if not os.path.isabs(command):
             command = shutil.which(command) or command
 
         merged_env = _build_subprocess_env(server, resolved)
-        params = StdioServerParameters(command=command, args=server.args or [], env=merged_env)
+        params = StdioServerParameters(command=command, args=args, env=merged_env)
 
         # The subprocess's stderr is where the useful diagnosis lives — npm's
         # "404 Not Found", a missing runtime, a rejected token. By default the
@@ -811,13 +1077,24 @@ class MCPClientManager:
             logger.exception("Failed SSE connection to MCP server %s", server.name)
             raise MCPConnectionError(_describe(e)) from e
 
-    async def list_tools(self, use_cache: bool = True) -> list[dict[str, Any]]:
+    async def list_tools(
+        self, use_cache: bool = True, cached_only: bool = False,
+    ) -> list[dict[str, Any]]:
         """
         Return tool descriptors for this server.
 
-        Cached (Redis) by default with a short TTL; pass `use_cache=False`
-        to force a live fetch (used by the tool-cache invalidation path
-        and by debug endpoints).
+        Cached (Redis, then the stored catalogue) by default; pass
+        `use_cache=False` to force a live fetch (used by the tool-cache
+        invalidation path and by debug endpoints).
+
+        `cached_only=True` answers from storage or not at all: a miss returns
+        `[]` and queues a refresh instead of starting the connector. That is
+        what every *listing* caller now passes, and it is the single largest
+        thing this class does for latency and for memory. Knowing which tools
+        exist is a question about a catalogue; it was answered by spawning a
+        Node process, which cost a turn its first seconds and the box its
+        headroom — for a list that was, nearly always, already on disk. A
+        connector is now started when a tool is *called*.
 
         Server config and credentials are resolved exactly once regardless of
         whether the cache is warm or cold.
@@ -841,6 +1118,17 @@ class MCPClientManager:
                     # began — a cost the user pays and never sees a reason for.
                     _refresh_in_background(self.server_id, self.user)
                 return tools
+
+        if cached_only:
+            # Nothing stored for this connection yet. Warm it behind the caller
+            # — serialised through the refresh queue and subject to the memory
+            # budget — and answer without its tools this once.
+            _refresh_in_background(self.server_id, self.user)
+            logger.info(
+                "No stored tool list for MCP server %s; listing in background",
+                self.server_id,
+            )
+            return []
 
         resolved = await self._resolve_credentials(server)
         async with self._session(server, resolved) as session:
@@ -917,6 +1205,9 @@ async def drain_pool() -> None:
         await _evict(key)
     _creation_locks.clear()
     _failures.clear()
+    # `_evict` releases each key as it closes; this clears anything left by a
+    # worker that never made it into the pool.
+    supervisor.reset()
 
 
 def _visible_servers_queryset(user_id: int | None, enabled_only: bool = True):

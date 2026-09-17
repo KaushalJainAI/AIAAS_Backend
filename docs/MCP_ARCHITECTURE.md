@@ -119,20 +119,74 @@ shutdown         → drain_pool() closes all subprocesses cleanly
 |---|---|---|
 | `CONNECT_TIMEOUT` | 25 s | Opening a session (spawn + install + handshake) |
 | `LIST_TOOLS_TIMEOUT` | 30 s | `GET /tools/` — a person is watching a spinner |
-| `AGENT_LIST_TOOLS_TIMEOUT` | 5 s (`MCP_AGENT_LIST_TIMEOUT`) | An agent turn — dead air the user did not ask for |
 | `RPC_TIMEOUT` | 15 s | `list_tools` on an open session |
 | `CALL_TOOL_TIMEOUT` | 120 s | One tool call |
 | `CLOSE_TIMEOUT` | 5 s (`MCP_CLOSE_TIMEOUT`) | Waiting for a worker to unwind before cancelling it |
+| `SESSION_TTL` | 300 s (`MCP_SESSION_TTL`, 120 in prod) | How long an idle session holds its subprocess |
+| `FAILURE_TTL` / `BUDGET_FAILURE_TTL` | 60 s / 10 s | How long a connect failure — or a memory refusal — is remembered |
 
-Listing fans out concurrently with one shared budget each — deliberately
-*unbounded*: batching cold spawns through a semaphore turns one 8s timeout
-into ceil(n/k)*8s of dead air when all of them are cold, which is the hang
-this path must not produce. An agent-budget timeout now also records a
-`FAILURE_TTL` entry and schedules a background warm with the full connect
-budget — otherwise a connector whose cache never filled costs every turn 8s
-for zero tools, because the agent path times out before a cold `npx` (~21s)
-could ever populate the cache. `MCP_DISABLED=True` is the emergency brake:
-every listing path returns no tools without spawning anything.
+`AGENT_LIST_TOOLS_TIMEOUT` (5 s, `MCP_AGENT_LIST_TIMEOUT`) is **retired**
+(2026-09-17) along with the spawn it bounded; see below. `MCP_DISABLED=True`
+remains the emergency brake: every listing path returns no tools without
+spawning anything.
+
+## Listing never starts a connector (2026-09-17)
+
+A chat turn used to ask every connector what it could do, each answer a cold
+`npx` under a 5 s budget that a ~21 s cold start could never meet. So the
+common case was a turn paying five seconds of silence **per connector** and
+getting no tools for it — while spawning the Node processes that pushed the
+384 MB production container into the OOM killer on 2026-09-16, taking daphne
+with them.
+
+Which tools exist is a question about a catalogue, and the catalogue is already
+on disk (`MCPToolCatalogue`, Redis in front of it). `list_tools(cached_only=True)`
+answers from storage or returns `[]` and queues a refresh; **a connector starts
+when a tool is called**. Background refreshes drain through one serial queue,
+because one detached task per connector is the same eight-way stampede moved
+somewhere harder to see. Tests: `tests/test_listing_never_spawns.py`.
+
+## The memory budget (`supervisor.py`, 2026-09-17)
+
+`MAX_POOLED_SESSIONS` is a *cache* policy — which already-connected session to
+drop. It could not prevent the OOM, because nothing it counts existed yet: the
+eight connectors were all mid-start. Three gaps, all closed by admission
+control:
+
+* **a count is not a budget** — six connectors is 300 MB or 900 MB;
+* **starting was unbounded** and invisible to the cap; and
+* **a busy session is never evicted**, so the pool may sit over its own limit.
+
+`supervisor.admit()` reserves an estimate *before* a spawn, evicting
+least-recently-used idle sessions until it fits and refusing — inside
+`ADMIT_WAIT_SECONDS` — when nothing can be freed. `commit()` attributes the
+processes that appeared, so later admissions reason in measured megabytes
+(`/proc`) rather than a default. The container's own cgroup usage is a backstop
+above the budget: past `CONTAINER_HIGH_WATER`, connectors lose rather than
+daphne. Eviction frees the accounting synchronously and kills the process tree
+behind the caller, because a cancelled transport that leaves a Node resident is
+how the budget drifts from reality.
+
+| Env | Default | Prod | Meaning |
+|---|---|---|---|
+| `MCP_MEMORY_BUDGET_MB` | 150 | 150 | Total resident MB for all connectors; 0 disables |
+| `MCP_MAX_CONCURRENT_STARTS` | 1 | 1 | Connectors that may be starting at once |
+| `MCP_DEFAULT_CONNECTOR_MB` | 70 | 70 | Assumed cost until measured |
+| `MCP_ADMIT_WAIT_SECONDS` | 3 | 3 | How long an admission waits for room |
+| `MCP_CONTAINER_HIGH_WATER` | 0.85 | 0.85 | Fraction of the cgroup limit that refuses all starts |
+
+Tests: `tests/test_supervisor.py`.
+
+## Direct `node` launch (`launch.py`)
+
+`npx -y <pkg>` is two Node processes: the launcher, which stays resident
+holding a pipe, and the server. The image installs the curated packages to
+`/opt/mcp` (`MCP_PACKAGE_ROOT`) and the launch is rewritten to
+`node <pkg>/<bin>` when the package is provably there — halving per-connector
+memory and removing the resolve step. Catalogue rows keep saying `npx -y`,
+which is what works on a developer's machine, and anything not installed (a
+user's own server, a version pin, a `uvx` row) starts exactly as before.
+Tests: `tests/test_launch.py`.
 `@isaacphi/mcp-gdrive` writes `Starting server` to stdout before the
 handshake; the SDK logs a parse error for that line and carries on
 (harmless, filtered in `apps.ready`).
