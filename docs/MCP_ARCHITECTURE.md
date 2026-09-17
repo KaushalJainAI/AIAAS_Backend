@@ -171,9 +171,26 @@ how the budget drifts from reality.
 |---|---|---|---|
 | `MCP_MEMORY_BUDGET_MB` | 150 | 150 | Total resident MB for all connectors; 0 disables |
 | `MCP_MAX_CONCURRENT_STARTS` | 1 | 1 | Connectors that may be starting at once |
-| `MCP_DEFAULT_CONNECTOR_MB` | 70 | 70 | Assumed cost until measured |
+| `MCP_DEFAULT_CONNECTOR_MB` | 110 | 110 | Assumed cost until measured |
 | `MCP_ADMIT_WAIT_SECONDS` | 3 | 3 | How long an admission waits for room |
-| `MCP_CONTAINER_HIGH_WATER` | 0.85 | 0.85 | Fraction of the cgroup limit that refuses all starts |
+| `MCP_CONTAINER_HIGH_WATER` | 0.85 | 0.85 | Ceiling on the cgroup limit; a start must fit *below* it |
+
+Measured in the 2026-09-17 image (`--memory 384m`), one process per connector
+now that launches are direct: **memory 69 MB, Gmail ~150 MB**. Two consequences
+were found by measuring rather than reasoning. The default estimate was 70 —
+the floor of that range, not its middle — so it is 110. And the container check
+compares `cost` against *headroom*, not a usage fraction against a ceiling: at
+220 MB of daphne plus one 70 MB connector a 384 MB container is at 76%, under
+any sane high-water mark, and the next connector is the 150 MB one — admitting
+it reaches 440 MB and the kernel kills daphne without anything ever having
+looked over the mark.
+
+`NODE_OPTIONS=--max-old-space-size=192` is the per-connector runaway ceiling
+(it reaches the subprocess through the `NODE_` passthrough). It is deliberately
+well above what any curated connector needs: at 64 the Gmail connector died
+with `JS heap out of memory` in the smoke test, which converts a working
+connector into a crash loop. The budget, not the heap cap, is what bounds the
+aggregate.
 
 Tests: `tests/test_supervisor.py`.
 

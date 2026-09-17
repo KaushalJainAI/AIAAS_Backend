@@ -38,7 +38,7 @@ class BudgetAdmissionTests(SimpleTestCase):
         patcher = patch.object(sup, "proc_available", return_value=False)
         patcher.start()
         self.addCleanup(patcher.stop)
-        pressure = patch.object(sup, "container_pressure", return_value=None)
+        pressure = patch.object(sup, "container_headroom_mb", return_value=None)
         pressure.start()
         self.addCleanup(pressure.stop)
 
@@ -127,15 +127,34 @@ class BudgetAdmissionTests(SimpleTestCase):
 
         self.assertEqual(peak, 1)
 
-    def test_container_pressure_refuses_even_under_budget(self):
+    def test_container_headroom_refuses_even_under_budget(self):
         """Something has to lose, and it is not the web server."""
         with patch.object(sup, "MEMORY_BUDGET_MB", 1000.0), \
-             patch.object(sup, "CONTAINER_HIGH_WATER", 0.85), \
+             patch.object(sup, "DEFAULT_CONNECTOR_MB", 110.0), \
              patch.object(sup, "ADMIT_WAIT_SECONDS", 0.05), \
-             patch.object(sup, "container_pressure", return_value=0.93):
+             patch.object(sup, "container_headroom_mb", return_value=20.0):
             with self.assertRaises(ConnectorBudgetExceeded) as ctx:
                 async_to_sync(self._admit)((1, 1), 1)
-        self.assertIn("container memory", str(ctx.exception))
+        self.assertIn("container has", str(ctx.exception))
+
+    def test_headroom_counts_what_is_about_to_be_spent(self):
+        """A *fraction* answers the question one start too late.
+
+        daphne at 220 MB plus a 70 MB connector is 76% of a 384 MB container —
+        under any sane ceiling — and the next connector is the Gmail one at
+        ~150 MB. Admitting it takes the container to 440 MB and the kernel
+        kills daphne, with nothing ever having looked over the high-water mark.
+        """
+        with patch.object(sup, "MEMORY_BUDGET_MB", 0.0), \
+             patch.object(sup, "ADMIT_WAIT_SECONDS", 0.05), \
+             patch.object(sup, "container_headroom_mb", return_value=106.0):
+            # Fits: a measured-cheap connector.
+            with patch.object(sup, "DEFAULT_CONNECTOR_MB", 70.0):
+                async_to_sync(self._admit)((1, 1), 1)
+            # Does not: the expensive one, though the *fraction* is unchanged.
+            with patch.object(sup, "DEFAULT_CONNECTOR_MB", 150.0):
+                with self.assertRaises(ConnectorBudgetExceeded):
+                    async_to_sync(self._admit)((2, 1), 2)
 
     def test_a_zero_budget_disables_the_ceiling(self):
         """Local development, and any host with room, is unaffected."""

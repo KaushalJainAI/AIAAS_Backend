@@ -23,6 +23,7 @@ from django.test import SimpleTestCase
 
 from mcp_integration import client as mcp_client
 from mcp_integration.client import _pool, _touch, _trim_pool
+from mcp_integration import supervisor as sup
 from mcp_integration.supervisor import supervisor
 
 
@@ -199,6 +200,18 @@ class PoolBoundIsWiredIntoAcquisitionTests(SimpleTestCase):
         # `CredentialManager`'s process-global cache.
         supervisor.reset()
         self.addCleanup(supervisor.reset)
+        # These cases are about the *count* cap and its LRU order. The memory
+        # budget is a second, independent ceiling (test_supervisor.py) and on
+        # this catalogue it is the tighter of the two — a 150 MB budget against
+        # a 110 MB estimate admits exactly one connector, so leaving it on
+        # would evict for reasons that have nothing to do with what is under
+        # test here.
+        budget = patch.object(sup, "MEMORY_BUDGET_MB", 0.0)
+        budget.start()
+        self.addCleanup(budget.stop)
+        headroom = patch.object(sup, "container_headroom_mb", return_value=None)
+        headroom.start()
+        self.addCleanup(headroom.stop)
 
     def test_opening_more_sessions_than_the_cap_evicts_as_it_goes(self):
         from types import SimpleNamespace

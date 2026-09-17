@@ -91,8 +91,12 @@ MEMORY_BUDGET_MB: float = _float_env("MCP_MEMORY_BUDGET_MB", 150.0)
 MAX_CONCURRENT_STARTS: int = max(1, _int_env("MCP_MAX_CONCURRENT_STARTS", 1))
 #: What one connector is assumed to cost until it has been measured once.
 #: Deliberately generous: under-estimating admits a connector that then does
-#: not fit, which is the exact failure this module exists to prevent.
-DEFAULT_CONNECTOR_MB: float = _float_env("MCP_DEFAULT_CONNECTOR_MB", 70.0)
+#: not fit, which is the exact failure this module exists to prevent. Measured
+#: on the curated catalogue in the 2026-09-17 image: the memory connector is
+#: 69 MB resident and the Gmail one is ~150 MB, so 70 was the *floor* of the
+#: range rather than the middle of it — and the estimate only decides the first
+#: start of a given server, after which the measurement takes over.
+DEFAULT_CONNECTOR_MB: float = _float_env("MCP_DEFAULT_CONNECTOR_MB", 110.0)
 #: How long an admission waits for room before refusing. Short on purpose: the
 #: caller is a tool call a user is waiting on, and "no room right now" is a
 #: better answer than thirty seconds of silence followed by the same one.
@@ -251,6 +255,41 @@ def kill_tree(pids: Iterable[int]) -> int:
     return killed
 
 
+def container_headroom_mb() -> float | None:
+    """Megabytes left below the container's ceiling, or None if unlimited.
+
+    The question admission actually has to answer. A *fraction* answers "are we
+    in trouble yet", which is the wrong test one start too early: measured on
+    this catalogue, daphne at 220 MB plus one 70 MB connector is 76% of a
+    384 MB container — under any sane ceiling — and the next connector is the
+    Gmail one, which costs ~150 MB on its own. Admitting it takes the container
+    to 440 MB and the kernel kills daphne, having never once been over the
+    high-water mark when anyone looked.
+
+    So the comparison includes what is about to be spent, not only what has
+    been.
+    """
+    pressure = container_pressure()
+    if pressure is None:
+        return None
+    try:
+        with open("/sys/fs/cgroup/memory.max", "r", encoding="ascii") as fh:
+            raw = fh.read().strip()
+        limit_mb = float(raw) / (1024 * 1024) if raw != "max" else None
+    except (OSError, ValueError):
+        limit_mb = None
+    if limit_mb is None:
+        try:
+            with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r", encoding="ascii") as fh:
+                value = float(fh.read().strip())
+            limit_mb = value / (1024 * 1024) if 0 < value <= 1 << 62 else None
+        except (OSError, ValueError):
+            limit_mb = None
+    if limit_mb is None:
+        return None
+    return max(0.0, limit_mb * CONTAINER_HIGH_WATER - limit_mb * pressure)
+
+
 def container_pressure() -> float | None:
     """Used fraction of the container's own memory limit, or None if unlimited.
 
@@ -348,21 +387,25 @@ class ConnectorSupervisor:
 
     def _has_room(self, cost: float) -> tuple[bool, str]:
         """Whether `cost` more megabytes fits, and why not when it does not."""
-        if MEMORY_BUDGET_MB <= 0:
-            return True, ""
-        used = self.used_mb()
-        reserved = self._reserved_mb()
-        if used + reserved + cost > MEMORY_BUDGET_MB:
+        # The two ceilings are independent. `MCP_MEMORY_BUDGET_MB=0` switches
+        # off the *connector* budget — an operator saying "these are not the
+        # thing I need bounded here" — and must not also switch off the
+        # container backstop, which is the one protecting the web server. The
+        # first version returned early here and did exactly that.
+        if MEMORY_BUDGET_MB > 0:
+            used = self.used_mb()
+            reserved = self._reserved_mb()
+            if used + reserved + cost > MEMORY_BUDGET_MB:
+                return False, (
+                    f"connector memory budget reached "
+                    f"({used + reserved:.0f} MB of {MEMORY_BUDGET_MB:.0f} MB in use, "
+                    f"{cost:.0f} MB needed)"
+                )
+        headroom = container_headroom_mb()
+        if headroom is not None and cost > headroom:
             return False, (
-                f"connector memory budget reached "
-                f"({used + reserved:.0f} MB of {MEMORY_BUDGET_MB:.0f} MB in use, "
-                f"{cost:.0f} MB needed)"
-            )
-        pressure = container_pressure()
-        if pressure is not None and pressure > CONTAINER_HIGH_WATER:
-            return False, (
-                f"container memory at {pressure * 100:.0f}% of its limit "
-                f"(ceiling {CONTAINER_HIGH_WATER * 100:.0f}%)"
+                f"container has {headroom:.0f} MB before its "
+                f"{CONTAINER_HIGH_WATER * 100:.0f}% ceiling, {cost:.0f} MB needed"
             )
         return True, ""
 
