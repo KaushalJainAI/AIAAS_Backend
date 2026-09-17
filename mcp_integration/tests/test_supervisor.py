@@ -164,6 +164,40 @@ class BudgetAdmissionTests(SimpleTestCase):
             for i in range(4):
                 async_to_sync(self._admit)((i, 1), i)
 
+    def test_contention_and_budget_refusals_are_told_apart(self):
+        """One is worth remembering; the other would punish a healthy connector.
+
+        A parallel tool batch queues several starts at once. Refusing the tail
+        of it *and* then blacklisting those connectors for ten seconds would
+        make position in a batch look like a broken connection.
+        """
+        async def _scenario():
+            async def _hold():
+                async with self.sup.admit((9, 1), 9):
+                    await asyncio.sleep(0.3)
+
+            task = asyncio.ensure_future(_hold())
+            await asyncio.sleep(0.05)
+            with self.assertRaises(ConnectorBudgetExceeded) as ctx:
+                async with self.sup.admit((8, 1), 8):
+                    pass  # pragma: no cover
+            await task
+            return ctx.exception
+
+        with patch.object(sup, "MEMORY_BUDGET_MB", 0.0), \
+             patch.object(sup, "MAX_CONCURRENT_STARTS", 1), \
+             patch.object(sup, "ADMIT_WAIT_SECONDS", 0.05):
+            contention = async_to_sync(_scenario)()
+        self.assertTrue(contention.transient, "a queued start is not a broken connector")
+
+        with patch.object(sup, "MEMORY_BUDGET_MB", 100.0), \
+             patch.object(sup, "DEFAULT_CONNECTOR_MB", 70.0), \
+             patch.object(sup, "ADMIT_WAIT_SECONDS", 0.05):
+            async_to_sync(self._admit)((1, 1), 1)
+            with self.assertRaises(ConnectorBudgetExceeded) as ctx:
+                async_to_sync(self._admit)((2, 1), 2)
+        self.assertFalse(ctx.exception.transient, "a full budget is worth remembering")
+
     def test_a_measured_connector_replaces_the_default_estimate(self):
         """The budget reasons in measured megabytes once it has seen one."""
         with patch.object(sup, "proc_available", return_value=True), \
@@ -190,6 +224,37 @@ class ProcessMeasurementTests(SimpleTestCase):
 
     def test_our_own_process_reports_some_memory(self):
         self.assertGreater(sup.tree_rss_mb([os.getpid()]), 0.0)
+
+    def test_pressure_discounts_reclaimable_page_cache(self):
+        """Page cache is not a claim on memory, and counting it refuses starts.
+
+        Straight after a deploy, collectstatic and migrate left ~60 MB of cache
+        in a 384 MB container: `memory.current` read 79% used, which would have
+        refused every connector until something evicted the cache. The working
+        set — what `docker stats` shows — is the honest figure.
+        """
+        import tempfile
+
+        limit, current, inactive = 400.0e6, 300.0e6, 100.0e6
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, value in (("memory.max", limit), ("memory.current", current)):
+                with open(os.path.join(tmp, name), "w", encoding="ascii") as fh:
+                    fh.write(str(int(value)))
+            with open(os.path.join(tmp, "memory.stat"), "w", encoding="ascii") as fh:
+                fh.write(f"anon 12345\ninactive_file {int(inactive)}\nfile 200\n")
+
+            real_open = open
+
+            def fake_open(path, *a, **kw):
+                if isinstance(path, str) and path.startswith("/sys/fs/cgroup/"):
+                    return real_open(os.path.join(tmp, os.path.basename(path)), *a, **kw)
+                return real_open(path, *a, **kw)
+
+            with patch("builtins.open", fake_open):
+                pressure = sup.container_pressure()
+
+        # 300 MB used, 100 MB of it reclaimable cache -> 200/400, not 300/400.
+        self.assertAlmostEqual(pressure, 0.5, places=3)
 
     def test_kill_tree_ignores_pids_that_are_not_ours(self):
         """Pids are reused: a stale one can belong to anything by now."""

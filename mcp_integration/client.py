@@ -899,13 +899,19 @@ class MCPClientManager:
                         await worker.start()
                         admission.commit(worker.pids)
                 except ConnectorBudgetExceeded as exc:
-                    # Remembered like any other connect failure so a turn under
-                    # pressure does not re-queue behind the same wall on every
-                    # tool call — but for a fraction of FAILURE_TTL, because
-                    # this one says "not right now" rather than "this connector
-                    # is broken", and the memory it is waiting on is freed by an
-                    # idle timeout measured in seconds.
-                    _record_failure(key, str(exc), ttl=BUDGET_FAILURE_TTL)
+                    # A *budget* refusal is remembered like any other connect
+                    # failure so a turn under pressure does not re-queue behind
+                    # the same wall on every tool call — but for a fraction of
+                    # FAILURE_TTL, because it says "not right now" rather than
+                    # "this connector is broken", and the memory it waits on is
+                    # freed by an idle timeout measured in seconds.
+                    #
+                    # A *contention* refusal is not remembered at all: it says
+                    # only that another connector happened to be starting, and
+                    # holding that against this one would take a healthy
+                    # connector away from the next caller for no reason.
+                    if not getattr(exc, "transient", False):
+                        _record_failure(key, str(exc), ttl=BUDGET_FAILURE_TTL)
                     raise MCPConnectionError(str(exc)) from exc
                 except MCPConnectionError as exc:
                     _record_failure(key, str(exc))

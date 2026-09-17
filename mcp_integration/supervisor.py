@@ -97,10 +97,16 @@ MAX_CONCURRENT_STARTS: int = max(1, _int_env("MCP_MAX_CONCURRENT_STARTS", 1))
 #: range rather than the middle of it — and the estimate only decides the first
 #: start of a given server, after which the measurement takes over.
 DEFAULT_CONNECTOR_MB: float = _float_env("MCP_DEFAULT_CONNECTOR_MB", 110.0)
-#: How long an admission waits for room before refusing. Short on purpose: the
-#: caller is a tool call a user is waiting on, and "no room right now" is a
-#: better answer than thirty seconds of silence followed by the same one.
-ADMIT_WAIT_SECONDS: float = _float_env("MCP_ADMIT_WAIT_SECONDS", 3.0)
+#: How long an admission waits for room before refusing.
+#:
+#: 10 s, and the number is set by what it is queueing behind rather than by
+#: patience: starts are serialised, a direct `node` launch plus handshake is
+#: 1-2 s, so three seconds admitted barely two queued callers and refused the
+#: rest of a parallel tool batch for no better reason than their position in
+#: it. The caller here is a *tool call* — a real action a user asked for,
+#: already budgeted 25 s to connect and 120 s to run — not a listing, which no
+#: longer starts anything at all.
+ADMIT_WAIT_SECONDS: float = _float_env("MCP_ADMIT_WAIT_SECONDS", 10.0)
 #: Fraction of the *container's* memory limit past which no connector is
 #: admitted, whatever the connector budget says.
 CONTAINER_HIGH_WATER: float = _float_env("MCP_CONTAINER_HIGH_WATER", 0.85)
@@ -112,7 +118,19 @@ _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
 
 
 class ConnectorBudgetExceeded(RuntimeError):
-    """No room to start another connector, and nothing idle left to evict."""
+    """No room to start another connector, and nothing idle left to evict.
+
+    `transient` separates two refusals that read alike and must not be handled
+    alike. A *budget* refusal says the memory is genuinely spoken for, and is
+    worth remembering for a few seconds so a turn does not queue behind the
+    same wall on every tool call. A *contention* refusal says only that someone
+    else was starting a connector at that moment — remembering that would take
+    a perfectly healthy connector away from the next caller for no reason.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
 
 
 # ---------------------------------------------------------------------------
@@ -290,8 +308,31 @@ def container_headroom_mb() -> float | None:
     return max(0.0, limit_mb * CONTAINER_HIGH_WATER - limit_mb * pressure)
 
 
+def _cgroup_stat(path: str, key: str) -> float:
+    """One counter out of a `memory.stat`, or 0.0 if it is not there."""
+    try:
+        with open(path, "r", encoding="ascii") as fh:
+            for line in fh:
+                name, _, value = line.partition(" ")
+                if name == key:
+                    return float(value.strip())
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
 def container_pressure() -> float | None:
     """Used fraction of the container's own memory limit, or None if unlimited.
+
+    The usage figure is the **working set** — `memory.current` less inactive
+    file pages — which is what `docker stats` reports and what the kernel would
+    actually have to find under pressure. `memory.current` alone counts
+    reclaimable page cache, and on this box that is not a rounding error:
+    straight after a deploy, collectstatic and migrate leave ~60 MB of cache in
+    a 384 MB container, which read as 79% used and would have refused every
+    connector start until something evicted the cache. Refusing to start a
+    connector because the container once read some files is a self-inflicted
+    outage of the feature this module is meant to keep running.
 
     cgroup v2 first (what Amazon Linux 2023 and modern Docker use), then v1.
     Returning None rather than 0.0 when there is no limit keeps "unlimited" and
@@ -306,7 +347,8 @@ def container_pressure() -> float | None:
         limit = float(raw_max)
         with open("/sys/fs/cgroup/memory.current", "r", encoding="ascii") as fh:
             current = float(fh.read().strip())
-        return current / limit if limit > 0 else None
+        current -= _cgroup_stat("/sys/fs/cgroup/memory.stat", "inactive_file")
+        return max(0.0, current) / limit if limit > 0 else None
     except (OSError, ValueError):
         pass
     try:
@@ -317,7 +359,8 @@ def container_pressure() -> float | None:
         # v1 spells "unlimited" as a number near 2**63.
         if limit <= 0 or limit > 1 << 62:
             return None
-        return current / limit
+        current -= _cgroup_stat("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file")
+        return max(0.0, current) / limit
     except (OSError, ValueError):
         return None
 
@@ -500,7 +543,8 @@ class ConnectorSupervisor:
             if time.monotonic() >= deadline:
                 raise ConnectorBudgetExceeded(
                     f"{MAX_CONCURRENT_STARTS} connector start(s) already in "
-                    f"progress; try again shortly."
+                    f"progress; try again shortly.",
+                    transient=True,
                 )
             await asyncio.sleep(0.05)
 
