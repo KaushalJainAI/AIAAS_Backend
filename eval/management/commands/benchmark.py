@@ -37,6 +37,11 @@ class Command(BaseCommand):
         parser.add_argument('--provider', default='', help='Override the agents\' provider.')
         parser.add_argument('--model', default='', help='Override the agents\' model, e.g. deepseek/deepseek-v4.1-flash.')
         parser.add_argument('--notes', default='', help='Stored on each EvalRun, e.g. "after prompt change".')
+        parser.add_argument('--tier', choices=['core', 'work'],
+                            help='core = the original suites; work = the realistic multi-file suites.')
+        parser.add_argument('--repeats', type=int, default=0,
+                            help='Attempts per suite (0 = each suite\'s own `repeats`, usually 1; '
+                                 'work suites default to 3). Reliability is reported as pass^k.')
 
     # ------------------------------------------------------------------ helpers
 
@@ -51,6 +56,11 @@ class Command(BaseCommand):
         chosen = [catalogue[s] for s in slugs]
         if options['group']:
             chosen = [s for s in chosen if s['group'] == options['group']]
+        if options.get('tier'):
+            from eval.benchmarks.suites import WORK_SUITES
+
+            work = {s['slug'] for s in WORK_SUITES}
+            chosen = [s for s in chosen if (s['slug'] in work) == (options['tier'] == 'work')]
         if not chosen:
             raise CommandError('No suites match that selection.')
         return chosen
@@ -129,22 +139,28 @@ class Command(BaseCommand):
         # graph is compiled once per process and its checkpointer's lock binds
         # to the first loop that uses it, so a fresh `async_to_sync` per suite
         # made every suite after the first crash before reaching the model.
-        runs = async_to_sync(self._sweep_all)(chosen, suites, user, options['notes']) if chosen else []
+        runs = (async_to_sync(self._sweep_all)(chosen, suites, user, options['notes'], options['repeats'])
+                if chosen else [])
 
         path = write_report(scorecard.render(runs, skipped=skipped, judge=judge))
         self.stdout.write(self.style.SUCCESS(f'\nScorecard: {path}'))
 
-    async def _sweep_all(self, chosen, suites, user, notes):
+    async def _sweep_all(self, chosen, suites, user, notes, repeats=0):
         from asgiref.sync import sync_to_async
 
         from eval import api as evals
 
         runs = []
-        for definition in chosen:
+        for definition, attempt, attempts in _attempt_plan(chosen, repeats):
             suite = suites[definition['slug']]
+            label = f' (attempt {attempt}/{attempts})' if attempts > 1 else ''
             self.stdout.write(self.style.MIGRATE_HEADING(
-                f"\n> {definition['slug']}: {len(definition['cases'])} cases on {suite.subagent.name} ..."))
-            run = await evals.run_suite_now(suite, suite.subagent, user, notes=notes)
+                f"\n> {definition['slug']}{label}: {len(definition['cases'])} cases on {suite.subagent.name} ..."))
+            # Each attempt is its own EvalRun, so each keeps its own traces and
+            # the report can say "passed 2 of 3" per case. Workspaces are reset
+            # before every attempt, so one attempt cannot help the next.
+            run_notes = f'{notes} [attempt {attempt}/{attempts}]'.strip() if attempts > 1 else notes
+            run = await evals.run_suite_now(suite, suite.subagent, user, notes=run_notes)
             closed = await sync_to_async(close_paused_runs)(run)
             runs.append(run)
 
@@ -165,15 +181,25 @@ class Command(BaseCommand):
 
         user = self._user(options)
         runs = []
-        for definition in self._selected(options):
+        for definition, _attempt, attempts in _attempt_plan(self._selected(options), options['repeats']):
+            if _attempt != 1:
+                continue
+            # The latest N runs of a suite are its latest set of attempts.
             latest = (EvalRun.objects.filter(user=user, suite__name=definition['name'])
-                      .select_related('suite', 'subagent').order_by('-created_at').first())
-            if latest:
-                runs.append(latest)
+                      .select_related('suite', 'subagent').order_by('-created_at')[:attempts])
+            runs.extend(reversed(list(latest)))
         if not runs:
             raise CommandError('No benchmark runs yet. Start with `benchmark run`.')
         path = write_report(scorecard.render(runs))
         self.stdout.write(self.style.SUCCESS(f'Scorecard: {path}'))
+
+
+def _attempt_plan(chosen, repeats: int):
+    """(suite, attempt, attempts) in run order: all attempts of a suite together."""
+    for definition in chosen:
+        attempts = max(1, repeats or int(definition.get('repeats', 1)))
+        for attempt in range(1, attempts + 1):
+            yield definition, attempt, attempts
 
 
 def close_paused_runs(run) -> int:

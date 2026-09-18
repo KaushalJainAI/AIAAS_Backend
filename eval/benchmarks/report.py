@@ -123,6 +123,56 @@ def _group_line(rows, group: str, label: str) -> str:
             f'{held}/{len(chosen)} suites at their pass bar')
 
 
+def reliability(rows) -> list[dict]:
+    """Per suite with more than one attempt: pass@1 and pass^k, and per case k/n.
+
+    pass@1 is the share of all attempts that passed; pass^k is the share of cases
+    that passed on *every* attempt (τ-bench's measure). The gap between them is
+    the unreliability a user meets: a case at 2/3 works in a demo and fails one
+    run in three.
+    """
+    by_suite: dict[str, list] = {}
+    for r in rows:
+        by_suite.setdefault(r['suite'], []).append(r)
+    out = []
+    for suite, attempts in by_suite.items():
+        if len(attempts) < 2:
+            continue
+        per_case: dict[str, list[bool]] = {}
+        for r in attempts:
+            for result in r['results']:
+                per_case.setdefault(result.case_name, []).append(result.final_passed is True)
+        total = sum(len(v) for v in per_case.values())
+        passes = sum(sum(v) for v in per_case.values())
+        out.append({
+            'suite': suite,
+            'group': attempts[0]['group'],
+            'attempts': len(attempts),
+            'pass_at_1': passes / total if total else 0.0,
+            'pass_all': sum(1 for v in per_case.values() if v and all(v)) / len(per_case) if per_case else 0.0,
+            'cases': {name: (sum(v), len(v)) for name, v in per_case.items()},
+        })
+    return out
+
+
+def _reliability(rows) -> list[str]:
+    stats = reliability(rows)
+    if not stats:
+        return []
+    out = ['## Reliability', '',
+           'Each suite was attempted more than once from a fresh workspace. **pass@1** is the share of '
+           'attempts that passed; **pass^k** is the share of cases that passed *every* time.', '',
+           '| Suite | Group | Attempts | pass@1 | pass^k |', '|---|---|---|---|---|']
+    for s in stats:
+        out.append(f"| {s['suite']} | {s['group']} | {s['attempts']} | {s['pass_at_1']:.0%} | {s['pass_all']:.0%} |")
+    out += ['', '| Suite › Case | Passed |', '|---|---|']
+    for s in stats:
+        for name, (passed, n) in s['cases'].items():
+            mark = '✅' if passed == n else ('❌' if passed == 0 else '⚠️')
+            out.append(f"| {s['suite']} › {_cell(name, 60)} | {mark} {passed}/{n} |")
+    return out + ['']
+
+
 def _attention(rows) -> list[str]:
     """Every case that did not pass, grouped by what to do about it."""
     fails, reviews, errors = [], [], []
@@ -221,6 +271,7 @@ def render(runs, *, skipped=(), judge: str = '') -> str:
             f"{_secs(r['duration_ms'])} | {r['tokens']:,} | ${r['cost']:.4f} |"
         )
     out.append('')
+    out += _reliability(rows)
     out += _attention(rows)
 
     out += ['## Results by suite', '']

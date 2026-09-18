@@ -74,6 +74,15 @@ ALLOWED_MODULES = {
     'functools': ['reduce', 'partial'],
     'collections': ['Counter', 'defaultdict', 'OrderedDict', 'namedtuple', 'deque'],
     'string': ['ascii_letters', 'digits', 'punctuation', 'Template'],
+    # What data work reaches for first. None of these can touch a file or the
+    # network without `open`/`io.FileIO`, which stay unavailable; `io` exposes
+    # only the in-memory buffers `csv` needs. Added 2026-09-17 because the
+    # benchmark's analyst tasks could not parse a CSV in the dev engine at all,
+    # while the production sidecar has the full standard library.
+    'csv': ['reader', 'writer', 'DictReader', 'DictWriter', 'QUOTE_MINIMAL', 'QUOTE_ALL'],
+    'io': ['StringIO'],
+    'statistics': ['mean', 'median', 'mode', 'stdev', 'pstdev', 'fmean'],
+    'decimal': ['Decimal', 'ROUND_HALF_UP', 'ROUND_HALF_EVEN', 'getcontext'],
 }
 
 # Explicitly blocked modules

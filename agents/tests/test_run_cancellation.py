@@ -140,3 +140,26 @@ class CrashedTurnTests(TransactionTestCase):
         await sync_to_async(log.refresh_from_db)()
         self.assertEqual(log.status, 'failed')
         self.assertIn('different event loop', log.error_message)
+
+    async def test_an_upstream_refusal_is_a_failed_run_not_its_answer(self):
+        # Regression (benchmark, 2026-09-17): the provider refused mid-run and
+        # the run closed as `completed` with "Upstream error from Alibaba: ..."
+        # as its answer. The real graph runs here; only the provider is fake.
+        from agents.agent.runtime import AgentTurnFailed, _open_log, run_agent
+        from chat.tests.test_account_errors import error_stream
+
+        log = await _open_log(self.agent, self.user, 'go', 'manual', 'thread-refused')
+
+        async def no_preflight(**kwargs):
+            return None
+
+        refusal = error_stream('Upstream error from Alibaba: Output data may contain inappropriate content.', 400)
+        with patch('llm.access.stream', refusal), \
+                patch('llm.access.preflight', no_preflight):
+            with self.assertRaises(AgentTurnFailed):
+                await run_agent(self.agent, 'go', user=self.user,
+                                thread_id='thread-refused', log=log)
+
+        await sync_to_async(log.refresh_from_db)()
+        self.assertEqual(log.status, 'failed')
+        self.assertIn('Alibaba', log.error_message)

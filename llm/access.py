@@ -379,6 +379,10 @@ class Completion:
     usage: TokenUsage = EMPTY_USAGE
     tokens: int = 0
     media_url: str | None = None
+    #: Set when the provider failed and `content` is only a sentence *about*
+    #: that failure. Chat shows the sentence; an agent run must record a failed
+    #: run instead of a completed one whose answer is the error.
+    error: str = ""
 
 
 @dataclass(slots=True)

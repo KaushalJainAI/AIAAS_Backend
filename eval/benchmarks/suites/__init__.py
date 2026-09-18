@@ -31,11 +31,23 @@ judge cannot pass a case on its own.
 from .connectors import SUITES as CONNECTORS
 from .data_analysis import SUITE as DATA_ANALYSIS
 from .files import SUITE as FILES
+from .guard_work import SUITE as GUARD_WORK
 from .guardrails import SUITES as GUARDRAILS
 from .instructions import SUITE as INSTRUCTIONS
 from .planning import SUITES as PLANNING
 from .research import SUITE as RESEARCH
+from .work_analyst import SUITE as WORK_ANALYST
+from .work_docs import SUITE as WORK_DOCS
+from .work_long import SUITE as WORK_LONG
+from .work_ops import SUITE as WORK_OPS
+from .work_research import SUITE as WORK_RESEARCH
 
 #: Capabilities first (does it do the job?), then guardrails (does it stop
 #: where it should?). The README lists them in this order.
 ALL_SUITES = [INSTRUCTIONS, RESEARCH, DATA_ANALYSIS, FILES, *PLANNING, *GUARDRAILS, *CONNECTORS]
+
+#: The harder, realistic tier (2026-09-17): multi-file workspaces graded on the
+#: files produced, each case repeated to measure reliability. Kept as its own
+#: group so `--group work` runs exactly these; guard-work is still a guardrail.
+WORK_SUITES = [WORK_ANALYST, WORK_OPS, WORK_DOCS, WORK_RESEARCH, WORK_LONG, GUARD_WORK]
+ALL_SUITES += WORK_SUITES

@@ -33,7 +33,7 @@ from workflow_backend.thresholds import (
     EVAL_RESULT_ANSWER_CHAR_LIMIT,
 )
 
-from . import graders, supervision
+from . import graders, supervision, workspace
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +42,22 @@ class NoCasesToRun(ValueError):
     """The suite has nothing active in it. Refused rather than scored 0/0."""
 
 
-def _goal_for(case) -> str:
+def _goal_for(case, workspace_path: str = '') -> str:
     """The prompt one case hands the agent.
 
     `input_data` is appended as labelled JSON rather than merged into the
     sentence: the agent has to be able to tell the instruction from the data,
     and a case that interpolates its fixtures into prose is a case whose
     failures are about phrasing.
+
+    Keys starting `__` are harness instructions (the workspace spec), never
+    shown to the agent: its files are in its folder, not pasted into its prompt.
+    `{workspace}` in the goal becomes the path the agent's file tools accept.
     """
     goal = (case.goal or '').strip()
-    payload = case.input_data or {}
+    if workspace_path:
+        goal = goal.replace('{workspace}', workspace_path)
+    payload = {k: v for k, v in (case.input_data or {}).items() if not str(k).startswith('__')}
     if not payload:
         return goal
     return f'{goal}\n\nINPUT DATA (JSON):\n{json.dumps(payload, indent=2, default=str)}'
@@ -161,9 +167,14 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
             return 0
 
         started = time.monotonic()
+        spec = workspace.spec_for(case)
         try:
+            # Reset inside the semaphore and the try: a fixture that fails to
+            # write is this case's error, and two attempts at the same case
+            # must never share a half-written folder.
+            workspace_path = await workspace.prepare(user, agent, spec) if spec else ''
             agent_run = await run_agent(
-                agent, _goal_for(case), user=user,
+                agent, _goal_for(case, workspace_path), user=user,
                 trigger_type='api', caller='api',
             )
         except (AgentRunRefused, LLMUserActionable) as exc:
@@ -182,7 +193,9 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
             return 0
 
     answer = agent_run.answer or ''
+    files = await workspace.snapshot(user, agent, spec) if spec else {}
     ctx = graders.GradeContext(
+        files=files,
         answer=answer,
         structured=agent_run.structured,
         contract_error=agent_run.contract_error,

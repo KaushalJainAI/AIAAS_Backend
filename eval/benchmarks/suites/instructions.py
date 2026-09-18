@@ -41,7 +41,10 @@ SUITE = {
             'goal': 'In one sentence of at most 25 words, explain what an API is.',
             'graders': [
                 {'type': 'max_length', 'value': 220},
-                {'type': 'contains', 'value': 'interface'},
+                # Not the one word "interface": "a set of rules letting one
+                # program request data from another" is a correct answer too
+                # (failed exactly that way on 2026-09-17).
+                {'type': 'regex', 'pattern': r'interface|program|software|application|system'},
             ],
             'tags': ['format', 'length'],
         },

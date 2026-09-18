@@ -34,7 +34,8 @@ class SandboxImportTests(SimpleTestCase):
         self.assertFalse(outcome['success'])
 
     def test_anything_else_is_refused_and_says_what_is_available(self):
-        outcome = self.run_code('import csv\nresult = 1')
+        # `uuid`: neither allowed nor on the blocked list (csv was, until it was allowed).
+        outcome = self.run_code('import uuid\nresult = 1')
         self.assertFalse(outcome['success'])
         self.assertIn('not available', outcome['error'])
         self.assertIn('datetime', outcome['error'])

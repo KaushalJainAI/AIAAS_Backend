@@ -310,6 +310,10 @@ class AgentState(TypedDict):
     #: every existing reader wants the scalar — and because a total that is
     #: derived from the breakdown can never disagree with it.
     usage: TokenUsage
+    #: The provider's failure on the latest model call, or "" if it answered.
+    #: Overwritten every call, so only a failure that *ended* the run survives
+    #: to `run_turn`, which reports it as `TurnResult.error`.
+    provider_error: str
 
 
 def _context(config: RunnableConfig | None) -> TurnContext:
@@ -577,10 +581,15 @@ async def _run_model(
         # Everything else — an outage, a malformed request — still reaches the
         # user, but as a sentence rather than as the provider's JSON. The full
         # body is in the log line above for whoever has to debug it.
+        sentence = humanize_provider_body(accumulator.error)
         return Completion(
-            content=f"⚠️ {humanize_provider_body(accumulator.error)}",
+            content=f"⚠️ {sentence}",
             usage=completion.usage,
             tokens=completion.tokens,
+            # Carried separately so `run_turn` can report it: an agent run that
+            # ended here used to close as `completed` with this as its answer
+            # (benchmark, 2026-09-17: "Upstream error from Alibaba: ...").
+            error=sentence or "provider error",
         )
 
     return completion
@@ -748,6 +757,13 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     )
 
     calls, content = completion.tool_calls, completion.content or ""
+    if at_limit and calls:
+        # Tools were withheld on this last permitted call, so a call here is a
+        # model ignoring that. Dispatching it would loop past the iteration cap
+        # into the graph's recursion limit and lose the whole run; ending the
+        # turn with whatever it wrote is the honest stop.
+        logger.warning("[Agent] Dropped %d tool call(s) issued at the iteration limit", len(calls))
+        calls = ()
     if not calls and content and not at_limit:
         calls, content = await _recover_text_tool_calls(content, turn, tools)
 
@@ -791,6 +807,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         "thinking": thinking,
         "total_tokens": state.get("total_tokens", 0) + completion.tokens,
         "usage": state.get("usage", EMPTY_USAGE) + completion.usage,
+        "provider_error": completion.error,
     }
 
 
@@ -1632,6 +1649,12 @@ async def curate_node(state: AgentState, config: RunnableConfig) -> dict[str, An
 
 # ── Graph ────────────────────────────────────────────────────────────────────
 
+#: Graph nodes visited per tool iteration: agent, tools, curate, steering. Keep
+#: in step with `_build_graph`; `run_turn` sizes the recursion limit from it and
+#: `chat/tests/test_iteration_limit.py` fails if a node is added without it.
+STEPS_PER_ITERATION = 4
+
+
 def _next_step(state: AgentState) -> str:
     last = state["messages"][-1]
     return "tools" if isinstance(last, AIMessage) and last.tool_calls else END
@@ -1931,7 +1954,14 @@ async def run_turn(
     """
     config: RunnableConfig = {
         "configurable": {"thread_id": thread_id, "turn": turn},
-        "recursion_limit": turn.max_iterations * 2 + 10,
+        # LangGraph counts *node visits*, and one tool iteration is four of them
+        # (agent -> tools -> curate -> steering). This was `* 2`, from before
+        # curate and steering existed, so a run died with GraphRecursionError at
+        # roughly half its configured iterations — before `at_limit` could
+        # withhold tools and force an answer. Found by the work-tier stress
+        # benchmark (2026-09-17). The final answer visit and the margin are the
+        # `+ 10`.
+        "recursion_limit": turn.max_iterations * STEPS_PER_ITERATION + 10,
     }
     initial: AgentState = {
         "messages": [HumanMessage(content=prompt)],
@@ -1940,6 +1970,7 @@ async def run_turn(
         "thinking": "",
         "total_tokens": 0,
         "usage": EMPTY_USAGE,
+        "provider_error": "",
     }
 
     # Resume only when the graph is genuinely paused mid-run. `.values` alone is
@@ -1994,6 +2025,9 @@ async def run_turn(
         tokens=final.get("total_tokens", 0),
         usage=final.get("usage", EMPTY_USAGE),
         awaiting_approval=awaiting_approval,
+        # Chat ignores this and shows the sentence already in `answer`; an agent
+        # run raises `AgentTurnFailed` on it and is recorded as failed.
+        error="" if awaiting_approval else (final.get("provider_error") or ""),
     )
 
 

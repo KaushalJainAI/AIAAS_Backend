@@ -103,6 +103,48 @@ working is in a comment above each case.
 
 ---
 
+## The work tier: realistic, repeated, graded on outputs
+
+The suites above mostly check one or two steps, graded on the reply. Real use is
+different: data analysis and report generation (the top reported use, ~60% of
+organisations), process automation against a policy (~48%) and multi-stage
+workflows (57%). So there is a second, harder tier, built the way the serious
+agent benchmarks are (TheAgentCompany, OSWorld, τ-bench, GAIA, GDPval):
+
+- **A real starting folder per case.** Each case gets a folder of messy files
+  (duplicates, mixed date formats, prose contracts, a ticket queue). It is wiped
+  and rewritten before every attempt, so no attempt can pass on an earlier one's
+  output.
+- **Graded on what the agent produced.** File graders read the folder afterwards:
+  is `summary.csv` there, is North's `net_usd` right to 5 cents, is ticket T-3
+  `escalated` to `finance`. Saying "done" earns nothing.
+- **Answer keys computed, never typed.** Each suite file holds a reference
+  solution that computes the expected values from the exact fixture text, plus
+  `IDEAL_OUTPUTS`. The tests prove every case passes with the ideal outputs and
+  **fails with the untouched fixtures**, so no case can be passed by doing nothing.
+- **Repeated.** Work suites run 3 attempts each, and the scorecard's
+  **Reliability** section reports **pass@1** (share of attempts that passed) and
+  **pass^k** (share of cases that passed every time).
+
+```bash
+python manage.py benchmark run --user you@example.com --tier work               # all work suites, 3 attempts each
+python manage.py benchmark run --user you@example.com --tier work --repeats 1   # quick smoke pass
+python manage.py benchmark run --user you@example.com --suite work-ops          # one suite
+```
+
+| Suite | Agent | Cases | What it stresses |
+|---|---|---|---|
+| `work-analyst` | Operator | 2 | Month-end close from 63 messy order rows (dupes, day-first dates, 3 currencies, blanks) into a summary CSV and report; bank reconciliation with one-to-one matching and near-miss traps |
+| `work-ops` | Operator | 1 (31 checkpoints) | τ-bench-style refund queue against a written policy: window edge cases, escalation limits, final sale, a duplicate, a privacy request, and an injected fake "policy update" |
+| `work-docs` | Operator | 2 | Invoice audit across contracts **and an amendment that only applies from September**; contract renewal deadlines from prose agreements |
+| `work-research` | Deep researcher | 5 | GAIA-style multi-hop questions with one checkable `ANSWER:` |
+| `work-long` | Lead + field workers | 1 | Delegation: parallel workers write per-region summaries into the lead's folder, and the lead assembles a checked grand total |
+| `guard-work` | Operator (`full`, nothing pauses) | 4 | Instructions planted in files, cleanup that must not over-delete, a data file asking for a copy outside the folder, secrets in a config file |
+
+Agents: **Operator** (files and code, scoped to its own folder, no approvals),
+**Lead** (can delegate only to **Field worker**, installed and linked
+automatically), **Deep researcher** (web and code).
+
 ## How it fits together
 
 ```
@@ -215,6 +257,12 @@ Then:
 | `min_length` / `max_length` | answer length in characters | `value` |
 | `tool_used` / `tool_not_used` | whether a tool was called | `tool` (e.g. `web_search`, `execute_python`, `write_file`) |
 | `paused_for_approval` | the run stopped for a human before acting | none |
+| `file_exists` / `file_absent` | a file is / is not in the case's workspace after the run | `path` (`~/x` for home-relative) |
+| `file_count` | how many workspace files match a glob | `glob`, `equals` or `min` |
+| `file_contains` / `file_regex` | a workspace file's text | `path`, `value` / `pattern`, `negate` |
+| `file_number` | the first number after a label in a file (commas and currency ignored) | `path`, `after`, `equals`, `tolerance` |
+| `json_value` | a field of a JSON file, or of the list item matching `select` | `path`, `select`, `field`, `equals`, `tolerance` |
+| `csv_value` / `csv_rows` | a cell in the row matching `match` / the number of data rows | `path`, `match`, `column`, `equals`, `tolerance` |
 | `no_error` | the run finished cleanly (a pause counts as an error here) | none |
 | `max_tokens` / `max_duration_ms` | cost and latency budgets | `value` |
 | `json_key` / `contract` | structured output from an agent with an output contract | `key`, `equals` |

@@ -84,6 +84,27 @@ def render_tool_catalogue(names) -> str:
     return '\n'.join(lines)
 
 
+def resolve_delegates(user, keys: list, overrides: dict | None = None) -> list[int]:
+    """Benchmark agent keys -> this account's agent ids, installing any missing.
+
+    Symbolic for the reason connectors are: an id means a different row in every
+    database. A delegate is installed on demand (with the same model override)
+    so a lead can never be saved pointing at a worker that does not exist yet.
+    """
+    from agents.models import SubAgent
+
+    ids = []
+    for key in keys:
+        if key not in bench_agents.AGENTS:
+            raise BenchmarkConfigError(f'delegatesTo names unknown benchmark agent {key!r}')
+        agent = SubAgent.objects.filter(user=user, name=bench_agents.AGENTS[key]['name']).first()
+        if agent is None:
+            agent, _ = upsert_agent(user, key, provider=(overrides or {}).get('provider', ''),
+                                    model=(overrides or {}).get('model', ''))
+        ids.append(agent.id)
+    return ids
+
+
 def validate_agent_config(key: str, overrides: dict | None = None, *, user=None) -> dict:
     """Return validated serializer data for one benchmark agent, or raise.
 
@@ -97,12 +118,15 @@ def validate_agent_config(key: str, overrides: dict | None = None, *, user=None)
         config['brief'] = config['brief'].replace(
             '{TOOL_CATALOGUE}', render_tool_catalogue(bench_agents.PLANNING_CATALOGUE))
     context = {}
-    if config.get('connectors'):
+    if config.get('connectors') or config.get('delegatesTo'):
         if user is None:
-            raise BenchmarkConfigError(f'agent {key!r} has connectors; validating it needs a user')
-        config['connectors'] = resolve_connectors(user, config['connectors'])
+            raise BenchmarkConfigError(f'agent {key!r} names other rows; validating it needs a user')
         # The serializer reads the caller off a request, as every view passes it.
         context['request'] = SimpleNamespace(user=user)
+    if config.get('connectors'):
+        config['connectors'] = resolve_connectors(user, config['connectors'])
+    if config.get('delegatesTo'):
+        config['delegatesTo'] = resolve_delegates(user, config['delegatesTo'], overrides)
     serializer = AgentSerializer(data=config, context=context)
     if not serializer.is_valid():
         raise BenchmarkConfigError(f'agent {key!r} rejected: {serializer.errors}')

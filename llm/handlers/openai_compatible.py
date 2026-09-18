@@ -30,6 +30,7 @@ attachment and credential helpers below but keep their own transport.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import mimetypes
@@ -49,6 +50,20 @@ if TYPE_CHECKING:
     from llm.context import ExecutionContext
 
 logger = logging.getLogger(__name__)
+
+#: Seconds to wait before each retry of a stream that could not connect.
+#: Two retries, ~4s total: enough to ride out a DNS or TLS blip, short enough
+#: that a real outage still surfaces as an error while the user is waiting.
+STREAM_CONNECT_RETRY_DELAYS: tuple[float, ...] = (1.0, 3.0)
+
+
+def _describe(exc: BaseException) -> str:
+    """The exception's message, or its type when the message is empty.
+
+    `httpx.ConnectError` often stringifies to "", which reached users and run
+    logs as the bare "OpenRouter error: " with nothing to act on.
+    """
+    return str(exc).strip() or type(exc).__name__
 
 
 # ── Shared helpers (also used by the non-OpenAI-shaped handlers) ─────────────
@@ -532,32 +547,52 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
             usage_convention=self.usage_convention,
         )
 
-        try:
-            async with shared_client().stream(
-                "POST", self._chat_url(),
-                headers=self.auth_headers(api_key), json=payload,
-                timeout=self.timeout,
-            ) as response:
-                if response.status_code != 200:
-                    body = (await response.aread()).decode("utf-8", "replace")
-                    # `status` rides along so the chat layer can tell "out of
-                    # credit" from "provider hiccup" without parsing prose.
-                    yield {
-                        "type": "error",
-                        "message": f"{self.api_label} API error: {body}",
-                        "status": response.status_code,
-                    }
+        # A connection that never got a response is retried, a little: the
+        # stress benchmark (2026-09-17) lost two whole 20-minute agent runs to
+        # one `httpx.ConnectError` on the first model call. Only *before anything
+        # was emitted* — once tokens have reached the caller a retry would repeat
+        # them — and only for failures to reach the provider, never for an HTTP
+        # error the provider actually answered with.
+        for attempt, delay in enumerate((*STREAM_CONNECT_RETRY_DELAYS, None)):
+            emitted = False
+            try:
+                async with shared_client().stream(
+                    "POST", self._chat_url(),
+                    headers=self.auth_headers(api_key), json=payload,
+                    timeout=self.timeout,
+                ) as response:
+                    if response.status_code != 200:
+                        body = (await response.aread()).decode("utf-8", "replace")
+                        # `status` rides along so the chat layer can tell "out of
+                        # credit" from "provider hiccup" without parsing prose.
+                        yield {
+                            "type": "error",
+                            "message": f"{self.api_label} API error: {body}",
+                            "status": response.status_code,
+                        }
+                        return
+                    async for chunk in iter_sse_chunks(response):
+                        for event in parser.feed(chunk):
+                            emitted = True
+                            yield event
+                for event in parser.flush():
+                    yield event
+                return
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
+                if emitted or delay is None:
+                    logger.exception("%s stream failed", self.api_label)
+                    yield {"type": "error", "message": f"{self.api_label} error: {_describe(exc)}"}
                     return
-                async for chunk in iter_sse_chunks(response):
-                    for event in parser.feed(chunk):
-                        yield event
-            for event in parser.flush():
-                yield event
-        except httpx.TimeoutException:
-            yield {
-                "type": "error",
-                "message": f"{self.api_label} API request timed out",
-            }
-        except Exception as exc:
-            logger.exception("%s stream failed", self.api_label)
-            yield {"type": "error", "message": f"{self.api_label} error: {exc}"}
+                logger.warning("%s connection failed (%s); retry %d in %ss",
+                               self.api_label, _describe(exc), attempt + 1, delay)
+                await asyncio.sleep(delay)
+            except httpx.TimeoutException:
+                yield {
+                    "type": "error",
+                    "message": f"{self.api_label} API request timed out",
+                }
+                return
+            except Exception as exc:
+                logger.exception("%s stream failed", self.api_label)
+                yield {"type": "error", "message": f"{self.api_label} error: {_describe(exc)}"}
+                return

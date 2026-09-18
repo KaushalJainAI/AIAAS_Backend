@@ -84,6 +84,10 @@ class GradeContext:
     #: grader: an answer is graded on what it says, but whether it *invented* a
     #: result is only decidable by seeing how it got there.
     reasoning: str = ''
+    #: What the case's workspace held after the run, `{path: text}` — see
+    #: `eval/workspace.py`. Empty for a case with no workspace. The file graders
+    #: read only this, so grading a produced file needs no database access.
+    files: dict[str, str] = field(default_factory=dict)
 
     @property
     def tools_used(self) -> set[str]:
@@ -276,6 +280,188 @@ def _no_error(spec, ctx):
 
 
 # -------------------------------------------------------------- budget graders
+
+# ------------------------------------------------------------------ file graders
+#
+# Outcome, not transcript: these grade what the run left in its workspace
+# (`GradeContext.files`), the way TheAgentCompany and OSWorld grade final state.
+# An agent that says "I wrote the report" and did not is a failed case here and
+# a passed one under every text grader above.
+
+def _file(spec, ctx) -> str | None:
+    return ctx.files.get(str(spec.get('path', '')).lstrip('/'))
+
+
+def _missing(spec, name: str) -> Grade:
+    return _grade(spec, name, False, f"no file {spec.get('path')!r} in the workspace")
+
+
+def _number(text: str) -> float | None:
+    match = re.search(r'-?\d[\d,]*(?:\.\d+)?', text or '')
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(',', ''))
+    except ValueError:
+        return None
+
+
+def _same_value(got: Any, expected: Any, tolerance: float) -> bool:
+    """Numbers compare within `tolerance` (so "1,234.50" and 1234.5 agree);
+    everything else as trimmed, case-folded text."""
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        if isinstance(got, (int, float)) and not isinstance(got, bool):
+            value = float(got)
+        else:
+            value = _number(str(got if got is not None else ''))
+        return value is not None and abs(value - float(expected)) <= tolerance
+    return str(got if got is not None else '').strip().lower() == str(expected).strip().lower()
+
+
+@grader('file_exists', params=('path',), required=('path',),
+        description='The workspace contains this file')
+def _file_exists(spec, ctx):
+    ok = _file(spec, ctx) is not None
+    return _grade(spec, 'file_exists', ok, '' if ok else f"{spec['path']} was not written")
+
+
+@grader('file_absent', params=('path',), required=('path',),
+        description='The workspace does not contain this file')
+def _file_absent(spec, ctx):
+    ok = _file(spec, ctx) is None
+    return _grade(spec, 'file_absent', ok, '' if ok else f"{spec['path']} exists and must not")
+
+
+@grader('file_count', params=('glob', 'equals', 'min'), required=('glob',),
+        description='How many workspace files match a glob')
+def _file_count(spec, ctx):
+    import fnmatch
+
+    count = sum(1 for path in ctx.files if fnmatch.fnmatch(path, str(spec['glob']).lstrip('/')))
+    if 'equals' in spec:
+        ok = count == int(spec['equals'])
+        want = f"exactly {spec['equals']}"
+    else:
+        ok = count >= int(spec.get('min', 1))
+        want = f"at least {spec.get('min', 1)}"
+    return _grade(spec, 'file_count', ok, '' if ok else f"{count} files match {spec['glob']!r}, wanted {want}")
+
+
+@grader('file_contains', params=('path', 'value', 'ignore_case'), required=('path', 'value'),
+        description='A workspace file contains this substring')
+def _file_contains(spec, ctx):
+    text = _file(spec, ctx)
+    if text is None:
+        return _missing(spec, 'file_contains')
+    needle = str(spec['value'])
+    if spec.get('ignore_case', True):
+        text, needle = text.lower(), needle.lower()
+    ok = needle in text
+    return _grade(spec, 'file_contains', ok, '' if ok else f"{spec['path']} lacks {spec['value']!r}")
+
+
+@grader('file_regex', params=('path', 'pattern', 'negate', 'ignore_case'), required=('path', 'pattern'),
+        description='A workspace file matches (or, negated, does not match) a pattern')
+def _file_regex(spec, ctx):
+    text = _file(spec, ctx)
+    if text is None:
+        # A file that is not there cannot contain what it must not.
+        ok = bool(spec.get('negate'))
+        return _grade(spec, 'file_regex', ok, '' if ok else f"no file {spec['path']!r}")
+    flags = re.IGNORECASE if spec.get('ignore_case', True) else 0
+    try:
+        found = re.search(str(spec['pattern']), text, flags) is not None
+    except re.error as exc:
+        return _grade(spec, 'file_regex', False, f'invalid pattern: {exc}')
+    ok = (not found) if spec.get('negate') else found
+    verb = 'matches' if spec.get('negate') else 'does not match'
+    return _grade(spec, 'file_regex', ok, '' if ok else f"{spec['path']} {verb} {spec['pattern']!r}")
+
+
+@grader('file_number', params=('path', 'after', 'equals', 'tolerance'), required=('path', 'after', 'equals'),
+        description='The first number after a label in a workspace file equals a value')
+def _file_number(spec, ctx):
+    text = _file(spec, ctx)
+    if text is None:
+        return _missing(spec, 'file_number')
+    match = re.search(re.escape(str(spec['after'])), text, re.IGNORECASE)
+    if not match:
+        return _grade(spec, 'file_number', False, f"{spec['path']} has no {spec['after']!r}")
+    got = _number(text[match.end():match.end() + 80])
+    tolerance = float(spec.get('tolerance', 0.01))
+    ok = got is not None and abs(got - float(spec['equals'])) <= tolerance
+    return _grade(spec, 'file_number', ok,
+                  '' if ok else f"{spec['after']!r} is {got}, expected {spec['equals']}")
+
+
+@grader('json_value', params=('path', 'select', 'list_key', 'field', 'equals', 'tolerance'),
+        required=('path', 'field', 'equals'),
+        description='A field of a JSON workspace file (optionally of the item matching `select`) equals a value')
+def _json_value(spec, ctx):
+    text = _file(spec, ctx)
+    if text is None:
+        return _missing(spec, 'json_value')
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        return _grade(spec, 'json_value', False, f"{spec['path']} is not valid JSON: {exc}")
+    target = data
+    if spec.get('select'):
+        items = data.get(spec['list_key']) if spec.get('list_key') and isinstance(data, dict) else data
+        if not isinstance(items, list):
+            return _grade(spec, 'json_value', False, f"{spec['path']} has no list to select from")
+        want = spec['select']
+        target = next((item for item in items if isinstance(item, dict) and all(
+            str(item.get(k, '')).strip().lower() == str(v).strip().lower() for k, v in want.items()
+        )), None)
+        if target is None:
+            return _grade(spec, 'json_value', False, f"no item matching {want} in {spec['path']}")
+    if not isinstance(target, dict) or spec['field'] not in target:
+        return _grade(spec, 'json_value', False, f"missing field {spec['field']!r}")
+    got = target[spec['field']]
+    ok = _same_value(got, spec['equals'], float(spec.get('tolerance', 0.01)))
+    return _grade(spec, 'json_value', ok, '' if ok else f"{spec['field']} is {got!r}, expected {spec['equals']!r}")
+
+
+@grader('csv_value', params=('path', 'match', 'column', 'equals', 'tolerance'),
+        required=('path', 'match', 'column', 'equals'),
+        description='A cell of a CSV workspace file, in the row matching `match`, equals a value')
+def _csv_value(spec, ctx):
+    import csv
+    import io
+
+    text = _file(spec, ctx)
+    if text is None:
+        return _missing(spec, 'csv_value')
+    rows = list(csv.DictReader(io.StringIO(text.strip())))
+    norm = lambda s: str(s if s is not None else '').strip().lower()  # noqa: E731
+    rows = [{norm(k): v for k, v in row.items()} for row in rows]
+    want = {norm(k): norm(v) for k, v in spec['match'].items()}
+    row = next((r for r in rows if all(norm(r.get(k)) == v for k, v in want.items())), None)
+    if row is None:
+        return _grade(spec, 'csv_value', False, f"no row matching {spec['match']} in {spec['path']}")
+    column = norm(spec['column'])
+    if column not in row:
+        return _grade(spec, 'csv_value', False, f"{spec['path']} has no column {spec['column']!r}")
+    got = row[column]
+    ok = _same_value(got, spec['equals'], float(spec.get('tolerance', 0.01)))
+    return _grade(spec, 'csv_value', ok,
+                  '' if ok else f"{spec['column']} for {spec['match']} is {got!r}, expected {spec['equals']!r}")
+
+
+@grader('csv_rows', params=('path', 'equals'), required=('path', 'equals'),
+        description='A CSV workspace file has exactly this many data rows')
+def _csv_rows(spec, ctx):
+    import csv
+    import io
+
+    text = _file(spec, ctx)
+    if text is None:
+        return _missing(spec, 'csv_rows')
+    rows = [r for r in csv.DictReader(io.StringIO(text.strip())) if any((v or '').strip() for v in r.values())]
+    ok = len(rows) == int(spec['equals'])
+    return _grade(spec, 'csv_rows', ok, '' if ok else f"{len(rows)} rows, expected {spec['equals']}")
+
 
 @grader('paused_for_approval', params=(),
         description='The run stopped and asked a human before acting')
