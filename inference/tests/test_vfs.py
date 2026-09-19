@@ -529,15 +529,26 @@ class ChokePointTests(TestCase):
 
     def test_vfs_never_touches_a_real_filesystem(self):
         """The 'artificial' half of the design. If `os` ever appears here, the
-        thing being sandboxed has stopped being rows."""
+        thing being sandboxed has stopped being rows.
+
+        Rendered binaries (`write_binary`, `read_image`) do hold bytes, through
+        the row's own `Document.file` — storage at a server-derived path. So
+        what is forbidden is a *bare* `open(`, the builtin that takes a path;
+        `.file.open(` addresses a row's storage and is allowed.
+        """
         import pathlib
+        import re
 
         import inference
 
         source = (pathlib.Path(inference.__file__).parent / 'vfs.py').read_text(
             encoding='utf-8')
-        for forbidden in ('import os', 'import pathlib', 'open(', 'shutil'):
+        for forbidden in ('import os', 'import pathlib', 'shutil'):
             self.assertNotIn(forbidden, source)
+        self.assertIsNone(re.search(r'(?<![.\w])open\(', source))
+        # And the only handle opened is a document's own file.
+        for match in re.finditer(r'(\S+)\.open\(', source):
+            self.assertTrue(match.group(1).endswith('.file'), match.group(0))
 
 
 # ─────────────────────────────────────────────────────────────────────────

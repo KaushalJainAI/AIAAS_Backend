@@ -217,6 +217,14 @@ async def stop_message_stream(request, session_id: str):
     serialized = await serialize_message(message) if message is not None else None
     await run.emit(Event.DONE, ai_response=serialized, stopped=True)
     runs.finish(run, "stopped")
+    try:
+        from logs.signals_api import record_signal
+        from asgiref.sync import sync_to_async as _sta
+
+        await _sta(record_signal)(user.id, 'cancelled', session_id=session_id,
+                                  detail={'after_ms': 0})
+    except Exception:  # noqa: BLE001
+        pass
 
     return JsonResponse({"stopped": True, "ai_response": serialized})
 
@@ -261,7 +269,17 @@ async def steer_message_stream(request, session_id: str):
     if not steering.post(session_id, message):
         return JsonResponse({"detail": "A message is required."}, status=400)
 
-    return JsonResponse({"steered": True, **steering.stats(session_id)})
+    stats = steering.stats(session_id)
+    try:
+        from logs.signals_api import record_signal
+        from asgiref.sync import sync_to_async as _sta
+
+        await _sta(record_signal)(user.id, 'steered', session_id=session_id,
+                                  detail={'chars': len(message),
+                                          'queued': stats.get('queued', 0)})
+    except Exception:  # noqa: BLE001
+        pass
+    return JsonResponse({"steered": True, **stats})
 
 
 @sync_api_view(["GET"])

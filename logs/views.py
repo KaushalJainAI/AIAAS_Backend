@@ -97,6 +97,49 @@ def execution_detail(request, execution_id: str):
     return Response(detail)
 
 
+# ======================== Judgement ========================
+
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@api_view(['PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def feedback(request):
+    """Thumbs up/down on a run or a chat message. Upsert on PUT, clear on DELETE."""
+    from . import queries
+
+    if request.method == 'DELETE':
+        target = request.query_params.get('target', '')
+        target_id = request.query_params.get('id', '')
+        if queries.clear_feedback(request.user, target=target, target_id=target_id):
+            return Response({'cleared': True})
+        return Response({'error': 'Feedback not found'}, status=404)
+    body = request.data or {}
+    result = queries.upsert_feedback(
+        request.user,
+        target=body.get('target', ''), target_id=body.get('id'),
+        rating=body.get('rating'), reason=body.get('reason', ''),
+        comment=body.get('comment', ''),
+    )
+    if result is None:
+        return Response({'error': 'Target not found'}, status=404)
+    if 'error' in result:
+        return Response(result, status=400)
+    return Response({'feedback': result})
+
+
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def quality(request):
+    """Quality counts: failures by category, thumbs, signals. Excludes eval."""
+    from . import queries
+    from .serializers import AnalyticsFilterSerializer as _F
+
+    serializer = _F(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    return Response(queries.quality_summary(
+        request.user, days=serializer.validated_data['days']))
+
+
 # ======================== Configuration history ========================
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})

@@ -406,3 +406,42 @@ async def agent_autonomy(request, agent_id: int):
                         status=status.HTTP_400_BAD_REQUEST)
 
     return Response({'autonomy': level, 'execution_id': str(log.execution_id)})
+
+
+@extend_schema(
+    methods=['POST'],
+    request=None,
+    responses={200: OpenApiResponse(description='The status the run ended in')},
+    description='Stop a running or approval-paused agent run.',
+)
+@async_api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def run_cancel(request, execution_id: str):
+    """Stop a run.
+
+    There was no way to: a run started by mistake, or one looping on a bad
+    brief, could only be waited out until `maxRunSeconds`, spending the whole
+    time. The runtime already closed a cancelled task cleanly; nothing asked it
+    to. Addressed by execution rather than by agent because an agent may have
+    several runs going and "stop the agent" does not say which.
+    """
+    import uuid
+
+    from agents.agent.runtime import CannotCancel, cancel_agent_run
+
+    try:
+        uuid.UUID(str(execution_id))
+    except ValueError:
+        # A UUID column raises on a malformed value; that is a 404, not a 500.
+        return Response({'error': 'Run not found'}, status=status.HTTP_404_NOT_FOUND)
+    log = await ExecutionLog.objects.filter(
+        execution_id=execution_id, user=request.user,
+    ).afirst()
+    if log is None:
+        return Response({'error': 'Run not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        final = await cancel_agent_run(log)
+    except CannotCancel as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+    return Response({'execution_id': str(log.execution_id), 'status': final})

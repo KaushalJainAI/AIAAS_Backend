@@ -118,6 +118,7 @@ class TurnRequest:
     #: `agent_reject` exists to close for agent runs.
     reject_tool_call: str | None = None
     reject_reason: str = ""
+    regenerate_of: int | None = None
 
     @classmethod
     def parse(cls, payload: Mapping[str, Any]) -> TurnRequest:
@@ -131,8 +132,14 @@ class TurnRequest:
         requested = (payload.get("intent") or "").strip().lower()
         reference = payload.get("reference")
 
+        try:
+            regenerate_of = payload.get("regenerate_of")
+            regenerate_of = int(regenerate_of) if regenerate_of is not None else None
+        except (TypeError, ValueError):
+            regenerate_of = None
         return cls(
             content=content,
+            regenerate_of=regenerate_of,
             intent=requested if requested in SELECTABLE_INTENTS else None,
             provider=(payload.get("llm_provider") or "").strip() or None,
             model=(payload.get("llm_model") or "").strip() or None,
@@ -332,28 +339,41 @@ async def _seed_intent_tool(
     return f"\n\n[RESULTS FROM {tool_name.upper()}]\n{text}", [trace]
 
 
-def _now_string() -> str:
-    """Current time, in the project's timezone, for the system prompt."""
-    from django.utils import timezone
+def _now_string(prefs=None) -> str:
+    """Current time where the user is, for the per-turn context update.
 
-    return timezone.localtime().strftime("%A, %B %d, %Y %I:%M %p %Z")
+    Was the server's zone (UTC in every deployment), so "what time is it" and
+    "remind me tomorrow morning" were answered five and a half hours out for a
+    user in India while their own Settings said Asia/Kolkata.
+    """
+    from core.preferences import DEFAULTS, local_now
+
+    return local_now(prefs or DEFAULTS)
 
 
-async def _user_memory_block(user_id: int | None) -> str:
+async def _user_memory_block(user_id: int | None, prefs=None) -> str:
     """What we know about this user, for the system prompt, or ''.
+
+    Two sources, both session-stable: what they told us in Settings, then what
+    the assistant has remembered about them. Settings comes first because it is
+    what they chose to say about themselves.
 
     Degrades to nothing rather than failing the turn, like every other context
     gatherer here: a memory store that cannot be read should cost the answer
     its personalisation, not its existence.
     """
+    from core.preferences import about_user
+
+    about = about_user(prefs) if prefs is not None else ""
     try:
         from core.memory import for_prompt
 
-        return await sync_to_async(for_prompt)(user_id)
+        memory = await sync_to_async(for_prompt)(user_id)
     except Exception:  # noqa: BLE001
         logger.warning("[Chat] Could not read user memory for %s", user_id,
                        exc_info=True)
-        return ""
+        memory = ""
+    return "\n\n".join(block for block in (about, memory) if block)
 
 
 async def _chat_file_scope(user):
@@ -524,6 +544,15 @@ async def run_chat_turn(
     chosen provider, empty request) — all checked before any status is
     streamed, so the client never shows work that cannot happen.
     """
+    if getattr(request, 'regenerate_of', None):
+        try:
+            from logs.signals_api import arecord_signal
+
+            await arecord_signal(user.id, 'regenerated', session_id=str(session.id),
+                                 message_id=request.regenerate_of,
+                                 detail={'of_message_id': request.regenerate_of})
+        except Exception:  # noqa: BLE001
+            pass
     provider = request.provider or session.llm_provider
     model = request.model or session.llm_model
     # `or` rather than a None check on purpose: the client sends "" to mean
@@ -536,6 +565,11 @@ async def run_chat_turn(
     )
 
     phases = _PhaseTimer()
+    # Model calls made inside tools on other models (the vision witness) are
+    # collected here and priced into this turn — see `side_calls`.
+    from . import side_calls
+
+    side_calls.start()
 
     await _guard_media_intent(intent, model)
     phases.mark("media_guard")
@@ -573,6 +607,7 @@ async def run_chat_turn(
         # sees the call it asked for.
         await agent.reject_tool_call(
             thread_id, request.reject_tool_call, reason=request.reject_reason,
+            user_id=user.id,
         )
 
     await sink(Event.STATUS, {"phase": "planning", "message": "Starting up..."})
@@ -621,8 +656,11 @@ async def run_chat_turn(
     # Read once per turn and folded into the baseline, not the per-turn update:
     # it is standing knowledge about the person, and it changes only when a
     # fact is written. See `build_system_message`.
+    from core.preferences import for_user as preferences_for
+
+    prefs = await sync_to_async(preferences_for)(user.id)
     system_message = prompts.build_system_message(
-        session, user_memory=await _user_memory_block(user.id),
+        session, user_memory=await _user_memory_block(user.id, prefs),
     )
     phases.mark("user_memory")
 
@@ -655,7 +693,7 @@ async def run_chat_turn(
     # trailing `system` message instead of being concatenated onto the baseline.
     # Folded in, the clock alone made the cached prefix differ on every turn.
     context_update = prompts.build_context_update(
-        session, _now_string(), intent, blocked_notice=blocked_notice
+        session, _now_string(prefs), intent, blocked_notice=blocked_notice
     )
     if context_update:
         wire_history.append({"role": "system", "content": context_update})
@@ -734,6 +772,21 @@ _EMPTY_ANSWER_FALLBACK = (
 )
 
 
+def _combine_payers(so_far: str, this_turn: str) -> str:
+    """The conversation's payer after one more turn.
+
+    The first turn sets it; a later turn that disagrees makes it `mixed` for
+    good, the way one unpriced turn makes a total unpriced: after a switch
+    the sum is part one person's bill and part credits, and no single label is
+    true of it. An unknown turn leaves what is known alone.
+    """
+    if not this_turn:
+        return so_far
+    if not so_far or so_far == this_turn:
+        return this_turn
+    return "mixed"
+
+
 @sync_to_async
 def _price_turn(model_id: str, usage):
     """What this turn cost, and how much we trust the figure.
@@ -782,9 +835,13 @@ async def _persist_answer(
     if result.awaiting_approval:
         metadata["awaiting_approval"] = True
 
+    # Every model call this turn made on the user's model, not only the answer:
+    # the conversation's cost is shown in the header, and a figure that leaves
+    # out a call per answer is understated while looking exact.
+    extra_usage: list = []
     if not result.awaiting_approval and elapsed_s <= FOLLOW_UPS_SLOW_TURN_SECONDS:
         metadata["follow_ups"] = await agent.suggest_follow_ups(
-            turn, question=question, answer=answer
+            turn, question=question, answer=answer, usage_sink=extra_usage,
         )
     elif not result.awaiting_approval:
         # The turn already ran long; a further LLM call would delay the persist
@@ -802,6 +859,42 @@ async def _persist_answer(
     # written, so the message carries its own cost rather than having one
     # inferred later from a session-level rate that may since have changed.
     cost, cost_source = await _price_turn(session.llm_model, result.usage)
+    extra_tokens = 0
+    for usage in extra_usage:
+        if usage.is_empty:
+            continue
+        # Priced on its own rather than folded into the answer's usage: the
+        # answer may be billed and this estimated, and `combine_sources` is
+        # what keeps that mix from being reported as billed.
+        extra_cost, extra_source = await _price_turn(turn.model, usage)
+        cost += extra_cost
+        cost_source = combine_sources([cost_source, extra_source])
+        extra_tokens += usage.total or usage.billable_total
+    from . import side_calls
+
+    # Tools that spend money themselves (a generated image). Recorded by the
+    # tool's side effect; priced by the provider, not by our token table.
+    for entry in (result.metadata or {}).get("tool_costs") or []:
+        try:
+            cost += Decimal(str(entry.get("cost_usd") or 0))
+        except (ArithmeticError, ValueError):
+            continue
+        cost_source = combine_sources([cost_source, entry.get("cost_source") or "estimated"])
+
+    for call in side_calls.collected():
+        # Each on its own model: the witness is a different, cheaper model
+        # from the one answering, and pricing it at the answer's rate would
+        # be wrong in either direction.
+        call_cost, call_source = await _price_turn(call.model, call.usage)
+        cost += call_cost
+        cost_source = combine_sources([cost_source, call_source])
+        extra_tokens += call.usage.total or call.usage.billable_total
+
+    # Whose money `cost` is. Resolved the way `preflight` resolved the key this
+    # turn actually used, so the label cannot disagree with the call.
+    paid_by = await llm.payer(
+        provider=turn.provider, model=turn.model, user_id=turn.user_id,
+    )
 
     message = await ChatMessage.objects.acreate(
         session=session,
@@ -816,16 +909,18 @@ async def _persist_answer(
         cached_write_tokens=result.usage.cached_write,
         cost_usd=cost,
         cost_source=cost_source,
+        paid_by=paid_by,
     )
 
-    session.total_tokens_used += result.tokens
+    session.total_tokens_used += result.tokens + extra_tokens
     session.total_cost_usd = (session.total_cost_usd or Decimal("0")) + cost
     # Combined, not overwritten: one unpriced turn makes the conversation's
     # total unpriced for good, because from then on the sum is missing money
     # nobody can put back.
     session.cost_source = combine_sources([session.cost_source, cost_source])
+    session.paid_by = _combine_payers(session.paid_by, paid_by)
     await session.asave(update_fields=[
-        "total_tokens_used", "total_cost_usd", "cost_source",
+        "total_tokens_used", "total_cost_usd", "cost_source", "paid_by",
     ])
 
     try:

@@ -25,11 +25,24 @@ EvalSuite ── EvalCase              a named set of cases + a supervision poli
 
 | Table | Row is | Key columns |
 |---|---|---|
-| `eval_evalsuite` | a set of cases and the policy for reviewing them | `supervision`, `pass_threshold`, `reviewer`, `concurrency` |
+| `eval_evalsuite` | a set of cases and the policy for reviewing them | `supervision`, `pass_threshold`, `reviewer`, `concurrency`, `max_cost_rupees` |
 | `eval_evalcase` | one goal handed to the agent | `goal`, `input_data`, `reference`, `graders` |
-| `eval_evalrun` | one sweep of a suite against one agent | `status`, `score`, `passed`, `grader_agreement`, `revision` |
-| `eval_evalresult` | one case's outcome | `auto_passed`, `auto_score`, `grades`, `review_state`, `execution` |
+| `eval_evalrun` | one sweep of a suite against one agent | `status`, `score`, `passed`, `grader_agreement`, `revision`, `is_baseline`, `mode` |
+| `eval_evalresult` | one case's outcome | `auto_passed`, `auto_score`, `grades`, `review_state`, `execution`, `judge_tokens`, `judge_cost_usd` |
 | `eval_evalreview` | a person's verdict on a result | `verdict`, `agreed_with_graders`, `corrected_answer` |
+| `eval_judgecalibration` | judge agreement vs known labels | `judge_model`, `agreement`, `false_pass_rate`, `source` |
+
+**Eval runs are `caller='eval'`** (not `api`): they are excluded from the
+agent spend cap, agent list stats, `/runs` (unless `caller=eval` is passed),
+and insights — but included in `cost_breakdown.by_caller['eval']` as real
+money. A suite may cap its sweep with `max_cost_rupees`; the sweep fails with
+"ceiling reached" and skips the rest. Stale `running` sweeps are closed by
+`eval/recovery.py` (3 h, via `recover_runs`). Judge cost is recorded per grade
+(`tokens`, `cost_usd`) and summed onto the result/run/scorecard. Baselines are
+accepted per suite+model (`benchmark accept`); the scorecard shows a vs-baseline
+column. `disagreement` queues only judge-vs-deterministic splits and uncertain
+judges. `mode='bare'` is the platform-tax control (external suites only):
+one bare `llm.complete` per case, no tools, no `ExecutionLog`.
 
 The app label is **`eval`, singular**. A previous `evals` app was deleted
 2026-08-17 (see API.md §18) and dev databases predating that still carry inert

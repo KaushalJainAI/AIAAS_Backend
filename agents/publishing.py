@@ -49,17 +49,25 @@ from agents.gallery import REQUIREMENT_FIELDS
 #: not about the configuration), and the three id lists, which leave as
 #: requirements instead.
 SHAREABLE_KEYS: frozenset[str] = frozenset({
-    'name', 'brief',
-    'provider', 'model', 'temperature',
-    'fileAccess', 'workdir', 'venv',
+    'name', 'brief', 'description', 'tags',
+    'provider', 'model', 'temperature', 'effort',
+    'fileAccess',
     'tools',
-    'useOrgContext', 'useEnvironment',
-    'trigger', 'schedule', 'allowUnattended',
-    'autonomy', 'notifyOnHitl', 'reviewAgent', 'spendCapRupees',
-    'maxRunSeconds', 'egress',
+    'useEnvironment', 'browserDomains',
+    'outputContract', 'fanoutParallel',
+    'schedule', 'allowUnattended',
+    'autonomy', 'notifyOnHitl', 'spendCapRupees',
+    'maxRunSeconds',
     'summaryModel', 'summaryProvider',
     'recursiveContext', 'compaction', 'indexing',
 })
+# 2026-09-18: six retired fields left (`workdir`, `venv`, `useOrgContext`,
+# `egress`, `reviewAgent`, and the derived `trigger`) — the serializer ignores
+# them, so they travelled as dead weight. Five live, non-private ones joined:
+# `effort`, `outputContract` and `fanoutParallel` change how the agent runs, so
+# an installed copy without them was a different agent from the one
+# published; `description` and `tags` are what a delegating agent reads to
+# choose it. `delegatesTo` stays out: it names the author's other agents.
 
 #: The timezone is deliberately *not* shareable. A schedule means "Monday
 #: morning" to its author, and Monday morning is a different instant for

@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 _IGNORED_KEYS = frozenset({'id', 'created_at', 'updated_at', 'runs', 'unattended',
                            'spend', 'status'})
 
+#: Fields removed from the configuration. Older snapshots still carry them, and
+#: without this the next save of every such agent would record "reviewAgent
+#: changed" — a change nobody made. (`reviewAgent` was stored and never read;
+#: retired 2026-09-18.)
+RETIRED_KEYS = frozenset({'reviewAgent'})
+
 #: How a changed key is described in the one-line summary. Anything absent falls
 #: back to the key itself, so a new config field still reads sensibly.
 _LABELS: dict[str, str] = {
@@ -82,7 +88,7 @@ def diff(before: dict[str, Any] | None, after: dict[str, Any]) -> dict[str, Any]
     """
     before = before or {}
     changed: dict[str, Any] = {}
-    for key in sorted(set(before) | set(after)):
+    for key in sorted((set(before) | set(after)) - RETIRED_KEYS):
         old, new = before.get(key), after.get(key)
         if old != new:
             changed[key] = {'from': _clip(old), 'to': _clip(new)}

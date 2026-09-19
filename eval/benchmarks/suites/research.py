@@ -20,7 +20,7 @@ SUITE = {
                 {'type': 'contains', 'value': 'van rossum'},
                 {'type': 'regex', 'pattern': r'https?://'},
             ],
-            'tags': ['fact', 'citation'],
+            'tags': ['fact', 'citation', 'smoke'],
         },
         {
             'name': 'Precise number',

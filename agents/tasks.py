@@ -40,7 +40,13 @@ def recover_runs():
     from .recovery import sweep_orphaned_runs
 
     try:
-        return async_to_sync(sweep_orphaned_runs)()
+        tally = async_to_sync(sweep_orphaned_runs)()
+        # Eval sweeps die with the same restart; `agents` never imports `eval`
+        # at module scope, so this stays a lazy import inside the function.
+        from eval.recovery import sweep_orphaned_eval_runs
+
+        eval_tally = async_to_sync(sweep_orphaned_eval_runs)()
+        return {**tally, 'eval': eval_tally}
     except Exception as exc:
         logger.exception('Run recovery sweep failed: %s', exc)
         raise

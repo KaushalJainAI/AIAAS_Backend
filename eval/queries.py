@@ -144,6 +144,25 @@ def agent_scorecard(user, agent_id: int, *, history: int = 10):
     return sorted(by_suite.values(), key=lambda e: e['suite_name'].lower())
 
 
+def baseline_for(user, suite_name: str, provider: str, model: str) -> list:
+    """The accepted baseline runs for (suite, provider/model), newest first.
+
+    A baseline is identified by suite name + agent provider/model — the same
+    suite on another model has its own baseline.
+    """
+    qs = (
+        EvalRun.objects.filter(
+            user=user, suite__name=suite_name, is_baseline=True,
+            subagent__llm_provider=provider,
+        )
+        .select_related('suite', 'subagent', 'revision')
+        .order_by('-created_at')
+    )
+    if model:
+        qs = qs.filter(subagent__llm_model=model)
+    return list(qs)
+
+
 def suite_health(user):
     """Per-suite counts a dashboard reads: cases, runs, and what is queued."""
     return list(

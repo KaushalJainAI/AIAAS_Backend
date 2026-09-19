@@ -20,7 +20,11 @@ What lives where:
   charts        `render_chart` — data and a spec, drawn by the frontend
   vision        the `ask_vision` surface over `chat.vision`
   files         the agent's virtual filesystem over `inference.vfs`
-  internal      this platform's own API, called as the user
+   office        .pptx / .xlsx / .docx rendered from a spec into that filesystem
+  media         `generate_image`, billed to the user and saved into their files
+  browser       a remote Chromium: `browse_page` reads, `browser_act` acts (domain-scoped)
++  publish       hosted pages: snapshots shareable by link (`link`/`platform`/`public`)
+   internal      this platform's own API, called as the user
   clock         wall-clock time
   google        native Gmail / Drive / Sheets / Calendar connector tools
 
@@ -39,6 +43,7 @@ from . import (  # noqa: F401  — imported for their registration side effect
     agents,
     artifacts,
     authoring,
+    browser,
     charts,
     clock,
     conversation,
@@ -46,8 +51,11 @@ from . import (  # noqa: F401  — imported for their registration side effect
     google,
     internal,
     knowledge,
+    media,
     memory,
+    office,
     planning,
+    publish,
     sandbox,
     vision,
     web,
@@ -198,6 +206,13 @@ async def _requirement_met(
         # `AVAILABLE_TOOLS` by the names its grants unlock, so `fileOps` is
         # what turns these on there, and that is unchanged.
         return file_scope is not None
+    if requirement == "browser":
+        # Configuration, not a credential: with no engine there is nothing to
+        # offer, and a browser tool that always refuses is one the model plans
+        # around and then has to explain.
+        from browsing.engine import browser_available
+
+        return browser_available()
     if requirement == "vision":
         if user_id is None:
             return False  # no user, no credential, no witness

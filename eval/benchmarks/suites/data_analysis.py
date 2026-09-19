@@ -53,7 +53,7 @@ SUITE = {
                 {'type': 'regex', 'pattern': r'\b4\b'},
                 {'type': 'contains', 'value': 'd@w.net'},
             ],
-            'tags': ['cleaning'],
+            'tags': ['cleaning', 'smoke'],
         },
         {
             # 50000 * (1 + 0.075/12) ** 36 = 62572.31

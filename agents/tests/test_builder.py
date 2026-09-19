@@ -114,8 +114,30 @@ class SanitiseTests(APITestCase):
     def test_every_grant_the_runtime_knows_can_be_set_and_is_described(self):
         """A tool the runtime hands out but the prompt never mentions is one the
         configuring model can only reach by guessing its name."""
+        from agents.agent.runtime import UNSERVED_GRANTS
+
         described = {p.split('.', 1)[1] for p in KNOBS if p.startswith('tools.')}
-        self.assertEqual(described, TOOL_KEYS)
+        self.assertEqual(described, TOOL_KEYS - UNSERVED_GRANTS)
+
+    def test_controls_that_do_nothing_are_not_offered(self):
+        """A grant nothing serves, and a guardrail nothing reads, are promises.
+
+        The builder chat offered both: `shell` switched on a tool no run is
+        handed, and `reviewAgent` told the user a second agent would check the
+        answers when nothing ever did.
+        """
+        self.assertNotIn('tools.shell', KNOBS)
+        self.assertNotIn('reviewAgent', KNOBS)
+        out = self._sanitise([
+            {'path': 'tools.shell', 'value': True},
+            {'path': 'reviewAgent', 'value': True},
+        ])
+        self.assertEqual(out, [])
+
+    def test_the_prompt_does_not_ask_for_the_retired_trigger_field(self):
+        from agents.views.builder import SYSTEM
+
+        self.assertNotIn('`trigger`', SYSTEM)
 
 
     def test_the_knobs_the_runtime_reads_are_all_settable(self):
@@ -290,3 +312,63 @@ class ConfigureEndpointTests(APITestCase):
         # Deterministic: the same brief should not produce a different board on
         # a second read.
         self.assertEqual(captured['temperature'], 0)
+
+
+class BuilderChatMemoryTests(APITestCase):
+    """The builder conversation for a saved agent survives a reload.
+
+    It lived in React state, so reloading the page threw away the `why` on
+    every change it had proposed — the only place that reasoning is written.
+    """
+
+    def setUp(self):
+        from agents.models import SubAgent
+
+        self.user = User.objects.create_user('keeper', 'k@example.com', 'pw')
+        self.client.force_authenticate(self.user)
+        self.agent = SubAgent.objects.create(user=self.user, name='Mailer')
+
+    def _say(self, message, agent_id=None):
+        proposal = answer('Turned on web search.', [
+            {'path': 'tools.webSearch', 'value': True, 'why': 'It looks things up.'},
+        ])
+        body = {'message': message, 'config': {'name': 'Mailer', 'tools': {}}}
+        if agent_id is not None:
+            body['agent_id'] = agent_id
+        with patch('llm.access.complete', return_value=proposal):
+            return self.client.post(URL, body, format='json')
+
+    def _history(self, agent_id):
+        return self.client.get(f'/api/orchestrator/agents/{agent_id}/builder-chat/')
+
+    def test_a_turn_is_kept_and_read_back_in_order(self):
+        self._say('search the web for pricing', self.agent.id)
+        messages = self._history(self.agent.id).json()['messages']
+        self.assertEqual([m['role'] for m in messages], ['user', 'agent'])
+        self.assertEqual(messages[0]['text'], 'search the web for pricing')
+        self.assertEqual(messages[1]['changes'][0]['why'], 'It looks things up.')
+
+    def test_a_new_board_keeps_nothing(self):
+        from agents.models import ConversationMessage
+
+        self._say('hello')
+        self.assertFalse(ConversationMessage.objects.exists())
+
+    def test_someone_elses_agent_is_neither_written_nor_read(self):
+        from agents.models import ConversationMessage, SubAgent
+
+        other = User.objects.create_user('other', 'o@example.com', 'pw')
+        theirs = SubAgent.objects.create(user=other, name='Theirs')
+        self.assertEqual(self._say('hi', theirs.id).status_code, 200)
+        self.assertFalse(ConversationMessage.objects.filter(subagent=theirs).exists())
+        self.assertEqual(self._history(theirs.id).status_code, 404)
+
+    def test_only_the_newest_turns_are_kept(self):
+        from agents.models import ConversationMessage
+        from agents.views.builder import BUILDER_CHAT_KEEP
+
+        for i in range(BUILDER_CHAT_KEEP // 2 + 3):
+            self._say(f'message {i}', self.agent.id)
+        self.assertEqual(
+            ConversationMessage.objects.filter(subagent=self.agent).count(),
+            BUILDER_CHAT_KEEP)

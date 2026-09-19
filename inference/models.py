@@ -257,6 +257,8 @@ class Document(models.Model):
         ('txt', 'Text'),
         ('md', 'Markdown'),
         ('docx', 'Word Document'),
+        ('pptx', 'PowerPoint'),
+        ('xlsx', 'Excel Workbook'),
         ('csv', 'CSV'),
         ('json', 'JSON'),
         ('html', 'HTML'),
@@ -699,3 +701,67 @@ class ExtractedRow(models.Model):
         self.status = (
             'needs_review' if self.confidence < self.schema.confidence_threshold else 'accepted'
         )
+
+
+class PublishedPage(models.Model):
+    """A snapshot of an output, shareable by link.
+
+    A **snapshot, not a pointer**, reusing the `SharedAgent` decisions rather
+    than inventing new ones: what an installer reads comes from frozen `body`,
+    never from a live document that could change under a link somebody already
+    holds. Withdrawing unlists rather than deletes, so links already handed out
+    stop resolving while installs already made keep working.
+
+    Three visibilities, each strictly wider than the last, defaulting to the
+    middle: `link` (by slug, still needs an account) < `platform` (listed to
+    signed-in users) < `public` (readable with no account at `/p/<slug>`).
+    """
+
+    VISIBILITY_CHOICES = [
+        ('link', 'Anyone with the link'),
+        ('platform', 'Everyone on the platform'),
+        ('public', 'Anyone, including people without an account'),
+    ]
+
+    KIND_CHOICES = [
+        ('report', 'Report'),
+        ('html', 'HTML'),
+        ('file', 'File'),
+    ]
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='published_pages',
+    )
+    slug = models.SlugField(max_length=220, unique=True)
+    title = models.CharField(max_length=200)
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES, default='report')
+    #: The frozen content. `report` holds markdown (+ chart specs the client
+    #: redraws); `html` holds a full HTML document; `file` holds
+    #: `{"document_id": N}` pointing at the bytes at publish time.
+    body = models.TextField(blank=True, default='')
+    #: A server-side copy of the file at publish time (`kind='file'` only), so
+    #: the link is a snapshot: trashing the original never breaks it.
+    file = models.FileField(upload_to='published_pages/%Y/%m/', blank=True, default='')
+    file_name = models.CharField(max_length=255, blank=True, default='')
+    visibility = models.CharField(
+        max_length=10, choices=VISIBILITY_CHOICES, default='platform',
+    )
+    is_listed = models.BooleanField(default=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Published page'
+        verbose_name_plural = 'Published pages'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['is_listed', 'visibility', '-updated_at']),
+            models.Index(fields=['owner', '-updated_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.title} ({self.slug})'

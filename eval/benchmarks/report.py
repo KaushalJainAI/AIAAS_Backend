@@ -12,10 +12,9 @@ It has three layers, so the same file serves a skim and an investigation:
 3. **Case details** — for every case: the goal, each grader's verdict and
    detail, the tools the agent really called, and an excerpt of the answer.
 
-Cost is the provider's reported `ExecutionLog.cost_usd`, not the spend cap's
-flat token rate: that rate is a blast-radius control and overstates cheap models
-and understates dear ones. Judge calls are **not** in it — they are billed to the
-same key but no run records them — and the report says so.
+Cost is the provider's reported `ExecutionLog.cost_usd` plus the recorded
+`EvalResult.judge_cost_usd`, not the spend cap's flat token rate: that rate is a
+blast-radius control and overstates cheap models and understates dear ones.
 """
 from __future__ import annotations
 
@@ -79,13 +78,25 @@ def _tools_called(result) -> list[str]:
 
 
 def _cost(result) -> Decimal:
-    return Decimal(result.execution.cost_usd or 0) if result.execution else Decimal(0)
+    agent = Decimal(result.execution.cost_usd or 0) if result.execution else Decimal(0)
+    judge = Decimal(result.judge_cost_usd or 0)
+    return agent + judge
+
+
+def _judge_cost(result) -> Decimal:
+    return Decimal(result.judge_cost_usd or 0)
 
 
 def summary_rows(runs) -> list[dict]:
     rows = []
     for run in runs:
         definition = _BY_NAME.get(run.suite.name, {})
+        if not definition and run.suite.name.startswith('External:'):
+            definition = {'slug': 'external', 'group': 'external',
+                          'proves': run.suite.description}
+        if not definition and run.suite.name.startswith('Smoke:'):
+            definition = {'slug': 'smoke', 'group': run.suite.tags[1] if len(run.suite.tags or []) > 1 else 'capability',
+                          'proves': run.suite.description}
         results = list(run.results.select_related('execution', 'review').order_by('id'))
         rows.append({
             'suite': run.suite.name,
@@ -95,6 +106,7 @@ def summary_rows(runs) -> list[dict]:
             'agent': run.subagent.name if run.subagent else '-',
             'model': (f"{run.subagent.llm_provider}/{run.subagent.llm_model or '(provider default)'}"
                       if run.subagent else '-'),
+            'mode': getattr(run, 'mode', 'agent'),
             'passed': run.passed_count,
             'total': run.total_cases,
             'errors': run.error_count,
@@ -202,10 +214,13 @@ def _attention(rows) -> list[str]:
 
 def _case_detail(r, result) -> list[str]:
     tools = _tools_called(result)
+    redacted = r.get('group') == 'external'
     lines = [
         f"#### {result.case_name} — {_verdict(result)}",
         '',
-        f"- **Goal:** {_cell(result.goal, 400)}",
+        # Gold answers never leave the process in clear for redacted sets: the
+        # item id is printed instead of the question/expected answer.
+        f"- **Goal:** {'(redacted external item)' if redacted else _cell(result.goal, 400)}",
         f"- **Tools really called:** {', '.join(f'`{t}`' for t in tools) if tools else 'none'}",
         f"- **Time / tokens / cost:** {_secs(result.duration_ms)} · {result.tokens:,} · {_usd(_cost(result))}",
     ]
@@ -230,9 +245,47 @@ def _case_detail(r, result) -> list[str]:
     return lines + ['']
 
 
-def render(runs, *, skipped=(), judge: str = '') -> str:
+def _calibration_line() -> str:
+    try:
+        from eval.models import JudgeCalibration
+
+        row = JudgeCalibration.objects.filter(source='handwritten').order_by('-created_at').first()
+        if row is None:
+            return ''
+        return (f"- **Judge calibration:** `{row.judge_model}` agreement {row.agreement:.0%}, "
+                f"false-pass {row.false_pass_rate:.0%} (n={row.n}, {row.created_at:%Y-%m-%d})")
+    except Exception:  # noqa: BLE001
+        return ''
+
+
+def _external_section(rows) -> list[str]:
+    ext = [r for r in rows if r['group'] == 'external']
+    if not ext:
+        return []
+    out = ['## External', '',
+           '| Suite | Agent | Bare | Delta |',
+           '|---|---|---|---|']
+    by_suite: dict[str, list] = {}
+    for r in ext:
+        by_suite.setdefault(r['suite'], []).append(r)
+    for suite, attempts in by_suite.items():
+        agent_rows = [r for r in attempts if r.get('mode') != 'bare']
+        bare_rows = [r for r in attempts if r.get('mode') == 'bare']
+        def _pass1(items) -> float:
+            total = sum(x['total'] for x in items)
+            passed = sum(x['passed'] for x in items)
+            return (passed / total) if total else 0.0
+        agent = _pass1(agent_rows) if agent_rows else 0.0
+        bare = _pass1(bare_rows) if bare_rows else 0.0
+        out.append(f'| {suite} | {agent:.0%} | {bare:.0%} | {agent - bare:+.0%} |')
+    return out + ['']
+
+
+def render(runs, *, skipped=(), judge: str = '', baselines: dict | None = None,
+           verdict: str = '') -> str:
     runs = list(runs)
     skipped = list(skipped)
+    baselines = baselines or {}
     rows = summary_rows(runs)
     total_cases = sum(r['total'] for r in rows)
     total_passed = sum(r['passed'] for r in rows)
@@ -241,36 +294,51 @@ def render(runs, *, skipped=(), judge: str = '') -> str:
     total_ms = sum(r['duration_ms'] or 0 for r in rows)
     agent_models = sorted({r['model'] for r in rows})
 
+    judge_cost_total = sum(
+        (_judge_cost(res) for r in rows for res in r['results']), Decimal(0)
+    )
+    agent_cost_total = total_cost - judge_cost_total
+    calib = _calibration_line()
     out = [
         '# AIAAS benchmark scorecard',
         '',
         f"Generated {timezone.localtime():%Y-%m-%d %H:%M %Z}.",
         '',
+        *([verdict, ''] if verdict else []),
         '## Headline',
         '',
         f'- **Cases passed:** {total_passed} / {total_cases} ({_pct(total_passed, total_cases)})',
         _group_line(rows, 'capability', 'Capability'),
         _group_line(rows, 'guardrail', 'Guardrails'),
+        _group_line(rows, 'external', 'External'),
         f"- **Agent model:** {', '.join(f'`{m}`' for m in agent_models) or '-'}",
         *([f'- **Judge model:** `{judge}`'] if judge else []),
-        f'- **Real cost (agent runs):** {_usd(total_cost)} for {total_tokens:,} tokens. '
-        'Judge calls are billed to the same key but not recorded, so they are not included.',
+        *([calib] if calib else []),
+        f'- **Real cost:** {_usd(total_cost)} for {total_tokens:,} tokens '
+        f'(agent {_usd(agent_cost_total)}, judge {_usd(judge_cost_total)}).',
         f'- **Wall time:** {_secs(total_ms)}',
         *([f'- **Skipped:** {len(skipped)} suite(s) this account cannot run (listed below)'] if skipped else []),
         '',
         '## Suites',
         '',
-        '| Suite | Group | Verdict | Passed | Score / bar | Errors | Review | Time | Tokens | Cost |',
-        '|---|---|---|---|---|---|---|---|---|---|',
+        '| Suite | Group | Verdict | Passed | Score / bar | Vs baseline | Errors | Review | Time | Tokens | Cost |',
+        '|---|---|---|---|---|---|---|---|---|---|---|',
     ]
     for r in rows:
         score = '-' if r['score'] is None else f"{r['score']:.2f}"
+        base = baselines.get(r['suite'])
+        if base is None:
+            vs = '-'
+        else:
+            now = (r['passed'] / r['total']) if r['total'] else 0.0
+            vs = f'{now:.0%} vs {base:.0%} ({now - base:+.0%})'
         out.append(
             f"| {r['suite']} | {r['group']} | {_mark(r['verdict'])} | {r['passed']}/{r['total']} | "
-            f"{score} / {r['threshold']:.2f} | {r['errors']} | {r['review']} | "
+            f"{score} / {r['threshold']:.2f} | {vs} | {r['errors']} | {r['review']} | "
             f"{_secs(r['duration_ms'])} | {r['tokens']:,} | ${r['cost']:.4f} |"
         )
     out.append('')
+    out += _external_section(rows)
     out += _reliability(rows)
     out += _attention(rows)
 

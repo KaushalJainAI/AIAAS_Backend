@@ -10,17 +10,17 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
-from agents.models import ConversationMessage, HITLRequest, SubAgent, Trigger
+from agents.models import HITLRequest, SubAgent, Trigger
 from logs.models import ExecutionLog
 
 User = get_user_model()
 
 
 class RenamedColumnTests(APITestCase):
-    """`Workflow` became `SubAgent`; these call sites were left behind.
+    """`Workflow` became `SubAgent`; this call site was left behind.
 
-    Both were 500s on every request, on endpoints the frontend calls, and both
-    are the kind of break a rename leaves in a string argument or a keyword
+    It was a 500 on every request, on an endpoint the frontend calls, and it is
+    the kind of break a rename leaves in a string argument or a keyword
     argument name, where no type checker looks.
     """
 
@@ -42,41 +42,6 @@ class RenamedColumnTests(APITestCase):
         self.assertEqual(response.data['count'], 1)
         # The serializer field keeps its wire name; what it names is the agent.
         self.assertEqual(response.data['requests'][0]['workflow_name'], 'A')
-
-    def test_posting_a_chat_message_stores_the_agent(self):
-        agent = SubAgent.objects.create(user=self.user, name='A')
-
-        response = self.client.post(
-            '/api/orchestrator/chat/',
-            {'content': 'hello', 'workflow_id': agent.id}, format='json',
-        )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(ConversationMessage.objects.get().subagent_id, agent.id)
-
-    def test_posting_a_chat_message_without_an_agent_works(self):
-        response = self.client.post('/api/orchestrator/chat/',
-                                    {'content': 'hello'}, format='json')
-        self.assertEqual(response.status_code, 202)
-
-    def test_a_chat_message_cannot_be_attached_to_someone_elses_agent(self):
-        other = User.objects.create_user(username='other', password='pw')
-        theirs = SubAgent.objects.create(user=other, name='Theirs')
-
-        response = self.client.post(
-            '/api/orchestrator/chat/',
-            {'content': 'hello', 'workflow_id': theirs.id}, format='json',
-        )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertIsNone(ConversationMessage.objects.get().subagent_id)
-
-    def test_a_junk_agent_id_does_not_500(self):
-        response = self.client.post(
-            '/api/orchestrator/chat/',
-            {'content': 'hello', 'workflow_id': 'not-a-number'}, format='json',
-        )
-        self.assertEqual(response.status_code, 202)
 
 
 class AgentStatsTests(APITestCase):

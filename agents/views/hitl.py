@@ -108,6 +108,7 @@ async def respond_to_hitl(request, request_id: str):
             resumable = await reject_tool_call(
                 thread_id, call_id,
                 reason=str(message or value or ''),
+                user_id=request.user.id,
             )
         else:
             # An answer to a clarification is not a tool decision; there is

@@ -81,8 +81,9 @@ container instead.
 
 - Local: `docker compose up --build` brings up the `sandbox` service alongside
   the backend.
-- EC2: `docker compose -f docker-compose.ec2.yml build sandbox` (or push
-  `kaushaljainai/aiaas-sandbox:latest`), then `up`. The image is ~300–400 MB
+- EC2: push `kaushaljainai/aiaas-sandbox:latest` from a dev machine, then
+  `docker compose -f docker-compose.prod.yml pull sandbox && ... up -d` on the
+  box — nothing is built there. The image is ~300–400 MB
   (numpy/pandas); the container idles around ~100 MB and a run can spike to
   `SANDBOX_MEM_MB`, so on the RAM-tight box the cap is deliberately modest.
 

@@ -60,14 +60,29 @@ class PolicyTests(SimpleTestCase):
         self.assertIn(True, picks)
         self.assertIn(False, picks)
 
-    def test_disagreement_queues_a_split_verdict(self):
+    def test_disagreement_queues_judge_vs_deterministic_split(self):
+        """New rule (2026-09-19): judge vs exact-checks disagreeing queues.
+
+        The old rule queued any split across deterministic graders; that made
+        `disagreement` queue nearly every partial failure. Deterministic
+        graders disagreeing with each other is now a partial failure, not
+        uncertainty — only judge-vs-deterministic or an uncertain judge queues.
+        """
         queue, reason = supervision.needs_review(
+            'disagreement', auto_passed=False, score=0.5,
+            grades=[{'type': 'llm_judge', 'passed': True, 'score': 0.9},
+                    {'type': 'contains', 'passed': False, 'score': 0.0}],
+        )
+        self.assertTrue(queue)
+        self.assertIn('judge and the exact checks disagree', reason)
+
+    def test_disagreement_does_not_queue_deterministic_splits(self):
+        queue, _ = supervision.needs_review(
             'disagreement', auto_passed=False, score=0.5,
             grades=[{'type': 'contains', 'passed': True, 'score': 1.0},
                     {'type': 'regex', 'passed': False, 'score': 0.0}],
         )
-        self.assertTrue(queue)
-        self.assertIn('disagreed', reason)
+        self.assertFalse(queue)
 
     def test_disagreement_queues_an_uncertain_judge(self):
         queue, reason = supervision.needs_review(
@@ -81,6 +96,13 @@ class PolicyTests(SimpleTestCase):
         queue, _ = supervision.needs_review(
             'disagreement', auto_passed=True, score=1.0,
             grades=[{'type': 'contains', 'passed': True, 'score': 1.0}],
+        )
+        self.assertFalse(queue)
+        # Confident judge agreeing with deterministic checks also stays out.
+        queue, _ = supervision.needs_review(
+            'disagreement', auto_passed=True, score=1.0,
+            grades=[{'type': 'llm_judge', 'passed': True, 'score': 0.95},
+                    {'type': 'contains', 'passed': True, 'score': 1.0}],
         )
         self.assertFalse(queue)
 

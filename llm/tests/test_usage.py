@@ -141,8 +141,28 @@ class AccumulationTests(SimpleTestCase):
         billed = TokenUsage(input=1, reported_cost_usd=Decimal("0.004"))
         estimated = TokenUsage(input=1)
         self.assertEqual((billed + billed).reported_cost_usd, Decimal("0.008"))
-        # One side reported, so the sum still carries what is known — but the
-        # `cost_source` machinery in `pricing.combine_sources` is what stops
-        # the *total* being presented as billed.
-        self.assertEqual((billed + estimated).reported_cost_usd, Decimal("0.004"))
+        # One side consumed tokens and reported nothing, so the sum is not a
+        # bill. It used to keep the $0.004, and a chat turn is priced as one
+        # summed usage — `cost_for_usage` then called that half a bill
+        # `billed`, and `combine_sources` never saw the parts to catch it.
+        self.assertIsNone((billed + estimated).reported_cost_usd)
+        self.assertIsNone((estimated + billed).reported_cost_usd)
         self.assertIsNone((estimated + estimated).reported_cost_usd)
+        # Once lost, the claim stays lost however many billed calls follow.
+        self.assertIsNone(((billed + estimated) + billed).reported_cost_usd)
+
+    def test_an_empty_side_carries_no_claim(self):
+        """A stream chunk without usage must not void the call's real bill."""
+        billed = TokenUsage(input=1, reported_cost_usd=Decimal("0.004"))
+        self.assertEqual((EMPTY_USAGE + billed).reported_cost_usd, Decimal("0.004"))
+        self.assertEqual((billed + EMPTY_USAGE).reported_cost_usd, Decimal("0.004"))
+        self.assertIsNone((EMPTY_USAGE + EMPTY_USAGE).reported_cost_usd)
+
+    def test_a_partial_turn_is_estimated_not_billed(self):
+        """The end-to-end consequence: the whole turn goes to the price table."""
+        from llm.pricing import cost_for_usage
+
+        mixed = (TokenUsage(input=1000, reported_cost_usd=Decimal("0.004"))
+                 + TokenUsage(input=1000))
+        _cost, source = cost_for_usage("no-such-model", mixed)
+        self.assertNotEqual(source, "billed")

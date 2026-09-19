@@ -152,6 +152,11 @@ AGENT_FILE_READ_CHARS = 30_000
 #: a model emitting 200k characters has lost the plot, and the cheap failure is
 #: the refusal.
 AGENT_FILE_WRITE_CHARS = 200_000
+#: Bytes one rendered binary (`vfs.write_binary` — a deck, a workbook, a Word
+#: document, an image) may occupy. The render tools' own caps (slides, rows)
+#: keep real output far below this; it is the backstop for the one input they
+#: do not bound, embedded images.
+AGENT_FILE_BINARY_BYTES = 10 * 1024 * 1024
 #: Entries (folders + documents) one `list_files` call returns.
 AGENT_FILE_LIST_LIMIT = 200
 #: Root-level folder under which `fileAccess='scoped'` agents get their homes.
@@ -310,6 +315,39 @@ EVAL_RESULT_ANSWER_CHAR_LIMIT = 16_000
 EVAL_RUN_LIST_LIMIT = 100
 EVAL_RESULT_LIST_LIMIT = 200
 EVAL_REVIEW_QUEUE_LIMIT = 100
+#: How stale a `running` EvalRun may be before the recovery sweep closes it.
+#: Longer than any legitimate sweep: the full benchmark's slowest suite attempt
+#: is ~4 min, and a 200-case user suite at concurrency 2 with 10-min cases
+#: would be the extreme.
+EVAL_ORPHAN_SECONDS = 3 * 60 * 60
+#: Full-tier deploy-gate tolerance: how many pass@1 points a capability suite
+#: may drop below its baseline before the gate fails. Revisited after four
+#: weekly full runs show the real noise.
+GATE_TOLERANCE = 10
+#: Where external datasets are cached (git-ignored; never committed — licences,
+#: and keeping them out of training data).
+EVAL_DATA_DIR = 'Backend/.eval_data/'
+
+# ==================== Sandbox File Bridge ====================
+# `run_python_on_files` hands input files to the sandbox and collects declared
+# outputs back. Both live in the run's own ephemeral cwd and nowhere else.
+# These bound the tool side; the sidecar enforces its own `MAX_FILE_BYTES` /
+# `MAX_FILES` as well, and the VFS caps what is finally stored
+# (`AGENT_FILE_BINARY_BYTES`, `AGENT_FILE_WRITE_CHARS`).
+#: Files the tool accepts per run, in each direction. Small on purpose: a run
+#: handing over dozens of files is pasting a tree through a tool call.
+SANDBOX_FILE_MAX_FILES = 5
+#: Bytes per file handed to or back from the sandbox. Matches
+#: `AGENT_FILE_BINARY_BYTES` so a file the sandbox can return is a file the
+#: VFS can store.
+SANDBOX_FILE_MAX_BYTES = 10 * 1024 * 1024
+
+# ==================== Published Pages ====================
+# Snapshots of outputs shareable by link. Bodies are capped like agent file
+# writes (refuse, don't truncate); listings are capped like every other
+# `@api_view` list, which DRF pagination never reaches.
+PUBLISHED_PAGE_BODY_CHARS = 200_000
+PUBLISHED_PAGE_LIST_LIMIT = 60
 
 # ==================== Agent Time ====================
 # The resource an agent run actually contends for is *wall-clock time*, not CPU

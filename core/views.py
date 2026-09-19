@@ -80,8 +80,11 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
-def _send_password_otp_email(user, otp_code, purpose):
-    label = 'password reset' if purpose == PasswordOTP.PURPOSE_PASSWORD_RESET else 'password change'
+def _send_password_otp_email(user, otp_code, purpose, recipient=''):
+    label = {
+        PasswordOTP.PURPOSE_PASSWORD_RESET: 'password reset',
+        PasswordOTP.PURPOSE_EMAIL_CHANGE: 'email change',
+    }.get(purpose, 'password change')
     subject = f'AIAAS {label.title()} OTP'
     message = (
         f'Your AIAAS OTP for {label} is: {otp_code}\n\n'
@@ -95,7 +98,7 @@ def _send_password_otp_email(user, otp_code, purpose):
                 subject=subject,
                 message=message,
                 from_email=from_email,
-                recipient_list=[user.email],
+                recipient_list=[recipient or user.email],
                 fail_silently=False,
             )
         except Exception as exc:
@@ -104,7 +107,7 @@ def _send_password_otp_email(user, otp_code, purpose):
     threading.Thread(target=send, daemon=True).start()
 
 
-def _create_password_otp(user, purpose):
+def _create_password_otp(user, purpose, target_email=''):
     otp_code = f"{random.randint(100000, 999999)}"
     PasswordOTP.objects.filter(user=user, purpose=purpose, is_used=False).update(is_used=True)
     PasswordOTP.objects.filter(
@@ -116,10 +119,11 @@ def _create_password_otp(user, purpose):
         user=user,
         purpose=purpose,
         expires_at=django_timezone.now() + timedelta(minutes=10),
+        target_email=target_email,
     )
     otp_record.set_otp(otp_code)
     otp_record.save()
-    _send_password_otp_email(user, otp_code, purpose)
+    _send_password_otp_email(user, otp_code, purpose, recipient=target_email)
     return otp_record
 
 
@@ -387,6 +391,82 @@ class PasswordChangeOTPVerifyView(APIView):
             'detail': 'OTP verified successfully.',
             'verification_token': otp_record.verification_token,
         }, status=status.HTTP_200_OK)
+
+
+def _email_taken(email, user) -> bool:
+    return User.objects.filter(email__iexact=email).exclude(pk=user.pk).exists()
+
+
+class EmailChangeRequestView(APIView):
+    """Send a code to a new address before it can become the account's email.
+
+    The profile PATCH used to set `user.email` straight from the request, and
+    that address is what sign-in and password reset look accounts up by — so
+    a typo locked someone out, and a session left open on a shared machine was
+    enough to point the account's reset at someone else's inbox. The code goes
+    to the *new* address (proving it is theirs), and the current password is
+    asked for first where the account has one (a Google-only account does not).
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [PasswordChangeOTPThrottle]
+
+    def post(self, request):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.core.validators import validate_email
+
+        email = (request.data.get('new_email') or '').strip()
+        try:
+            validate_email(email)
+        except DjangoValidationError:
+            return Response({'detail': 'Enter a valid email address.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        user = request.user
+        if email.lower() == (user.email or '').lower():
+            return Response({'detail': 'That is already your email address.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if user.has_usable_password():
+            password = request.data.get('password') or ''
+            if not user.check_password(password):
+                return Response({'detail': 'Your current password is incorrect.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+        if _email_taken(email, user):
+            return Response({'detail': 'That email address is already in use.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        _create_password_otp(user, PasswordOTP.PURPOSE_EMAIL_CHANGE, target_email=email)
+        return Response({'detail': f'A code was sent to {email}.'},
+                        status=status.HTTP_200_OK)
+
+
+class EmailChangeConfirmView(APIView):
+    """Apply the new address once the code sent to it comes back."""
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [PasswordChangeOTPThrottle]
+
+    def post(self, request):
+        serializer = PasswordOTPVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            otp_record, error_response = _verify_password_otp(
+                request.user, PasswordOTP.PURPOSE_EMAIL_CHANGE,
+                serializer.validated_data['otp_code'],
+            )
+        except PasswordOTP.DoesNotExist:
+            return Response({'detail': 'Request a code first.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if error_response:
+            return error_response
+
+        email = otp_record.target_email
+        # Checked again: the address may have been taken in the ten minutes
+        # the code was valid for.
+        if not email or _email_taken(email, request.user):
+            return Response({'detail': 'That email address is no longer available.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        request.user.email = email
+        request.user.save(update_fields=['email'])
+        return Response({'detail': 'Email address updated.', 'email': email},
+                        status=status.HTTP_200_OK)
 
 
 class PasswordResetRequestView(APIView):

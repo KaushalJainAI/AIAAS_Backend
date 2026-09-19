@@ -374,6 +374,10 @@ def template_install(request, slug: str):
         # distinguishable from one built by hand a month later.
         agent.tags = tags
         agent.icon = icon
+        # Curated installs record their slug so a pack install can skip what
+        # is already there. Shared installs leave this empty: their slug lives
+        # in another user's namespace.
+        agent.template_slug = slug if entry is not None else None
         agent.save()
         AgentSerializer.sync_schedule(agent, data)
         # `source='create'`, because that is what an install is. A fourth
@@ -395,6 +399,64 @@ def template_install(request, slug: str):
         _with_stats([AgentSerializer.to_config(agent)], [agent], request.user)[0],
         status=status.HTTP_201_CREATED,
     )
+
+
+@extend_schema(
+    methods=['POST'],
+    responses={200: OpenApiResponse(description='Pack install result.')},
+    description='Install every template in a pack that needs no setup and is '
+                'not already installed. Body: {"pack": "office"}. Templates '
+                'with requirements are listed as needing setup rather than '
+                'installed. Idempotent: reinstalling skips what is already there.',
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def template_install_pack(request):
+    pack = (request.data.get('pack') or '').strip()
+    slugs = gallery.PACKS.get(pack) if hasattr(gallery, 'PACKS') else None
+    if not slugs:
+        return Response({'error': f'No pack named "{pack}".'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    installed: list[dict] = []
+    skipped: list[dict] = []
+    for slug in slugs:
+        entry = gallery.get(slug)
+        if entry is None:
+            skipped.append({'slug': slug, 'reason': 'no such template'})
+            continue
+        if SubAgent.objects.filter(user=request.user, template_slug=slug).exists():
+            skipped.append({'slug': slug, 'reason': 'already installed'})
+            continue
+        requirements = entry.get('requirements') or []
+        if [r for r in requirements if not r.get('optional')]:
+            skipped.append({'slug': slug, 'reason': 'needs setup'})
+            continue
+
+        config = dict(entry['config'])
+        serializer = AgentSerializer(data=config, context={'request': request})
+        if not serializer.is_valid():
+            skipped.append({'slug': slug, 'reason': 'invalid configuration'})
+            continue
+
+        base_name = serializer.validated_data['name']
+        name = base_name
+        counter = 1
+        while SubAgent.objects.filter(user=request.user, name=name).exists():
+            name = f'{base_name} ({counter})'
+            counter += 1
+        data = dict(serializer.validated_data, name=name)
+        with transaction.atomic():
+            agent = AgentSerializer.apply(SubAgent(user=request.user), data)
+            agent.tags = list(entry.get('tags') or []) + [f'template:{slug}']
+            agent.icon = entry.get('icon', '')
+            agent.template_slug = slug
+            agent.save()
+            AgentSerializer.sync_schedule(agent, data)
+            revisions.record(agent, user=request.user, source='create')
+        installed.append({'slug': slug, 'id': agent.id, 'name': agent.name})
+
+    return Response({'pack': pack, 'installed': installed, 'skipped': skipped})
 
 
 # -------------------------------------------------------------------- publish

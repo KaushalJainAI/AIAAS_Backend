@@ -120,6 +120,78 @@ class SessionTotalTests(TestCase):
         self.assertEqual(message.model_id, 'vendor/model')
 
 
+class FollowUpCostTests(TestCase):
+    """The follow-up questions are a model call on the user's model, and cost.
+
+    They were generated after every answer and their usage was discarded, so
+    the header's conversation cost left out one call per turn while looking
+    exact.
+    """
+
+    def setUp(self):
+        provider = AIProvider.objects.create(name='OpenRouter', slug='openrouter')
+        AIModel.objects.create(
+            provider=provider, name='Test', value='vendor/model',
+            input_price_per_million=Decimal('2.0000'),
+            output_price_per_million=Decimal('12.0000'),
+        )
+        self.user = User.objects.create_user(username='asker', password='pw')
+        self.session = ChatSession.objects.create(
+            user=self.user, title='Chat', llm_model='vendor/model',
+        )
+
+    def _persist(self, follow_usage):
+        from unittest.mock import patch
+
+        from chat.turn.agent import TurnContext, TurnResult
+        from chat.turn.pipeline import _persist_answer
+
+        async def follow_ups(*_a, usage_sink=None, **_k):
+            if usage_sink is not None and follow_usage is not None:
+                usage_sink.append(follow_usage)
+            return ['a?']
+
+        turn = TurnContext(
+            provider='openrouter', model='vendor/model', system_message='s',
+            user_id=self.user.id, session_id=str(self.session.id),
+            intent='chat', user_text='q',
+        )
+        answer_usage = TokenUsage(input=1_000_000, total=1_000_000,
+                                  reported_cost_usd=Decimal('2'))
+        result = TurnResult(
+            answer='A considered answer. ' * 50, metadata={}, tool_trace=[],
+            usage=answer_usage, tokens=1_000_000,
+        )
+        with patch('chat.turn.agent.suggest_follow_ups', follow_ups):
+            message = async_to_sync(_persist_answer)(
+                session=self.session, user=self.user, turn=turn,
+                result=result, question='q', intent='chat', elapsed_s=1,
+            )
+        self.session.refresh_from_db()
+        return message
+
+    def test_the_follow_up_call_is_added_to_the_turn(self):
+        message = self._persist(TokenUsage(
+            input=100_000, total=100_000, reported_cost_usd=Decimal('0.5'),
+        ))
+        self.assertEqual(message.cost_usd, Decimal('2.500000'))
+        self.assertEqual(message.cost_source, 'billed')
+        self.assertEqual(self.session.total_cost_usd, Decimal('2.500000'))
+        self.assertEqual(self.session.total_tokens_used, 1_100_000)
+
+    def test_an_estimated_follow_up_stops_the_turn_claiming_billed(self):
+        # 0.1M input at $2/M, from the price table.
+        message = self._persist(TokenUsage(input=100_000, total=100_000))
+        self.assertEqual(message.cost_usd, Decimal('2.200000'))
+        self.assertEqual(message.cost_source, 'estimated')
+
+    def test_no_follow_up_call_changes_nothing(self):
+        message = self._persist(None)
+        self.assertEqual(message.cost_usd, Decimal('2.000000'))
+        self.assertEqual(message.cost_source, 'billed')
+        self.assertEqual(self.session.total_tokens_used, 1_000_000)
+
+
 class TurnResultUsageTests(TestCase):
     """The breakdown has to survive the graph, or none of the above can work."""
 
@@ -139,3 +211,92 @@ class TurnResultUsageTests(TestCase):
         from chat.turn.agent import TurnResult
 
         self.assertTrue(TurnResult().usage.is_empty)
+
+
+class PayerTests(TestCase):
+    """Whose money the chip's figure is.
+
+    A bare `₹1.02` was read as "this chat charged me ₹1.02" — true only on the
+    user's own key. On the platform's key the user pays credits instead.
+    """
+
+    def _payer(self, *, own=None, platform=None, free=False, provider='openrouter'):
+        from unittest.mock import AsyncMock, patch
+
+        from llm import access
+
+        with patch.object(access, '_resolve_credential', AsyncMock(return_value=own)), \
+             patch.object(access, '_platform_api_key', lambda _p: platform), \
+             patch.object(access.credits, 'is_free_model', AsyncMock(return_value=free)):
+            return async_to_sync(access.payer)(provider=provider, model='m', user_id=1)
+
+    def test_the_users_own_key_wins_over_the_platforms(self):
+        """The same order `_build_request` resolves keys in."""
+        self.assertEqual(self._payer(own=7, platform='pk'), 'own_key')
+
+    def test_the_platform_key_on_a_paid_model_is_credits(self):
+        self.assertEqual(self._payer(platform='pk'), 'platform')
+
+    def test_the_platform_key_on_a_free_model_costs_nobody(self):
+        self.assertEqual(self._payer(platform='pk', free=True), 'free')
+
+    def test_a_keyless_provider_is_local(self):
+        self.assertEqual(self._payer(provider='ollama'), 'local')
+
+    def test_no_key_at_all_is_unknown_rather_than_a_guess(self):
+        self.assertEqual(self._payer(), '')
+
+    def test_a_conversation_that_switched_keys_reads_mixed_for_good(self):
+        from chat.turn.pipeline import _combine_payers
+
+        self.assertEqual(_combine_payers('', 'platform'), 'platform')
+        self.assertEqual(_combine_payers('platform', 'platform'), 'platform')
+        self.assertEqual(_combine_payers('platform', 'own_key'), 'mixed')
+        self.assertEqual(_combine_payers('mixed', 'platform'), 'mixed')
+        # An unknown turn leaves what is known alone.
+        self.assertEqual(_combine_payers('own_key', ''), 'own_key')
+
+
+class SideCallCostTests(FollowUpCostTests):
+    """A model call inside a tool, on another model, is part of the turn too.
+
+    The vision witness answers `ask_vision` on its own model; its usage never
+    reached the graph state the turn is priced from.
+    """
+
+    def setUp(self):
+        super().setUp()
+        AIModel.objects.create(
+            provider=AIProvider.objects.get(slug='openrouter'), name='Witness',
+            value='vendor/witness',
+            input_price_per_million=Decimal('1.0000'),
+            output_price_per_million=Decimal('1.0000'),
+        )
+
+    def test_a_witness_call_is_priced_on_its_own_model(self):
+        from chat.turn import side_calls
+
+        side_calls.start()
+        side_calls.record('vendor/witness', TokenUsage(input=1_000_000,
+                                                       total=1_000_000))
+        message = self._persist(None)
+        # $2 billed for the answer + $1 estimated for the witness.
+        self.assertEqual(message.cost_usd, Decimal('3.000000'))
+        self.assertEqual(message.cost_source, 'estimated')
+        self.assertEqual(self.session.total_tokens_used, 2_000_000)
+
+    def test_recording_outside_a_turn_is_a_no_op(self):
+        from contextvars import Context
+
+        from chat.turn import side_calls
+
+        def outside():
+            side_calls.record('vendor/witness', TokenUsage(input=5, total=5))
+            return side_calls.collected()
+
+        self.assertEqual(Context().run(outside), [])
+
+    # Inherited follow-up cases are not re-run here.
+    test_the_follow_up_call_is_added_to_the_turn = None
+    test_an_estimated_follow_up_stops_the_turn_claiming_billed = None
+    test_no_follow_up_call_changes_nothing = None

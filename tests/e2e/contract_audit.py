@@ -170,8 +170,6 @@ def main() -> None:
     probe("GET", "/api/inference/documents/", headers=H)
     # Notifications
     probe("GET", "/api/notifications/", headers=H)
-    # Chat
-    probe("GET", "/api/orchestrator/chat/", headers=H)
     # Templates
     probe("GET", "/api/orchestrator/templates/", headers=H)
     # Real execute (validates execution response schema)

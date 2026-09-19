@@ -225,14 +225,22 @@ class AttachmentOwnershipTests(UserFixture):
 
 
 class ToolRegistryTests(TestCase):
-    def test_generate_image_is_neither_advertised_nor_dispatchable(self):
-        # It was advertised with no dispatch entry, so a model that called it got
-        # "not recognized" — an offer the registry could not honour.
-        names = {t["function"]["name"] for t in AVAILABLE_TOOLS}
-        self.assertNotIn("generate_image", names)
+    def test_generate_image_is_a_real_registration_now(self):
+        # History: an older `generate_image` was advertised with no dispatch
+        # entry, so a model that called it got "not recognized" — an offer the
+        # registry could not honour, and this test pinned its removal. The
+        # tool that owns the name now (`chat/tools/media.py`, 2026-09-20) is a
+        # single registration, schema and implementation together, so it is
+        # dispatchable by construction. Without a file scope it refuses in its
+        # own words rather than being unknown.
+        from chat.tools.registry import get
+
+        self.assertIsNotNone(get("generate_image"))
         User = get_user_model()
         user = User.objects.create_user(email="r@example.com", username="r", password="pw")
-        self.assertIn("not recognized", run("generate_image", {"prompt": "x"}, user))
+        result = run("generate_image", {"prompt": "x"}, user)
+        self.assertNotIn("not recognized", result)
+        self.assertIn("file workspace", result)
 
     def test_every_advertised_tool_can_be_dispatched(self):
         """

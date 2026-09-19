@@ -51,7 +51,8 @@ class EvalSuiteSerializer(serializers.ModelSerializer):
         model = EvalSuite
         fields = [
             'id', 'name', 'slug', 'description', 'subagent', 'pass_threshold',
-            'supervision', 'sample_percent', 'reviewer', 'concurrency', 'tags',
+            'supervision', 'sample_percent', 'reviewer', 'concurrency',
+            'max_cost_rupees', 'tags',
             'is_active', 'case_count', 'last_run', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'slug', 'created_at', 'updated_at']
@@ -143,7 +144,8 @@ class EvalResultSerializer(serializers.ModelSerializer):
             'id', 'run', 'case', 'case_name', 'goal', 'status', 'answer',
             'answer_truncated', 'auto_passed', 'auto_score', 'grades', 'weight',
             'review_state', 'review_reason', 'review', 'final_passed',
-            'final_score', 'tokens', 'duration_ms', 'error_message',
+            'final_score', 'tokens', 'judge_tokens', 'judge_cost_usd',
+            'duration_ms', 'error_message',
             'execution_id', 'created_at',
         ]
         read_only_fields = fields
@@ -171,6 +173,7 @@ class EvalRunSerializer(serializers.ModelSerializer):
             'pending_review_count', 'score', 'passed', 'grader_agreement',
             'tokens_used', 'duration_ms', 'started_at', 'completed_at',
             'error_message', 'notes', 'created_at',
+            'is_baseline', 'mode',
         ]
         read_only_fields = fields
 

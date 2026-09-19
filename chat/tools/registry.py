@@ -22,8 +22,9 @@ from typing import Any, Awaitable, Callable, Dict, Iterator, Literal
 #: `memory` — the conversation must have history to consult; `vision` — a
 #: vision witness must resolve for this user; `spill` — this session must have
 #: an oversized tool result stored; `files` — the caller must have a virtual
-#: filesystem scope, which only an agent run does.
-Requirement = Literal["memory", "vision", "spill", "files"]
+#: filesystem scope, which only an agent run does; `browser` — a remote
+#: browser engine must be configured (`browsing/engine.py`).
+Requirement = Literal["memory", "vision", "spill", "files", "browser"]
 
 #: What running this tool does to the world, which is what an autonomy level
 #: actually needs to know. `sensitive` answers "ask in chat"; this answers "how

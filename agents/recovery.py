@@ -97,13 +97,14 @@ def _fail(log, message: str) -> None:
         return
     fresh.status = 'failed'
     fresh.error_message = message
+    fresh.failure_category = 'interrupted'
     fresh.completed_at = timezone.now()
     if fresh.started_at:
         fresh.duration_ms = int(
             (fresh.completed_at - fresh.started_at).total_seconds() * 1000
         )
-    fresh.save(update_fields=['status', 'error_message', 'completed_at',
-                              'duration_ms'])
+    fresh.save(update_fields=['status', 'error_message', 'failure_category',
+                              'completed_at', 'duration_ms'])
 
 
 async def _has_state(thread_id: str) -> bool:
@@ -146,6 +147,18 @@ async def sweep_orphaned_runs(limit: int = MAX_RECOVERIES_PER_SWEEP) -> dict:
     for log, allowed in await _orphans(limit):
         tally['checked'] += 1
         thread_id = (log.input_data or {}).get('thread_id') or ''
+
+        if getattr(log, 'caller', '') == 'eval':
+            # An eval execution belongs to a sweep that is dead (its process
+            # went away with it). Resuming would spend money for nobody, since
+            # nothing will ever grade the resumed run.
+            await _fail(
+                log,
+                'This evaluation run was interrupted — the process running its '
+                'sweep stopped. Run the suite again.',
+            )
+            tally['failed'] += 1
+            continue
 
         if log.subagent is None:
             await _fail(log, 'The agent for this run no longer exists.')

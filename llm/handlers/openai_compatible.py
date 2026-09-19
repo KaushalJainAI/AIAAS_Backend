@@ -586,12 +586,21 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
                 logger.warning("%s connection failed (%s); retry %d in %ss",
                                self.api_label, _describe(exc), attempt + 1, delay)
                 await asyncio.sleep(delay)
-            except httpx.TimeoutException:
-                yield {
-                    "type": "error",
-                    "message": f"{self.api_label} API request timed out",
-                }
-                return
+            except httpx.TimeoutException as exc:
+                # Same rule as a failed connection: a timeout with nothing
+                # emitted cost the caller nothing, so try again. Once tokens
+                # have gone out, a retry would repeat them, so it is reported.
+                # The stress benchmark lost a 12-iteration month-end close to a
+                # single one of these (2026-09-17).
+                if emitted or delay is None:
+                    yield {
+                        "type": "error",
+                        "message": f"{self.api_label} API request timed out",
+                    }
+                    return
+                logger.warning("%s timed out (%s); retry %d in %ss",
+                               self.api_label, _describe(exc), attempt + 1, delay)
+                await asyncio.sleep(delay)
             except Exception as exc:
                 logger.exception("%s stream failed", self.api_label)
                 yield {"type": "error", "message": f"{self.api_label} error: {_describe(exc)}"}

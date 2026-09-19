@@ -353,6 +353,130 @@ def submit_review(request, result_id: int):
     })
 
 
+# ======================== Judge calibration ========================
+
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def judge_calibration(request):
+    """Latest judge calibration per source (platform-wide, read-only)."""
+    from .models import JudgeCalibration
+
+    source = request.query_params.get('source', '')
+    qs = JudgeCalibration.objects.order_by('-created_at')
+    if source in ('handwritten', 'gold'):
+        qs = qs.filter(source=source)
+    latest: dict[str, dict] = {}
+    for row in qs[:20]:
+        if row.source not in latest:
+            latest[row.source] = {
+                'judge_provider': row.judge_provider,
+                'judge_model': row.judge_model,
+                'n': row.n,
+                'agreement': row.agreement,
+                'false_pass_rate': row.false_pass_rate,
+                'false_fail_rate': row.false_fail_rate,
+                'source': row.source,
+                'created_at': row.created_at,
+            }
+    return Response({'calibrations': latest})
+
+
+class CaseFromRunSerializer(__import__('rest_framework').serializers.Serializer):
+    execution_id = __import__('rest_framework').serializers.CharField()
+    suite_id = __import__('rest_framework').serializers.IntegerField(
+        required=False, allow_null=True)
+
+
+@extend_schema(methods=['POST'], request=CaseFromRunSerializer,
+               responses={201: OpenApiTypes.OBJECT},
+               description='Save a run as an eval case for the same agent.')
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def case_from_run(request):
+    """A bad run becomes a test.
+
+    `graders = []` is deliberate: a case with no graders is queued under every
+    policy, which is right for a success criterion nobody has written yet.
+    Files are v1-limited: paths the run read are recorded in `reference`, but
+    no `__workspace__` is built — current contents may differ from what the
+    run saw, and a silently differing fixture is worse than none.
+    """
+    from logs.models import ExecutionLog
+
+    from .models import EvalCase, EvalSuite
+    from .serializers import EvalCaseSerializer
+
+    body = CaseFromRunSerializer(data=request.data)
+    body.is_valid(raise_exception=True)
+    execution_id = body.validated_data['execution_id']
+    try:
+        log = ExecutionLog.objects.select_related('subagent').filter(
+            execution_id=execution_id, user=request.user).first()
+    except Exception:  # noqa: BLE001
+        log = None
+    if log is None:
+        return Response({'error': 'Run not found'}, status=status.HTTP_404_NOT_FOUND)
+    if log.subagent_id is None:
+        return Response(
+            {'error': 'Chat turns have no agent to replay against.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    suite_id = body.validated_data.get('suite_id')
+    suite = None
+    if suite_id:
+        suite = EvalSuite.objects.filter(id=suite_id, user=request.user).first()
+        if suite is None:
+            return Response({'error': 'Suite not found'}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        suite, _ = EvalSuite.objects.get_or_create(
+            user=request.user, name='From runs',
+            defaults={
+                'description': 'Cases saved from real runs.',
+                'subagent': log.subagent,
+                'supervision': 'all',
+            },
+        )
+    payload = dict(log.input_data or {})
+    payload.pop('thread_id', None)
+    for key in [k for k in payload if str(k).startswith('_')]:
+        payload.pop(key, None)
+    goal = str(payload.pop('goal', '') or '')
+    # Feedback comment becomes the reference — the reviewer's words about good.
+    reference = ''
+    try:
+        fb = log.feedbacks.filter(user=request.user).first()
+        reference = (fb.comment or '') if fb else ''
+    except Exception:  # noqa: BLE001
+        reference = ''
+    # Paths the run read, recorded — not built into a workspace (v1 limit).
+    read_paths: list[str] = []
+    try:
+        for call in (log.output_data or {}).get('tool_trace', []) or []:
+            name = str(call.get('tool') or call.get('name') or '')
+            if name in ('read_file', 'list_files'):
+                args = call.get('args') or call.get('arguments') or {}
+                if isinstance(args, dict) and args.get('path'):
+                    read_paths.append(str(args['path']))
+    except Exception:  # noqa: BLE001
+        read_paths = []
+    if read_paths and not reference:
+        reference = 'Files this run read: ' + ', '.join(sorted(set(read_paths)))
+    elif read_paths:
+        reference = (reference + '\nFiles this run read: '
+                     + ', '.join(sorted(set(read_paths)))).strip()
+    case = EvalCase.objects.create(
+        suite=suite,
+        name=f'From run {str(log.execution_id)[:8]}',
+        goal=goal,
+        input_data=payload,
+        reference=reference,
+        graders=[],
+        tags=['from-run', str(log.execution_id)],
+    )
+    return Response(EvalCaseSerializer(case).data, status=status.HTTP_201_CREATED)
+
+
 # ======================== Scorecard ========================
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})

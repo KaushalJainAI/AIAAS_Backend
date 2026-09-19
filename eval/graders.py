@@ -88,6 +88,11 @@ class GradeContext:
     #: `eval/workspace.py`. Empty for a case with no workspace. The file graders
     #: read only this, so grading a produced file needs no database access.
     files: dict[str, str] = field(default_factory=dict)
+    #: The same workspace's rendered binaries (`.pptx`, `.xlsx`, `.docx`),
+    #: `{path: bytes}`, keyed like `files`. The office graders open these with
+    #: the real readers, because "has a chart" or "this cell is a formula that
+    #: sums to 4.2" is not in any text extract.
+    binaries: dict[str, bytes] = field(default_factory=dict)
 
     @property
     def tools_used(self) -> set[str]:
@@ -108,6 +113,10 @@ class Grade:
     score: float
     weight: float = 1.0
     detail: str = ''
+    #: What the judge call itself cost. Zero for deterministic graders; a judge
+    #: that errored also records 0 — the failure is in `detail`, not in money.
+    tokens: int = 0
+    cost_usd: Any = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -116,6 +125,8 @@ class Grade:
             'score': round(self.score, 4),
             'weight': self.weight,
             'detail': self.detail,
+            'tokens': self.tokens,
+            'cost_usd': str(self.cost_usd) if self.cost_usd is not None else None,
         }
 
 
@@ -463,6 +474,208 @@ def _csv_rows(spec, ctx):
     return _grade(spec, 'csv_rows', ok, '' if ok else f"{len(rows)} rows, expected {spec['equals']}")
 
 
+# -------------------------------------------------------------- office graders
+#
+# Structure, not text: these open a rendered file with its real reader
+# (`eval/office_files.py`). A deck whose extract mentions "Q3 revenue" and a
+# deck with a Q3 revenue *chart* grade the same under `file_contains`, and only
+# the second is what the case asked for.
+
+def _binary(spec, ctx) -> bytes | None:
+    return ctx.binaries.get(str(spec.get('path', '')).lstrip('/'))
+
+
+def _open_failed(spec, name: str, exc: Exception) -> Grade:
+    return _grade(spec, name, False, f"{spec['path']} could not be opened: {exc}")
+
+
+@grader('file_type', params=('path', 'format'), required=('path', 'format'),
+        description='A workspace file really is a .pptx / .xlsx / .docx, not text with that name')
+def _file_type(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'file_type')
+    got = office_files.sniff(data)
+    # `format`, not `type`: `type` is the key that names the grader itself.
+    ok = got == str(spec['format']).lower()
+    return _grade(spec, 'file_type', ok, '' if ok else f"{spec['path']} is {got or 'not an office file'}")
+
+
+@grader('pptx_slides', params=('path', 'min', 'max'), required=('path',),
+        description='A deck has between min and max slides')
+def _pptx_slides(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'pptx_slides')
+    try:
+        n = office_files.pptx_slide_count(data)
+    except Exception as exc:  # noqa: BLE001 — a corrupt file is a failed grade
+        return _open_failed(spec, 'pptx_slides', exc)
+    lo, hi = int(spec.get('min', 1)), int(spec.get('max', 10_000))
+    ok = lo <= n <= hi
+    return _grade(spec, 'pptx_slides', ok, '' if ok else f'{n} slides, wanted {lo} to {hi}')
+
+
+@grader('pptx_contains', params=('path', 'value'), required=('path', 'value'),
+        description='Some slide (or its notes) contains this text')
+def _pptx_contains(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'pptx_contains')
+    try:
+        text = office_files.pptx_text(data)
+    except Exception as exc:  # noqa: BLE001
+        return _open_failed(spec, 'pptx_contains', exc)
+    ok = str(spec['value']).lower() in text.lower()
+    return _grade(spec, 'pptx_contains', ok, '' if ok else f"no slide says {spec['value']!r}")
+
+
+@grader('pptx_chart', params=('path', 'values', 'categories', 'tolerance'), required=('path',),
+        description='The deck has a native chart; optionally one series with these values')
+def _pptx_chart(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'pptx_chart')
+    try:
+        charts = office_files.pptx_charts(data)
+    except Exception as exc:  # noqa: BLE001
+        return _open_failed(spec, 'pptx_chart', exc)
+    if not charts:
+        return _grade(spec, 'pptx_chart', False, 'the deck has no native chart')
+    want = spec.get('values')
+    cats = [str(c).lower() for c in spec.get('categories') or []]
+    tol = float(spec.get('tolerance', 0.01))
+
+    def matches(chart) -> bool:
+        if cats and [c.lower() for c in chart['categories']] != cats:
+            return False
+        if want is None:
+            return True
+        return any(len(vals) == len(want) and all(
+            v is not None and abs(float(v) - float(w)) <= tol for v, w in zip(vals, want))
+            for vals in chart['series'].values())
+
+    ok = any(matches(c) for c in charts)
+    return _grade(spec, 'pptx_chart', ok, '' if ok else (
+        f'no chart has a series {want}' + (f" over {spec['categories']}" if cats else '')
+        + f'; found {charts[:3]}'))
+
+
+@grader('xlsx_value', params=('path', 'sheet', 'match', 'column', 'cell', 'equals',
+                              'tolerance', 'formula'),
+        required=('path', 'sheet', 'equals'),
+        description=('A workbook cell (by address, or by header + matching row) holds this value, '
+                     'formulas evaluated; formula=true also requires it to be a formula'))
+def _xlsx_value(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'xlsx_value')
+    try:
+        wb = office_files.workbook(data)
+    except Exception as exc:  # noqa: BLE001
+        return _open_failed(spec, 'xlsx_value', exc)
+    sheet = str(spec['sheet'])
+    if sheet not in wb.sheetnames:
+        return _grade(spec, 'xlsx_value', False, f'no sheet {sheet!r}; sheets are {wb.sheetnames}')
+    ref = spec.get('cell')
+    if not ref:
+        if not spec.get('match') or not spec.get('column'):
+            return _grade(spec, 'xlsx_value', False, 'give either cell, or match and column')
+        row = office_files.find_row(wb, sheet, spec['match'])
+        col = office_files.column_letter(wb, sheet, str(spec['column']))
+        if row is None or col is None:
+            return _grade(spec, 'xlsx_value', False,
+                          f"no row matching {spec['match']} with a column {spec['column']!r}")
+        ref = f'{col}{row}'
+    raw = wb[sheet][ref].value
+    is_formula = isinstance(raw, str) and raw.startswith('=')
+    if spec.get('formula') and not is_formula:
+        return _grade(spec, 'xlsx_value', False, f'{sheet}!{ref} is {raw!r}, not a formula')
+    try:
+        got = office_files.cell(wb, sheet, ref)
+    except office_files.FormulaError as exc:
+        return _grade(spec, 'xlsx_value', False, f'{sheet}!{ref}: {exc}')
+    ok = _same_value(got, spec['equals'], float(spec.get('tolerance', 0.01)))
+    return _grade(spec, 'xlsx_value', ok,
+                  '' if ok else f"{sheet}!{ref} is {got!r} ({raw!r}), expected {spec['equals']!r}")
+
+
+@grader('xlsx_chart', params=('path', 'sheet'), required=('path',),
+        description='The workbook (or one sheet of it) has a native chart')
+def _xlsx_chart(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'xlsx_chart')
+    try:
+        wb = office_files.workbook(data)
+        ok = office_files.has_chart(wb, spec.get('sheet'))
+    except Exception as exc:  # noqa: BLE001
+        return _open_failed(spec, 'xlsx_chart', exc)
+    return _grade(spec, 'xlsx_chart', ok, '' if ok else 'no chart in the workbook')
+
+
+@grader('docx_headings', params=('path', 'includes'), required=('path', 'includes'),
+        description='A Word file has a heading for each of these')
+def _docx_headings(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'docx_headings')
+    try:
+        headings = [h.lower() for h in office_files.docx_headings(data)]
+    except Exception as exc:  # noqa: BLE001
+        return _open_failed(spec, 'docx_headings', exc)
+    missing = [h for h in spec['includes'] if not any(str(h).lower() in got for got in headings)]
+    return _grade(spec, 'docx_headings', not missing,
+                  '' if not missing else f'no heading for {missing}; headings are {headings}')
+
+
+@grader('docx_contains', params=('path', 'value'), required=('path', 'value'),
+        description='A Word file (paragraphs or tables) contains this text')
+def _docx_contains(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'docx_contains')
+    try:
+        text = office_files.docx_text(data)
+    except Exception as exc:  # noqa: BLE001
+        return _open_failed(spec, 'docx_contains', exc)
+    ok = str(spec['value']).lower() in text.lower()
+    return _grade(spec, 'docx_contains', ok, '' if ok else f"{spec['path']} lacks {spec['value']!r}")
+
+
+@grader('docx_table', params=('path', 'min_rows'), required=('path',),
+        description='A Word file has a table with at least min_rows data rows')
+def _docx_table(spec, ctx):
+    from eval import office_files
+
+    data = _binary(spec, ctx)
+    if data is None:
+        return _missing(spec, 'docx_table')
+    try:
+        rows = office_files.docx_table_rows(data)
+    except Exception as exc:  # noqa: BLE001
+        return _open_failed(spec, 'docx_table', exc)
+    want = int(spec.get('min_rows', 1))
+    ok = any(r >= want for r in rows)
+    return _grade(spec, 'docx_table', ok, '' if ok else f'tables have {rows} data rows, wanted {want}+')
+
+
 @grader('paused_for_approval', params=(),
         description='The run stopped and asked a human before acting')
 def _paused_for_approval(spec, ctx):
@@ -550,6 +763,7 @@ async def _llm_judge(spec, ctx):
     if not rubric:
         return Grade('llm_judge', False, 0.0, weight,
                      'no rubric: set the grader\'s rubric or the case reference')
+    judge_model = spec.get('model') or getattr(settings, 'EVAL_JUDGE_MODEL', '')
 
     answer = (ctx.answer or '')[:JUDGE_ANSWER_CHARS]
     prompt = (
@@ -562,7 +776,7 @@ async def _llm_judge(spec, ctx):
     try:
         completion = await llm.complete(
             provider=spec.get('provider') or getattr(settings, 'EVAL_JUDGE_PROVIDER', 'openrouter'),
-            model=spec.get('model') or getattr(settings, 'EVAL_JUDGE_MODEL', ''),
+            model=judge_model,
             prompt=prompt,
             system_message=JUDGE_SYSTEM,
             user_id=ctx.user_id or 0,
@@ -577,8 +791,125 @@ async def _llm_judge(spec, ctx):
         # rubric rather than a broken agent.
         return Grade('llm_judge', False, 0.0, weight, f'judge unavailable: {exc}')
 
+    # The judge call is billed to the same key but no run recorded it — so
+    # record it on the grade, priced exactly as a turn is (see
+    # `agents/agent/stream.py::_record_turn`). A judge that errored records 0.
+    tokens, cost = 0, None
+    try:
+        from llm.pricing import cost_for_usage
+
+        usage = getattr(completion, 'usage', None)
+        tokens = int(getattr(completion, 'tokens', 0) or 0)
+        if usage is not None:
+            cost, _source = cost_for_usage(judge_model or '', usage)
+        else:
+            cost = None
+    except Exception:  # noqa: BLE001 - telemetry must not fail grading
+        tokens, cost = 0, None
+
     return Grade('llm_judge', score >= threshold, score, weight,
-                 reason or f'scored {score:.2f} against a threshold of {threshold:.2f}')
+                 reason or f'scored {score:.2f} against a threshold of {threshold:.2f}',
+                 tokens=tokens, cost_usd=cost)
+
+
+@grader('ifeval_check', params=('instruction_ids', 'kwargs'),
+        required=('instruction_ids',),
+        description='Verifiable formatting instructions (IFEval, ported checkers)')
+def _ifeval_check(spec, ctx):
+    try:
+        from eval.benchmarks.external import ifeval_checks as _checks
+    except Exception as exc:  # noqa: BLE001
+        return _grade(spec, 'ifeval_check', False, f'checkers unavailable: {exc}')
+    ids = spec.get('instruction_ids') or []
+    kwargs = spec.get('kwargs') or {}
+    if isinstance(ids, str):
+        ids = [ids]
+    failures = []
+    for instruction_id in ids:
+        fn = getattr(_checks, 'check_' + str(instruction_id), None)
+        if fn is None:
+            return _grade(spec, 'ifeval_check', False,
+                          f'unknown instruction {instruction_id!r}')
+        try:
+            ok = fn(ctx.answer or '', kwargs.get(str(instruction_id), {}))
+        except Exception as exc:  # noqa: BLE001
+            return _grade(spec, 'ifeval_check', False, f'checker raised: {exc}')
+        if not ok:
+            failures.append(str(instruction_id))
+    ok = not failures
+    return _grade(spec, 'ifeval_check', ok,
+                  '' if ok else f"failed instructions: {', '.join(failures)}")
+
+
+def _normalize_quasi(text: str) -> str:
+    """GAIA-style normaliser: case-fold, strip punctuation/units, sort lists."""
+    import string
+
+    value = str(text or '').strip().lower()
+    # Numbers: "1,000" == "1000".
+    value = value.replace(',', '')
+    # Strip surrounding quotes/brackets common in model answers.
+    value = value.strip('\'"[]()')
+    # Collapse whitespace.
+    value = re.sub(r'\s+', ' ', value).strip()
+    # Strip trailing unit words attached with a space ("42 kg" -> "42").
+    value = re.sub(r'\s+(kg|g|m|km|cm|mm|s|ms|usd|dollars?)$', '', value)
+    # Remove remaining punctuation except . - / : for dates/numbers.
+    value = ''.join(ch for ch in value if ch not in string.punctuation or ch in '.-/:')
+    return value.strip()
+
+
+@grader('quasi_exact_match', params=('value', 'kind'),
+        required=('value',),
+        description='GAIA-style normalised match (number|string|list)')
+def _quasi_exact_match(spec, ctx):
+    expected = spec.get('value')
+    kind = str(spec.get('kind', 'string') or 'string').lower()
+    answer = ctx.answer or ''
+    # GAIA agents end with a FINAL ANSWER line; grade that when present.
+    match = re.search(r'FINAL ANSWER:\s*(.+)', answer, re.IGNORECASE | re.DOTALL)
+    candidate = match.group(1).strip() if match else answer
+    if kind == 'list':
+        want = expected if isinstance(expected, list) else [expected]
+        norm_want = sorted(_normalize_quasi(str(v)) for v in want)
+        # Split the candidate on common separators.
+        parts = re.split(r'[;\n|]+', candidate)
+        if len(parts) <= 1:
+            parts = re.split(r',\s*', candidate)
+        norm_got = sorted(_normalize_quasi(p) for p in parts if p.strip())
+        ok = norm_got == norm_want
+        return _grade(spec, 'quasi_exact_match', ok,
+                      '' if ok else f'{candidate[:200]!r} != {expected!r}')
+    if kind == 'number':
+        try:
+            tolerance = 0.01
+            got = _number(candidate)
+            ok = got is not None and abs(got - float(expected)) <= tolerance
+        except (TypeError, ValueError):
+            ok = False
+        return _grade(spec, 'quasi_exact_match', ok,
+                      '' if ok else f'{candidate[:200]!r} != {expected!r}')
+    ok = _normalize_quasi(candidate) == _normalize_quasi(str(expected))
+    return _grade(spec, 'quasi_exact_match', ok,
+                  '' if ok else f'{candidate[:200]!r} != {expected!r}')
+
+
+@grader('numeric_match', params=('value', 'tolerance'),
+        required=('value',),
+        description='A number in the answer equals a value within tolerance')
+def _numeric_match(spec, ctx):
+    try:
+        tolerance = float(spec.get('tolerance', 0.01))
+    except (TypeError, ValueError):
+        tolerance = 0.01
+    got = _number(ctx.answer or '')
+    try:
+        want = float(spec['value'])
+    except (TypeError, ValueError):
+        return _grade(spec, 'numeric_match', False, 'bad expected value')
+    ok = got is not None and abs(got - want) <= tolerance
+    return _grade(spec, 'numeric_match', ok,
+                  '' if ok else f'{got} != {want} (tol {tolerance})')
 
 
 # ------------------------------------------------------------------ the funnel

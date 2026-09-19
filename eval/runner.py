@@ -42,6 +42,10 @@ class NoCasesToRun(ValueError):
     """The suite has nothing active in it. Refused rather than scored 0/0."""
 
 
+class _SweepCeilingReached(RuntimeError):
+    """The suite's `max_cost_rupees` was reached. Skips the rest, fails the run."""
+
+
 def _goal_for(case, workspace_path: str = '') -> str:
     """The prompt one case hands the agent.
 
@@ -64,7 +68,7 @@ def _goal_for(case, workspace_path: str = '') -> str:
 
 
 @sync_to_async
-def open_run(suite, agent, user, notes: str = ''):
+def open_run(suite, agent, user, notes: str = '', *, mode: str = 'agent'):
     """Create the `EvalRun` a sweep will fill in. Public on purpose.
 
     `start_suite_run` opens the run *before* spawning so the caller gets a
@@ -76,6 +80,9 @@ def open_run(suite, agent, user, notes: str = ''):
 
     from .models import EvalRun
 
+    kwargs: dict = {}
+    if hasattr(EvalRun, 'mode'):
+        kwargs['mode'] = mode
     return EvalRun.objects.create(
         suite=suite,
         subagent=agent,
@@ -89,6 +96,7 @@ def open_run(suite, agent, user, notes: str = ''):
         total_cases=0,
         started_at=timezone.now(),
         notes=notes or '',
+        **kwargs,
     )
 
 
@@ -113,10 +121,17 @@ def _open_result(run, case):
 
 @sync_to_async
 def _save_result(result, suite, **fields):
+    from django.utils import timezone as _tz
+
+    from .models import EvalRun
+
     for key, value in fields.items():
         setattr(result, key, value)
     supervision.apply_policy(result, suite)
     result.save()
+    # Touch the run so a long but live sweep is never mistaken for dead by
+    # `eval/recovery.py::sweep_orphaned_eval_runs` (which keys off `updated_at`).
+    EvalRun.objects.filter(pk=result.run_id).update(updated_at=_tz.now())
 
 
 @sync_to_async
@@ -127,9 +142,53 @@ def _run_status(run) -> str:
 
 
 @sync_to_async
+def _run_spend_rupees(run) -> int:
+    """What this sweep has spent so far, in rupees (agent + judge)."""
+    from decimal import Decimal
+
+    from django.db.models import Sum
+
+    from agents.spend import rupees_for_usd
+
+    from .models import EvalResult
+    from logs.models import ExecutionLog
+    from agents.spend import aggregate_rupees
+
+    execution_ids = list(
+        EvalResult.objects.filter(run_id=run.pk, execution__isnull=False)
+        .values_list('execution_id', flat=True)
+    )
+    agent_rupees = 0
+    if execution_ids:
+        agent_rupees = aggregate_rupees(
+            ExecutionLog.objects.filter(id__in=execution_ids)
+        )
+    judge_total = (
+        EvalResult.objects.filter(run_id=run.pk)
+        .aggregate(total=Sum('judge_cost_usd'))['total']
+        or Decimal('0')
+    )
+    return agent_rupees + rupees_for_usd(judge_total)
+
+
+@sync_to_async
+def _suite_ceiling(suite) -> int | None:
+    try:
+        suite.refresh_from_db(fields=['max_cost_rupees'])
+    except Exception:  # noqa: BLE001
+        pass
+    return getattr(suite, 'max_cost_rupees', None)
+
+
+@sync_to_async
 def _finish(run, *, status: str | None = None, error: str = '', tokens: int = 0):
+    from django.db.models import Sum
+
     run.refresh_from_db()
-    run.tokens_used = tokens
+    judge_tokens = (
+        run.results.aggregate(total=Sum('judge_tokens'))['total'] or 0
+    )
+    run.tokens_used = tokens + int(judge_tokens or 0)
     if status:
         run.status = status
     if error:
@@ -166,6 +225,22 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
                                error_message='sweep stopped before this case ran')
             return 0
 
+        # Sweep ceiling: a benchmark must never spend without bound. Checked
+        # after acquiring the semaphore and before starting the case.
+        # Null means unlimited; 0 means "already over" (useful in tests).
+        ceiling = await _suite_ceiling(suite)
+        if ceiling is not None:
+            spent = await _run_spend_rupees(run)
+            if spent >= ceiling:
+                abort.set()
+                await _save_result(
+                    result, suite, status='skipped',
+                    error_message=(
+                        f'sweep cost ceiling reached (₹{spent} of ₹{ceiling})'
+                    ),
+                )
+                raise _SweepCeilingReached(f'sweep cost ceiling reached (₹{spent} of ₹{ceiling})')
+
         started = time.monotonic()
         spec = workspace.spec_for(case)
         try:
@@ -175,7 +250,7 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
             workspace_path = await workspace.prepare(user, agent, spec) if spec else ''
             agent_run = await run_agent(
                 agent, _goal_for(case, workspace_path), user=user,
-                trigger_type='api', caller='api',
+                trigger_type='api', caller='eval',
             )
         except (AgentRunRefused, LLMUserActionable) as exc:
             # Every remaining case would fail the same way. Stop the sweep
@@ -194,8 +269,10 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
 
     answer = agent_run.answer or ''
     files = await workspace.snapshot(user, agent, spec) if spec else {}
+    binaries = await workspace.snapshot_binaries(user, agent, spec) if spec else {}
     ctx = graders.GradeContext(
         files=files,
+        binaries=binaries,
         answer=answer,
         structured=agent_run.structured,
         contract_error=agent_run.contract_error,
@@ -216,6 +293,8 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
 
     execution = await _execution_for(agent_run.execution_id)
     truncated = len(answer) > EVAL_RESULT_ANSWER_CHAR_LIMIT
+    judge_tokens = sum(int(getattr(g, 'tokens', 0) or 0) for g in grades)
+    judge_cost = _sum_judge_cost(grades)
     await _save_result(
         result, suite,
         status='graded',
@@ -226,10 +305,29 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
         auto_score=score,
         grades=[g.as_dict() for g in grades],
         tokens=agent_run.tokens,
+        judge_tokens=judge_tokens,
+        judge_cost_usd=judge_cost,
         duration_ms=agent_run.duration_ms,
         error_message='',
     )
-    return agent_run.tokens
+    return agent_run.tokens + judge_tokens
+
+
+def _sum_judge_cost(grades):
+    from decimal import Decimal
+
+    total = Decimal('0')
+    seen = False
+    for g in grades:
+        cost = getattr(g, 'cost_usd', None)
+        if cost is None:
+            continue
+        try:
+            total += Decimal(str(cost))
+            seen = True
+        except Exception:  # noqa: BLE001
+            continue
+    return total if seen else None
 
 
 @sync_to_async
@@ -239,9 +337,23 @@ def _execution_for(execution_id: str):
     return ExecutionLog.objects.filter(execution_id=execution_id).first()
 
 
-async def sweep(run, suite, agent, user) -> None:
-    """Run every active case, then settle the run. Never raises to its caller."""
+async def sweep(run, suite, agent, user, *, case_ids: list[int] | None = None,
+              mode: str = 'agent') -> None:
+    """Run every active case, then settle the run. Never raises to its caller.
+
+    `case_ids` narrows the sweep to one case (the smoke gate's retry) without
+    creating rows. `mode='bare'` runs the platform-tax control (Phase 8): one
+    bare model call per case, no agent, no `ExecutionLog`.
+    """
     cases = await _active_cases(suite)
+    if case_ids is not None:
+        wanted = set(case_ids)
+        cases = [c for c in cases if c.pk in wanted]
+    if mode == 'bare':
+        from . import bare as _bare
+
+        await _bare.sweep_bare(run, suite, cases, agent, user)
+        return
     concurrency = max(1, min(int(suite.concurrency or 1), EVAL_MAX_CONCURRENCY))
     sem = asyncio.Semaphore(concurrency)
     abort = asyncio.Event()
@@ -288,7 +400,9 @@ def _reload(run):
     return EvalRun.objects.select_related('suite', 'subagent').get(pk=run.pk)
 
 
-async def run_suite_now(suite, agent, user, *, notes: str = ''):
+async def run_suite_now(suite, agent, user, *, notes: str = '',
+                        case_ids: list[int] | None = None,
+                        mode: str = 'agent'):
     """Sweep a suite and **await** it, returning the settled `EvalRun`.
 
     The counterpart to `start_suite_run`, for callers that are not an HTTP
@@ -301,8 +415,8 @@ async def run_suite_now(suite, agent, user, *, notes: str = ''):
     duplicating the check here would mean two places could disagree about what
     refuses a run.
     """
-    run = await open_run(suite, agent, user, notes)
-    await sweep(run, suite, agent, user)
+    run = await open_run(suite, agent, user, notes, mode=mode)
+    await sweep(run, suite, agent, user, case_ids=case_ids, mode=mode)
     return await _reload(run)
 
 

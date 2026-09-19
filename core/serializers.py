@@ -45,10 +45,48 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'theme_preference', 'accent_color',
             'created_at', 'updated_at'
         ]
+        # `credits_remaining` is the platform-key allowance `llm/credits.py`
+        # meters against. It was writable here, so any user could PATCH their
+        # own balance to whatever they liked and spend the platform key without
+        # limit. `llm_credential_id` was written by the retired
+        # `orchestrator/settings/update/` and no model call ever read it.
         read_only_fields = [
             'tier', 'compile_limit', 'execute_limit', 'stream_connections',
-            'credits_used_total', 'created_at', 'updated_at'
+            'credits_remaining', 'credits_used_total', 'llm_credential_id',
+            # Stored, never read, and dangerous if it were: a small output cap
+            # makes a reasoning model spend it all thinking and answer with an
+            # empty string. Kept on the wire so an older client still parses.
+            'default_max_tokens',
+            'created_at', 'updated_at'
         ]
+
+    def validate_timezone(self, value):
+        """An IANA zone, or the save is refused.
+
+        This value now drives the chat clock, an agent's sense of "now" and a
+        new schedule's default zone, so a typo would move all three silently.
+        """
+        from core.preferences import zone_is_valid
+
+        zone = (value or '').strip() or 'UTC'
+        if not zone_is_valid(zone):
+            raise serializers.ValidationError(
+                f'"{zone}" is not a timezone name, e.g. "Asia/Kolkata".'
+            )
+        return zone
+
+    def validate_language(self, value):
+        """Stored as a language code, whichever spelling the client sent.
+
+        The model's default is `en` while the Settings page sent `English`, so
+        the column held two vocabularies and nothing could read it reliably.
+        """
+        from core.preferences import language_code
+
+        code = language_code(value)
+        if code is None:
+            raise serializers.ValidationError('Not a supported language.')
+        return code
 
     def validate_llm_effort(self, value):
         """Reject a level that is not on the ladder; blank means model default.
@@ -78,7 +116,17 @@ class UserProfileSerializer(serializers.ModelSerializer):
             if 'last_name' in user_data:
                 user.last_name = user_data['last_name']
             if 'email' in user_data:
-                user.email = user_data['email']
+                email = (user_data['email'] or '').strip()
+                # Sign-in and password reset both look accounts up by email, so
+                # it changes only through `auth/email/change/`, which sends a
+                # code to the new address first. Refused rather than ignored:
+                # a save that silently drops a field reads as a save that
+                # worked. The same address is fine — the form always sends it.
+                if email and email.lower() != (user.email or '').lower():
+                    raise serializers.ValidationError(
+                        {'email': 'Change your email from the Account tab; '
+                                  'it needs a code sent to the new address.'}
+                    )
             user.save()
             
         return super().update(instance, validated_data)
@@ -102,6 +150,19 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         model = User
         fields = ['username', 'email', 'password', 'password2', 'first_name', 'last_name']
     
+    def validate_email(self, value):
+        """One account per address.
+
+        Sign-in (`username_field = 'email'`) and password reset both look an
+        account up by email, and nothing stopped a second account registering
+        an address the first already held — after which neither lookup can say
+        which account is meant.
+        """
+        email = (value or '').strip()
+        if email and User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError('An account with this email already exists.')
+        return email
+
     def validate(self, attrs):
         if attrs['password'] != attrs['password2']:
             raise serializers.ValidationError({

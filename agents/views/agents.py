@@ -64,8 +64,8 @@ logger = logging.getLogger(__name__)
 # 'mcp' unlocks the user's own configured MCP servers. It is a grant rather
 # than an always-on capability because those tools reach real systems under
 # the user's credentials — see mcp_integration/credential_injector.py.
-TOOL_KEYS = {'codeExecution', 'shell', 'webSearch', 'scrape', 'fileOps', 'rag', 'mcp',
-             'subAgents'}
+TOOL_KEYS = {'codeExecution', 'shell', 'webSearch', 'scrape', 'fileOps', 'office', 'media', 'publish', 'browser', 'rag',
+             'mcp', 'subAgents'}
 # `connectors` holds `MCPServer` ids, validated against what the user can
 # actually see. It used to be a hardcoded set of six presentation slugs
 # ({'gdrive', 'gmail', 'sheets', 'photos', 'calendar', 'slack'}) that nothing
@@ -103,10 +103,11 @@ AUTONOMY = {'plan', 'review', 'ask', 'auto', 'full'}
 # unconditional, which is the true statement. Existing rows keep the key; it is
 # simply no longer read, offered or written.
 
-# Which agent lifecycle states a user may set. `archived` is deliberately
-# absent: `search_agents` already excludes it and there is no un-archive path,
-# so offering it as a save would be a one-way door disguised as a dropdown.
-SETTABLE_STATUS = {'draft', 'active', 'paused'}
+# Which agent lifecycle states a user may set. `archived` joined 2026-09-18,
+# once it stopped being a one-way door: the agents list shows archived agents
+# behind a toggle and restores them, and archive — not delete — is what the
+# builder offers first, because delete now keeps the runs but loses the agent.
+SETTABLE_STATUS = {'draft', 'active', 'paused', 'archived'}
 
 # The result shapes an agent may be asked for, from the closed registry in
 # `agents/contracts.py`. Blank means prose, which is the default and always
@@ -178,7 +179,7 @@ class AgentSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=MAX_TAG_CHARS),
         required=False, default=list, max_length=MAX_TAGS,
     )
-    #: draft | active | paused. Writable as of 2026-09-03: it was read-only, so
+    #: draft | active | paused | archived. Writable as of 2026-09-03: it was read-only, so
     #: the only way to stop a scheduled agent was to delete its schedule or the
     #: agent itself.
     status = serializers.ChoiceField(
@@ -228,6 +229,11 @@ class AgentSerializer(serializers.Serializer):
         child=serializers.IntegerField(), required=False, default=list,
     )
     skills = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    #: Sites `browser_act` may act on (bare hostnames; subdomains included).
+    #: Empty means it may browse but not act.
+    browserDomains = serializers.ListField(
+        child=serializers.CharField(max_length=253), required=False, default=list, max_length=20,
+    )
     #: `useOrgContext` was removed from the wire (2026-09-03): it defaulted on,
     #: was stored on every agent, and no prompt builder ever read it. There is
     #: no workspace-level context to include or omit yet; it comes back with the
@@ -273,7 +279,6 @@ class AgentSerializer(serializers.Serializer):
     # Guardrails
     autonomy = serializers.ChoiceField(choices=sorted(AUTONOMY), required=False, default='ask')
     notifyOnHitl = serializers.BooleanField(required=False, default=True)
-    reviewAgent = serializers.BooleanField(required=False, default=False)
     spendCapRupees = serializers.IntegerField(required=False, default=500, min_value=0)
     # The other half of the blast radius, and the one that was missing. The
     # spend cap is monthly and per agent: it says nothing about how long a
@@ -426,6 +431,18 @@ class AgentSerializer(serializers.Serializer):
     def validate_skills(self, value):
         return self._owned_ids(Skill, value, 'skill')
 
+    def validate_browserDomains(self, value):
+        import re
+
+        out = []
+        for raw in value:
+            domain = raw.strip().lower().removeprefix('https://').removeprefix('http://')
+            domain = domain.split('/')[0].strip('.')
+            if not re.fullmatch(r'[a-z0-9-]+(\.[a-z0-9-]+)+', domain):
+                raise serializers.ValidationError(f'"{raw}" is not a domain like example.com.')
+            out.append(domain)
+        return sorted(set(out))
+
     def validate_delegatesTo(self, value):
         """Only agents the caller owns, checked the way knowledge bases are.
 
@@ -455,7 +472,45 @@ class AgentSerializer(serializers.Serializer):
             )
         return ids
 
+    @staticmethod
+    def _model_problem(provider: str, model: str) -> str | None:
+        """Why `model` cannot be routed on `provider`, or None if it can.
+
+        Both fields were free text, so a typo or a model id from another
+        provider saved cleanly and failed at the first model call of the first
+        run — hours later, for a scheduled agent. Checked only against a
+        provider whose catalogue we hold: a fresh install (or a test database)
+        has no `AIModel` rows yet, and refusing every model there would make
+        the builder unusable until someone seeded it. A *retired* row is not
+        refused — that is reported on the agent (`model_status`) instead, so an
+        old agent stays editable while it says what needs changing.
+        """
+        from llm.models import AIModel
+
+        provider, model = (provider or '').strip(), (model or '').strip()
+        if not model:
+            return None
+        rows = AIModel.objects.filter(provider__slug=provider)
+        if not rows.exists():
+            return None
+        if rows.filter(value=model).exists():
+            return None
+        elsewhere = (AIModel.objects.filter(value=model)
+                     .values_list('provider__slug', flat=True).first())
+        if elsewhere:
+            return f'"{model}" is a {elsewhere} model, not a {provider} one.'
+        return f'"{model}" is not a {provider} model we know of.'
+
     def validate(self, attrs):
+        for model_key, provider_key, fallback in (
+            ('model', 'provider', 'openrouter'),
+            ('summaryModel', 'summaryProvider', ''),
+        ):
+            problem = self._model_problem(
+                attrs.get(provider_key) or fallback, attrs.get(model_key) or '')
+            if problem:
+                raise serializers.ValidationError({model_key: problem})
+
         schedule = (attrs.get('schedule') or '').strip()
         tz = (attrs.get('scheduleTimezone') or 'UTC').strip() or 'UTC'
         if not zone_is_valid(tz):
@@ -531,6 +586,7 @@ class AgentSerializer(serializers.Serializer):
             'knowledgeBases': ctx.get('knowledgeBases', []),
             'skills': ctx.get('skills', []),
             'delegatesTo': ctx.get('delegatesTo', []),
+            'browserDomains': ctx.get('browserDomains', []),
             'useEnvironment': ctx.get('useEnvironment', False),
             # The contract by name, blank for prose. `output_schema` is stored
             # as `{'contract': name}`; anything else in there is a shape from
@@ -555,7 +611,6 @@ class AgentSerializer(serializers.Serializer):
             'allowUnattended': agent.allow_unattended,
             'autonomy': guards.get('autonomy', 'ask'),
             'notifyOnHitl': guards.get('notifyOnHitl', True),
-            'reviewAgent': guards.get('reviewAgent', False),
             'spendCapRupees': guards.get('spendCapRupees', 500),
             # Read through `budget` rather than straight off the dict: an agent
             # saved before this field existed has no key at all, and every one
@@ -612,6 +667,7 @@ class AgentSerializer(serializers.Serializer):
             'delegatesTo': [
                 i for i in data.get('delegatesTo', []) if i != workflow.id
             ],
+            'browserDomains': data.get('browserDomains', []),
             'useEnvironment': data.get('useEnvironment', False),
         }
 
@@ -627,7 +683,6 @@ class AgentSerializer(serializers.Serializer):
         workflow.guardrails = {
             'autonomy': autonomy,
             'notifyOnHitl': data.get('notifyOnHitl', True),
-            'reviewAgent': data.get('reviewAgent', False),
             'spendCapRupees': data.get('spendCapRupees', 500),
             'maxRunSeconds': budget.clamp_run_seconds(
                 data.get('maxRunSeconds', DEFAULT_RUN_SECONDS)
@@ -726,6 +781,7 @@ def _with_stats(configs, workflows, user):
     rows = (
         ExecutionLog.objects
         .filter(user=user, subagent_id__in=ids)
+        .exclude(caller='eval')
         .values('subagent_id')
         .annotate(
             runs=Count('id', distinct=True),
@@ -741,6 +797,7 @@ def _with_stats(configs, workflows, user):
     spend_rows = (
         ExecutionLog.objects
         .filter(user=user, subagent_id__in=ids)
+        .exclude(caller='eval')
         .values('subagent_id')
         .annotate(
             priced_usd=Sum('cost_usd', filter=Q(cost_source__in=PRICED_SOURCES)),
@@ -755,12 +812,30 @@ def _with_stats(configs, workflows, user):
     }
 
     by_id = {r['subagent_id']: r for r in rows}
+    status_of = _model_statuses(configs)
     for cfg in configs:
         r = by_id.get(cfg['id'], {})
         cfg['runs'] = r.get('runs', 0)
         cfg['unattended'] = r.get('unattended', 0)
         cfg['spend'] = spend_by_id.get(cfg['id'], 0)
+        cfg['model_status'] = status_of.get(cfg.get('model') or '', 'ok')
     return configs
+
+
+def _model_statuses(configs) -> dict[str, str]:
+    """`retired` for each configured model whose catalogue row is inactive.
+
+    Attached here rather than in `to_config`: that dict is also the revision
+    snapshot, and a model being retired upstream is not a configuration change
+    the owner made — it must not mint a revision. One query for the whole list.
+    """
+    from llm.models import AIModel
+
+    values = {c.get('model') for c in configs if c.get('model')}
+    if not values:
+        return {}
+    inactive = AIModel.objects.filter(value__in=values, is_active=False)
+    return {value: 'retired' for value in inactive.values_list('value', flat=True)}
 
 @extend_schema(
     methods=['GET'],
@@ -849,4 +924,60 @@ def agent_detail(request, agent_id: int):
     # has always done it in this order; this path did not.
     AgentSerializer.sync_schedule(agent, serializer.validated_data)
     revisions.record(agent, user=request.user, source='update')
+    return Response(_with_stats([AgentSerializer.to_config(agent)], [agent], request.user)[0])
+
+
+#: Keys a revision snapshot carries that are observations or identity, not
+#: configuration — restoring them would be restoring the past's statistics.
+#: `status` is left out too: rolling a configuration back is not a request to
+#: pause or unpause the agent.
+_NOT_RESTORED = frozenset({
+    'id', 'status', 'runs', 'unattended', 'spend', 'created_at', 'updated_at',
+    'extraSchedules', 'trigger',
+})
+
+
+@extend_schema(
+    methods=['POST'],
+    request=None,
+    responses={200: AgentSerializer},
+    description="Put an agent's configuration back to an earlier revision.",
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def agent_restore_revision(request, agent_id: int, number: int):
+    """Roll back to revision `number`, as a new revision.
+
+    A revision is a full `to_config` snapshot, so this is an ordinary save of
+    that snapshot — through the same serializer, ownership checks and schedule
+    reconcile as every other save. That matters more than it looks: a
+    connection or knowledge base the old config named may since have been
+    deleted or switched off, and the answer then is the serializer's own 400
+    naming it, not a restore that silently re-grants access to something the
+    user can no longer see. History is never rewritten: the restore is
+    recorded as the next revision, with source `restore`.
+    """
+    from logs.models import SubAgentRevision
+
+    agent = get_object_or_404(SubAgent, id=agent_id, user=request.user)
+    revision = get_object_or_404(SubAgentRevision, subagent=agent, number=number)
+
+    current = AgentSerializer.to_config(agent)
+    restored = {k: v for k, v in (revision.config or {}).items()
+                if k not in _NOT_RESTORED}
+    merged = {k: v for k, v in current.items() if k not in _NOT_RESTORED}
+    merged.update(restored)
+
+    serializer = AgentSerializer(data=merged, context={'request': request})
+    serializer.is_valid(raise_exception=True)
+    name = serializer.validated_data['name']
+    if SubAgent.objects.filter(user=request.user, name=name).exclude(id=agent.id).exists():
+        return Response(
+            {'error': f'Another agent is now called "{name}"; rename one first.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    AgentSerializer.apply(agent, serializer.validated_data).save()
+    AgentSerializer.sync_schedule(agent, serializer.validated_data)
+    revisions.record(agent, user=request.user, source='restore')
     return Response(_with_stats([AgentSerializer.to_config(agent)], [agent], request.user)[0])

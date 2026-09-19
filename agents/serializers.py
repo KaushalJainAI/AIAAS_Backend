@@ -2,7 +2,7 @@ import re
 
 from rest_framework import serializers
 
-from .models import ConversationMessage, HITLRequest
+from .models import HITLRequest
 
 
 #: Shared guard for agent names. The name reaches logs, filenames and the
@@ -51,9 +51,3 @@ class HITLRequestSerializer(serializers.ModelSerializer):
         agent = getattr(execution, 'subagent', None) if execution else None
         return agent.name if agent else None
 
-class ConversationMessageSerializer(serializers.ModelSerializer):
-    """Serializer for AI chat messages."""
-    class Meta:
-        model = ConversationMessage
-        fields = ['id', 'role', 'content', 'metadata', 'created_at']
-        read_only_fields = ['id', 'created_at']

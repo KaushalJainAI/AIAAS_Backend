@@ -40,6 +40,10 @@ class Event(StrEnum):
     #: tool that produces it replaces the whole list every time — a client
     #: applying deltas would have to reconstruct state the server never sends.
     TODOS_UPDATE = "todos_update"
+    #: Files the turn wrote or edited in the user's tree. Carries the whole
+    #: list every time, for the reason TODOS_UPDATE does: a second write to the
+    #: same file updates its entry rather than adding one.
+    FILES_UPDATE = "files_update"
     ASK_PERMISSION = "ask_permission"
     ERROR = "error"
     DONE = "done"

@@ -13,6 +13,8 @@ from .views import (
     UserProfileView,
     AvatarUploadView,
     ChangePasswordView,
+    EmailChangeConfirmView,
+    EmailChangeRequestView,
     PasswordChangeOTPRequestView,
     PasswordChangeOTPVerifyView,
     PasswordResetRequestView,
@@ -46,6 +48,9 @@ urlpatterns = [
     path('auth/profile/avatar/', AvatarUploadView.as_view(), name='avatar-upload'),
     path('auth/change-password/request-otp/', PasswordChangeOTPRequestView.as_view(), name='change-password-request-otp'),
     path('auth/change-password/verify-otp/', PasswordChangeOTPVerifyView.as_view(), name='change-password-verify-otp'),
+    # Changing the sign-in address needs a code sent to the new one.
+    path('auth/email/change/request/', EmailChangeRequestView.as_view(), name='email-change-request'),
+    path('auth/email/change/confirm/', EmailChangeConfirmView.as_view(), name='email-change-confirm'),
     path('auth/change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('auth/password-reset-request/', PasswordResetRequestView.as_view(), name='password-reset-request'),
     path('auth/password-reset-verify/', PasswordResetVerifyView.as_view(), name='password-reset-verify'),

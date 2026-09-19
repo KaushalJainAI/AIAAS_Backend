@@ -191,6 +191,17 @@ class DocumentListSerializer(DocumentSerializer):
             'error_message', 'folder_id', 'folder_path',
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # A rendered file's spec (`metadata.spec`, written by the office
+        # tools for the preview) can run to tens of kilobytes — a 40-slide deck,
+        # a workbook's first hundred rows. A listing renders none of it, so it
+        # rides only on the detail response the preview fetches.
+        meta = data.get('metadata')
+        if isinstance(meta, dict) and 'spec' in meta:
+            data['metadata'] = {k: v for k, v in meta.items() if k != 'spec'}
+        return data
+
 
 class RagSearchSerializer(serializers.Serializer):
     query = serializers.CharField(required=True)

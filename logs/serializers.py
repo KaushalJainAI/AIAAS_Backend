@@ -34,7 +34,7 @@ class ExecutionListFilterSerializer(serializers.Serializer):
     #: Who started the run. Validated against the model's own choices so a
     #: typo returns 400 rather than an empty list that reads as "no such runs".
     caller = serializers.ChoiceField(
-        choices=['api', 'chat', 'orchestrator', 'trigger'],
+        choices=['api', 'chat', 'orchestrator', 'trigger', 'eval'],
         required=False, allow_null=True,
     )
     limit = serializers.IntegerField(default=20, min_value=1, max_value=100)

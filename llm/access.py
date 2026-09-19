@@ -535,6 +535,36 @@ async def preflight(*, provider: str, model: str, user_id: int) -> None:
     )
 
 
+#: Who pays for a call. `own_key`: the user's credential, so the provider bills
+#: them. `platform`: the platform's key, so the platform pays the provider and
+#: the user is charged credits. `free`: the platform's key on a free model,
+#: which costs nobody credits. `local`: a keyless provider on the user's own
+#: hardware. `''`: could not tell.
+PAYERS = ('own_key', 'platform', 'free', 'local')
+
+
+async def payer(*, provider: str, model: str, user_id: int) -> str:
+    """Whose money a call to `provider`/`model` spends, for display.
+
+    Answers the question `preflight` answers, in the same order, so the label
+    on a cost can never disagree with the key the call actually used: a
+    user's own credential wins over the platform's, exactly as
+    `_build_request` resolves it. Never raises — this labels a figure that
+    already exists, and a lookup failing must not cost the turn anything.
+    """
+    try:
+        if provider in _KEYLESS_PROVIDERS:
+            return 'local'
+        if await _resolve_credential(provider, user_id) is not None:
+            return 'own_key'
+        if _platform_api_key(provider) is not None:
+            return 'free' if await credits.is_free_model(model) else 'platform'
+    except Exception:  # noqa: BLE001
+        logger.warning('[Access] Could not tell who pays for %s/%s', provider,
+                       model, exc_info=True)
+    return ''
+
+
 def _execution_context(user_id: int):
     from llm.context import ExecutionContext
 

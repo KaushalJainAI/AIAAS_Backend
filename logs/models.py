@@ -64,11 +64,18 @@ class SubAgentRevision(models.Model):
         # Minted lazily for an agent that predates revision tracking, so its
         # first run still has a configuration to point at.
         ('backfill', 'Backfilled'),
+        # An earlier revision put back. A new row, never an edit of history.
+        ('restore', 'Restored'),
     ]
 
+    #: Null once the agent is deleted. The snapshot outlives it on purpose:
+    #: the runs that executed under this configuration keep pointing at it, and
+    #: a run whose config vanished can no longer say why it behaved as it did.
     subagent = models.ForeignKey(
         'orchestrator.SubAgent',
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='revisions',
     )
     #: Who made the change. Null for a backfill, which nobody performed.
@@ -140,6 +147,7 @@ class ExecutionLog(models.Model):
         ('chat', 'Chat agent'),
         ('orchestrator', 'Delegated by another agent'),
         ('trigger', 'Trigger'),
+        ('eval', 'Evaluation sweep'),
     ]
 
     execution_id = models.UUIDField(
@@ -149,10 +157,12 @@ class ExecutionLog(models.Model):
         help_text='Unique identifier for this execution',
     )
     # Null for runs whose agent has since been deleted, and for the historical
-    # rows that belonged to a node graph — see migration 0009.
+    # rows that belonged to a node graph — see migration 0009. SET_NULL, not
+    # CASCADE: the column was always nullable for exactly this reason, and yet
+    # deleting an agent erased every run it had made, with its spend.
     subagent = models.ForeignKey(
         'orchestrator.SubAgent',
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='executions',
@@ -242,6 +252,21 @@ class ExecutionLog(models.Model):
     error_node_id = models.CharField(
         max_length=100, blank=True, help_text='call_id of the step that caused the error'
     )
+    #: Machine-readable failure kind (`logs/failures.py::classify`). Blank =
+    #: unknown (old rows). Set at the single close point (`_close_log`) and in
+    #: recovery, so a quality dashboard can count by category.
+    FAILURE_CHOICES = [
+        ('provider', 'Provider'),
+        ('step_budget', 'Step budget'),
+        ('tool_error', 'Tool error'),
+        ('guardrail', 'Guardrail'),
+        ('contract', 'Contract'),
+        ('timeout', 'Timeout'),
+        ('cancelled', 'Cancelled'),
+        ('interrupted', 'Interrupted'),
+        ('other', 'Other'),
+    ]
+    failure_category = models.CharField(max_length=16, blank=True, default='')
 
     # ── Resource usage ──
     nodes_executed = models.IntegerField(default=0, validators=[MinValueValidator(0)])
@@ -390,6 +415,116 @@ class AgentTurn(models.Model):
 
     def __str__(self):
         return f'Turn {self.index} of {self.execution_id} ({self.decision})'
+
+
+class Feedback(models.Model):
+    """Explicit judgement: thumbs up/down on a run or a chat message.
+
+    Exactly one of `execution` / `chat_message` is set (CheckConstraint).
+    Re-rating is an update, not a second row (partial UniqueConstraints).
+    All rows cascade-delete with the user. Nothing here is sent to a model.
+    """
+
+    REASON_CHOICES = [
+        ('wrong', 'Wrong'),
+        ('incomplete', 'Incomplete'),
+        ('slow', 'Slow'),
+        ('unsafe', 'Unsafe'),
+        ('ignored_instructions', 'Ignored instructions'),
+        ('other', 'Other'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='feedbacks',
+    )
+    execution = models.ForeignKey(
+        ExecutionLog, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='feedbacks',
+    )
+    chat_message = models.ForeignKey(
+        'chat.ChatMessage', on_delete=models.CASCADE, null=True, blank=True,
+        related_name='feedbacks',
+    )
+    rating = models.SmallIntegerField(help_text='+1 or -1')
+    reason = models.CharField(max_length=24, blank=True, default='')
+    comment = models.TextField(blank=True, max_length=2000, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Feedback'
+        verbose_name_plural = 'Feedback'
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(execution__isnull=False, chat_message__isnull=True)
+                    | models.Q(execution__isnull=True, chat_message__isnull=False)
+                ),
+                name='logs_feedback_exactly_one_target',
+            ),
+            models.UniqueConstraint(
+                fields=['user', 'execution'],
+                condition=models.Q(execution__isnull=False),
+                name='logs_feedback_unique_user_execution',
+            ),
+            models.UniqueConstraint(
+                fields=['user', 'chat_message'],
+                condition=models.Q(chat_message__isnull=False),
+                name='logs_feedback_unique_user_message',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id}: {self.rating}'
+
+
+class RunSignal(models.Model):
+    """Implicit judgement: structured retry/cancel/steer/reject events.
+
+    Best-effort telemetry — writers wrap in try/except and never fail the
+    user's action. One writer (`logs/signals_api.py::record_signal`).
+    """
+
+    KIND_CHOICES = [
+        ('regenerated', 'Regenerated'),
+        ('steered', 'Steered'),
+        ('steers_returned', 'Steers returned'),
+        ('approval_rejected', 'Approval rejected'),
+        ('approval_granted', 'Approval granted'),
+        ('cancelled', 'Cancelled'),
+        ('failed', 'Failed'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='run_signals',
+    )
+    execution = models.ForeignKey(
+        ExecutionLog, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='signals',
+    )
+    chat_session_id = models.CharField(max_length=100, blank=True, default='')
+    chat_message = models.ForeignKey(
+        'chat.ChatMessage', on_delete=models.CASCADE, null=True, blank=True,
+        related_name='signals',
+    )
+    kind = models.CharField(max_length=24)
+    detail = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Run signal'
+        verbose_name_plural = 'Run signals'
+        indexes = [
+            models.Index(fields=['user', 'kind', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id} {self.kind}'
 
 
 class AgentStep(models.Model):

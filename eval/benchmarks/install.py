@@ -181,6 +181,7 @@ def upsert_suite(user, suite_def: dict, agent, report: InstallReport):
             'pass_threshold': suite_def.get('pass_threshold', 0.8),
             'supervision': suite_def.get('supervision', 'disagreement'),
             'concurrency': suite_def.get('concurrency', 2),
+            'max_cost_rupees': suite_def.get('max_cost_rupees'),
             'tags': ['benchmark', suite_def['group'], suite_def['slug']],
             'is_active': True,
         },

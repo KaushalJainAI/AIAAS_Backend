@@ -53,6 +53,26 @@ GRANT_META: dict[str, dict[str, str]] = {
         'description': 'Run Python in the sandboxed interpreter.',
         'icon': 'code',
     },
+    'office': {
+        'label': 'Office files',
+        'description': 'Create PowerPoint decks, Excel workbooks and Word documents.',
+        'icon': 'presentation',
+    },
+    'media': {
+        'label': 'Images',
+        'description': 'Generate images, billed to your OpenRouter account.',
+        'icon': 'image',
+    },
+    'browser': {
+        'label': 'Browser',
+        'description': 'Read JavaScript pages and act on allowed sites in a real browser.',
+        'icon': 'globe',
+    },
+    'publish': {
+        'label': 'Publishing',
+        'description': 'Publish hosted pages shareable by link.',
+        'icon': 'globe',
+    },
     'fileOps': {
         'label': 'Files',
         'description': 'Read and write your own files within the virtual filesystem.',
@@ -110,7 +130,11 @@ LIBRARY_GROUPS: dict[str, tuple[str, ...]] = {
     'scrape': ('scrape_webpage', 'read_url'),
     'rag': ('list_knowledge_bases', 'knowledge_base_search', 'keyword_search',
             'list_documents', 'read_document'),
-    'codeExecution': ('execute_python',),
+    'codeExecution': ('execute_python', 'run_python_on_files'),
+    'office': ('render_deck', 'render_workbook', 'render_document'),
+    'media': ('generate_image',),
+    'publish': ('publish_page',),
+    'browser': ('browse_page', 'browser_act'),
     'fileOps': ('list_files', 'read_file', 'write_file', 'make_directory',
                 'delete_file'),
     'subAgents': ('search_agents', 'run_agent', 'get_agent_run', 'invoke_subagent'),
@@ -127,15 +151,15 @@ LIBRARY_GROUPS: dict[str, tuple[str, ...]] = {
 #: Display order. The six grant groups first, because those are the ones an
 #: agent's permissions screen mirrors; everything always-on below them.
 CATEGORY_ORDER = [
-    'webSearch', 'scrape', 'rag', 'codeExecution', 'fileOps', 'subAgents',
-    'system', 'chat', 'vision', 'artifacts', 'internal', 'mcp', 'shell',
+    'webSearch', 'scrape', 'rag', 'codeExecution', 'fileOps', 'office', 'media',
+    'publish', 'browser', 'subAgents', 'system', 'chat', 'vision', 'artifacts', 'internal', 'mcp', 'shell',
 ]
 
 #: The six that mirror a grant in the agent builder. Sent to the client so the
 #: split between "granted per agent" and "always on" is decided here, next to
 #: GRANT_TOOLS, rather than by a literal array in the page.
 GRANT_CATEGORIES = ['webSearch', 'scrape', 'rag', 'codeExecution', 'fileOps',
-                    'subAgents']
+                    'office', 'media', 'publish', 'browser', 'subAgents']
 
 
 def _display_name(tool_name: str) -> str:

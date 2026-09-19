@@ -189,7 +189,6 @@ INSTALLED_APPS = [
     'dj_rest_auth.registration',
     'core',
     'llm',
-    'executor',
     'agents',
     'credentials',
     'inference',
@@ -318,6 +317,16 @@ if USE_S3:
 else:
     STATIC_URL = '/static/'
     MEDIA_URL = '/media/'
+
+# ---------------------------------------------------------------------------
+# Remote browser
+# ---------------------------------------------------------------------------
+# For `browse_page` / `browser_act` (browsing/engine.py). `none` offers neither
+# tool; `remote` drives a Browserless-compatible API. No browser runs on this
+# box — Chromium does not fit beside the app.
+BROWSER_ENGINE = os.environ.get('BROWSER_ENGINE', 'none')
+BROWSER_REMOTE_URL = os.environ.get('BROWSER_REMOTE_URL', '')
+BROWSER_API_TOKEN = os.environ.get('BROWSER_API_TOKEN', '')
 
 # ---------------------------------------------------------------------------
 # Code execution sandbox
@@ -701,6 +710,8 @@ IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD'
 # from an agent failure. It is a reasoning model: see `JUDGE_MAX_TOKENS`.
 EVAL_JUDGE_PROVIDER = os.environ.get('EVAL_JUDGE_PROVIDER', 'openrouter')
 EVAL_JUDGE_MODEL = os.environ.get('EVAL_JUDGE_MODEL', 'meta/muse-spark-1.3-contributor')
+#: Where external benchmark datasets are cached (git-ignored, never committed).
+EVAL_DATA_DIR = os.environ.get('EVAL_DATA_DIR', 'Backend/.eval_data/')
 
 
 # ==================== Context curation ====================

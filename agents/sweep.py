@@ -143,7 +143,7 @@ def fire(trigger, now: datetime | None = None) -> str:
     Run one trigger's agent, and report what happened in a word.
 
     Returns one of `fired`, `queued`, `dropped`, `skipped`, `late`, `busy`,
-    `waiting`, `expired`, `stopped`, `refused`, `failed` — the sweep counts
+    `waiting`, `paused`, `expired`, `stopped`, `refused`, `failed` — the sweep counts
     these, and a caller reading the counts can tell "nothing was due" apart
     from "everything was refused", which a boolean cannot. The word is also
     written to
@@ -170,6 +170,17 @@ def fire(trigger, now: datetime | None = None) -> str:
             'enabled', 'queued_for', 'last_outcome', 'last_error', 'updated_at',
         ])
         return 'expired'
+
+    # A paused agent skips its slot rather than being refused by the runtime.
+    # A refusal counts toward `MAX_CONSECUTIVE_FAILURES`, so pausing an agent
+    # for a week would switch every one of its schedules off for good, and
+    # un-pausing it would not bring them back. Any owed firing is dropped too:
+    # work deferred while paused is not work anyone asked for on resume.
+    if trigger.subagent.status in ('paused', 'archived'):
+        _clear_queue(trigger)
+        return _rearm(trigger, now, 'paused',
+                      f'The agent is {trigger.subagent.status}, so this firing '
+                      f'was skipped.')
 
     # A firing already owed from an earlier slot takes precedence over the
     # upcoming one: it is the older debt, and running both would double up.

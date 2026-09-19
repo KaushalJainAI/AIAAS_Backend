@@ -4,10 +4,16 @@ The agent's virtual filesystem: POSIX-shaped paths over the user's own tree.
 An agent needs a filesystem it can *plan* with — `/notes/draft.md`, "list what
 is in there", "write that to a file" — and this platform already has durable
 per-user storage in `Folder` + `Document`. This module is the adapter between
-the two, and it is deliberately **artificial**: `os` is never imported, nothing
-here opens a handle, and no path an agent types corresponds to any path on any
+the two, and it is deliberately **artificial**: `os` is never imported, no path
+is ever built here, and no path an agent types corresponds to any path on any
 host. The worst a traversal bug can reach is another row, never another file,
 and never the process's own disk.
+
+The one place bytes are touched is a rendered binary (`write_binary`,
+`read_image`), and it goes through the row's own `Document.file` — the storage
+an upload uses, at a path `utils.user_document_path` derives from the owner's
+id and a fresh uuid. Nothing the caller supplied reaches that path, so it adds
+a place bytes live without adding a way to name one.
 
 Three properties carry the isolation, and each is structural rather than
 checked:
@@ -52,6 +58,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
 from workflow_backend.thresholds import (
+    AGENT_FILE_BINARY_BYTES,
     AGENT_FILE_LIST_LIMIT,
     AGENT_FILE_READ_CHARS,
     AGENT_FILE_WRITE_CHARS,
@@ -91,6 +98,21 @@ _EXT_TO_TYPE = {
     'csv': 'csv',
     'html': 'html', 'htm': 'html',
 }
+
+#: Extensions whose *bytes* are the file, mapped to their `file_type`. These are
+#: produced only by `write_binary` (the office render tools, generated images):
+#: `write_file` refuses them, because a text body saved as `report.docx` is a
+#: file that downloads as a corrupt Word document and previews as nothing.
+BINARY_TYPES = {
+    'pptx': 'pptx',
+    'xlsx': 'xlsx',
+    'docx': 'docx',
+    'pdf': 'pdf',
+    'png': 'image', 'jpg': 'image', 'jpeg': 'image', 'webp': 'image', 'gif': 'image',
+}
+
+#: How many `name (n).ext` candidates `write_binary` tries before giving up.
+_FREE_NAME_TRIES = 50
 
 
 class VfsError(Exception):
@@ -528,12 +550,47 @@ def read_file(scope: FileScope, path: str, *, offset: int = 0,
             f'{remaining:,} characters remain — call read_file again with '
             f'offset={end} to continue.'
         )
-    if not body:
+    if is_binary(doc):
+        # Said up front, because the text reads like the file and is not: a
+        # model that "edits" it, or quotes it as the layout, is working from a
+        # summary. Re-rendering is how a binary changes.
+        out['binary'] = doc.file_type
+        out['note'] = (
+            f'This is a {doc.file_type} file; the content above is text '
+            f'extracted from it, not the file itself. To change it, render it '
+            f'again rather than editing this text.'
+            + (f' {out["note"]}' if 'note' in out else '')
+        )
+    elif not body:
         out['note'] = (
             'This file has no extracted text. It may be a binary upload (PDF, '
             'image) that was never processed, rather than an empty file.'
         )
     return out
+
+
+def read_image(scope: FileScope, path: str) -> tuple[bytes, str]:
+    """The bytes of one image in scope, and its rendered path.
+
+    Only for embedding — a slide's picture, a document's figure. Reached by
+    the same walk as `read_file`, so an image outside the readable subtree is
+    "no such file" exactly as a text file would be.
+    """
+    parent_parts, name = _split_leaf(scope, path)
+    folder = _folder_at(scope, parent_parts)
+    doc = _document_in(scope, folder, name)
+    shown = render(scope, parent_parts + [name])
+    if doc is None:
+        raise VfsError(f'No such image: {shown}. List the directory to see what is there.')
+    if doc.file_type != 'image' or not doc.file:
+        raise VfsError(f'{shown} is not an image file (it is {doc.file_type}).')
+    if (doc.file_size or 0) > AGENT_FILE_BINARY_BYTES:
+        raise VfsError(f'{shown} is too large to embed. Use a smaller image.')
+    with doc.file.open('rb') as handle:
+        data = handle.read(AGENT_FILE_BINARY_BYTES + 1)
+    if len(data) > AGENT_FILE_BINARY_BYTES:
+        raise VfsError(f'{shown} is too large to embed. Use a smaller image.')
+    return data, shown
 
 
 def write_file(scope: FileScope, path: str, content: str, *,
@@ -554,6 +611,7 @@ def write_file(scope: FileScope, path: str, content: str, *,
     name = safe_name(raw_name)
     if not name:
         raise VfsError(f'"{raw_name}" is not a usable file name.')
+    _refuse_binary_name(name, 'write_file')
 
     text = content if isinstance(content, str) else str(content)
     if len(text) > AGENT_FILE_WRITE_CHARS:
@@ -602,6 +660,100 @@ def write_file(scope: FileScope, path: str, content: str, *,
     }
 
 
+def write_binary(scope: FileScope, path: str, data: bytes, *, text: str = '',
+                 spec: dict | None = None, overwrite: bool = False) -> dict:
+    """Save a rendered binary — a deck, a workbook, a Word file, an image.
+
+    The bytes go to the document's `FileField` (the same storage an upload
+    uses, so `document_download` serves them unchanged) and `text` goes to
+    `content_text`, which is what keeps `find_files` and `read_file` working on
+    a file whose real contents they cannot read. `spec` is the structure that
+    produced the file; the preview renders from it, because drawing a slide
+    from its spec is possible in a browser and drawing one from `.pptx` bytes
+    is not.
+
+    **Never overwrites by accident.** A name that is taken becomes
+    `name (2).ext` and the real path is returned. `overwrite=True` replaces the
+    old file by *trashing* it, not by writing over it, so the previous version
+    is one restore away in the recycle bin — which is what makes the render
+    tools `reversible` without asking first.
+    """
+    parent_parts, raw_name = _split_leaf(scope, path)
+    # Before `_make_dirs`, for the reason `write_file` gives.
+    _require_write_at(scope, parent_parts, 'write')
+
+    name = safe_name(raw_name)
+    if not name:
+        raise VfsError(f'"{raw_name}" is not a usable file name.')
+    file_type = BINARY_TYPES.get(_extension(name))
+    if file_type is None:
+        raise VfsError(
+            f'"{name}" needs one of these extensions: '
+            f'{", ".join(sorted(BINARY_TYPES))}.'
+        )
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise VfsError('There is nothing to save — the rendered file is empty.')
+    if len(data) > AGENT_FILE_BINARY_BYTES:
+        raise VfsError(
+            f'The rendered file is {len(data) / 1_048_576:.1f} MB; the limit is '
+            f'{AGENT_FILE_BINARY_BYTES / 1_048_576:.0f} MB. Use fewer or smaller '
+            f'images, or split it into two files.'
+        )
+
+    from django.core.files.base import ContentFile
+    from django.db import transaction
+
+    from workflow_backend.thresholds import DOCUMENT_EXTRACT_CAP
+
+    folder = _make_dirs(scope, parent_parts)
+    requested = name
+    existing = _document_in(scope, folder, name)
+    replaced = False
+    if existing is not None:
+        if overwrite:
+            from . import recycle
+
+            recycle.trash(scope.user, documents=[existing])
+            replaced = True
+        else:
+            name = _free_name(scope, folder, name)
+
+    doc = Document(
+        user=scope.user,
+        folder=folder,
+        name=name,
+        file_type=file_type,
+        file_size=len(data),
+        content_text=(text or '')[:DOCUMENT_EXTRACT_CAP],
+        # Terminal and never indexed, exactly as `write_file`: producing a
+        # file must not silently start an embedding job.
+        status='stored',
+        metadata={'created_by': 'agent', **({'spec': spec} if spec else {})},
+    )
+    # Bytes first, row second, and the bytes removed if the row fails: the
+    # other order leaves a row pointing at nothing, which downloads as a 500.
+    doc.file.save(name, ContentFile(bytes(data)), save=False)
+    try:
+        with transaction.atomic():
+            doc.save()
+    except Exception:
+        doc.file.delete(save=False)
+        raise
+
+    return {
+        'path': render(scope, parent_parts + [name]),
+        'document_id': doc.id,
+        'created': not replaced,
+        'replaced': replaced,
+        # Said, so the model reports the path that exists rather than the one
+        # it asked for.
+        'renamed': name != requested,
+        'type': file_type,
+        'bytes': len(data),
+        'chars': len(doc.content_text),
+    }
+
+
 def edit_file(scope: FileScope, path: str, old_text: str, new_text: str,
               *, replace_all: bool = False) -> dict:
     """Replace an exact run of text inside one file, leaving the rest untouched.
@@ -645,6 +797,13 @@ def edit_file(scope: FileScope, path: str, old_text: str, new_text: str,
         raise VfsError(
             f'No such file: {render(scope, parent_parts + [name])}. '
             f'List the directory to see what is there.'
+        )
+
+    if is_binary(doc):
+        raise VfsError(
+            f'{render(scope, parent_parts + [name])} is a binary '
+            f'{doc.file_type} file; its text is an extract, not the file. To '
+            f'change it, render it again with the same path and overwrite=true.'
         )
 
     body = doc.content_text or ''
@@ -881,3 +1040,38 @@ def _make_dirs(scope: FileScope, parts: Sequence[str]) -> Folder | None:
 def _file_type(name: str) -> str:
     ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
     return _EXT_TO_TYPE.get(ext, 'txt')
+
+
+def _extension(name: str) -> str:
+    return name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+
+
+def is_binary(doc: Document) -> bool:
+    """A document whose bytes live in its `FileField`, not in `content_text`."""
+    return bool(doc.file) and doc.file_type in set(BINARY_TYPES.values())
+
+
+def _refuse_binary_name(name: str, tool: str) -> None:
+    ext = _extension(name)
+    if ext in BINARY_TYPES:
+        raise VfsError(
+            f'.{ext} is a binary format and {tool} stores text, so the result '
+            f'would not open. Use render_deck for .pptx, render_workbook for '
+            f'.xlsx and render_document for .docx; for plain text pick .md, '
+            f'.txt, .csv or .json.'
+        )
+
+
+def _free_name(scope: FileScope, folder: Folder | None, name: str) -> str:
+    """`name`, or the first `stem (n).ext` not already taken in `folder`."""
+    stem, dot, ext = name.rpartition('.')
+    if not dot:
+        stem, ext = name, ''
+    for n in range(2, _FREE_NAME_TRIES + 2):
+        candidate = f'{stem} ({n}).{ext}' if ext else f'{stem} ({n})'
+        if _document_in(scope, folder, candidate) is None:
+            return candidate
+    raise VfsError(
+        f'{name} and {_FREE_NAME_TRIES} numbered copies of it already exist. '
+        f'Pick a different name, or pass overwrite=true to replace it.'
+    )

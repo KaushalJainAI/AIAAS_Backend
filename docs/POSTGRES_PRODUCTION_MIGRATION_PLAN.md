@@ -78,7 +78,7 @@ flowchart LR
 ---
 
 ### Phase 2: Production Docker & Compose Configuration
-Update `docker-compose.prod.yml` (and `docker-compose.ec2.yml`) to ensure PostgreSQL and the reverse proxy correctly route inbound webhooks:
+Update `docker-compose.prod.yml` to ensure PostgreSQL and the reverse proxy correctly route inbound webhooks:
 
 1. **PostgreSQL Service**:
    ```yaml

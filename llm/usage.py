@@ -123,14 +123,18 @@ class TokenUsage:
     def __add__(self, other: TokenUsage) -> TokenUsage:
         """Fold two calls together. Used to accumulate a stream, and a run.
 
-        `reported_cost_usd` adds only when at least one side reported one;
-        summing a reported cost with a missing one as if it were zero would
-        turn a partially-reported run into a confidently understated bill.
+        `reported_cost_usd` survives only when every side that consumed tokens
+        reported one. A side with tokens and no cost is a call nobody priced,
+        and keeping the other side's figure would turn a partially reported
+        turn into a confidently understated bill: `pricing.cost_for_usage`
+        returns any reported figure as `billed`, and a chat turn is priced as
+        one summed usage, so nothing downstream could catch the gap. `None`
+        sends the whole sum to the price table instead, which covers every
+        token. An empty side (a stream chunk with no usage) carries no claim
+        either way and is ignored.
         """
         if not isinstance(other, TokenUsage):  # pragma: no cover - defensive
             return NotImplemented
-        costs = [c for c in (self.reported_cost_usd, other.reported_cost_usd)
-                 if c is not None]
         return TokenUsage(
             input=self.input + other.input,
             output=self.output + other.output,
@@ -138,7 +142,7 @@ class TokenUsage:
             cached_write=self.cached_write + other.cached_write,
             reasoning=self.reasoning + other.reasoning,
             total=self.total + other.total,
-            reported_cost_usd=sum(costs, Decimal("0")) if costs else None,
+            reported_cost_usd=_combined_cost(self, other),
         )
 
     __radd__ = __add__
@@ -160,6 +164,15 @@ class TokenUsage:
 
 
 EMPTY_USAGE = TokenUsage()
+
+
+def _combined_cost(a: TokenUsage, b: TokenUsage) -> Decimal | None:
+    """The reported cost of `a + b`, or None if any priced part is missing."""
+    parts = [u for u in (a, b)
+             if not (u.is_empty and u.reported_cost_usd is None)]
+    if not parts or any(u.reported_cost_usd is None for u in parts):
+        return None
+    return sum((u.reported_cost_usd for u in parts), Decimal("0"))
 
 
 def normalize(raw: Any, convention: Convention = DEFAULT_CONVENTION) -> TokenUsage:

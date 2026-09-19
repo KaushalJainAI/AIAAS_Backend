@@ -171,6 +171,12 @@ class TurnContext:
     #: every agent on the account, including ones holding grants it was refused.
     delegation_scope: tuple[int, ...] | None = None
 
+    #: Sites `browser_act` may act on, or None for "ask the watching human
+    #: instead" (chat). An agent run always passes a tuple — empty meaning it
+    #: may browse but not act — because this scope arrived with the tool, so
+    #: no agent predates it that an empty default would silently cut off.
+    browser_domains: tuple[str, ...] | None = None
+
     #: Which knowledge bases the KB tools may reach this turn, or None for "any
     #: the user owns". The agent runtime sets it from the builder's KB selection
     #: — which until now was read only to print names into the system prompt,
@@ -284,6 +290,13 @@ class TurnContext:
     #: write another, so one pause would reach the Inbox twice and one of the
     #: two would ignore the agent's `notifyOnHitl` setting entirely.
     approval_queue: bool = False
+
+    #: What started the run (`chat` | `orchestrator` | `trigger` | `api` |
+    #: `eval`). Tools that are safe in a watched chat turn but not from a
+    #: schedule read it — `publish_page` above `link` visibility refuses an
+    #: unattended caller rather than publishing to the open internet while
+    #: nobody is watching.
+    caller: str = 'chat'
 
     @property
     def max_tokens(self) -> int:
@@ -1053,6 +1066,91 @@ async def _on_todos(
     await sink(Event.TODOS_UPDATE, {"todos": items})
 
 
+#: How much of one edit's before/after text a file card keeps. The card shows a
+#: diff to say *what* changed; the file itself is one click away, so the record
+#: of the edit does not need to be the edit, and it rides on every reload.
+FILE_EDIT_PREVIEW_CHARS = 4000
+
+#: Edits kept per file per turn. A run that edits one file forty times needs a
+#: card saying so, not forty diffs.
+FILE_EDITS_KEPT = 5
+
+
+async def _on_file(
+    parsed: dict, args: dict, meta: dict, sink: EventSink
+) -> None:
+    """Record a file the turn wrote or edited, so the answer can point at it.
+
+    Before this, the only trace of a written file was the path the model chose
+    to repeat in its prose — inert text the user had to go and find. The tool
+    result already carries `document_id`, which is the one locator the file
+    browser accepts, so the card links by id and never has to resolve a path.
+
+    One entry per document, updated in place: a file written and then edited
+    three times is one file, and a card per call would read as four files.
+    `created` survives later edits in the same turn, because "this is new" is
+    the more useful thing to know about it.
+    """
+    doc_id = parsed.get("document_id")
+    if parsed.get("error") or not isinstance(doc_id, int):
+        return
+
+    files: list = meta.setdefault("files", [])
+    entry = next((f for f in files if f.get("document_id") == doc_id), None)
+    if entry is None:
+        entry = {"document_id": doc_id, "edits": []}
+        files.append(entry)
+
+    path = str(parsed.get("path") or "")
+    entry["path"] = path
+    entry["name"] = path.rstrip("/").rsplit("/", 1)[-1] or path
+    entry["chars"] = parsed.get("chars")
+    if parsed.get("type"):
+        # A rendered binary (`render_deck` & co.): the card shows its kind and
+        # size, since its character count is of an extract, not of the file.
+        entry["type"] = parsed["type"]
+        entry["bytes"] = parsed.get("bytes")
+
+    if "old_text" in args:
+        action = "edited"
+        if len(entry["edits"]) < FILE_EDITS_KEPT:
+            entry["edits"].append({
+                "old": str(args.get("old_text") or "")[:FILE_EDIT_PREVIEW_CHARS],
+                "new": str(args.get("new_text") or "")[:FILE_EDIT_PREVIEW_CHARS],
+                "replacements": parsed.get("replacements", 1),
+            })
+        else:
+            entry["edits_omitted"] = entry.get("edits_omitted", 0) + 1
+    elif parsed.get("created"):
+        action = "created"
+    elif parsed.get("appended"):
+        action = "appended"
+    else:
+        action = "updated"
+    if entry.get("action") != "created":
+        entry["action"] = action
+
+    await sink(Event.FILES_UPDATE, {"files": files})
+
+
+async def _on_generated(
+    parsed: dict, args: dict, meta: dict, sink: EventSink
+) -> None:
+    """A generated image: a file card, plus the money it cost.
+
+    The cost is kept on the message's metadata so the turn's price includes it
+    (`pipeline` adds `tool_costs` to the model calls' cost). The agent runtime
+    reads the same figure back from the step row instead.
+    """
+    await _on_file(parsed, args, meta, sink)
+    if parsed.get("cost_usd") and not parsed.get("error"):
+        meta.setdefault("tool_costs", []).append({
+            "tool": "generate_image",
+            "cost_usd": str(parsed["cost_usd"]),
+            "cost_source": parsed.get("cost_source") or "estimated",
+        })
+
+
 #: tool name → side effect applied to metadata / streamed to the client.
 #: The model always gets the raw tool output regardless; these only drive the UI.
 _SIDE_EFFECTS = {
@@ -1066,6 +1164,12 @@ _SIDE_EFFECTS = {
     "deep_research": _on_deep_research,
     "update_todos": _on_todos,
     "render_chart": _on_chart,
+    "write_file": _on_file,
+    "edit_file": _on_file,
+    "render_deck": _on_file,
+    "render_workbook": _on_file,
+    "render_document": _on_file,
+    "generate_image": _on_generated,
 }
 
 
@@ -1200,8 +1304,12 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # than its own, which makes delegation a way to reach a tool you were
         # not given. None is unrestricted, as everywhere else.
         "delegation_scope": turn.delegation_scope,
+        "browser_domains": turn.browser_domains,
         # Extra archives the retrieval tools may read — a worker's parent.
         "archive_scopes": turn.archive_scopes,
+        # Who started the run. `publish_page` refuses above-`link`
+        # visibilities from unattended callers.
+        "caller": turn.caller,
     }
     # Per-call, filled in just before dispatch below. A tool that starts other
     # runs (`invoke_subagent`, `run_agent`) needs to name the step that invoked
@@ -1902,10 +2010,18 @@ async def approve_tool_call(
         # the resume the user actually asked for.
         logger.exception("[HITL] Could not store the standing allowance")
     logger.info("[HITL] Approved %s on thread %s", call_id, thread_id)
+    try:
+        if user_id is not None:
+            from logs.signals_api import arecord_signal
+
+            await arecord_signal(user_id, 'approval_granted',
+                                 detail={'tool': tool_name or '', 'scope': scope})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def reject_tool_call(
-    thread_id: str, call_id: str, *, reason: str = "",
+    thread_id: str, call_id: str, *, reason: str = "", user_id: int | None = None,
 ) -> bool:
     """
     Record a refusal so the paused run can resume *past* the call it asked for.
@@ -1933,6 +2049,15 @@ async def reject_tool_call(
     meta["rejected_tool_calls"] = rejected
     await get_graph().aupdate_state(config, {"metadata": meta})
     logger.info("[HITL] Rejected %s on thread %s", call_id, thread_id)
+    try:
+        if user_id is not None:
+            from logs.signals_api import arecord_signal
+
+            tool_name = _pending_tool_name(snapshot, call_id) or ''
+            await arecord_signal(user_id, 'approval_rejected',
+                                 detail={'tool': tool_name})
+    except Exception:  # noqa: BLE001
+        pass
     return True
 
 
@@ -2032,7 +2157,8 @@ async def run_turn(
 
 
 async def suggest_follow_ups(
-    turn: TurnContext, *, question: str, answer: str, limit: int = 3
+    turn: TurnContext, *, question: str, answer: str, limit: int = 3,
+    usage_sink: list[TokenUsage] | None = None,
 ) -> list[str]:
     """
     Ask for follow-up questions in a separate, cheap call.
@@ -2041,6 +2167,10 @@ async def suggest_follow_ups(
     long markdown reply in JSON just to carry three questions is what made the
     answer impossible to stream token-by-token; this costs one small call after
     the user is already reading.
+
+    Cheap is not free: it runs on the user's own model, so its usage is handed
+    back through `usage_sink` for the turn's cost. It used to be dropped, which
+    made every conversation's cost figure leave out one call per answer.
     """
     if len(answer.strip()) < 200:
         return []
@@ -2067,6 +2197,8 @@ async def suggest_follow_ups(
         logger.info("[FollowUps] Skipped: %s", exc)
         return []
 
+    if usage_sink is not None:
+        usage_sink.append(completion.usage)
     return _parse_follow_ups(completion.content, limit)
 
 

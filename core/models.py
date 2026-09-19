@@ -343,9 +343,13 @@ class PasswordOTP(models.Model):
 
     PURPOSE_PASSWORD_RESET = 'password_reset'
     PURPOSE_PASSWORD_CHANGE = 'password_change'
+    #: Proves the user owns an address before it becomes their sign-in and
+    #: reset address. The code goes to `target_email`, not the current one.
+    PURPOSE_EMAIL_CHANGE = 'email_change'
     PURPOSE_CHOICES = [
         (PURPOSE_PASSWORD_RESET, 'Password Reset'),
         (PURPOSE_PASSWORD_CHANGE, 'Password Change'),
+        (PURPOSE_EMAIL_CHANGE, 'Email Change'),
     ]
     MAX_FAILED_ATTEMPTS = 5
 
@@ -361,6 +365,9 @@ class PasswordOTP(models.Model):
     expires_at = models.DateTimeField()
     is_used = models.BooleanField(default=False)
     failed_attempts = models.PositiveIntegerField(default=0)
+    #: For `email_change` only: the address being verified, which the code was
+    #: sent to and which becomes `user.email` once it is confirmed.
+    target_email = models.EmailField(blank=True, default='')
 
     class Meta:
         ordering = ['-created_at']

@@ -24,7 +24,7 @@ SUITE = {
                 {'type': 'contains', 'value': 'benchmark-ok-7731'},
                 {'type': 'no_error'},
             ],
-            'tags': ['write', 'read'],
+            'tags': ['write', 'read', 'smoke'],
         },
         {
             'name': 'Edit in place',
@@ -38,7 +38,7 @@ SUITE = {
                 {'type': 'contains', 'value': 'mode=final'},
                 {'type': 'contains', 'value': 'retries=3'},
             ],
-            'tags': ['edit'],
+            'tags': ['edit', 'smoke'],
         },
         {
             'name': 'Find by content',

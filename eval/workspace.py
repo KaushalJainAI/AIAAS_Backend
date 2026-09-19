@@ -21,7 +21,10 @@ first benchmark's file suite once read a sibling case's output.
 **Graded on what is there afterwards.** `snapshot` reads every document under
 `root` and the `watch` paths into a flat `{path: text}` map that becomes
 `GradeContext.files`. Graders stay pure: they never touch the database, they
-read the snapshot — the same rule as the rest of `graders.py`.
+read the snapshot — the same rule as the rest of `graders.py`. Rendered
+binaries (a deck, a workbook, a Word file) are also read as bytes by
+`snapshot_binaries`, into `GradeContext.binaries`, because their text extract
+cannot say whether a chart exists or a cell is a formula.
 
 **Where the agent sees it.** A `scoped` agent's filesystem is rooted at its home,
 so the workspace is `/work/...`; every other mode sees the whole tree, so it is
@@ -113,8 +116,8 @@ def _prepare_sync(user, agent, spec: dict) -> str:
     return visible_root(agent, home.name, root)
 
 
-def _snapshot_sync(user, agent, spec: dict) -> dict[str, str]:
-    """`{path: text}` for every file under the workspace and the watch paths.
+def _documents(user, agent, spec: dict):
+    """`(key, document)` for every file under the workspace and the watch paths.
 
     Keys under `root` are relative to it (`summary.csv`, `replies/T-1.md`); keys
     under a watch path are home-relative and prefixed `~/` (`~/shared/x.csv`),
@@ -126,7 +129,6 @@ def _snapshot_sync(user, agent, spec: dict) -> dict[str, str]:
 
     home = _home(user, agent)
     root = spec['root'].strip('/')
-    out: dict[str, str] = {}
     for rel, prefix in [(root, ''), *((w.strip('/'), f'~/{w.strip("/")}/') for w in spec.get('watch', []))]:
         base = _folder_at(user, _abs(home.name, rel))
         if base is None:
@@ -136,8 +138,26 @@ def _snapshot_sync(user, agent, spec: dict) -> dict[str, str]:
                     .select_related('folder')):
             folder_path = fs.name_path(doc.folder)
             sub = folder_path[len(base_path):].strip('/')
-            key = f'{sub}/{doc.name}' if sub else doc.name
-            out[prefix + key] = (doc.content_text or '')[:SNAPSHOT_FILE_CHARS]
+            yield prefix + (f'{sub}/{doc.name}' if sub else doc.name), doc
+
+
+def _snapshot_sync(user, agent, spec: dict) -> dict[str, str]:
+    """`{path: text}` for every file under the workspace and the watch paths."""
+    return {key: (doc.content_text or '')[:SNAPSHOT_FILE_CHARS]
+            for key, doc in _documents(user, agent, spec)}
+
+
+def _snapshot_binaries_sync(user, agent, spec: dict) -> dict[str, bytes]:
+    """`{path: bytes}` for every rendered binary, keyed like `_snapshot_sync`."""
+    from inference.vfs import is_binary
+    from workflow_backend.thresholds import AGENT_FILE_BINARY_BYTES
+
+    out: dict[str, bytes] = {}
+    for key, doc in _documents(user, agent, spec):
+        if not is_binary(doc):
+            continue
+        with doc.file.open('rb') as handle:
+            out[key] = handle.read(AGENT_FILE_BINARY_BYTES)
     return out
 
 
@@ -150,4 +170,9 @@ async def snapshot(user, agent, spec: dict) -> dict[str, str]:
     return await sync_to_async(_snapshot_sync)(user, agent, spec)
 
 
-__all__ = ['WORKSPACE_KEY', 'prepare', 'snapshot', 'spec_for', 'visible_root']
+async def snapshot_binaries(user, agent, spec: dict) -> dict[str, bytes]:
+    return await sync_to_async(_snapshot_binaries_sync)(user, agent, spec)
+
+
+__all__ = ['WORKSPACE_KEY', 'prepare', 'snapshot', 'snapshot_binaries', 'spec_for',
+           'visible_root']

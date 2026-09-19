@@ -66,6 +66,19 @@ def _repair_research(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _repair_files(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept the near-misses a model produces for file output."""
+    if 'summary' not in payload:
+        for alias in ('text', 'content', 'answer'):
+            if alias in payload:
+                payload['summary'] = payload.pop(alias)
+                break
+    files = payload.get('files')
+    if isinstance(files, str):
+        payload['files'] = [files]
+    return payload
+
+
 RESEARCH = Contract(
     name='research',
     instruction=(
@@ -95,8 +108,24 @@ EXTRACTION = Contract(
     optional={'fields': [], 'notes': '', 'type': 'extraction'},
 )
 
+FILES = Contract(
+    name='files',
+    instruction=(
+        'Return your final answer as a single JSON object and nothing else, '
+        'with these keys:\n'
+        '  "summary" — what you produced, in two or three sentences\n'
+        '  "files"   — the workspace paths you wrote, as a list '
+        '(e.g. ["/Agents/Analyst/q3-sales.xlsx"])\n'
+        'Do not wrap it in a code fence. Do not paste file contents back; '
+        'the user opens them as file cards.'
+    ),
+    required=('summary', 'files'),
+    optional={'type': 'files'},
+    repair=_repair_files,
+)
+
 #: Name -> contract. Closed on purpose; see the module docstring.
-CONTRACTS: dict[str, Contract] = {c.name: c for c in (RESEARCH, EXTRACTION)}
+CONTRACTS: dict[str, Contract] = {c.name: c for c in (RESEARCH, EXTRACTION, FILES)}
 
 
 def get(name: str) -> Contract | None:

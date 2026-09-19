@@ -67,6 +67,7 @@ agent_scorecard = queries.agent_scorecard
 run_page = queries.run_page
 run_with_results = queries.run_with_results
 suite_health = queries.suite_health
+baseline_for = queries.baseline_for
 
 
 def list_graders() -> list[dict[str, Any]]:
@@ -157,5 +158,5 @@ __all__ = [
     'recompute', 'record_review',
     # reads
     'agent_scorecard', 'review_queue', 'reviewable_result', 'run_page',
-    'run_with_results', 'suite_health',
+    'run_with_results', 'suite_health', 'baseline_for',
 ]

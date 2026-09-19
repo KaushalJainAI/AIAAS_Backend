@@ -18,7 +18,8 @@ in-process — if the sidecar is down, a run fails loudly rather than quietly
 dropping to the weaker engine.
 
 Both engines return the same envelope: ``success``, ``result``, ``output``,
-``stderr``, ``error``, ``timed_out``.
+``stderr``, ``error``, ``timed_out`` — plus ``files_out`` (``{name: bytes}``),
+``missing`` and ``unsaved`` when ``collect`` is given.
 """
 from __future__ import annotations
 
@@ -29,11 +30,23 @@ def _engine() -> str:
     return getattr(settings, "SANDBOX_ENGINE", "inprocess")
 
 
-async def arun_code(code: str) -> dict:
-    """Execute `code` through the configured engine. Async."""
+async def arun_code(
+    code: str,
+    *,
+    files: dict[str, bytes] | None = None,
+    collect: tuple[str, ...] | list[str] = (),
+) -> dict:
+    """Execute `code` through the configured engine. Async.
+
+    `files` are inputs written into the run's ephemeral cwd before the child
+    starts (`{bare name: bytes}`); `collect` names the outputs to read back
+    afterwards. Both engines share the envelope so callers treat them the
+    same; the sidecar enforces its own caps and the in-process engine mirrors
+    them. There is no fallback between engines — see the module docstring.
+    """
     if _engine() == "service":
         from .service_client import run_via_service
-        return await run_via_service(code)
+        return await run_via_service(code, files=files, collect=collect)
 
     from asgiref.sync import sync_to_async
     from .safe_execution import get_sandbox
@@ -41,6 +54,8 @@ async def arun_code(code: str) -> dict:
     # The in-process engine joins a worker thread; keep the event loop free.
     # Not thread_sensitive: it touches no ORM and must not queue behind the
     # request's own executor.
-    outcome = await sync_to_async(get_sandbox().execute, thread_sensitive=False)(code)
+    outcome = await sync_to_async(get_sandbox().execute, thread_sensitive=False)(
+        code, files=files, collect=collect
+    )
     outcome.setdefault("timed_out", False)
     return outcome

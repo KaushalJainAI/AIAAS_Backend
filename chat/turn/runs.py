@@ -163,6 +163,13 @@ def finish(run: ChatRun, status: RunStatus, error: str | None = None) -> None:
     if leftovers := steering.drain_messages(run.key):
         logger.info("[Run] Returning %d unread steer(s) for session %s", len(leftovers), run.key)
         run._append(Event.STEERS_RETURNED, {"messages": leftovers})
+        try:
+            from logs.signals_api import record_signal
+
+            record_signal(run.user_id, 'steers_returned', session_id=run.key,
+                          detail={'count': len(leftovers)})
+        except Exception:  # noqa: BLE001
+            pass
     for queue in run.listeners:
         queue.put_nowait(_SENTINEL)
     _arm_gc(run)

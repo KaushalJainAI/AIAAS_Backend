@@ -63,17 +63,32 @@ def needs_review(policy: str, *, auto_passed, score: float,
         return picked, 'sampled for review' if picked else ''
 
     if policy == 'disagreement':
+        from . import graders as _graders
+
         entries = grades or []
-        verdicts = {bool(g.get('passed')) for g in entries}
-        if len(verdicts) > 1:
-            return True, 'graders disagreed with each other'
+        # Split judge verdicts from deterministic ones. A `calls_model` grader
+        # counts as judge — read the registry, do not hard-code the name.
+        judge_passed: list[bool] = []
+        judge_scores: list[float] = []
+        deterministic_passed: list[bool] = []
         for g in entries:
-            if g.get('type') == 'llm_judge':
-                judged = float(g.get('score') or 0.0)
-                if UNCERTAIN_BAND[0] <= judged <= UNCERTAIN_BAND[1]:
-                    return True, 'the judge was uncertain'
-        if UNCERTAIN_BAND[0] <= float(score or 0.0) <= UNCERTAIN_BAND[1]:
-            return True, 'the score was borderline'
+            declared = _graders.REGISTRY.get(g.get('type', ''))
+            if declared is not None and declared.calls_model:
+                judge_passed.append(bool(g.get('passed')))
+                try:
+                    judge_scores.append(float(g.get('score') or 0.0))
+                except (TypeError, ValueError):
+                    judge_scores.append(0.0)
+            else:
+                deterministic_passed.append(bool(g.get('passed')))
+        if judge_passed and deterministic_passed:
+            judge_all = all(judge_passed)
+            det_all = all(deterministic_passed)
+            if judge_all != det_all:
+                return True, 'the judge and the exact checks disagree'
+        for judged in judge_scores:
+            if UNCERTAIN_BAND[0] <= judged <= UNCERTAIN_BAND[1]:
+                return True, 'the judge was uncertain'
         return False, ''
 
     logger.warning('[Eval] unknown supervision policy %r; not queueing', policy)

@@ -39,6 +39,7 @@ from .research import SUITE as RESEARCH
 from .work_analyst import SUITE as WORK_ANALYST
 from .work_docs import SUITE as WORK_DOCS
 from .work_long import SUITE as WORK_LONG
+from .work_office import SUITE as WORK_OFFICE
 from .work_ops import SUITE as WORK_OPS
 from .work_research import SUITE as WORK_RESEARCH
 
@@ -49,5 +50,6 @@ ALL_SUITES = [INSTRUCTIONS, RESEARCH, DATA_ANALYSIS, FILES, *PLANNING, *GUARDRAI
 #: The harder, realistic tier (2026-09-17): multi-file workspaces graded on the
 #: files produced, each case repeated to measure reliability. Kept as its own
 #: group so `--group work` runs exactly these; guard-work is still a guardrail.
-WORK_SUITES = [WORK_ANALYST, WORK_OPS, WORK_DOCS, WORK_RESEARCH, WORK_LONG, GUARD_WORK]
+WORK_SUITES = [WORK_ANALYST, WORK_OPS, WORK_DOCS, WORK_RESEARCH, WORK_LONG, WORK_OFFICE,
+               GUARD_WORK]
 ALL_SUITES += WORK_SUITES

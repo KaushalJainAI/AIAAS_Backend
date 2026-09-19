@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import folder_views, views
+from . import folder_views, page_views, views
 
 app_name = 'inference'
 
@@ -26,4 +26,18 @@ urlpatterns = [
     # RAG
     path('rag/search/', views.rag_search, name='rag_search'),
     path('rag/query/', views.rag_query, name='rag_query'),
+
+    # Hosted pages — snapshots of outputs shareable by link.
+    path('pages/', page_views.page_list, name='page_list'),
+    path('pages/<slug:slug>/', page_views.page_detail, name='page_detail'),
+    path('pages/<slug:slug>/download/', page_views.page_download,
+         name='page_download'),
+
+    # The public pair: the third unauthenticated surface in the product.
+    # Every refusal is the same 404; see page_views for why.
+    path('public/pages/', page_views.public_page_list, name='public_page_list'),
+    path('public/pages/<slug:slug>/', page_views.public_page_detail,
+         name='public_page_detail'),
+    path('public/pages/<slug:slug>/download/', page_views.public_page_download,
+         name='public_page_download'),
 ]

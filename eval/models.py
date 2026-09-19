@@ -101,6 +101,14 @@ class EvalSuite(models.Model):
         default=2, validators=[MinValueValidator(1)],
         help_text='Cases run in parallel. Capped by EVAL_MAX_CONCURRENCY.',
     )
+    #: Sweep cost ceiling in rupees (null = unlimited). Checked in
+    #: `runner._run_case` after acquiring the semaphore: a benchmark must never
+    #: exhaust a user's real agent budget, so eval spend is excluded from the
+    #: agent spend cap and bounded here instead.
+    max_cost_rupees = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text='Sweep cost ceiling in rupees (agent + judge). Null = unlimited.',
+    )
 
     tags = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
@@ -234,6 +242,16 @@ class EvalRun(models.Model):
     duration_ms = models.IntegerField(
         null=True, blank=True, validators=[MinValueValidator(0)],
     )
+    #: Accepted as the reference score for (suite, provider/model). Set by
+    #: `manage.py benchmark accept`; one baseline set per suite+model.
+    is_baseline = models.BooleanField(default=False, db_index=True)
+    #: `agent` or `bare` (the platform-tax control). Stored so a report can say
+    #: which half of an external comparison a run belongs to.
+    mode = models.CharField(
+        max_length=8,
+        choices=[('agent', 'Agent'), ('bare', 'Bare model')],
+        default='agent',
+    )
 
     error_message = models.TextField(blank=True)
     notes = models.TextField(blank=True)
@@ -320,6 +338,13 @@ class EvalResult(models.Model):
     )
 
     tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    #: What the `llm_judge` calls for this case cost. The agent answer is
+    #: priced on its `ExecutionLog`; the judge was billed to the same key but
+    #: no run recorded it — so it is recorded here and summed in `_finish`.
+    judge_tokens = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    judge_cost_usd = models.DecimalField(
+        max_digits=12, decimal_places=6, null=True, blank=True,
+    )
     duration_ms = models.IntegerField(
         null=True, blank=True, validators=[MinValueValidator(0)],
     )
@@ -358,6 +383,43 @@ class EvalResult(models.Model):
         if review is not None and review.verdict in ('pass', 'fail'):
             return 1.0 if review.verdict == 'pass' else 0.0
         return self.auto_score
+
+
+class JudgeCalibration(models.Model):
+    """How the `llm_judge` scores against known labels.
+
+    Platform-wide (not per user): the judge model is shared, so its agreement
+    rate is read-only for everyone. `source='handwritten'` is the 30-row
+    hand-built set; `source='gold'` rows come from external datasets with gold
+    answers (Phase 8.1).
+    """
+
+    SOURCE_CHOICES = [
+        ('handwritten', 'Hand-written'),
+        ('gold', 'Gold answers'),
+    ]
+
+    judge_provider = models.CharField(max_length=30, default='openrouter')
+    judge_model = models.CharField(max_length=200, blank=True)
+    n = models.IntegerField(default=0)
+    agreement = models.FloatField(default=0.0)
+    false_pass_rate = models.FloatField(default=0.0)
+    false_fail_rate = models.FloatField(default=0.0)
+    details = models.JSONField(default=list, blank=True)
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES, default='handwritten')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Judge calibration'
+        verbose_name_plural = 'Judge calibrations'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['source', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.source} {self.judge_model}: {self.agreement:.0%}'
 
 
 class EvalReview(models.Model):

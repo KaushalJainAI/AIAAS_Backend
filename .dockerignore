@@ -68,3 +68,6 @@ Thumbs.db
 *.tar.gz
 *.bak
 *.backup
+
+# External benchmark datasets
+.eval_data/

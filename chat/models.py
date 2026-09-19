@@ -79,6 +79,9 @@ class ChatSession(models.Model):
     #: a total that silently omits a turn is worse than an admitted gap. See
     #: `llm/pricing.py::combine_sources`.
     cost_source = models.CharField(max_length=12, blank=True, default='')
+    #: Every turn's `paid_by` if they agree, else `mixed` — a conversation that
+    #: switched from the platform key to the user's own partway through.
+    paid_by = models.CharField(max_length=12, blank=True, default='')
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -139,6 +142,12 @@ class ChatMessage(models.Model):
         max_digits=12, decimal_places=6, default=Decimal('0.000000'),
     )
     cost_source = models.CharField(max_length=12, blank=True, default='')
+    #: Whose money `cost_usd` is: `own_key` (the provider bills the user),
+    #: `platform` (the platform pays; the user is charged credits), `free`,
+    #: `local`, or `''` when it could not be told. See `llm.access.payer`.
+    #: A cost without this was read as "you were charged this", which is only
+    #: true on the user's own key.
+    paid_by = models.CharField(max_length=12, blank=True, default='')
     #: The model that produced this message. Recorded per message, not read off
     #: the session, because the session's model is *current* configuration and
     #: this is a fact about the past — switching model must not retroactively

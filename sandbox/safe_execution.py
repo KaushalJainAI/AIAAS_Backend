@@ -139,9 +139,14 @@ class SafeCodeValidator(ast.NodeVisitor):
     - Attribute access to dangerous objects
     """
     
-    def __init__(self):
+    def __init__(self, *, allow_open: bool = False):
         self.errors: list[str] = []
         self.warnings: list[str] = []
+        # `open` is blocked by default (no filesystem in the sandbox) and
+        # allowed only for a run that was handed files: the file bridge gives
+        # the snippet one ephemeral directory and a confined `open` that can
+        # reach nothing else. See `CodeSandbox.execute(files=...)`.
+        self.allow_open = allow_open
     
     def validate(self, code: str) -> tuple[bool, list[str]]:
         """
@@ -182,7 +187,7 @@ class SafeCodeValidator(ast.NodeVisitor):
         # Check for dangerous function calls
         if isinstance(node.func, ast.Name):
             name = node.func.id
-            if name in BLOCKED_BUILTINS:
+            if name in BLOCKED_BUILTINS and not (name == 'open' and self.allow_open):
                 self.errors.append(f"Call to '{name}()' is not allowed")
         
         elif isinstance(node.func, ast.Attribute):
@@ -211,6 +216,87 @@ class SafeCodeValidator(ast.NodeVisitor):
             self.errors.append(f"Access to '{node.attr}' is not allowed")
         
         self.generic_visit(node)
+
+
+# ======================== File bridge (dev) ========================
+# Mirrors `sandbox_service/executor.py`'s contract so the two engines stay
+# interchangeable: inputs are written into an ephemeral cwd before the run,
+# only declared outputs are read back, names are bare file names. Weaker
+# isolation by construction (same process), dev fallback only.
+
+import os as _os
+import re as _re
+import shutil as _shutil
+import stat as _stat
+import tempfile as _tempfile
+
+#: Keep in step with the sidecar: 10 files each way, 16 MB each.
+_INPROC_MAX_FILES = 10
+_INPROC_MAX_FILE_BYTES = 16 * 1024 * 1024
+_NAME_RE = _re.compile(r'^(?!\.)[^/\\\x00]{1,128}$')
+
+
+class FileSpecError(ValueError):
+    """An input or output name the dev engine refuses before running."""
+
+
+def _check_name(name: str) -> str:
+    if not isinstance(name, str) or not _NAME_RE.match(name) or name in ('.', '..'):
+        raise FileSpecError(f'{name!r} is not a plain file name.')
+    return name
+
+
+def _confined_open(workdir: str):
+    """An `open` that can reach only bare names inside `workdir`.
+
+    No chdir (which would move the whole process), no absolute paths, no
+    `..`, no hidden files: the snippet names a file and gets that file in its
+    own directory. Anything else raises rather than escaping. `pandas` and
+    `csv` both go through builtins `open`, so confining this one function
+    confines them too.
+    """
+    real_open = open
+
+    def _open(file, mode='r', *args, **kwargs):
+        name = _os.fspath(file) if not isinstance(file, str) else file
+        if not isinstance(name, str):
+            raise FileNotFoundError(f'{file!r} is not a plain file name.')
+        # Normalise separators the way `vfs.segments` does, then refuse
+        # anything that is not one bare segment.
+        candidate = name.replace('\\', '/')
+        if '/' in candidate or candidate in ('.', '..') or not _NAME_RE.match(candidate):
+            raise FileNotFoundError(
+                f'{name!r} is not available here. Use a plain file name '
+                f'from the inputs or outputs.'
+            )
+        return real_open(_os.path.join(workdir, candidate), mode, *args, **kwargs)
+
+    return _open
+
+
+def _collect_inproc(workdir: str, collect: list[str], inputs: set[str]) -> dict:
+    out: dict[str, bytes] = {}
+    missing: list[str] = []
+    for name in collect:
+        path = _os.path.join(workdir, name)
+        try:
+            info = _os.lstat(path)
+        except FileNotFoundError:
+            missing.append(name)
+            continue
+        if not _stat.S_ISREG(info.st_mode) or info.st_size > _INPROC_MAX_FILE_BYTES:
+            missing.append(name)
+            continue
+        with open(path, 'rb') as handle:
+            out[name] = handle.read(_INPROC_MAX_FILE_BYTES + 1)
+    try:
+        entries = _os.listdir(workdir)
+    except OSError:
+        entries = []
+    unsaved = sorted(
+        e for e in entries if e not in out and e not in inputs and e not in missing
+    )
+    return {"files_out": out, "missing": missing, "unsaved": unsaved[:20]}
 
 
 # ======================== Sandbox Execution ========================
@@ -296,15 +382,18 @@ class CodeSandbox:
         
         return safe_globals
     
-    def validate(self, code: str) -> tuple[bool, list[str]]:
+    def validate(self, code: str, *, allow_open: bool = False) -> tuple[bool, list[str]]:
         """Validate code before execution."""
-        return self.validator.validate(code)
+        return SafeCodeValidator(allow_open=allow_open).validate(code)
     
     def execute(
         self,
         code: str,
         context: dict | None = None,
         timeout: int | None = None,
+        *,
+        files: dict[str, bytes] | None = None,
+        collect: tuple[str, ...] | list[str] = (),
     ) -> dict[str, Any]:
         """
         Execute code in sandbox.
@@ -313,32 +402,64 @@ class CodeSandbox:
             code: Python code to execute
             context: Variables to make available
             timeout: Execution timeout (seconds)
+            files: inputs written into the run's own directory (`{name: bytes}`)
+            collect: output names to read back from that directory
             
         Returns:
-            Dict with 'result', 'output', 'error' keys
+            Dict with 'result', 'output', 'error' keys — plus `files_out`,
+            `missing` and `unsaved` when `collect` is given.
         """
         import io
         from contextlib import redirect_stdout, redirect_stderr
+
+        files = dict(files or {})
+        collect = list(dict.fromkeys(collect or ()))
+        wants_files = bool(files) or bool(collect)
+        if len(files) > _INPROC_MAX_FILES or len(collect) > _INPROC_MAX_FILES:
+            return {
+                'success': False,
+                'error': f'At most {_INPROC_MAX_FILES} input and {_INPROC_MAX_FILES} output files per run.',
+                'result': None,
+            }
+        try:
+            for name, data in files.items():
+                _check_name(name)
+                if len(data) > _INPROC_MAX_FILE_BYTES:
+                    raise FileSpecError(f'{name} is over the file limit.')
+            for name in collect:
+                _check_name(name)
+        except FileSpecError as exc:
+            return {'success': False, 'error': str(exc), 'result': None}
         
-        # Validate first
-        is_safe, errors = self.validate(code)
+        # Validate first (allow `open` only when files are in play).
+        is_safe, errors = self.validate(code, allow_open=wants_files)
         if not is_safe:
             return {
                 'success': False,
                 'error': f"Code validation failed: {'; '.join(errors)}",
                 'result': None,
             }
-        
-        # Prepare execution environment
-        safe_globals = self._create_safe_globals(context)
-        safe_locals = {}
-        
+
+        workdir = _tempfile.mkdtemp(prefix="sbx-") if wants_files else None
         # Capture output
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
-        
+
         try:
-            
+            if workdir is not None:
+                for name, data in files.items():
+                    with open(_os.path.join(workdir, name), 'wb') as handle:
+                        handle.write(data)
+
+            # Prepare execution environment
+            safe_globals = self._create_safe_globals(context)
+            if workdir is not None:
+                # The one filesystem the snippet may touch: its own directory.
+                safe_globals['__builtins__'] = {
+                    **self._safe_builtins, 'open': _confined_open(workdir),
+                }
+            safe_locals = {}
+
             class SandboxThread(threading.Thread):
                 def __init__(self, code_obj, glbs, lcls):
                     super().__init__(daemon=True)
@@ -402,13 +523,16 @@ class CodeSandbox:
             # Get result (last expression or 'result' variable)
             result = safe_locals.get('result', safe_locals.get('output'))
             
-            return {
+            out = {
                 'success': True,
                 'result': result,
                 'output': stdout_capture.getvalue(),
                 'stderr': stderr_capture.getvalue(),
                 'locals': {k: v for k, v in safe_locals.items() if not k.startswith('_')},
             }
+            if collect and workdir is not None:
+                out.update(_collect_inproc(workdir, collect, set(files)))
+            return out
             
         except Exception as e:
             return {
@@ -418,6 +542,9 @@ class CodeSandbox:
                 'output': stdout_capture.getvalue(),
                 'stderr': stderr_capture.getvalue(),
             }
+        finally:
+            if workdir is not None:
+                _shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _stop_thread(thread, grace: float = 1.0) -> bool:
@@ -520,11 +647,17 @@ def get_sandbox() -> CodeSandbox:
     return _sandbox
 
 
-def safe_execute(code: str, context: dict | None = None) -> dict:
+def safe_execute(
+    code: str,
+    context: dict | None = None,
+    *,
+    files: dict[str, bytes] | None = None,
+    collect: tuple[str, ...] | list[str] = (),
+) -> dict:
     """Convenience wrapper around the in-process engine.
 
     Production code should go through `sandbox.engine.arun_code`, which selects
     the hardened sidecar when configured. This stays for the in-process path and
     any synchronous caller.
     """
-    return get_sandbox().execute(code, context)
+    return get_sandbox().execute(code, context, files=files, collect=collect)

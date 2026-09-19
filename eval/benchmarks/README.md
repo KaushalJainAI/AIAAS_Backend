@@ -45,6 +45,22 @@ python manage.py benchmark run --user you@example.com --model meta/muse-spark-1.
 
 # Rebuild the scorecard from the latest runs (e.g. after reviewing results in the UI)
 python manage.py benchmark report --user you@example.com
+
+# Deploy gate (deterministic smoke tier, < 5 min, < $0.05)
+python manage.py benchmark run --tier smoke --gate --user you@example.com
+
+# Baselines: accept the latest runs as the reference, then compare later runs
+python manage.py benchmark accept --user you@example.com
+python manage.py benchmark run --user you@example.com  # scorecard shows vs-baseline
+
+# Judge calibration (paid, ~$0.05 — ask first)
+python manage.py benchmark calibrate --user you@example.com [--source handwritten|gold|all]
+
+# External datasets (seeded samples, ≤ $1 each by default; never committed)
+python manage.py benchmark external --slug ifeval
+python manage.py benchmark external --slug ifeval --sample 30 --seed 0
+python manage.py benchmark run --group external --user you@example.com
+python manage.py benchmark run --group external --bare --user you@example.com  # + platform-tax control
 ```
 
 `--user` is the account that owns the benchmark agents **and pays for the

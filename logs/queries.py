@@ -71,8 +71,12 @@ def _user_executions(user, *, days: int | None = None) -> QuerySet:
 # ======================== Insights ========================
 
 def execution_statistics(user, *, days: int, agent_id: int | None = None) -> dict[str, Any]:
-    """Run counts, success rate and daily trend over the last `days`."""
-    qs = _user_executions(user, days=days)
+    """Run counts, success rate and daily trend over the last `days`.
+
+    Eval sweeps (`caller='eval'`) are excluded: they are benchmark traffic, not
+    user runs, and counting them would inflate runs and spend on the agent.
+    """
+    qs = _user_executions(user, days=days).exclude(caller='eval')
     if agent_id:
         qs = qs.filter(subagent_id=agent_id)
 
@@ -131,14 +135,14 @@ def agent_metrics(user, agent_id: int) -> dict[str, Any] | None:
     if agent is None:
         return None
 
-    executions = ExecutionLog.objects.filter(subagent=agent)
+    executions = ExecutionLog.objects.filter(subagent=agent).exclude(caller='eval')
     total = executions.count()
     completed = executions.filter(status='completed').count()
     aggregates = executions.aggregate(
         avg_duration=Avg('duration_ms'), total_tokens=Sum('tokens_used')
     )
 
-    steps = AgentStep.objects.filter(execution__subagent=agent)
+    steps = AgentStep.objects.filter(execution__subagent=agent).exclude(execution__caller='eval')
     tool_stats = steps.values('tool').annotate(
         total=Count('id'), success=Count('id', filter=Q(status='completed'))
     )
@@ -175,8 +179,65 @@ def agent_metrics(user, agent_id: int) -> dict[str, Any] | None:
     }
 
 
+def _source_of(total: int, unpriced: int, billed: int) -> str:
+    """The honest label for a sum of `total` runs, from two counts.
+
+    `combine_sources` needs every part; a GROUP BY hands back counts, so this
+    applies the same rule to them: any unpriced part makes the sum unpriced,
+    and only a sum that is billed throughout is billed. `by_workflow` used to
+    label every priced agent `estimated`, including ones OpenRouter had billed.
+    """
+    if not total:
+        return 'unpriced'
+    if unpriced:
+        return 'unpriced'
+    return 'billed' if billed == total else 'estimated'
+
+
+def _chat_spend(user, *, days: int) -> dict[str, Any]:
+    """What conversations cost, which Insights used to leave out entirely.
+
+    Chat is priced per message (`ChatMessage.cost_usd`), not per run, so it
+    has no `ExecutionLog` and none of the sums above could see it — for most
+    users that was most of their spend. Only assistant rows carry a cost.
+    """
+    from chat.models import ChatMessage
+
+    rows = ChatMessage.objects.filter(
+        session__user=user, role='assistant', created_at__gte=_since(days),
+    )
+    agg = rows.aggregate(
+        cost=Sum('cost_usd'),
+        tokens=Sum('input_tokens'),
+        output=Sum('output_tokens'),
+        total=Count('id'),
+        unpriced=Count('id', filter=Q(cost_source__in=('', 'unpriced'))),
+        billed=Count('id', filter=Q(cost_source='billed')),
+        platform=Count('id', filter=Q(paid_by='platform')),
+        own_key=Count('id', filter=Q(paid_by='own_key')),
+    )
+    return {
+        "messages": agg['total'] or 0,
+        "tokens": (agg['tokens'] or 0) + (agg['output'] or 0),
+        "cost_usd": format_usd(agg['cost']),
+        "cost_source": _source_of(agg['total'] or 0, agg['unpriced'] or 0,
+                                  agg['billed'] or 0),
+        # How many answers each kind of key paid for, so a figure can be
+        # read as "your bill" or "our bill" rather than guessed at.
+        "paid_by": {
+            "platform": agg['platform'] or 0,
+            "own_key": agg['own_key'] or 0,
+        },
+    }
+
+
 def cost_breakdown(user, *, days: int) -> dict[str, Any]:
-    """Token and credit usage over the last `days`, split by agent and tool."""
+    """Token and credit usage over the last `days`, split by agent and tool.
+
+    Eval traffic is real money, so it is included — but reported as its own
+    `by_caller['eval']` line, so benchmark spend never hides inside an agent's
+    figure.
+    """
     executions = _user_executions(user, days=days)
     totals = executions.aggregate(
         total_tokens=Sum('tokens_used'),
@@ -184,7 +245,14 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
         total_input=Sum('input_tokens'),
         total_output=Sum('output_tokens'),
         total_cached_read=Sum('cached_read_tokens'),
+        total_runs=Count('id'),
+        unpriced_runs=Count('id', filter=Q(cost_source='unpriced')),
+        billed_runs=Count('id', filter=Q(cost_source='billed')),
     )
+    chat = _chat_spend(user, days=days)
+    agents_source = _source_of(totals['total_runs'] or 0,
+                               totals['unpriced_runs'] or 0,
+                               totals['billed_runs'] or 0)
 
     return {
         "period_days": days,
@@ -193,7 +261,22 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
         # this endpoint's headline number was structurally zero. Kept on the
         # wire at zero for one release so an old client does not read `None`.
         "total_credits": 0,
+        # Agent runs only, as it always was — `chat` and `all_cost_usd` below
+        # are the additions, so an older client reading this is not misled
+        # into thinking the meaning moved under it.
         "total_cost_usd": format_usd(totals['total_cost_usd']),
+        "total_cost_source": agents_source,
+        "chat": chat,
+        # Agents and chat together, labelled by the weaker of the two: a total
+        # with an unpriced part is not a number to state confidently.
+        "all_cost_usd": format_usd(
+            (totals['total_cost_usd'] or Decimal('0'))
+            + Decimal(chat['cost_usd'] or '0')
+        ),
+        "all_cost_source": combine_sources(
+            [s for s, n in ((agents_source, totals['total_runs']),
+                            (chat['cost_source'], chat['messages'])) if n]
+        ),
         "total_input_tokens": totals['total_input'] or 0,
         "total_output_tokens": totals['total_output'] or 0,
         "total_cached_read_tokens": totals['total_cached_read'] or 0,
@@ -203,7 +286,9 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
         "by_workflow": [
             {
                 "workflow_id": row['subagent__id'],
-                "workflow_name": row['subagent__name'],
+                # Runs outlive a deleted agent now, and all of them group
+                # under one null id.
+                "workflow_name": row['subagent__name'] or 'Deleted agents',
                 "tokens": row['tokens'],
                 "cost_usd": format_usd(row['cost_usd']),
                 # An agent with even one unpriced run cannot have its total
@@ -211,9 +296,8 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
                 # figure would understate it while looking exact. Counted
                 # rather than combined, because `combine_sources` needs the
                 # individual values and this is one GROUP BY.
-                "cost_source": (
-                    "unpriced" if row['unpriced'] else "estimated"
-                ),
+                "cost_source": _source_of(row['executions'], row['unpriced'],
+                                          row['billed']),
                 "executions": row['executions'],
             }
             for row in executions.values('subagent__id', 'subagent__name')
@@ -222,6 +306,7 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
                 cost_usd=Sum('cost_usd'),
                 executions=Count('id'),
                 unpriced=Count('id', filter=Q(cost_source='unpriced')),
+                billed=Count('id', filter=Q(cost_source='billed')),
             )
             .order_by('-tokens')[:10]
         ],
@@ -256,6 +341,9 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
             .annotate(count=Count('id'))
             .order_by('-count')
         ),
+        "by_caller": dict(
+            executions.values('caller').annotate(count=Count('id')).values_list('caller', 'count')
+        ),
         "daily_usage": _stringify_dates(list(
             executions.annotate(date=TruncDate('created_at'))
             .values('date')
@@ -276,7 +364,12 @@ def execution_page(
     status: str | None = None,
     caller: str | None = None,
 ) -> dict[str, Any]:
-    """One keyset-paginated page of the user's runs, newest first."""
+    """One keyset-paginated page of the user's runs, newest first.
+
+    Eval sweeps are hidden by default and shown only when the caller
+    explicitly passes `caller='eval'` — benchmark traffic must not pollute
+    `/runs`.
+    """
     qs = ExecutionLog.objects.filter(user=user)
     if agent_id:
         qs = qs.filter(subagent_id=agent_id)
@@ -284,6 +377,8 @@ def execution_page(
         qs = qs.filter(status=status)
     if caller:
         qs = qs.filter(caller=caller)
+    else:
+        qs = qs.exclude(caller='eval')
 
     # Counting is the expensive half, and a caller paging forward already has
     # the total from its first request - so only the uncursored call pays for it.
@@ -292,7 +387,8 @@ def execution_page(
     # `paginate_keyset` needs model instances (it reads `.id` and the sort field
     # off the last row to mint the cursor), so the projection to the wire shape
     # happens here rather than via `.values()`.
-    page = paginate_keyset(qs.select_related('subagent'), limit=limit, cursor=cursor)
+    page = paginate_keyset(qs.select_related('subagent', 'revision'),
+                           limit=limit, cursor=cursor)
 
     return {
         "count": total,
@@ -303,12 +399,26 @@ def execution_page(
     }
 
 
+def _agent_name(execution: ExecutionLog) -> str | None:
+    """The agent's name, surviving the agent.
+
+    A deleted agent's runs are kept (the FK is SET_NULL), and a run listed as
+    "unknown" is little better than one erased. The revision it executed under
+    is a full config snapshot, name included, so it answers for the agent.
+    """
+    if execution.subagent_id and execution.subagent:
+        return execution.subagent.name
+    revision = getattr(execution, 'revision', None)
+    name = (revision.config or {}).get('name') if revision else None
+    return f'{name} (deleted)' if name else None
+
+
 def _execution_row(execution: ExecutionLog) -> dict[str, Any]:
     return {
         "id": execution.id,
         "execution_id": str(execution.execution_id),
         "workflow_id": execution.subagent_id,
-        "workflow_name": execution.subagent.name if execution.subagent else None,
+        "workflow_name": _agent_name(execution),
         "status": execution.status,
         "trigger_type": execution.trigger_type,
         "caller": execution.caller,
@@ -329,6 +439,7 @@ def _execution_row(execution: ExecutionLog) -> dict[str, Any]:
         "cost_usd": format_usd(execution.cost_usd),
         "cost_source": execution.cost_source or "unpriced",
         "error_message": execution.error_message,
+        "failure_category": execution.failure_category,
         "started_at": execution.started_at,
         "completed_at": execution.completed_at,
         "created_at": execution.created_at,
@@ -355,7 +466,7 @@ def _step_row(step: AgentStep) -> dict[str, Any]:
             {
                 "execution_id": str(child.execution_id),
                 "workflow_id": child.subagent_id,
-                "workflow_name": child.subagent.name if child.subagent else None,
+                "workflow_name": _agent_name(child),
                 "status": child.status,
                 "task": child.delegation_task,
                 "index": child.delegation_index,
@@ -401,7 +512,7 @@ def execution_detail(user, execution_id: str) -> dict[str, Any] | None:
         .prefetch_related(
             Prefetch(
                 'delegated_runs',
-                queryset=ExecutionLog.objects.select_related('subagent'),
+                queryset=ExecutionLog.objects.select_related('subagent', 'revision'),
             )
         )
         .order_by('order')[:EXECUTION_NODE_LOG_LIMIT]
@@ -449,6 +560,7 @@ def execution_detail(user, execution_id: str) -> dict[str, Any] | None:
         **_execution_row(execution),
         "credits_used": execution.credits_used,
         "supervision_level": execution.supervision_level,
+        "failure_category": execution.failure_category,
         "input_data": execution.input_data,
         "output_data": execution.output_data,
         "error_node_id": execution.error_node_id,
@@ -461,6 +573,7 @@ def execution_detail(user, execution_id: str) -> dict[str, Any] | None:
         "turns_truncated": turn_total > len(turns),
         "revision": _revision_summary(execution.revision),
         "delegated_by": _delegated_by(execution),
+        "feedback": feedback_for(user, execution=execution),
         **_delegated_cost(execution),
     }
     return detail
@@ -511,6 +624,138 @@ def _delegated_cost(execution: ExecutionLog) -> dict[str, Any]:
     }
 
 
+def upsert_feedback(user, *, target: str, target_id, rating: int,
+                    reason: str = '', comment: str = '') -> dict[str, Any] | None:
+    """Upsert a thumbs up/down. Returns the feedback dict, or None on refusal.
+
+    Every refusal is None (the view answers 404): a foreign target must not be
+    distinguishable from a missing one.
+    """
+    from .models import Feedback
+
+    if rating not in (1, -1):
+        return {'error': 'rating must be +1 or -1'}
+    if target == 'execution':
+        from .models import ExecutionLog
+
+        log = ExecutionLog.objects.filter(execution_id=target_id, user=user).first()
+        if log is None:
+            try:
+                log = ExecutionLog.objects.filter(pk=target_id, user=user).first()
+            except Exception:  # noqa: BLE001
+                log = None
+        if log is None:
+            return None
+        fb, _ = Feedback.objects.update_or_create(
+            user=user, execution=log,
+            defaults={'rating': rating, 'reason': reason or '',
+                      'comment': (comment or '')[:2000]},
+        )
+    elif target == 'message':
+        try:
+            from chat.models import ChatMessage
+
+            msg = ChatMessage.objects.filter(pk=target_id, session__user=user).first()
+        except Exception:  # noqa: BLE001
+            msg = None
+        if msg is None:
+            return None
+        fb, _ = Feedback.objects.update_or_create(
+            user=user, chat_message=msg,
+            defaults={'rating': rating, 'reason': reason or '',
+                      'comment': (comment or '')[:2000]},
+        )
+    else:
+        return {'error': 'unknown target'}
+    return {'rating': fb.rating, 'reason': fb.reason, 'comment': fb.comment}
+
+
+def clear_feedback(user, *, target: str, target_id) -> bool:
+    """Delete the caller's feedback. True when something was cleared."""
+    from .models import Feedback
+
+    if target == 'execution':
+        qs = Feedback.objects.filter(user=user, execution__execution_id=target_id)
+        if not qs.exists():
+            try:
+                qs = Feedback.objects.filter(user=user, execution_id=target_id)
+            except Exception:  # noqa: BLE001
+                pass
+        deleted, _ = qs.delete()
+        return bool(deleted)
+    if target == 'message':
+        deleted, _ = Feedback.objects.filter(
+            user=user, chat_message_id=target_id).delete()
+        return bool(deleted)
+    return False
+
+
+def feedback_for(user, execution=None, message_id=None) -> dict | None:
+    """The caller's feedback on one target, or None."""
+    from .models import Feedback
+
+    if execution is not None:
+        fb = Feedback.objects.filter(user=user, execution=execution).first()
+    elif message_id is not None:
+        fb = Feedback.objects.filter(user=user, chat_message_id=message_id).first()
+    else:
+        return None
+    if fb is None:
+        return None
+    return {'rating': fb.rating, 'reason': fb.reason, 'comment': fb.comment}
+
+
+def quality_summary(user, *, days: int = 30) -> dict[str, Any]:
+    """Counts by failure category, thumbs, and signals. Excludes eval traffic."""
+    from django.db.models import Count
+
+    from .models import ExecutionLog, Feedback, RunSignal
+
+    logs = ExecutionLog.objects.filter(
+        user=user, created_at__gte=_since(days)).exclude(caller='eval')
+    by_category = dict(
+        logs.exclude(failure_category='').values('failure_category')
+        .annotate(count=Count('id')).values_list('failure_category', 'count')
+    )
+    thumbs = Feedback.objects.filter(user=user, created_at__gte=_since(days))
+    up = thumbs.filter(rating=1).count()
+    down = thumbs.filter(rating=-1).count()
+    by_reason = dict(
+        thumbs.filter(rating=-1).exclude(reason='').values('reason')
+        .annotate(count=Count('id')).values_list('reason', 'count')
+    )
+    signals = RunSignal.objects.filter(user=user, created_at__gte=_since(days))
+    by_signal = dict(
+        signals.values('kind').annotate(count=Count('id')).values_list('kind', 'count')
+    )
+    recent_down = list(
+        thumbs.filter(rating=-1).select_related('execution').order_by('-created_at')[:20]
+    )
+    targets = []
+    for fb in recent_down:
+        if fb.execution_id:
+            targets.append({
+                'type': 'execution', 'id': str(fb.execution.execution_id),
+                'agent': fb.execution.subagent.name if fb.execution.subagent else '',
+                'reason': fb.reason, 'comment': (fb.comment or '')[:200],
+            })
+        elif fb.chat_message_id:
+            targets.append({
+                'type': 'message', 'id': fb.chat_message_id,
+                'agent': '', 'reason': fb.reason,
+                'comment': (fb.comment or '')[:200],
+            })
+    return {
+        'days': days,
+        'by_failure_category': by_category,
+        'thumbs_up': up,
+        'thumbs_down': down,
+        'thumbs_down_by_reason': by_reason,
+        'signals_by_kind': by_signal,
+        'recent_thumbs_down': targets,
+    }
+
+
 def _delegated_by(execution: ExecutionLog) -> dict[str, Any] | None:
     """The orchestrator's side of a delegated run: who asked, and why.
 
@@ -526,7 +771,7 @@ def _delegated_by(execution: ExecutionLog) -> dict[str, Any] | None:
     return {
         "execution_id": str(parent_run.execution_id),
         "workflow_id": parent_run.subagent_id,
-        "workflow_name": parent_run.subagent.name if parent_run.subagent else None,
+        "workflow_name": _agent_name(parent_run),
         "tool": step.tool,
         "call_id": step.call_id,
         "task": execution.delegation_task,

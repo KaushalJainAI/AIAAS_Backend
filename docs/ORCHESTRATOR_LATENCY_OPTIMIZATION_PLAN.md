@@ -4,7 +4,13 @@
 
 This plan addresses slow response times in the orchestrator and agent run execution pipeline (`agents/agent/orchestrator.py`, `agents/agent/runtime.py`, `chat/turn/agent.py`). 
 
-Profiling reveals four major architectural bottlenecks contributing to high latency (often 15s to 45s+ per turn):
+> **Read §3d first.** As of 2026-09-18 this document has real production
+> measurements, and they disagree with the profiling below on two of its four
+> points: tool discovery is 6–35ms (not seconds), and the dominant cost is
+> provider TTFT, which none of the four items names. The four bottlenecks are
+> kept as written because the phases refer back to them.
+
+Profiling reveals four major architectural bottlenecks contributing to high latency (measured 2026-09-18 at 30s–83s per turn):
 1. **SQLite Write-Lock Contention:** High-frequency persistence of `AgentTurn`, `AgentStep`, and checkpoint commits stalls ASGI threads and async I/O.
 2. **MCP Discovery Latency & Cold Connectors:** Stdio-based MCP tools incur cold start costs (`npx` execution taking 8s–20s) if tool cache entries lapse.
 3. **Sequential Tool Execution & Companion Media Overhead:** When an agent issues queries or file/search operations, default executions and auto-triggered media searches run sequentially.
@@ -27,14 +33,30 @@ Profiling reveals four major architectural bottlenecks contributing to high late
 ## 3. Detailed Work Breakdown & Phases
 
 ### Phase 1: Database Migration & Write-Lock Elimination (Days 1–2)
-* **Status: NOT shipped — verified against the deployed compose file 2026-09-12.**
-  `docker-compose.ec2.yml` sets `SQLITE_PATH: /app/data/db.sqlite3`, so production
-  still runs SQLite, and `AGENT_CHECKPOINTER` defaults to `sqlite`
-  (`settings/base.py`) with `AGENT_CHECKPOINT_PATH` beside it on the same volume.
-  Both are therefore live, and every other phase's measured gain sits on top of a
-  single writer lock with `OPTIONS: {'timeout': 20}` — which means contention
-  surfaces as multi-second *stalls*, never as an error, and never in a log.
-  This is the phase the rest of the plan quietly assumes is done.
+* **Status: half shipped — verified against the running container 2026-09-18.**
+  The **application database is PostgreSQL**: `aiaas-db` is `postgres:16-alpine`
+  and the backend holds `DB_ENGINE=postgres` /
+  `DATABASE_URL=postgresql://admin:***@db:5432/app_db`. The `AgentTurn`,
+  `AgentStep` and `ExecutionLog` writes this phase was written about no longer
+  contend on a single writer lock.
+* **The previous entry here was wrong, and the way it was wrong is the lesson.**
+  It read "NOT shipped", sourced to `docker-compose.ec2.yml` — a *retired*
+  predecessor that still describes SQLite. `docker-compose.prod.yml` is what
+  production runs. A compose file in the tree is not evidence about a deployed
+  box; the container's own env is. Check the runtime, not the repo.
+* **What is genuinely still open is the checkpointer.** `AGENT_CHECKPOINTER` is
+  unset in production, so it falls to the `'sqlite'` default in
+  `settings/base.py:349`, and `/app/data/checkpoints.sqlite3` is live and being
+  written (1.5 MB WAL, mtime within the hour, observed 2026-09-18). Every
+  LangGraph super-step of every chat turn and agent run still goes through one
+  SQLite writer on the shared volume — contention that surfaces as a stall,
+  never as an error and never in a log, exactly as this phase said. It is on
+  its own file rather than `db.sqlite3`, which is the deliberate part; that it
+  is SQLite at all is the remaining half.
+* **Action (remaining):** set `AGENT_CHECKPOINTER=postgres` with
+  `AGENT_CHECKPOINT_DSN`. Note `checkpoints.py:137` raises at startup on a
+  misconfigured DSN rather than degrading to memory, so this is a deploy that
+  fails loudly or works — verify the DSN before the restart, not after.
 * **Problem:** Every model call and tool execution writes to `AgentTurn`, `AgentStep`, and `ExecutionLog` through `sync_to_async`. Under SQLite, database-level locking stalls the ASGI event loop.
 * **Actions:**
   1. Migrate production to PostgreSQL using `psycopg[binary,pool]` (as detailed in `postgres_production_migration_plan.md`).
@@ -150,7 +172,8 @@ tree it was written against: `tools_ms` in the existing `[Latency]` line is
 typically single-digit milliseconds, not the 3,000ms+ the table implies, because
 the descriptor build is cached and now also memoised per turn. Treat the targets
 as directional. The `[Latency]` logger is a real instrument; the numbers printed
-beside it in §2 are not measurements.
+beside it in §2 are not measurements. **§3d now carries measurements** — the
+first ones taken off production rather than off a developer's box.
 
 ### A second doc-vs-code drift, found the same way
 
@@ -242,7 +265,8 @@ reason for it to live only somewhere that evicts.
 
 **Problem B — `_pool` is unbounded.** `_pool: dict[_PoolKey, _PoolEntry]` has a
 TTL (`SESSION_TTL = 300s` idle) and **no size cap**. Each live stdio entry is a
-Node subprocess. On a 1.9 GB box, N users × M connectors grows until the TTL
+Node subprocess. On a ~900 MB box (`free -m` reports 913 MB total; the backend
+container is capped at 384 MB), N users × M connectors grows until the TTL
 happens to catch up, which is a memory ceiling set by user behaviour rather than
 by us. `_creation_locks` and `_failures` are likewise never cleaned.
 
@@ -380,7 +404,9 @@ Neither is a code change, and both cap what the rest can achieve.
 2. ~~**Phase 8, Problem A** (the batching rule)~~ — **done 2026-09-13**, chat and
    agent prompts both.
 3. ~~**Phase 6** — the database tier, then the LRU pool.~~ — **done 2026-09-13.**
-4. **Phase 1** — get off SQLite. *(open; ops, not code)*
+4. **Phase 1** — get the *checkpointer* off SQLite. *(half done: the
+   application DB is PostgreSQL in production as of 2026-09-18; LangGraph
+   checkpoints are still a SQLite file. Ops, not code.)*
 5. **Phase 7** — on-demand loading with speculative warming. *(open)*
 6. **Phase 8, Problem B** — speculative dispatch. *(open)*
 
@@ -398,8 +424,118 @@ three uncached queries (`_configured`, `_has_key`, `_retired`), it runs once in
 the pipeline and then again inside `get_available_tools` via
 `_requirement_met("vision")` on **every agent iteration** — for an answer that
 cannot change during a run. `tools_config` got a Redis-backed overlay cache for
-exactly this read shape; this never did. It is the cheapest remaining item and
-should be the next one picked up.
+exactly this read shape; this never did.
+
+**Picked up and shipped 2026-09-13** — `WITNESS_CACHE_TTL` (60s), caching the
+*absence* of a witness as well as the presence, and resolving live on a cache
+failure. Production confirms it: the pre-model line on a real turn now reads
+`vision_witness=9ms` inside a `total=38ms` segment (2026-09-18), against the
+16ms-of-16ms it was when the instrument first ran.
+
+---
+
+## 3d. First production measurements — 2026-09-18
+
+Pulled from `docker logs aiaas-backend` on the live box. Every prior "current
+state" figure in this document was an estimate; these are not. The sample is
+small and honest about it: **six model calls in 24 hours**, which is all the
+traffic there was.
+
+```text
+it=0 tools=35ms(n=59) ttft=3215ms  total=3243ms  prompt=13142 cached=0(0%) out=230  effort=low
+it=1 tools=8ms(n=59)  ttft=2082ms  total=5849ms  prompt=13383 cached=0(0%) out=514  effort=minimal
+it=0 tools=15ms(n=59) ttft=4190ms  total=9488ms  prompt=11998 cached=0(0%) out=176  effort=low
+it=1 tools=6ms(n=59)  ttft=2643ms  total=25398ms prompt=20259 cached=0(0%) out=1000 effort=minimal
+it=0 tools=17ms(n=59) ttft=28753ms total=30606ms prompt=12003 cached=0(0%) out=1010 effort=low
+it=1 tools=6ms(n=59)  ttft=3706ms  total=47770ms prompt=24061 cached=0(0%) out=1036 effort=minimal
+```
+
+All `openrouter/deepseek/deepseek-v4.1-flash`. Wall clock on the worst turn was
+83s end to end (`POST /message/stream/` at 06:30:16 → 06:31:39), which tripped
+`[Turn] Skipping follow-ups after a 83s turn (over 60s)`.
+
+**What this settles.**
+
+* **`tools_ms` is not a problem and never was.** 6–35ms with 59 descriptors. §2's
+  "3,000ms – 8,000ms" was invented, and §4's success criterion of "< 50ms" was
+  already met before any phase shipped. The caution in §3b was right.
+* **The pre-model segment is not a problem either.** `[Latency] pre-model
+  total=38ms intent=chat preflight=5ms sync_choice=2ms user_message=6ms
+  model_entry=3ms history=5ms user_memory=2ms vision_witness=9ms file_scope=3ms`
+  — 38ms against an 83s turn. The instrument added in the sequencing list has
+  now cleared its own segment of suspicion.
+* **TTFT is the whole visible hang, and it is provider-side.** Same model, same
+  box, same ~12k prompt: 2.0s, 2.6s, 3.2s, 3.7s, 4.2s — and then 28.7s. A 7x
+  spread with nothing local moving. **No phase in this document addresses
+  this**, because every phase assumes the latency is ours. On this evidence the
+  single largest win available is a provider or routing change, not a code
+  change, and that belongs in the plan as a phase rather than as a footnote.
+
+**The finding that is actually actionable: `cached=0(0%)`, every call, without
+exception.**
+
+Note `it=1` in each pair. That call resends `it=0`'s prefix verbatim and still
+reports a zero. Every call reprocesses 12k–24k prompt tokens from scratch.
+
+Two separate things are behind it, and they need separating because only one is
+a bug:
+
+1. **The prefix is not stable across iterations.** DeepSeek's caching is
+   *implicit* — the provider matches the prefix itself, no breakpoint markers
+   required — so a hit should not need anything from us. Getting zero means
+   something in the prefix moves between calls. This is a real defect and it is
+   the next thing to chase: diff the serialized request between `it=0` and
+   `it=1` and find what differs. `build_system_message` is the documented
+   session-stable baseline, so whatever moves should not be in it.
+2. **We never ask for caching at all.** `cache_control` appears nowhere in the
+   codebase — the only matches in `Backend/` are Django's own HTTP header
+   helpers under `venv/`. `llm/usage.py:186` *reads*
+   `prompt_tokens_details.cached_tokens` off the response and that is the
+   entire extent of cache handling. This does not explain today's zero (see
+   above), but it means a switch to any provider needing **explicit** cache
+   breakpoints — Anthropic through OpenRouter being the obvious one — would
+   report `cached=0` by construction, on every call, with nothing in the log to
+   say why. The instrument would keep printing the number while nothing was
+   ever asked to cache.
+
+**A standing context cost, not a bug:** `prompt=12003` for a one-line question
+in a brand-new session. That is system prompt plus 59 tool schemas before the
+user has said anything of substance. Chat has no connector scope, so all four
+enabled native Google connectors ride every turn. Phase 7 is the entry that
+addresses this, and these numbers are its justification.
+
+### What the native-connector move did to Phases 6 and 7
+
+Production runs **no stdio MCP servers at all**. `MCP_ALLOW_STDIO=False`, no
+Node in the image, and the connector table reads:
+
+```text
+Google Drive | native | enabled      Filesystem | stdio | disabled
+Gmail        | native | enabled      Fetch      | stdio | disabled
+Calendar     | native | enabled      Memory     | stdio | disabled
+Sheets       | native | enabled      Seq.Think. | stdio | disabled
+                                     Docs/Notion/Slack | stdio | disabled
+```
+
+So the cold-`npx` problem Phase 6 was written against — 21s handshakes, the
+subprocess pool, the memory budget, the tool-catalogue floor — **cannot occur in
+production**. Those mechanisms are all still correct and still load-bearing in
+**local dev**, where stdio is allowed, and they stay. But they should no longer
+be counted as production latency work, and Phase 7's remaining value is now
+purely the **prompt size** above, not the handshake it was originally about.
+
+The memory pressure they were built for is likewise gone for now: the backend
+sits at 225 MB of its 384 MB cap, with zero restarts and `OOMKilled=false` since
+the 2026-09-17 deploy. The last cgroup OOM kill of daphne was 2026-09-16
+12:27 — i.e. the deploy fixed it.
+
+### Health baseline at the time of measurement
+
+Recorded so a future "is it stuck?" has something to compare against. It was
+not stuck: no errors, tracebacks, timeouts or cancellations anywhere in 48h of
+backend logs, and `logs_executionlog` holds **no `running` rows** (237
+completed / 116 failed / 1 cancelled; most recent agent run 2026-09-03). The
+reported symptom was slow turns, not a hang.
 
 ---
 
@@ -409,7 +545,25 @@ To measure real-world impact after each phase, inspect the existing latency logg
 ```text
 [Latency] it=0 tools=4ms(n=14) ttft=840ms total=1420ms prompt=1840 cached=1600(87%) out=82 model=anthropic/claude-3-5-sonnet
 ```
-* **Success Criteria:**
-  - `tools_ms` drops from >3000ms to **< 50ms**.
-  - `ttft_ms` drops by **40–60%** on intermediate tool turns.
-  - Total turn completion time is reduced from **15–40s** to **3–8s**.
+That line is an illustration, not a capture — note the retired model id. For a
+real one, see §3d.
+
+Since 2026-09-13 there is a second line per turn covering everything before the
+graph, and it must be read alongside the first or the pre-model segment is
+invisible again:
+```text
+[Latency] pre-model total=38ms intent=chat preflight=5ms ... vision_witness=9ms file_scope=3ms
+```
+
+* **Success Criteria** (revised 2026-09-18 against measured production, §3d):
+  - ~~`tools_ms` drops from >3000ms to **< 50ms**~~ — **already true and never
+    otherwise**: measured 6–35ms at `n=59`. Retired as a criterion.
+  - `cached` becomes non-zero on `it>=1`. It is **0% on every call today**, and
+    this is the one criterion that is both failing and ours to fix.
+  - `prompt` on the first call of a fresh session drops below **12,000** tokens
+    (Phase 7).
+  - `ttft_ms` p95 drops below **5,000ms**. Measured spread is 2.0s–28.7s on one
+    model; the tail is provider-side, so this is a routing criterion, not a code
+    one.
+  - Total turn completion time is reduced from the measured **30–83s** to
+    **3–8s**.

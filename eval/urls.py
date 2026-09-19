@@ -14,6 +14,7 @@ app_name = 'eval'
 urlpatterns = [
     # What a case can assert. Served from the runner's registry.
     path('graders/', views.grader_catalog, name='grader_catalog'),
+    path('judge/calibration/', views.judge_calibration, name='judge_calibration'),
 
     # Suites and their cases
     path('suites/', views.suite_list, name='suite_list'),
@@ -26,6 +27,9 @@ urlpatterns = [
     path('runs/', views.run_list, name='run_list'),
     path('runs/<str:run_id>/', views.run_detail, name='run_detail'),
     path('runs/<str:run_id>/cancel/', views.run_cancel, name='run_cancel'),
+
+    # A bad run becomes a test.
+    path('cases/from-run/', views.case_from_run, name='case_from_run'),
 
     # Supervision — who checks the checker.
     path('reviews/pending/', views.review_queue, name='review_queue'),

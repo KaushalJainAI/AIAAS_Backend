@@ -56,7 +56,7 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # agent whose KB was keyword- or raw-backed could not read it at all.
     'rag': ('list_knowledge_bases', 'knowledge_base_search', 'keyword_search',
             'list_documents', 'read_document'),
-    'codeExecution': ('execute_python',),
+    'codeExecution': ('execute_python', 'run_python_on_files'),
     # The virtual filesystem over the user's own Folder/Document tree
     # (`inference/vfs.py`). What the agent may actually do with these is a
     # second axis — `sandbox['fileAccess']` decides read-only vs. its own
@@ -65,6 +65,24 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # scope says "which files".
     'fileOps': ('list_files', 'find_files', 'read_file', 'write_file',
                 'edit_file', 'make_directory', 'delete_file'),
+    # Decks, workbooks and Word files rendered from a spec (`chat/tools/office`).
+    # A grant of its own rather than part of `fileOps`, because "may produce a
+    # presentation" and "may rewrite my documents" are different things to
+    # hand out. It still needs a file scope to save into — `fileAccess` says
+    # where, exactly as for `fileOps`, and with no scope it is withheld.
+    'office': ('render_deck', 'render_workbook', 'render_document'),
+    # Generated images (`chat/tools/media.py`). Its own grant because it
+    # spends the user's money per call, and saved into the file scope, so it
+    # needs `fileAccess` exactly as `office` does.
+    'media': ('generate_image',),
+    # A remote browser (`chat/tools/browser.py`). Reading is harmless;
+    # acting is scoped to `agent_context['browserDomains']` at dispatch.
+    'browser': ('browse_page', 'browser_act'),
+    # Hosted pages: snapshots shareable by link (`chat/tools/publish.py`).
+    # Outward-facing, so the tool is `sensitive` + `irreversible` and the
+    # ladder gates it with no new mechanism; above `link` visibility from an
+    # unattended run is refused inside the tool, where the argument is.
+    'publish': ('publish_page',),
     # Delegation. There is no 'orchestrator' kind of agent — an agent that
     # fans out to other agents is one holding this grant, so composition is
     # checked by the same mechanism as every other capability instead of by a
@@ -240,13 +258,27 @@ class AgentToolbox:
         if self.read_only:
             from chat.tools import READ_ONLY_TOOLS
             names &= set(READ_ONLY_TOOLS)
+        if names & set(GRANT_TOOLS['browser']):
+            # Granted, but nothing to drive: not offered, rather than offered
+            # and refusing on every call.
+            from browsing.engine import browser_available
+
+            if not browser_available():
+                names -= set(GRANT_TOOLS['browser'])
         if self.file_scope is None:
             # Granted `fileOps` but `fileAccess='none'` — the two settings
             # disagree, and the safe reading is the narrower one. Withheld
             # rather than left to refuse at call time: an advertised tool that
             # cannot run is worse than one never offered, because the model
             # plans around it and then has to explain the failure.
-            names -= set(GRANT_TOOLS['fileOps'])
+            # `run_python_on_files` is the file-writing half of `codeExecution`
+            # (`execute_python` itself is read-only and stays): same rule.
+            names -= (
+                set(GRANT_TOOLS['fileOps'])
+                | set(GRANT_TOOLS['office'])
+                | set(GRANT_TOOLS['media'])
+                | {'run_python_on_files'}
+            )
         return frozenset(names)
 
     @property
@@ -412,7 +444,7 @@ class AgentToolbox:
             from mcp_integration.tool_provider import MCPToolProvider
             return await MCPToolProvider.execute(name, args, self.user_id)
 
-        if name == 'execute_python' and not self.grants.get('codeExecution'):
+        if name in ('execute_python', 'run_python_on_files') and not self.grants.get('codeExecution'):
             return _denied(name, 'code execution')
 
         if name not in self.allowed_names:
@@ -429,16 +461,18 @@ class AgentToolbox:
 async def build_file_scope(agent, user, *, workspace=()):
     """The virtual-filesystem scope for this run, or None.
 
-    Two settings have to agree before an agent touches files: the `fileOps`
-    grant (may it at all) and `sandbox['fileAccess']` (which files). This
-    resolves the second. It is async because a `scoped` agent's home folder is
-    created on demand, which is a write.
+    Two settings have to agree before an agent touches files: a grant that
+    reaches files (`fileOps`, `office`, or `codeExecution` for the file
+    bridge) and `sandbox['fileAccess']` (which files). This resolves the
+    second. It is async because a `scoped` agent's home folder is created on
+    demand, which is a write.
 
     A failure here degrades the run to no file access rather than killing it —
     the same rule MCP follows a few lines below. An agent that cannot reach its
     folder should say so, not 500.
     """
-    if not (agent.tool_grants or {}).get('fileOps'):
+    grants = agent.tool_grants or {}
+    if not any(grants.get(g) for g in ('fileOps', 'office', 'media', 'codeExecution')):
         return None
 
     file_access = (agent.sandbox or {}).get('fileAccess', 'scoped')
@@ -470,6 +504,12 @@ async def build_file_scope(agent, user, *, workspace=()):
 # this function documented: an empty selection is unrestricted, and a stale or
 # switched-off connection can only ever take tools away, since the scope is
 # intersected with what the user can actually see.
+
+
+def browser_domains_for(agent) -> tuple[str, ...]:
+    """Sites this agent's `browser_act` may act on. Empty: it may only read."""
+    raw = (agent.agent_context or {}).get('browserDomains') or []
+    return tuple(sorted({str(d).lower().strip().strip('.') for d in raw if str(d).strip()}))
 
 
 def delegation_scope_for(agent) -> tuple[int, ...] | None:
@@ -599,7 +639,7 @@ def switchable_modes(toolbox: AgentToolbox) -> dict:
 #: are its callers; they differ in configuration, never in code path. A second
 #: way to start a run is a second place for the guardrail checks to be
 #: forgotten.
-CALLERS = frozenset({'chat', 'orchestrator', 'trigger', 'api'})
+CALLERS = frozenset({'chat', 'orchestrator', 'trigger', 'api', 'eval'})
 
 #: Callers where no human is present at the moment the run starts. `chat` and
 #: `api` are both a person pressing something; `orchestrator` inherits the
@@ -629,6 +669,33 @@ def _check_unattended(agent, caller: str) -> None:
             f'"{agent.name}" is not enabled for unattended runs. Turn on '
             f'"allow unattended" in its settings if you want a trigger or '
             f'another agent to be able to run it.'
+        )
+
+
+#: Agent statuses nothing but the owner may run. `archived` is `paused` plus
+#: filed away: an archived agent firing on a schedule would be the surprise.
+#: `draft` is deliberately absent. See `_check_status`.
+STOPPED_STATUSES = frozenset({'paused', 'archived'})
+
+
+class AgentPaused(AgentRunRefused):
+    """Something other than the user tried to run an agent the user paused."""
+
+
+def _check_status(agent, caller: str) -> None:
+    """`paused` means nothing runs this agent but the user.
+
+    The builder has promised "schedules stop firing and no agent may delegate to
+    it" since the status became writable, and nothing enforced it: the sweep and
+    the delegation tools both ran a paused agent exactly as an active one. The
+    user can still run it by hand — pausing is a statement about automation,
+    and refusing its owner would make "paused" the same as "deleted".
+    """
+    status = getattr(agent, 'status', '')
+    if caller in UNATTENDED_CALLERS and status in STOPPED_STATUSES:
+        raise AgentPaused(
+            f'"{agent.name}" is {status}. Set it back to active in its settings '
+            f'for schedules and other agents to run it.'
         )
 
 
@@ -706,8 +773,14 @@ def _gather_context(agent, user) -> dict[str, Any]:
         logger.warning('[AgentRuntime] Could not read user memory', exc_info=True)
         user_memory = ''
 
+    # The owner's Settings: timezone, language, name, bio. Read here for the
+    # same reason as the memory above — a scheduled run has no conversation to
+    # infer the person from — and read-only for the same reason too.
+    from core.preferences import for_user as preferences_for
+
     return {'skills': skills, 'knowledge_bases': kbs, 'ctx': ctx,
-            'user_memory': user_memory}
+            'user_memory': user_memory,
+            'preferences': preferences_for(getattr(user, 'id', None))}
 
 
 def kb_scope_for(gathered: dict[str, Any]) -> tuple[int, ...] | None:
@@ -769,8 +842,22 @@ def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
                 f"- id {kb['id']} · {kb['name']} · {kb['doc_count']} document(s) · {how}"
             )
 
+    prefs = gathered.get('preferences')
     if gathered['ctx'].get('useEnvironment'):
-        parts += ['', f'The current time is {timezone.now().isoformat()}.']
+        # In the owner's zone, named. The builder has always promised "time and
+        # place"; this was a bare UTC ISO stamp, so an agent asked to act "this
+        # morning" or "within business hours" reasoned in the wrong zone.
+        from core.preferences import DEFAULTS, local_now
+
+        where = prefs or DEFAULTS
+        parts += ['', f'The current time for the user is {local_now(where)}.']
+
+    if prefs is not None:
+        from core.preferences import about_user
+
+        about = about_user(prefs)
+        if about:
+            parts += ['', about]
 
     if briefing:
         # Shared background from the agent that delegated this run, sent once to
@@ -910,6 +997,7 @@ def _spend_this_month(agent, user) -> int:
     return aggregate_rupees(
         ExecutionLog.objects
         .filter(user=user, subagent=agent, created_at__gte=start)
+        .exclude(caller='eval')
     )
 
 
@@ -998,11 +1086,17 @@ def _open_log(agent, user, goal: str, trigger_type: str, thread_id: str = '',
 @sync_to_async
 def _close_log(log, *, status: str, result: dict[str, Any], tokens: int,
                error: str = '', extra_cost_usd=None,
-               extra_cost_source: str = '') -> None:
+               extra_cost_source: str = '', exc=None) -> None:
+    from logs import failures as _failures
+
     log.status = status
     log.output_data = result
     log.tokens_used = tokens
     log.error_message = error
+    try:
+        log.failure_category = _failures.classify(status, error, exc)
+    except Exception:  # noqa: BLE001
+        log.failure_category = ''
     log.completed_at = timezone.now()
     if log.started_at:
         log.duration_ms = int(
@@ -1010,12 +1104,70 @@ def _close_log(log, *, status: str, result: dict[str, Any], tokens: int,
         )
     _roll_up_cost(log, extra_cost_usd=extra_cost_usd,
                   extra_cost_source=extra_cost_source)
+    if not tokens:
+        # The cancel, timeout and failure paths close with `tokens=0` because
+        # they have no final state to read it from — but the turns that did run
+        # were paid for. Zero here made those runs free to the spend cap, which
+        # counts tokens for any run without a price on record.
+        from django.db.models import Sum
+
+        from logs.models import AgentTurn
+
+        log.tokens_used = (
+            AgentTurn.objects.filter(execution=log)
+            .aggregate(total=Sum('tokens'))['total'] or 0
+        )
     log.save(update_fields=[
         'status', 'output_data', 'tokens_used', 'error_message',
+        'failure_category',
         'completed_at', 'duration_ms', 'updated_at',
         'input_tokens', 'output_tokens', 'cached_read_tokens',
         'cached_write_tokens', 'cost_usd', 'cost_source',
     ])
+    try:
+        from logs.signals_api import record_signal as _record
+
+        if status in ('failed', 'timeout'):
+            _record(log.user_id, 'failed',
+                    execution_id=str(log.execution_id),
+                    detail={'category': log.failure_category or ''})
+        elif status == 'cancelled':
+            _record(log.user_id, 'cancelled',
+                    execution_id=str(log.execution_id), detail={})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+#: Tools that spend money themselves, beside the model calls — their results
+#: carry `cost_usd` / `cost_source` (`chat/tools/media.py`).
+COSTED_TOOLS = ('generate_image',)
+
+
+def _tool_costs(log) -> tuple[Decimal, list[str]]:
+    """What this run's own tool calls cost, read back from their step rows.
+
+    From the rows rather than counted in memory, for the reason the turn
+    rollup gives: a resumed run starts with a fresh process but the same rows,
+    and a step re-run on resume updates its row instead of adding one. No new
+    column — the tool writes its cost into the result the step already keeps.
+    """
+    import json as _json
+
+    from logs.models import AgentStep
+
+    total, sources = Decimal('0'), []
+    for result in (AgentStep.objects
+                   .filter(execution=log, tool__in=COSTED_TOOLS, status='completed')
+                   .values_list('result', flat=True)):
+        raw = (result or {}).get('result')
+        try:
+            parsed = _json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and parsed.get('cost_usd'):
+            total += Decimal(str(parsed['cost_usd']))
+            sources.append(str(parsed.get('cost_source') or 'estimated'))
+    return total, sources
 
 
 def _roll_up_cost(log, *, extra_cost_usd=None,
@@ -1052,7 +1204,8 @@ def _roll_up_cost(log, *, extra_cost_usd=None,
         log.output_tokens = totals['output'] or 0
         log.cached_read_tokens = totals['cached_read'] or 0
         log.cached_write_tokens = totals['cached_write'] or 0
-        log.cost_usd = (totals['cost'] or Decimal('0')) + (
+        tool_cost, tool_sources = _tool_costs(log)
+        log.cost_usd = (totals['cost'] or Decimal('0')) + tool_cost + (
             Decimal(str(extra_cost_usd)) if extra_cost_usd else Decimal('0')
         )
         # The total is only as trustworthy as its least-known turn, so one
@@ -1060,6 +1213,7 @@ def _roll_up_cost(log, *, extra_cost_usd=None,
         # omits a turn is worse than an admitted gap.
         log.cost_source = combine_sources(
             list(turns.values_list('cost_source', flat=True))
+            + tool_sources
             + ([extra_cost_source] if extra_cost_source else [])
         )
     except Exception:  # noqa: BLE001
@@ -1117,6 +1271,85 @@ async def _finalise_cancelled(log, stream, started: float) -> None:
         logger.exception('[AgentRuntime] Could not finalise cancelled run')
 
 
+def _live_task(execution_id: str) -> asyncio.Task | None:
+    """The task running this execution in *this* process, if there is one.
+
+    Found by name: `start_agent_run` and `resume_agent_run` spawn with
+    `agent-run:<id>` / `agent-resume:<id>`, so no registry has to be kept in
+    step with the task's life.
+    """
+    names = {f'agent-run:{execution_id}', f'agent-resume:{execution_id}'}
+    try:
+        tasks = asyncio.all_tasks()
+    except RuntimeError:
+        return None
+    return next((t for t in tasks if t.get_name() in names and not t.done()), None)
+
+
+class CannotCancel(Exception):
+    """The run cannot be stopped from here; the message says why."""
+
+
+#: How long a stop waits for the run to finish unwinding before answering.
+CANCEL_WAIT_SECONDS = 5.0
+
+
+async def cancel_agent_run(log) -> str:
+    """Stop a run. Returns the status it ends in.
+
+    Three shapes of "in flight", each stopped differently:
+
+    - **A task in this process** is cancelled. The run's own `CancelledError`
+      branch closes the log (`_finalise_cancelled`), so there is one closing
+      path however a run is cancelled — by this, a parent, or shutdown.
+    - **Paused for approval** has no task at all: `interrupt()` returned and
+      the checkpoint is all that is left. So the row is closed here, its
+      approval withdrawn, and its checkpoint dropped — the same three things
+      the cancel branch does, and the reason Deny alone was not enough.
+    - **A delegated worker** runs inside its parent's task, so it cannot be
+      stopped alone without the parent waiting on a result that never comes.
+      Refused, naming the parent to stop instead.
+
+    A `running` row with no task here is either on another worker process or
+    orphaned; recovery (`agents/recovery.py`) closes orphans, and this says so
+    rather than writing `cancelled` over a run that is still going elsewhere.
+    """
+    execution_id = str(log.execution_id)
+    if log.status not in ('running', 'pending', 'paused'):
+        return log.status
+
+    task = _live_task(execution_id)
+    if task is not None:
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), CANCEL_WAIT_SECONDS)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):  # noqa: BLE001
+            pass
+        await sync_to_async(log.refresh_from_db)()
+        return log.status
+
+    if log.parent_step_id:
+        raise CannotCancel(
+            'This run was started by another agent and runs inside it. Stop '
+            'the run that delegated it.'
+        )
+
+    if log.status == 'paused':
+        await _cancel_pending_hitl(log)
+        thread_id = (log.input_data or {}).get('thread_id')
+        if thread_id:
+            from chat.turn.agent import forget_thread
+            await forget_thread(thread_id)
+        await _close_log(log, status='cancelled', result={}, tokens=0,
+                         error='Run cancelled while waiting for approval.')
+        return 'cancelled'
+
+    raise CannotCancel(
+        'This run is not running in this server process. If it has stopped '
+        'responding it will be closed automatically.'
+    )
+
+
 async def run_agent(agent, goal: str, *, user, sink=None,
                     thread_id: str | None = None,
                     trigger_type: str = 'manual', caller: str = 'api',
@@ -1158,6 +1391,7 @@ async def run_agent(agent, goal: str, *, user, sink=None,
     # reasoning covers the unattended gate: schedules and triggers reach this
     # function without passing through any view.
     _check_unattended(agent, caller)
+    _check_status(agent, caller)
     await check_guardrails(agent, user)
 
     started = time.monotonic()
@@ -1256,10 +1490,14 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             # can queue a paused call as a `HITLRequest` and the reminder ladder
             # takes it from there. Telling the graph stops it writing a second,
             # unconditional notification of its own — see `TurnContext`.
-            approval_queue=True,
-            # A worker is one level deeper than whoever asked for it, and the
-            # counter is what stops delegation multiplying without bound.
-            depth=depth,
+              approval_queue=True,
+              # A worker is one level deeper than whoever asked for it, and the
+              # counter is what stops delegation multiplying without bound.
+              depth=depth,
+              # What started the run. Tools that are safe watched but not
+              # unwatched read it (`publish_page` above `link` refuses an
+              # unattended caller).
+              caller=caller,
             # The soft stop. `agent_node` withholds tools once this is
             # `wrapping_up`, which turns "out of time" into the same last pass
             # that running out of iterations already produced: an answer built
@@ -1273,6 +1511,8 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             # And which of the user's agents this one may hand work to. Same
             # shape and same default as the two scopes below it.
             delegation_scope=delegation_scope_for(agent),
+            # Where `browser_act` may act. Always a tuple for an agent run.
+            browser_domains=browser_domains_for(agent),
             # And which knowledge bases the KB tools may reach. The builder's
             # selection, finally enforced rather than merely printed into the
             # prompt: before this an agent configured for one KB could search
@@ -1370,6 +1610,8 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         payload['charts'] = charts
     if todos := (result.metadata or {}).get('todos'):
         payload['todos'] = todos
+    if files := (result.metadata or {}).get('files'):
+        payload['files'] = files
     if structured is not None:
         payload['structured'] = structured
     if contract_error:
@@ -1447,8 +1689,13 @@ async def start_agent_run(agent, goal: str, *, user,
                           caller: str = 'api',
                           parent_step_id: int | None = None,
                           delegation_task: str = '',
-                          delegation_index: int = 0) -> str:
+                          delegation_index: int = 0,
+                          workspace: tuple[str, ...] = ()) -> str:
     """Begin a run in the background and return its execution id immediately.
+
+    `workspace` is the caller's own write folder, granted to the run as a
+    second writable subtree — the same hand-off `invoke_subagent` makes, so a
+    run started by `run_agent` can answer with a path too.
 
     Two things have to happen before the caller gets a response, and both are
     the reason this exists rather than the view spawning `run_agent` directly:
@@ -1473,6 +1720,7 @@ async def start_agent_run(agent, goal: str, *, user,
     from .stream import AgentRunStream
 
     _check_unattended(agent, caller)
+    _check_status(agent, caller)
     await check_guardrails(agent, user)
     # A missing credential is the same class of problem as a spent budget: the
     # caller can fix it, but only if they are told. Raised here, before the log
@@ -1518,7 +1766,7 @@ async def start_agent_run(agent, goal: str, *, user,
             async with admission.slot(user.id):
                 await run_agent(agent, goal, user=user, thread_id=thread_id,
                                 trigger_type=trigger_type, caller=caller,
-                                log=log)
+                                log=log, workspace=workspace)
         except admission.AdmissionTimeout as exc:
             # Nothing ran, so there is nothing to report as having failed
             # part-way. The log is closed here because `run_agent` never got to

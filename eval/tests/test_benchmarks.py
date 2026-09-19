@@ -311,19 +311,30 @@ class WorkSuiteTests(TestCase):
     """The realistic tier: every case is passable, and none is passable by doing nothing."""
 
     FILE_GRADERS = {'file_exists', 'file_absent', 'file_count', 'file_contains', 'file_regex',
-                    'file_number', 'json_value', 'csv_value', 'csv_rows'}
+                    'file_number', 'json_value', 'csv_value', 'csv_rows',
+                    'file_type', 'pptx_slides', 'pptx_contains', 'pptx_chart', 'xlsx_value',
+                    'xlsx_chart', 'docx_headings', 'docx_contains', 'docx_table'}
 
     def modules(self):
-        from eval.benchmarks.suites import (guard_work, work_analyst, work_docs, work_long, work_ops,
-                                            work_research)
+        from eval.benchmarks.suites import (guard_work, work_analyst, work_docs, work_long, work_office,
+                                            work_ops, work_research)
 
-        return [work_analyst, work_ops, work_docs, work_research, work_long, guard_work]
+        return [work_analyst, work_ops, work_docs, work_research, work_long, work_office, guard_work]
+
+    @staticmethod
+    def _ideal(module) -> dict:
+        # work_office renders its references on demand: building them imports
+        # the office renderers, which a suite module must not do at import time.
+        return module.ideal_outputs() if hasattr(module, 'ideal_outputs') else module.IDEAL_OUTPUTS
 
     def _grade_files(self, case, files):
         from eval import graders
 
         specs = [g for g in case['graders'] if g['type'] in self.FILE_GRADERS]
-        grades, _, passed = async_to_sync(graders.grade_all)(specs, graders.GradeContext(files=files))
+        text = {k: v for k, v in files.items() if isinstance(v, str)}
+        binaries = {k: v for k, v in files.items() if isinstance(v, bytes)}
+        grades, _, passed = async_to_sync(graders.grade_all)(
+            specs, graders.GradeContext(files=text, binaries=binaries))
         return passed, [g for g in grades if not g.passed]
 
     def test_the_reference_outputs_pass_every_file_check(self):
@@ -332,8 +343,9 @@ class WorkSuiteTests(TestCase):
                 if not any(g['type'] in self.FILE_GRADERS for g in case['graders']):
                     continue
                 with self.subTest(case=case['name']):
-                    self.assertIn(case['name'], module.IDEAL_OUTPUTS, 'add the ideal outputs for this case')
-                    passed, failed = self._grade_files(case, module.IDEAL_OUTPUTS[case['name']])
+                    ideal = self._ideal(module)
+                    self.assertIn(case['name'], ideal, 'add the ideal outputs for this case')
+                    passed, failed = self._grade_files(case, ideal[case['name']])
                     self.assertTrue(passed, [g.detail for g in failed])
 
     def test_the_untouched_fixtures_fail(self):

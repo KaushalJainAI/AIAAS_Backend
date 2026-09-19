@@ -25,13 +25,32 @@ def _service_url() -> str:
     return getattr(settings, "SANDBOX_SERVICE_URL", "http://sandbox:8100").rstrip("/")
 
 
-async def run_via_service(code: str) -> dict:
-    """Execute `code` on the sidecar. Returns the normalized envelope."""
+async def run_via_service(
+    code: str,
+    *,
+    files: dict[str, bytes] | None = None,
+    collect: tuple[str, ...] | list[str] = (),
+) -> dict:
+    """Execute `code` on the sidecar. Returns the normalized envelope.
+
+    `files` are base64-encoded into the request; `files_out` are decoded back
+    on the way out. A sidecar that predates files simply omits them, which is
+    backfilled below — the same rule as every other optional key.
+    """
     wall = int(getattr(settings, "SANDBOX_WALL_SECONDS", 10))
     cpu = int(getattr(settings, "SANDBOX_CPU_SECONDS", 8))
     mem_mb = int(getattr(settings, "SANDBOX_MEM_MB", 384))
 
-    payload = {"code": code, "wall_seconds": wall, "cpu_seconds": cpu, "mem_mb": mem_mb}
+    import base64
+
+    payload: dict = {"code": code, "wall_seconds": wall, "cpu_seconds": cpu, "mem_mb": mem_mb}
+    if files:
+        payload["files"] = {
+            name: base64.b64encode(data).decode("ascii")
+            for name, data in files.items()
+        }
+    if collect:
+        payload["collect"] = list(collect)
     # The HTTP read timeout sits above the sandbox's own wall-clock so the
     # in-container kill is what ends a runaway run, not a dropped connection
     # that leaves the subprocess orphaned.
@@ -45,6 +64,14 @@ async def run_via_service(code: str) -> dict:
     except httpx.TimeoutException:
         return _fail("The sandbox did not respond in time.")
     except httpx.HTTPStatusError as exc:
+        # A 400 here is the sidecar refusing a file spec (bad name, too many
+        # files) — surface its reason rather than a generic "rejected".
+        if exc.response.status_code == 400:
+            try:
+                detail = exc.response.json().get("error") or "bad request"
+            except Exception:
+                detail = "bad request"
+            return _fail(f"Sandbox error: {detail}.")
         detail = "sandbox is busy" if exc.response.status_code == 503 else "sandbox rejected the request"
         return _fail(f"Sandbox error: {detail}.")
     except (httpx.HTTPError, ValueError) as exc:
@@ -60,6 +87,20 @@ async def run_via_service(code: str) -> dict:
     env.setdefault("stderr", "")
     env.setdefault("error", None)
     env.setdefault("timed_out", False)
+    # Decode what the sidecar encoded; a failure to decode is a failure of the
+    # run, not of the transport — the bytes are the result.
+    if isinstance(env.get("files_out"), dict):
+        decoded: dict[str, bytes] = {}
+        try:
+            for name, data in env["files_out"].items():
+                decoded[str(name)] = base64.b64decode(data, validate=True)
+        except Exception:
+            return _fail("The sandbox returned a file that could not be read.")
+        env["files_out"] = decoded
+    else:
+        env.setdefault("files_out", {})
+    env.setdefault("missing", [])
+    env.setdefault("unsaved", [])
     return env
 
 

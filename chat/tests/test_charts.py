@@ -63,6 +63,12 @@ class SpecTests(SimpleTestCase):
         out = call(kind='bar', title='  ', series=[series('a', 1)])
         self.assertIn('error', out)
 
+    def test_omitted_labels_are_empty_not_the_word_none(self):
+        # They were stored as "None", and the component draws any non-empty
+        # label — so an unlabelled chart showed "None" as its axis and caption.
+        out = call(kind='column', title='t', series=[series('a', 1)])
+        self.assertEqual((out['x_label'], out['y_label'], out['note']), ('', '', ''))
+
     def test_points_may_be_pairs_as_well_as_objects(self):
         out = call(kind='line', title='t',
                    series=[{'name': 'a', 'points': [['Jan', 1], ['Feb', 2]]}])

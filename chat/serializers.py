@@ -17,6 +17,7 @@ class ChatMessageSerializer(serializers.ModelSerializer):
     cost_usd = serializers.DecimalField(
         max_digits=12, decimal_places=6, read_only=True, coerce_to_string=True,
     )
+    feedback = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = ChatMessage
@@ -27,9 +28,27 @@ class ChatMessageSerializer(serializers.ModelSerializer):
             # message is all zeroes with an empty `cost_source`, which reads as
             # `unpriced` on the client and renders as nothing at all.
             'model_id', 'input_tokens', 'output_tokens', 'cached_read_tokens',
-            'cached_write_tokens', 'cost_usd', 'cost_source',
+            'cached_write_tokens', 'cost_usd', 'cost_source', 'paid_by',
+            'feedback',
         ]
         read_only_fields = fields
+
+    def get_feedback(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None or getattr(user, 'is_anonymous', False):
+            return None
+        # Batched by `ChatSessionSerializer` for a whole transcript: one query
+        # for every message's feedback, not one per message.
+        batch = self.context.get('feedback_by_message')
+        if batch is not None:
+            return batch.get(obj.pk)
+        try:
+            from logs.queries import feedback_for
+
+            return feedback_for(user, message_id=obj.pk)
+        except Exception:  # noqa: BLE001
+            return None
 
 
 class ChatSessionSerializer(serializers.ModelSerializer):
@@ -44,13 +63,33 @@ class ChatSessionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'intent', 'llm_provider', 'llm_model', 'llm_effort',
             'system_prompt', 'memory_enabled', 'total_tokens_used',
-            'total_cost_usd', 'cost_source',
+            'total_cost_usd', 'cost_source', 'paid_by',
             'created_at', 'updated_at', 'messages'
         ]
         read_only_fields = [
             'id', 'created_at', 'updated_at', 'messages', 'total_tokens_used',
-            'total_cost_usd', 'cost_source',
+            'total_cost_usd', 'cost_source', 'paid_by',
         ]
+
+    def to_representation(self, instance):
+        # Every message's feedback in one query, handed to the message
+        # serializer through the shared context. Per-message lookups made the
+        # detail cost grow with the transcript
+        # (`test_session_list::test_the_detail_does_not_query_per_message`).
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if 'messages' in self.fields and user is not None and not getattr(user, 'is_anonymous', True):
+            try:
+                from logs.models import Feedback
+
+                self.context['feedback_by_message'] = {
+                    row['chat_message_id']: {k: row[k] for k in ('rating', 'reason', 'comment')}
+                    for row in Feedback.objects.filter(user=user, chat_message__session=instance)
+                    .values('chat_message_id', 'rating', 'reason', 'comment')
+                }
+            except Exception:  # noqa: BLE001 — feedback must not fail the transcript
+                self.context['feedback_by_message'] = {}
+        return super().to_representation(instance)
 
     def validate_llm_effort(self, value):
         """Reject a level that is not on the ladder.

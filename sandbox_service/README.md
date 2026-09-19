@@ -30,7 +30,7 @@ Via compose (normal path):
 
 ```bash
 docker compose up --build            # local
-docker compose -f docker-compose.ec2.yml build sandbox && docker compose -f docker-compose.ec2.yml up   # ec2
+docker compose -f docker-compose.prod.yml pull sandbox && docker compose -f docker-compose.prod.yml up -d   # ec2 (image built and pushed from a dev machine)
 ```
 
 Directly, for a quick check (no Docker; uses the host Python, so no numpy unless

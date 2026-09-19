@@ -125,6 +125,12 @@ class SubAgent(models.Model):
     icon = models.CharField(max_length=50, blank=True)
     color = models.CharField(max_length=7, default='#6366f1')
 
+    #: Which catalogue entry this was installed from, if any. Set by
+    #: `template_install` and never edited afterwards: it is what makes
+    #: "install the office pack" idempotent — a template whose slug already
+    #: has an agent is skipped rather than installed twice.
+    template_slug = models.CharField(max_length=100, blank=True, null=True)
+
     # Counters are denormalised for listing; `_with_stats` still computes the
     # observed numbers from ExecutionLog, because a stored counter drifts.
     execution_count = models.IntegerField(default=0)

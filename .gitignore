@@ -148,6 +148,9 @@ staticfiles/
 # Local database backups (manage.py backup_db)
 backups/
 
+# External benchmark datasets (licences + keep out of training data)
+.eval_data/
+
 # Hand-made database copies (e.g. db.sqlite3.bak-before-0019): they hold user data
 *.sqlite3.bak*
 *.sqlite3.backup*

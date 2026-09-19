@@ -1,8 +1,8 @@
 """
 Agents App URL Configuration
 
-Agent CRUD, execution, approval/steering, triggers, HITL, the builder chat
-transcript and platform settings. An agent is a `SubAgent` row; runs start from
+Agent CRUD, execution, approval/steering, triggers, HITL and platform
+settings. An agent is a `SubAgent` row; runs start from
 `agents/<id>/execute/`.
 """
 from django.urls import path
@@ -10,11 +10,9 @@ from django.urls import path
 from .views import (
     agents,
     builder,
-    conversations,
     gallery,
     hitl,
     runs,
-    system,
     triggers,
 )
 
@@ -24,22 +22,34 @@ urlpatterns = [
     # Agents
     path('agents/', agents.agent_list, name='agent_list'),
     path('agents/<int:agent_id>/', agents.agent_detail, name='agent_detail'),
+    # Roll the configuration back to an earlier revision, recorded as a new one.
+    path('agents/<int:agent_id>/revisions/<int:number>/restore/',
+         agents.agent_restore_revision, name='agent_restore_revision'),
     # The builder's chat pane: a description in, knob changes out. Nothing is
     # saved — it proposes against the board the caller sends, and the save it
     # leads to is the ordinary PATCH above. Not nested under an agent id
     # because a brand-new agent has none.
     path('agents/configure/', builder.configure_agent, name='agent_configure'),
+    # The builder chat for one saved agent, kept so a reload does not lose why
+    # each knob moved. Written by `configure/` when it is given an agent id.
+    path('agents/<int:agent_id>/builder-chat/', builder.builder_chat,
+         name='agent_builder_chat'),
     path('agents/<int:agent_id>/execute/', runs.agent_execute, name='agent_execute'),
     path('agents/<int:agent_id>/approve/', runs.agent_approve, name='agent_approve'),
     path('agents/<int:agent_id>/reject/', runs.agent_reject, name='agent_reject'),
     path('agents/<int:agent_id>/steer/', runs.agent_steer, name='agent_steer'),
     path('agents/<int:agent_id>/autonomy/', runs.agent_autonomy, name='agent_autonomy'),
+    # Stop one run. By execution, not by agent: an agent may have several
+    # runs going, and "stop the agent" would not say which.
+    path('runs/<str:execution_id>/cancel/', runs.run_cancel, name='run_cancel'),
 
     # Explore — everything installable, from two sources: the curated
     # catalogue (code, `agents/gallery.py`) and agents users have published
     # (`SharedAgent` rows). They are presented and installed identically;
     # install writes through the same serializer the builder saves through.
     path('templates/', gallery.template_list, name='template_list'),
+    path('templates/install-pack/', gallery.template_install_pack,
+         name='template_install_pack'),
     path('templates/<slug:slug>/', gallery.template_detail, name='template_detail'),
     path('templates/<slug:slug>/install/', gallery.template_install,
          name='template_install'),
@@ -81,13 +91,7 @@ urlpatterns = [
     path('hitl/pending/', hitl.pending_hitl_requests, name='pending_hitl'),
     path('hitl/<str:request_id>/respond/', hitl.respond_to_hitl, name='respond_hitl'),
 
-    # AI Chat
-    path('chat/', conversations.conversation_messages, name='chat_list'),
-    path('chat/<str:conversation_id>/', conversations.conversation_messages, name='chat_detail'),
-    path('chat/<str:conversation_id>/messages/<int:message_id>/',
-         conversations.conversation_messages, name='chat_message_detail'),
-
-    # Settings
-    path('settings/update/', system.update_orchestrator_settings,
-         name='update_orchestrator_settings'),
+    # `settings/update/` was retired 2026-09-18. It wrote a credential id no
+    # model call reads, and a provider/model pair with no validation; the
+    # account defaults are set through `auth/profile/`, which checks them.
 ]

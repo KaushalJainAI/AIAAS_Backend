@@ -87,6 +87,10 @@ class ConfigureSerializer(serializers.Serializer):
     history = serializers.ListField(
         child=serializers.DictField(), required=False, default=list
     )
+    #: The saved agent this conversation is about, if there is one. When set,
+    #: the turn is kept (see `_remember_turn`) so the builder chat survives a
+    #: reload. A brand-new board has no id and nothing is stored for it.
+    agent_id = serializers.IntegerField(required=False, allow_null=True, default=None)
 
     def validate_message(self, value):
         text = value.strip()
@@ -242,15 +246,34 @@ def _timezone(value, _cat):
     return value.strip()
 
 
-#: One line per grant, keyed by the same names `TOOL_KEYS` holds — the mapping
-#: is asserted in the tests, so a tool added to the runtime cannot quietly go
-#: undescribed to the model that hands it out.
+#: One line per grant the runtime actually serves — `TOOL_KEYS` minus
+#: `runtime.UNSERVED_GRANTS`, asserted in the tests, so a tool added to the
+#: runtime cannot quietly go undescribed to the model that hands it out.
+#: `shell` is absent on purpose: nothing serves it, so a model offered it would
+#: grant a capability that does nothing while the board showed it switched on.
 TOOL_HELP = {
     'codeExecution': 'run Python in the sandbox — arithmetic, CSV work, anything computed',
-    'shell': 'run shell commands. Rarely justified; do not grant unless asked for',
     'webSearch': 'search the web',
     'scrape': 'fetch and read a web page it has the URL for',
     'fileOps': "read and write the user's own files",
+    'office': (
+        'create PowerPoint decks, Excel workbooks and Word documents in its '
+        'folder. Needs `fileAccess` other than none'
+    ),
+    'media': (
+        'generate images, billed to the user\'s OpenRouter account and saved '
+        'into its folder. Needs `fileAccess` other than none'
+    ),
+    'browser': (
+        'use a real browser: read JavaScript pages, and click/type on the sites '
+        'listed in `browserDomains` (empty: read only). Off unless the platform '
+        'has a browser configured'
+    ),
+    'publish': (
+        'publish hosted pages shareable by link (report, HTML or file). '
+        'Outward-facing: above link visibility it pauses for a human, and an '
+        'unattended run may only publish link pages'
+    ),
     'rag': "search the user's knowledge bases",
     'mcp': (
         'reach connected accounts (Gmail, Drive, Slack, …). Needed for any '
@@ -279,16 +302,19 @@ KNOBS: dict[str, Knob] = {
     ),
     'status': Knob(
         'Status',
-        f'{sorted(SETTABLE_STATUS)}. `paused` stops schedules and delegation '
-        'without deleting anything. Only set this when the user asks to pause '
-        'or resume an agent.',
-        _one_of(SETTABLE_STATUS),
+        f'{sorted(SETTABLE_STATUS - {"archived"})}. `paused` stops schedules and '
+        'delegation without deleting anything. Only set this when the user asks '
+        'to pause or resume an agent.',
+        # Archiving is filing an agent away, done from the list, not something
+        # a description of a job should ever imply.
+        _one_of(SETTABLE_STATUS - {'archived'}),
     ),
     'outputContract': Knob(
         'Result shape',
         f'What the answer must come back as: {sorted(OUTPUT_CONTRACTS)}, or "" '
         'for prose. `research` returns text plus the queries run and the '
-        'sources used; `extraction` returns rows plus field names. Set one only '
+        'sources used; `extraction` returns rows plus field names; `files` '
+        'returns a summary plus the workspace paths written. Set one only '
         'when the user wants a structured result something else will read.',
         _one_of(OUTPUT_CONTRACTS | {''}),
     ),
@@ -404,9 +430,8 @@ KNOBS: dict[str, Knob] = {
     'notifyOnHitl': Knob(
         'Notify on pause', 'Ping the user when it needs an answer.', _bool,
     ),
-    'reviewAgent': Knob(
-        'Review agent', 'Have a second agent check its answers.', _bool,
-    ),
+    # `reviewAgent` is not offered: nothing reads it. It told the user a second
+    # agent would check the answers, and none ever did.
     'spendCapRupees': Knob(
         'Spend cap', 'Monthly cap in rupees, 0-100000.', _number(0, 100_000),
     ),
@@ -548,9 +573,9 @@ needs the `subAgents` grant and ids in `delegatesTo`.
 read from: naming a mailbox otherwise hands it sending and deleting too.
 - Anything that sends, posts, pays or deletes keeps `autonomy` at `ask` unless \
 the user explicitly asked to be left out of it.
-- A cadence ("every morning", "each Monday") means `trigger` = `maintenance`, a \
-`schedule`, and `allowUnattended` = true — all three, or the schedule is \
-refused at every firing.
+- A cadence ("every morning", "each Monday") means a `schedule` and \
+`allowUnattended` = true — both, or the schedule is refused at every firing. \
+Set `scheduleTimezone` to THE USER'S TIMEZONE unless they named another place.
 - Never name an id that is not in the catalogue below.
 
 Answer with a single JSON object and nothing else:
@@ -568,7 +593,8 @@ __CATALOGUE__
 """
 
 
-def _prompt(message: str, cfg: dict, history: list[dict]) -> str:
+def _prompt(message: str, cfg: dict, history: list[dict],
+            user_timezone: str = 'UTC') -> str:
     turns = []
     for turn in history[-MAX_HISTORY_TURNS:]:
         role = 'User' if turn.get('role') == 'user' else 'You'
@@ -585,6 +611,9 @@ def _prompt(message: str, cfg: dict, history: list[dict]) -> str:
         'CURRENT CONFIG:\n'
         + json.dumps(cfg, ensure_ascii=False, indent=2, default=str)
         + schedule_note
+        # From the user's Settings. Without it "every morning" became 09:00 UTC,
+        # which is mid-afternoon for most of the people using this.
+        + f"\n\nTHE USER'S TIMEZONE: {user_timezone}"
         + ('\n\nEARLIER IN THIS BUILDER CHAT:\n' + '\n'.join(turns) if turns else '')
         + f'\n\nTHE USER SAYS:\n{message}\n'
     )
@@ -736,13 +765,13 @@ def _candidates(cfg: dict) -> list[tuple[str, str]]:
 
 
 async def _ask(cfg: dict, message: str, history: list[dict], cat: Catalogue,
-               user_id: int) -> tuple[dict | None, str]:
+               user_id: int, user_timezone: str = 'UTC') -> tuple[dict | None, str]:
     """(parsed answer, error). Never raises on a provider's behalf."""
     from llm import access as llm
 
     system = SYSTEM.replace('__KNOBS__', _knob_block()).replace(
         '__CATALOGUE__', _catalogue_block(cat))
-    prompt = _prompt(message, cfg, history)
+    prompt = _prompt(message, cfg, history, user_timezone)
     last_error = ''
     for provider, model in _candidates(cfg):
         try:
@@ -789,8 +818,11 @@ async def configure_agent(request):
                        'created_at', 'updated_at', 'extraSchedules'}
     }
     cat = await _catalogue(request.user)
+    from core.preferences import for_user as preferences_for
+
+    prefs = await sync_to_async(preferences_for)(request.user.id)
     parsed, error = await _ask(cfg, data['message'], data['history'], cat,
-                               request.user.id)
+                               request.user.id, prefs.timezone)
 
     if parsed is None:
         # 503, not 200-with-an-apology: the caller falls back to its own local
@@ -810,4 +842,85 @@ async def configure_agent(request):
             'I set what your description implied — each change is highlighted '
             'on the right.' if changes else 'Nothing here needed to change.'
         )
+    if data.get('agent_id'):
+        await _remember_turn(request.user, data['agent_id'], data['message'],
+                             reply, changes)
     return Response({'reply': reply, 'changes': changes, 'source': 'model'})
+
+
+#: How much of an agent's builder conversation is kept and returned. It is a
+#: record of how the agent came to be configured, not an archive.
+BUILDER_CHAT_KEEP = 40
+
+
+@sync_to_async
+def _remember_turn(user, agent_id: int, message: str, reply: str,
+                   changes: list[dict]) -> None:
+    """Keep one exchange of an agent's builder chat.
+
+    The conversation lived in React state, so a reload threw away the reasoning
+    behind every knob it had moved — the `why` on each change is the only place
+    that reasoning is written down. Stored on `ConversationMessage` (which
+    already has a `subagent` column) rather than a new table. Best-effort: a
+    failed write costs the history, never the proposal the user is waiting on.
+    """
+    from agents.models import ConversationMessage, SubAgent
+
+    try:
+        agent = SubAgent.objects.filter(id=agent_id, user=user).first()
+        if agent is None:
+            return
+        ConversationMessage.objects.create(
+            user=user, subagent=agent, role='user', content=message,
+            metadata={'surface': 'builder'},
+        )
+        ConversationMessage.objects.create(
+            user=user, subagent=agent, role='assistant', content=reply,
+            metadata={'surface': 'builder', 'changes': changes},
+        )
+        stale = list(
+            ConversationMessage.objects
+            .filter(user=user, subagent=agent, metadata__surface='builder')
+            .order_by('-created_at', '-id')
+            .values_list('id', flat=True)[BUILDER_CHAT_KEEP:]
+        )
+        if stale:
+            ConversationMessage.objects.filter(id__in=stale).delete()
+    except Exception:  # noqa: BLE001
+        logger.warning('agent-builder: could not keep the turn', exc_info=True)
+
+
+@extend_schema(
+    methods=['GET'],
+    responses={200: OpenApiResponse(description="The agent's builder conversation")},
+    description="The builder chat for one saved agent, oldest first.",
+)
+@async_api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def builder_chat(request, agent_id: int):
+    """What was said while this agent was being configured, oldest first."""
+    from agents.models import ConversationMessage, SubAgent
+
+    owned = await SubAgent.objects.filter(id=agent_id, user=request.user).aexists()
+    if not owned:
+        return Response({'error': 'Agent not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    @sync_to_async
+    def _read():
+        rows = list(
+            ConversationMessage.objects
+            .filter(user=request.user, subagent_id=agent_id,
+                    metadata__surface='builder')
+            .order_by('-created_at', '-id')[:BUILDER_CHAT_KEEP]
+        )
+        rows.reverse()
+        return [
+            {
+                'role': 'user' if row.role == 'user' else 'agent',
+                'text': row.content,
+                'changes': (row.metadata or {}).get('changes') or [],
+            }
+            for row in rows
+        ]
+
+    return Response({'messages': await _read()})

@@ -194,6 +194,10 @@ async def _call_witness(
                     history=list(transcript),
                     attachments=[attachment],
                 )
+            # Paid for on the user's behalf; the turn that asked prices it.
+            from chat.turn import side_calls
+
+            side_calls.record(model, completion.usage)
         except asyncio.TimeoutError:
             logger.warning("[Vision] %s timed out after %ss", model,
                            WITNESS_TIMEOUT_SECONDS)

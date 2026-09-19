@@ -75,7 +75,7 @@ class AgentCrudTests(APITestCase):
             useEnvironment=True,
             outputContract='extraction', fanoutParallel=3, status='paused',
             schedule='0 9 * * 1', allowUnattended=True,
-            notifyOnHitl=False, reviewAgent=True, spendCapRupees=750,
+            notifyOnHitl=False, spendCapRupees=750,
             recursiveContext=False, compaction=False, indexing=False,
         )
         created = self.client.post(self.list_url, sent, format='json')
@@ -247,11 +247,14 @@ class AgentValidationTests(APITestCase):
         resumed = self.client.patch(url, {'status': 'active'}, format='json')
         self.assertEqual(resumed.data['status'], 'active')
 
-    def test_archiving_is_not_offered_as_a_save(self):
-        """There is no un-archive path, so a dropdown that reaches it is a
-        one-way door in disguise."""
+    def test_archiving_is_a_save_now_that_it_can_be_undone(self):
+        """It was refused while there was no un-archive path — a one-way door
+        in disguise. The agents list now restores archived agents, so archive
+        is the reversible answer to "get this out of my list", ahead of delete.
+        Round trip: `test_agent_lifecycle.ArchiveTests`."""
         r = self._post(status='archived')
-        self.assertEqual(r.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r.data['status'], 'archived')
 
     def test_run_limit_outside_the_range_is_refused(self):
         # The ceiling that replaced `memoryMb`'s. Both directions: a run limit

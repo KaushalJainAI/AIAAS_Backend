@@ -64,6 +64,10 @@ class ChartError(ValueError):
 
 
 def _label(value: Any) -> str:
+    # `None` is absence, not the word "None": an omitted `x_label` or `note`
+    # was stored as that string and drawn as the axis title and caption.
+    if value is None:
+        return ''
     return str(value).strip()[:CHART_MAX_LABEL_CHARS]
 
 
@@ -261,22 +265,44 @@ async def render_chart(args: Dict, context: Dict) -> str:
     every one of them is something the model can fix on its next turn: fold a
     series into "Other", aggregate the points, pick a different kind.
     """
-    kind = str(args.get('kind') or '').strip().lower()
-    if kind not in KINDS:
-        return json.dumps({
-            'error': f'Unknown chart kind {kind!r}. Use one of: {", ".join(KINDS)}.'
-        })
-
-    title = _label(args.get('title'))
-    if not title:
-        return json.dumps({'error': 'Give the chart a title saying what it shows.'})
-
     try:
-        series = _series(args.get('series'), kind)
+        spec = build_spec(args)
     except ChartError as exc:
         return json.dumps({'error': str(exc)})
 
-    spec = {
+    kind, title, series = spec['kind'], spec['title'], spec['series']
+    points = sum(len(s['points']) for s in series)
+    return json.dumps({
+        **spec,
+        'rendered': (
+            f'{kind} chart "{title}" with {len(series)} series and {points} '
+            f'points is now shown to the user. Do not describe it point by '
+            f'point; say what it shows.'
+        ),
+    })
+
+
+def build_spec(args: Dict) -> Dict[str, Any]:
+    """A validated chart spec, or `ChartError` naming what to fix.
+
+    Public because a chart on a slide or in a workbook must accept exactly the
+    shapes a chart in the conversation does (`chat/tools/office/`) — two
+    validators would drift, and a model that learned one would be refused by
+    the other.
+    """
+    if not isinstance(args, dict):
+        raise ChartError('A chart must be an object with kind, title and series.')
+    kind = str(args.get('kind') or '').strip().lower()
+    if kind not in KINDS:
+        raise ChartError(f'Unknown chart kind {kind!r}. Use one of: {", ".join(KINDS)}.')
+
+    title = _label(args.get('title'))
+    if not title:
+        raise ChartError('Give the chart a title saying what it shows.')
+
+    series = _series(args.get('series'), kind)
+
+    return {
         'type': 'chart',
         'kind': kind,
         'title': title,
@@ -289,13 +315,3 @@ async def render_chart(args: Dict, context: Dict) -> str:
         'stacked': bool(args.get('stacked')) and kind in ('bar', 'column', 'area'),
         'note': _label(args.get('note')),
     }
-
-    points = sum(len(s['points']) for s in series)
-    return json.dumps({
-        **spec,
-        'rendered': (
-            f'{kind} chart "{title}" with {len(series)} series and {points} '
-            f'points is now shown to the user. Do not describe it point by '
-            f'point; say what it shows.'
-        ),
-    })

@@ -20,6 +20,10 @@ urlpatterns = [
     path('executions/', views.execution_list, name='execution_list'),
     path('executions/<str:execution_id>/', views.execution_detail, name='execution_detail'),
 
+    # Judgement — explicit thumbs and implicit signals.
+    path('feedback/', views.feedback, name='feedback'),
+    path('insights/quality/', views.quality, name='quality'),
+
     # Configuration history — what the agent was when a run behaved that way.
     path('agents/<int:agent_id>/revisions/', views.revision_list, name='revision_list'),
     path('agents/<int:agent_id>/revisions/<int:number>/', views.revision_detail,

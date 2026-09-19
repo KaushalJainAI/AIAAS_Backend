@@ -252,3 +252,76 @@ class CurationCostTests(TestCase):
         )
         self.assertEqual(stream.curation['cost_usd'], Decimal('0'))
         self.assertEqual(stream.curation['cost_source'], '')
+
+
+class InsightsSpendTests(TestCase):
+    """`cost_breakdown` must count chat, and label every sum honestly."""
+
+    def setUp(self):
+        from chat.models import ChatSession
+
+        self.user = User.objects.create_user(username='insight', password='pw')
+        self.agent = SubAgent.objects.create(user=self.user, name='Worker')
+        self.session = ChatSession.objects.create(user=self.user, title='C')
+
+    def _run(self, **kwargs):
+        return ExecutionLog.objects.create(
+            user=self.user, subagent=self.agent, status='completed', **kwargs)
+
+    def _answer(self, cost, source, paid_by=''):
+        from chat.models import ChatMessage
+
+        return ChatMessage.objects.create(
+            session=self.session, role='assistant', content='a',
+            cost_usd=Decimal(cost), cost_source=source, paid_by=paid_by,
+            input_tokens=100, output_tokens=10,
+        )
+
+    def _breakdown(self):
+        from logs.queries import cost_breakdown
+
+        return cost_breakdown(self.user, days=30)
+
+    def test_chat_spend_is_counted(self):
+        """It was left out entirely: chat has no ExecutionLog to sum."""
+        self._answer('0.010', 'billed', 'own_key')
+        self._answer('0.002', 'billed', 'platform')
+        chat = self._breakdown()['chat']
+        self.assertEqual(chat['messages'], 2)
+        self.assertEqual(chat['cost_usd'], '0.012000')
+        self.assertEqual(chat['cost_source'], 'billed')
+        self.assertEqual(chat['paid_by'], {'platform': 1, 'own_key': 1})
+
+    def test_the_all_up_total_adds_both_and_takes_the_weaker_label(self):
+        self._run(cost_usd=Decimal('1.00'), cost_source='estimated')
+        self._answer('0.50', 'billed')
+        data = self._breakdown()
+        self.assertEqual(data['all_cost_usd'], '1.500000')
+        self.assertEqual(data['all_cost_source'], 'estimated')
+        # The agent-only total keeps its old meaning.
+        self.assertEqual(data['total_cost_usd'], '1.000000')
+
+    def test_an_agent_billed_throughout_is_labelled_billed(self):
+        """Every priced agent used to read `estimated`, billed or not."""
+        self._run(cost_usd=Decimal('0.1'), cost_source='billed')
+        self._run(cost_usd=Decimal('0.2'), cost_source='billed')
+        row = self._breakdown()['by_workflow'][0]
+        self.assertEqual(row['cost_source'], 'billed')
+
+    def test_one_unpriced_run_makes_the_agent_unpriced(self):
+        self._run(cost_usd=Decimal('0.1'), cost_source='billed')
+        self._run(cost_source='unpriced', tokens_used=5)
+        self.assertEqual(self._breakdown()['by_workflow'][0]['cost_source'],
+                         'unpriced')
+
+    def test_a_deleted_agents_runs_are_grouped_and_named(self):
+        self._run(cost_usd=Decimal('0.1'), cost_source='estimated')
+        self.agent.delete()
+        row = self._breakdown()['by_workflow'][0]
+        self.assertIsNone(row['workflow_id'])
+        self.assertEqual(row['workflow_name'], 'Deleted agents')
+
+    def test_nothing_spent_is_not_a_confident_zero(self):
+        data = self._breakdown()
+        self.assertEqual(data['chat']['cost_source'], 'unpriced')
+        self.assertEqual(data['all_cost_source'], 'unpriced')

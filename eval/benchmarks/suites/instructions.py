@@ -23,7 +23,7 @@ SUITE = {
                 {'type': 'regex', 'pattern': r'"age"\s*:\s*29\b'},
                 {'type': 'not_contains', 'value': '```'},
             ],
-            'tags': ['format', 'json'],
+            'tags': ['format', 'json', 'smoke'],
         },
         {
             'name': 'Exactly three bullets',
@@ -34,7 +34,7 @@ SUITE = {
             'graders': [
                 {'type': 'regex', 'pattern': r'^\s*(?:- [^\n]+\s*){3}$'},
             ],
-            'tags': ['format'],
+            'tags': ['format', 'smoke'],
         },
         {
             'name': 'Length limit',

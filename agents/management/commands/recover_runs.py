@@ -51,9 +51,13 @@ class Command(BaseCommand):
             return
 
         tally = async_to_sync(sweep_orphaned_runs)()
-        if not tally['checked']:
+        from eval.recovery import sweep_orphaned_eval_runs
+
+        eval_tally = async_to_sync(sweep_orphaned_eval_runs)()
+        if not tally['checked'] and not eval_tally['checked']:
             self.stdout.write('No orphaned runs.')
             return
         self.stdout.write(self.style.SUCCESS(
             ' '.join(f'{k}={v}' for k, v in sorted(tally.items()))
+            + ' eval=' + ' '.join(f'{k}={v}' for k, v in sorted(eval_tally.items()))
         ))

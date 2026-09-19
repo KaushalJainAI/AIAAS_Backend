@@ -363,6 +363,11 @@ async def run_agent(args: Dict, context: Dict) -> str:
             # of appearing in the history with no explanation of who wanted it.
             parent_step_id=await _parent_step_id(context),
             delegation_task=goal,
+            # The caller's write folder, as `invoke_subagent` hands its workers:
+            # without it this door could only ever return prose, and a deck or
+            # workbook the agent made would land in its own home where the
+            # conversation that asked for it never looks.
+            workspace=tuple(getattr(context.get("file_scope"), "write_prefix", None) or ()),
         )
     except AgentRunRefused as exc:
         # A guardrail said no — spend cap, disabled agent. The user can act
