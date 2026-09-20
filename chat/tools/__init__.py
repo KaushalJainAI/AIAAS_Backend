@@ -26,6 +26,8 @@ What lives where:
 +  publish       hosted pages: snapshots shareable by link (`link`/`platform`/`public`)
    internal      this platform's own API, called as the user
   clock         wall-clock time
+  fetch         `download_file`: a URL the user named, kept as their file
+  workspace     the platform itself: `extract_data`, `notify_user`
   google        native Gmail / Drive / Sheets / Calendar connector tools
 
 Connector tools (`google`) *are* registered here, and carry `connector=` so the
@@ -47,6 +49,7 @@ from . import (  # noqa: F401  — imported for their registration side effect
     charts,
     clock,
     conversation,
+    fetch,
     files,
     google,
     internal,
@@ -59,6 +62,7 @@ from . import (  # noqa: F401  — imported for their registration side effect
     sandbox,
     vision,
     web,
+    workspace,
 )
 from .registry import (
     Tool,

@@ -53,7 +53,7 @@ SHAREABLE_KEYS: frozenset[str] = frozenset({
     'provider', 'model', 'temperature', 'effort',
     'fileAccess',
     'tools',
-    'useEnvironment', 'browserDomains',
+    'useEnvironment', 'browserDomains', 'toolScope',
     'outputContract', 'fanoutParallel',
     'schedule', 'allowUnattended',
     'autonomy', 'notifyOnHitl', 'spendCapRupees',

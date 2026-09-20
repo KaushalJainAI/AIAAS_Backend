@@ -13,6 +13,9 @@ class Notification(models.Model):
         ('hitl_digest', 'Daily HITL Digest'),
         ('image_ready', 'Image Generation Complete'),
         ('system', 'System Alert'),
+        # An agent telling its owner something while running unattended
+        # (`chat/tools/workspace.py::notify_user`).
+        ('agent_update', 'Agent Update'),
     )
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='notifications')

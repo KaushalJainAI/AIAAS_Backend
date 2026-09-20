@@ -170,11 +170,15 @@ class RagGrantTests(SimpleTestCase):
         """`list_knowledge_bases` tells the model to use `keyword_search` on a
         keyword KB and `list_documents` + `read_document` on a raw one. The
         grant unlocked neither, so the catalogue was instructing the agent to
-        call tools it would then be refused."""
+        call tools it would then be refused.
+
+        `extract_data` joined them on 2026-09-20: it reads the user's documents
+        through the same corpus, so it belongs to the grant that says an agent
+        may read them."""
         self.assertEqual(
             set(GRANT_TOOLS["rag"]),
             {"list_knowledge_bases", "knowledge_base_search", "keyword_search",
-             "list_documents", "read_document"},
+             "list_documents", "read_document", "extract_data"},
         )
 
 

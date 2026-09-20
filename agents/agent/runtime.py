@@ -48,14 +48,17 @@ logger = logging.getLogger(__name__)
 #: no matter what the model asks for.
 GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     'webSearch': ('web_search', 'deep_research', 'image_search', 'video_search'),
-    'scrape': ('scrape_webpage', 'read_url'),
+    # `download_file` is here rather than with the file tools: what it needs
+    # permission for is reaching the web, and where it writes is already
+    # bounded by the file scope.
+    'scrape': ('scrape_webpage', 'read_url', 'download_file'),
     # All five, not two. `list_knowledge_bases` tells the model to use
     # `keyword_search` on a keyword KB and `list_documents` + `read_document` on
     # a raw one — tools this grant did not unlock, so the catalogue was
     # instructing the agent to call things it would then be refused, and an
     # agent whose KB was keyword- or raw-backed could not read it at all.
     'rag': ('list_knowledge_bases', 'knowledge_base_search', 'keyword_search',
-            'list_documents', 'read_document'),
+            'list_documents', 'read_document', 'extract_data'),
     'codeExecution': ('execute_python', 'run_python_on_files'),
     # The virtual filesystem over the user's own Folder/Document tree
     # (`inference/vfs.py`). What the agent may actually do with these is a
@@ -70,7 +73,8 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # presentation" and "may rewrite my documents" are different things to
     # hand out. It still needs a file scope to save into — `fileAccess` says
     # where, exactly as for `fileOps`, and with no scope it is withheld.
-    'office': ('render_deck', 'render_workbook', 'render_document'),
+    'office': ('render_deck', 'render_workbook', 'render_document', 'render_pdf',
+               'edit_workbook', 'render_diagram'),
     # Generated images (`chat/tools/media.py`). Its own grant because it
     # spends the user's money per call, and saved into the file scope, so it
     # needs `fileAccess` exactly as `office` does.
@@ -128,7 +132,10 @@ UNSERVED_GRANTS = frozenset({'shell'})
 #: worse report than one that can show them, and there is no blast radius to
 #: gate — the drawing happens in the reader's browser, from data the agent
 #: already had.
-ALWAYS_AVAILABLE = ('get_current_time', 'update_todos', 'render_chart')
+#: `notify_user` joins them (2026-09-20): it reaches only the owner's own
+#: notification feed, and an unattended agent that cannot say "this needs
+#: you" is not safer, only quieter. Capped per run inside the tool.
+ALWAYS_AVAILABLE = ('get_current_time', 'update_todos', 'render_chart', 'notify_user')
 
 #: Offered only once this run has actually stored something — a tool result too
 #: large to replay, or a step the curator removed. Both read back the run's own
@@ -208,6 +215,18 @@ class AgentToolbox:
     #: there was no third field to say otherwise. See `agents/connector_scope.py`.
     mcp_scope: Any = None
 
+    #: The exact built-in tools this agent may use, or `()` for "everything
+    #: its grants unlock". The third axis after the grant (may it at all) and
+    #: the scope (which rows): *which tools*, so one agent can hold `mcp` for
+    #: reading a mailbox without also carrying forty descriptors it never
+    #: calls. Empty is unrestricted, the same default every other scope takes,
+    #: because the field arrives after the agents that predate it.
+    #:
+    #: `ALWAYS_AVAILABLE` and `RETRIEVAL_TOOLS` are never narrowed by it: an
+    #: agent that may not keep its own plan or read back its own archived
+    #: output is not narrower, only more forgetful.
+    tool_scope: tuple[str, ...] = ()
+
     #: The MCP descriptors this run resolved, or None before the first pass.
     #: One toolbox serves one run, so this is a per-run memo: `descriptors` is
     #: called before *every* model call, and resolving connectors costs a
@@ -235,7 +254,8 @@ class AgentToolbox:
         return cls(grants=grants, user_id=user_id, unserved=unserved,
                    file_scope=file_scope, read_only=read_only,
                    session_key=session_key, archive_scopes=archive_scopes,
-                   mcp_scope=connector_scope.for_agent(agent))
+                   mcp_scope=connector_scope.for_agent(agent),
+                   tool_scope=tool_scope_for(agent))
 
     @property
     def allowed_names(self) -> frozenset[str]:
@@ -255,6 +275,10 @@ class AgentToolbox:
             # one declares its own effect and a declared read is a read.
             from chat.tools.registry import connector_tool_names
             names.update(connector_tool_names())
+        if self.tool_scope:
+            # Narrowed to the chosen tools, plus the infrastructure ones that
+            # are never a capability: the plan, the clock, the archive.
+            names &= set(self.tool_scope) | set(ALWAYS_AVAILABLE) | set(RETRIEVAL_TOOLS)
         if self.read_only:
             from chat.tools import READ_ONLY_TOOLS
             names &= set(READ_ONLY_TOOLS)
@@ -504,6 +528,18 @@ async def build_file_scope(agent, user, *, workspace=()):
 # this function documented: an empty selection is unrestricted, and a stale or
 # switched-off connection can only ever take tools away, since the scope is
 # intersected with what the user can actually see.
+
+
+def tool_scope_for(agent) -> tuple[str, ...]:
+    """The built-in tools this agent may use, or `()` for all of its grants'.
+
+    Only built-ins: an MCP tool's name is minted at runtime by a third party,
+    so a stored list of them would narrow silently when one is renamed — which
+    is the reason `connector_scope` answers that question per connection
+    instead.
+    """
+    raw = (agent.agent_context or {}).get('toolScope') or []
+    return tuple(sorted({str(t).strip() for t in raw if str(t).strip()}))
 
 
 def browser_domains_for(agent) -> tuple[str, ...]:

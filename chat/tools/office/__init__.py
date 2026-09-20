@@ -36,7 +36,7 @@ from asgiref.sync import sync_to_async
 from ..charts import render_chart as _register_chart  # noqa: F401 — schema reused below
 from ..registry import get as _registered
 from ..registry import tool
-from . import deck, document, workbook
+from . import deck, diagram, document, edit, pdf, workbook
 from .spec import SpecError
 from .themes import THEME_NAMES
 
@@ -423,4 +423,236 @@ async def render_document(args: Dict, context: Dict) -> str:
     return await _save(context, work)
 
 
-OFFICE_TOOLS = ('render_deck', 'render_workbook', 'render_document')
+# ---------------------------------------------------------------------------
+# render_pdf — the same blocks as render_document, as the format people send
+# ---------------------------------------------------------------------------
+
+@tool({
+    'type': 'function',
+    'function': {
+        'name': 'render_pdf',
+        'description': (
+            'Create a PDF from the same blocks render_document takes — heading, '
+            'paragraph, bullets, numbered, table, quote, image, chart, page_break. '
+            'Use it when the file is to be sent, printed or attached rather than '
+            'edited; use render_document when the user will edit it in Word. A '
+            'chart block is drawn as its data table, as in Word.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'path': _path_schema('.pdf'),
+                'title': {'type': 'string'},
+                'subtitle': {'type': 'string'},
+                'theme': {'type': 'string', 'enum': list(document.DOC_THEMES)},
+                'blocks': {
+                    'type': 'array',
+                    'description': f'At most {document.MAX_BLOCKS}. Same shape as render_document.',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'type': {'type': 'string', 'enum': list(document.BLOCK_TYPES)},
+                            'text': {'type': 'string', 'description': 'heading, paragraph, quote.'},
+                            'level': {'type': 'integer', 'enum': [1, 2, 3], 'description': 'heading.'},
+                            'items': {'type': 'array', 'items': {'type': 'string'},
+                                      'description': 'bullets, numbered.'},
+                            'columns': {'type': 'array', 'items': {'type': 'string'}, 'description': 'table.'},
+                            'rows': {'type': 'array', 'items': {'type': 'array', 'items': {'type': 'string'}},
+                                     'description': 'table.'},
+                            'caption': {'type': 'string', 'description': 'table, image.'},
+                            'path': {'type': 'string', 'description': "image: a path in the user's files."},
+                            'chart': _CHART_SCHEMA,
+                        },
+                        'required': ['type'],
+                        'additionalProperties': False,
+                    },
+                },
+                'overwrite': _OVERWRITE,
+            },
+            'required': ['title', 'blocks'],
+            'additionalProperties': False,
+        },
+    },
+}, requires='files', effect='reversible')
+async def render_pdf(args: Dict, context: Dict) -> str:
+    try:
+        spec = document.validate(args)
+    except SpecError as exc:
+        return json.dumps({'error': str(exc)})
+
+    def work(scope):
+        from inference.vfs import write_binary
+
+        target = _target(scope, args.get('path'), 'pdf', spec['title'])
+        data = pdf.render(spec, _load_images(scope, document.image_paths(spec)))
+        result = write_binary(scope, target, data, text=document.extract_text(spec),
+                              spec=document.preview(spec),
+                              overwrite=bool(args.get('overwrite')))
+        result['blocks'] = len(spec['blocks'])
+        if document.chart_count(spec):
+            result['charts_as_tables'] = document.chart_count(spec)
+        return result
+
+    return await _save(context, work)
+
+
+# ---------------------------------------------------------------------------
+# edit_workbook — change a workbook without re-emitting it
+# ---------------------------------------------------------------------------
+
+@tool({
+    'type': 'function',
+    'function': {
+        'name': 'edit_workbook',
+        'description': (
+            'Add rows to, or set cells in, a workbook that already exists, '
+            'keeping everything else — other sheets, formatting, charts and the '
+            'formulas you do not touch. Prefer this over render_workbook for any '
+            'change to an existing file: re-rendering means re-typing every row '
+            'you did not mean to change. Values starting with "=" are formulas.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'path': {'type': 'string', 'description': 'The .xlsx to change.'},
+                'sheet': {'type': 'string', 'description': 'Sheet name. Defaults to the first.'},
+                'append_rows': {
+                    'type': 'array',
+                    'description': 'Rows added after the last row that has data, in column order.',
+                    'items': {'type': 'array', 'items': {'type': ['string', 'number', 'boolean', 'null']}},
+                },
+                'set_cells': {
+                    'type': 'array',
+                    'description': 'Individual cells to overwrite.',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'cell': {'type': 'string', 'description': 'A reference like B7.'},
+                            'value': {'type': ['string', 'number', 'boolean', 'null']},
+                        },
+                        'required': ['cell', 'value'],
+                        'additionalProperties': False,
+                    },
+                },
+            },
+            'required': ['path'],
+            'additionalProperties': False,
+        },
+    },
+}, requires='files', sensitive=True, effect='reversible')
+async def edit_workbook(args: Dict, context: Dict) -> str:
+    try:
+        change = edit.validate(args)
+    except SpecError as exc:
+        return json.dumps({'error': str(exc)})
+
+    def work(scope):
+        from inference.vfs import VfsError, read_binary, write_binary
+
+        path = str(args.get('path') or '').strip()
+        if not path.lower().endswith('.xlsx'):
+            raise SpecError('edit_workbook changes .xlsx files; give the path of one.')
+        try:
+            data = read_binary(scope, path)
+        except VfsError:
+            raise
+        updated, report = edit.apply(data, change)
+        result = write_binary(scope, path, updated,
+                              text=_workbook_text(updated), overwrite=True)
+        result.update(report)
+        return result
+
+    return await _save(context, work)
+
+
+def _workbook_text(data: bytes) -> str:
+    """The edited file's searchable text, read back from what was written."""
+    import io
+
+    from inference.utils import extract_xlsx_text
+
+    return extract_xlsx_text(io.BytesIO(data))
+
+
+# ---------------------------------------------------------------------------
+# render_diagram — boxes and arrows as data
+# ---------------------------------------------------------------------------
+
+@tool({
+    'type': 'function',
+    'function': {
+        'name': 'render_diagram',
+        'description': (
+            'Draw a flow or architecture diagram from nodes and edges and save it '
+            'as an SVG in the user\'s files. The app does the layout (left to '
+            'right, one column per step), so describe what connects to what and '
+            'never write SVG or Mermaid yourself. Good for pipelines, processes '
+            'and system maps; use render_chart for numbers. The SVG opens in a '
+            'browser and goes into documents — it cannot be put on a slide yet.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'path': _path_schema('.svg'),
+                'title': {'type': 'string', 'description': 'What the diagram shows.'},
+                'theme': {'type': 'string', 'enum': list(THEME_NAMES)},
+                'nodes': {
+                    'type': 'array',
+                    'description': f'At most {diagram.MAX_NODES}.',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'id': {'type': 'string', 'description': 'Short, unique; edges refer to it.'},
+                            'label': {'type': 'string', 'description': 'What is shown in the box.'},
+                            'shape': {'type': 'string', 'enum': list(diagram.SHAPES),
+                                      'description': 'diamond for a decision.'},
+                            'accent': {'type': 'boolean', 'description': 'Highlight this one.'},
+                        },
+                        'required': ['id'],
+                        'additionalProperties': False,
+                    },
+                },
+                'edges': {
+                    'type': 'array',
+                    'description': f'At most {diagram.MAX_EDGES}.',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'from': {'type': 'string'},
+                            'to': {'type': 'string'},
+                            'label': {'type': 'string', 'description': 'What the arrow means.'},
+                        },
+                        'required': ['from', 'to'],
+                        'additionalProperties': False,
+                    },
+                },
+                'overwrite': _OVERWRITE,
+            },
+            'required': ['nodes'],
+            'additionalProperties': False,
+        },
+    },
+}, requires='files', effect='reversible')
+async def render_diagram(args: Dict, context: Dict) -> str:
+    try:
+        spec = diagram.validate(args)
+    except SpecError as exc:
+        return json.dumps({'error': str(exc)})
+
+    def work(scope):
+        from inference.vfs import write_binary
+
+        target = _target(scope, args.get('path'), 'svg', spec['title'] or 'diagram')
+        result = write_binary(scope, target, diagram.render(spec),
+                              text=diagram.extract_text(spec),
+                              spec={'kind': 'diagram', **spec},
+                              overwrite=bool(args.get('overwrite')))
+        result['nodes'] = len(spec['nodes'])
+        result['edges'] = len(spec['edges'])
+        return result
+
+    return await _save(context, work)
+
+
+OFFICE_TOOLS = ('render_deck', 'render_workbook', 'render_document', 'render_pdf',
+                'edit_workbook', 'render_diagram')

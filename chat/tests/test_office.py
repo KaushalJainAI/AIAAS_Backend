@@ -375,10 +375,15 @@ class OfficeAvailabilityTests(SimpleTestCase):
     def test_they_create_rather_than_destroy(self):
         # Why they run without asking in chat: nothing they do is beyond the
         # user's own undo (renamed on collision, overwrite goes to the bin).
+        #
+        # `edit_workbook` is the exception and asks first, because it is the
+        # one that changes a file the user already has rather than adding one:
+        # the undo is a restore from the bin, not "ignore the new file".
         for name in OFFICE_TOOLS:
             tool = registered(name)
-            self.assertEqual(tool.effect, 'reversible')
-            self.assertFalse(tool.sensitive)
+            with self.subTest(tool=name):
+                self.assertEqual(tool.effect, 'reversible')
+                self.assertEqual(tool.sensitive, name == 'edit_workbook')
 
     def test_the_office_grant_unlocks_them_and_needs_a_scope(self):
         from agents.agent.runtime import GRANT_TOOLS, AgentToolbox

@@ -48,3 +48,1880 @@ HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 O
 [Latency] it=0 tools=16ms(n=12) ttft=2938ms total=2983ms prompt=3305 cached=3185(96%) out=83 model=openrouter/meta/muse-spark-1.3-contributor effort=-
 [Tools] iter=1 list_files(['path'])
 [Tools] iter=1 dispatching 2 calls in parallel: ['read_file', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=30ms(n=12) ttft=1797ms total=2250ms prompt=3826 cached=3185(83%) out=145 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+[Latency] it=1 tools=31ms(n=12) ttft=2782ms total=3657ms prompt=3570 cached=3313(93%) out=193 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=30ms(n=12) ttft=10735ms total=20079ms prompt=4556 cached=3185(70%) out=1928 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=12) ttft=6061ms total=21358ms prompt=5686 cached=3313(58%) out=2558 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=47ms(n=12) ttft=3125ms total=12046ms prompt=5646 cached=4465(79%) out=1126 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=32ms(n=12) ttft=3952ms total=18936ms prompt=7878 cached=3441(44%) out=2058 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=63ms(n=12) ttft=11031ms total=11811ms prompt=6740 cached=3697(55%) out=882 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=16ms(n=12) ttft=8656ms total=9233ms prompt=6878 cached=3185(46%) out=713 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=47ms(n=12) ttft=3530ms total=16577ms prompt=9908 cached=113(1%) out=2032 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=32ms(n=12) ttft=12890ms total=13233ms prompt=7056 cached=6769(96%) out=970 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=15ms(n=12) ttft=10625ms total=11093ms prompt=11916 cached=7793(65%) out=400 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=16ms(n=12) ttft=6250ms total=7936ms prompt=7228 cached=3185(44%) out=895 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=6 tools=77ms(n=12) ttft=5188ms total=5579ms prompt=12012 cached=113(1%) out=180 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=16ms(n=12) ttft=8983ms total=9608ms prompt=12105 cached=9841(81%) out=408 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=14ms(n=12) ttft=22032ms total=22547ms prompt=12230 cached=11761(96%) out=1693 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=15ms(n=12) ttft=16407ms total=16968ms prompt=12333 cached=12145(98%) out=362 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=10 tools=31ms(n=12) ttft=13157ms total=13766ms prompt=12426 cached=5617(45%) out=410 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=12) ttft=15609ms total=16000ms prompt=12517 cached=3313(26%) out=640 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=0ms(n=12) ttft=25797ms total=26141ms prompt=12608 cached=12401(98%) out=2780 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=0ms(n=12) ttft=30953ms total=31608ms prompt=12709 cached=12017(95%) out=2903 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=0ms(n=12) ttft=17125ms total=17827ms prompt=12864 cached=12529(97%) out=776 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=15 update_todos(['todos'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=15 tools=0ms(n=12) ttft=14000ms total=14311ms prompt=13099 cached=12273(94%) out=721 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=16 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=16 tools=0ms(n=12) ttft=15733ms total=16250ms prompt=13282 cached=12657(95%) out=635 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=17 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=17 tools=0ms(n=12) ttft=33296ms total=34046ms prompt=13372 cached=12913(97%) out=3263 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=18 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=18 tools=16ms(n=12) ttft=28608ms total=29172ms prompt=13515 cached=12785(95%) out=3187 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=19 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=19 tools=0ms(n=12) ttft=13468ms total=13843ms prompt=13645 cached=13425(98%) out=607 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=20 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=20 tools=0ms(n=12) ttft=12702ms total=13014ms prompt=13733 cached=13553(99%) out=708 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=21 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=21 tools=0ms(n=12) ttft=20875ms total=21484ms prompt=13824 cached=13169(95%) out=1200 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=22 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=22 tools=46ms(n=12) ttft=17391ms total=18031ms prompt=14007 cached=12273(88%) out=686 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=23 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=23 tools=0ms(n=12) ttft=13188ms total=13688ms prompt=14190 cached=13553(96%) out=386 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=24 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=24 tools=0ms(n=12) ttft=21889ms total=22343ms prompt=14289 cached=13681(96%) out=2892 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=25 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=25 tools=0ms(n=12) ttft=37218ms total=37514ms prompt=14408 cached=11889(83%) out=3536 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=26 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=26 tools=0ms(n=12) ttft=35280ms total=35766ms prompt=14508 cached=14193(98%) out=3559 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=27 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=27 tools=0ms(n=12) ttft=31516ms total=31907ms prompt=14604 cached=13169(90%) out=2972 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=28 execute_python(['code'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=28 tools=16ms(n=12) ttft=37312ms total=37828ms prompt=14699 cached=13809(94%) out=2522 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=29 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=29 tools=16ms(n=12) ttft=26875ms total=27233ms prompt=14795 cached=14321(97%) out=2740 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=30 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=30 tools=0ms(n=12) ttft=28764ms total=29202ms prompt=14890 cached=14705(99%) out=2401 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=31 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=31 tools=0ms(n=12) ttft=30688ms total=30983ms prompt=14985 cached=14065(94%) out=2904 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=32 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=32 tools=0ms(n=12) ttft=13233ms total=13577ms prompt=15082 cached=14705(98%) out=643 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=33 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=33 tools=0ms(n=12) ttft=17030ms total=17671ms prompt=15172 cached=14961(99%) out=787 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=34 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=34 tools=0ms(n=12) ttft=48938ms total=49407ms prompt=15355 cached=14449(94%) out=3905 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=35 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=35 tools=0ms(n=0) ttft=32594ms total=41610ms prompt=12457 cached=0(0%) out=3359 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2657ms total=2938ms prompt=3305 cached=3185(96%) out=80 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=0 tools=16ms(n=12) ttft=2733ms total=3531ms prompt=3295 cached=3185(97%) out=146 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 dispatching 2 calls in parallel: ['read_file', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2358ms total=3592ms prompt=3570 cached=3185(89%) out=193 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+[Latency] it=1 tools=0ms(n=12) ttft=2813ms total=3813ms prompt=3826 cached=3313(87%) out=145 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=9641ms total=16686ms prompt=4556 cached=3313(73%) out=1949 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+[Latency] it=2 tools=0ms(n=12) ttft=4155ms total=18952ms prompt=5686 cached=3313(58%) out=2486 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=6827ms total=7359ms prompt=7989 cached=3313(41%) out=518 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=8218ms total=14358ms prompt=5656 cached=3313(59%) out=1645 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=9514ms total=9921ms prompt=8085 cached=3441(43%) out=477 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=11234ms total=12421ms prompt=8178 cached=5617(69%) out=322 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 execute_python(['code'])
+Credential 1 accessed by user 1
+[Latency] it=4 tools=0ms(n=12) ttft=17125ms total=17858ms prompt=6726 cached=3185(47%) out=1143 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=7625ms total=8109ms prompt=8294 cached=3313(40%) out=360 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=14ms(n=12) ttft=9454ms total=9875ms prompt=8419 cached=8049(96%) out=492 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=15ms(n=12) ttft=20796ms total=21437ms prompt=6827 cached=3697(54%) out=1171 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=14ms(n=12) ttft=12625ms total=13391ms prompt=8512 cached=8305(98%) out=649 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=14250ms total=14936ms prompt=6924 cached=5617(81%) out=1254 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=0ms(n=12) ttft=22062ms total=24968ms prompt=8635 cached=8433(98%) out=1419 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=12) ttft=20108ms total=21000ms prompt=7130 cached=6769(95%) out=1330 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=12) ttft=9420ms total=9733ms prompt=7308 cached=4465(61%) out=799 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=0ms(n=12) ttft=8719ms total=10922ms prompt=7480 cached=6641(89%) out=930 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=10 tools=14ms(n=12) ttft=22141ms total=22766ms prompt=9201 cached=113(1%) out=1645 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=12) ttft=14140ms total=21561ms prompt=9326 cached=8049(86%) out=2158 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=0ms(n=12) ttft=23093ms total=23577ms prompt=10836 cached=9073(84%) out=1192 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=0ms(n=12) ttft=15172ms total=16233ms prompt=10964 cached=8561(78%) out=817 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 run_python_on_files(['code', 'inputs', 'outputs'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=0ms(n=12) ttft=42406ms total=42842ms prompt=11130 cached=9201(83%) out=3382 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=15 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=15 tools=14ms(n=12) ttft=26313ms total=26625ms prompt=11238 cached=7921(70%) out=2618 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=16 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=16 tools=0ms(n=12) ttft=21516ms total=22000ms prompt=11350 cached=10993(97%) out=896 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=17 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=17 tools=0ms(n=12) ttft=11891ms total=12312ms prompt=11448 cached=10865(95%) out=523 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=18 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=18 tools=0ms(n=12) ttft=10422ms total=10843ms prompt=11547 cached=11377(99%) out=501 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=19 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=19 tools=0ms(n=12) ttft=23531ms total=23890ms prompt=11652 cached=11121(95%) out=1698 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=20 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=20 tools=0ms(n=12) ttft=22141ms total=22500ms prompt=11755 cached=11249(96%) out=1697 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=21 execute_python(['code'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=21 tools=0ms(n=12) ttft=19656ms total=20092ms prompt=11867 cached=11505(97%) out=1431 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=22 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=22 tools=0ms(n=12) ttft=17750ms total=18094ms prompt=11966 cached=11761(98%) out=750 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=23 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=23 tools=0ms(n=12) ttft=33811ms total=34327ms prompt=12059 cached=11889(99%) out=2683 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=24 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=24 tools=16ms(n=12) ttft=28156ms total=30000ms prompt=12162 cached=8177(67%) out=2552 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=25 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=25 tools=0ms(n=12) ttft=42014ms total=42858ms prompt=12484 cached=12017(96%) out=3150 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=26 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=26 tools=16ms(n=12) ttft=26186ms total=26672ms prompt=12649 cached=11633(92%) out=3428 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=27 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=27 tools=15ms(n=12) ttft=32688ms total=33016ms prompt=12797 cached=12529(98%) out=3545 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=28 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=28 tools=14ms(n=12) ttft=14391ms total=14813ms prompt=12904 cached=12017(93%) out=659 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=29 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=29 tools=0ms(n=12) ttft=30047ms total=30656ms prompt=12997 cached=12401(95%) out=2861 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=30 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=30 tools=0ms(n=12) ttft=36125ms total=36827ms prompt=13120 cached=12913(98%) out=3813 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=31 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=31 tools=0ms(n=12) ttft=25375ms total=25907ms prompt=13249 cached=10737(81%) out=3054 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=32 execute_python(['code'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=32 tools=0ms(n=12) ttft=24438ms total=31454ms prompt=13385 cached=13169(98%) out=2527 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=33 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=33 tools=0ms(n=12) ttft=21718ms total=22125ms prompt=14912 cached=12785(86%) out=907 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=34 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=34 tools=14ms(n=12) ttft=37641ms total=38485ms prompt=15005 cached=13297(89%) out=3374 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=35 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=35 tools=0ms(n=0) ttft=24141ms total=29577ms prompt=12172 cached=0(0%) out=3032 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2532ms total=2563ms prompt=3316 cached=113(3%) out=88 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=1813ms total=2781ms prompt=3584 cached=113(3%) out=212 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=12297ms total=12922ms prompt=5384 cached=3441(64%) out=1039 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=14ms(n=12) ttft=18485ms total=19954ms prompt=5670 cached=113(2%) out=1391 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=12) ttft=13250ms total=13781ms prompt=6014 cached=3313(55%) out=1173 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=12233ms total=13000ms prompt=6241 cached=113(2%) out=1062 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=16ms(n=12) ttft=11422ms total=11858ms prompt=6464 cached=5489(85%) out=1253 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=12) ttft=9766ms total=10547ms prompt=6687 cached=5233(78%) out=920 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=12) ttft=19250ms total=19688ms prompt=6910 cached=6257(91%) out=1841 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=0ms(n=12) ttft=14000ms total=14219ms prompt=7133 cached=5873(82%) out=956 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=10 tools=0ms(n=12) ttft=23672ms total=24547ms prompt=7370 cached=6513(88%) out=1474 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=12) ttft=20781ms total=21670ms prompt=7593 cached=7153(94%) out=1442 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=0ms(n=12) ttft=16983ms total=20750ms prompt=7816 cached=7409(95%) out=1726 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 write_file(['content', 'path'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=15ms(n=12) ttft=16391ms total=17312ms prompt=8470 cached=7665(90%) out=1149 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=0ms(n=12) ttft=9358ms total=10608ms prompt=8686 cached=6129(71%) out=930 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=15 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=15 tools=0ms(n=12) ttft=7859ms total=9468ms prompt=8882 cached=7025(79%) out=442 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=16 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=16 tools=0ms(n=12) ttft=6328ms total=7203ms prompt=9109 cached=8561(94%) out=553 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=17 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=17 tools=16ms(n=12) ttft=6483ms total=7406ms prompt=9302 cached=8305(89%) out=423 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=18 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=18 tools=0ms(n=12) ttft=3703ms total=5217ms prompt=9498 cached=9201(97%) out=251 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=19 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=19 tools=0ms(n=12) ttft=3858ms total=4092ms prompt=9695 cached=9329(96%) out=208 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=20 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=20 tools=14ms(n=12) ttft=2547ms total=2891ms prompt=10029 cached=6769(67%) out=128 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=21 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=21 tools=0ms(n=12) ttft=3842ms total=5452ms prompt=10754 cached=9841(92%) out=381 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=22 dispatching 5 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=22 tools=15ms(n=12) ttft=8952ms total=10062ms prompt=11768 cached=8689(74%) out=597 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=23 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=23 tools=0ms(n=12) ttft=8827ms total=16172ms prompt=11951 cached=9585(80%) out=959 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2516ms total=2953ms prompt=3316 cached=3313(100%) out=87 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=1593ms total=2202ms prompt=3584 cached=3441(96%) out=198 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=15875ms total=16202ms prompt=5369 cached=3441(64%) out=1122 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=15031ms total=17390ms prompt=5649 cached=5233(93%) out=1152 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=12) ttft=17063ms total=17297ms prompt=5968 cached=3441(58%) out=1117 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=14ms(n=12) ttft=13000ms total=13782ms prompt=6192 cached=3313(54%) out=945 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=20358ms total=21422ms prompt=6411 cached=6001(94%) out=1166 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=15ms(n=12) ttft=10827ms total=12797ms prompt=6630 cached=3441(52%) out=1734 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=12) ttft=9217ms total=9906ms prompt=7284 cached=6257(86%) out=684 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=15ms(n=12) ttft=5546ms total=6859ms prompt=7496 cached=5489(73%) out=318 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=10 tools=16ms(n=12) ttft=5766ms total=7531ms prompt=7673 cached=7281(95%) out=312 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=12) ttft=3358ms total=4172ms prompt=7871 cached=5873(75%) out=236 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=0ms(n=12) ttft=6391ms total=7079ms prompt=8067 cached=7153(89%) out=324 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=0ms(n=12) ttft=11656ms total=13733ms prompt=8244 cached=7921(96%) out=702 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=0ms(n=12) ttft=5125ms total=5609ms prompt=8448 cached=7665(91%) out=327 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=15 dispatching 2 calls in parallel: ['list_files', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=15 tools=0ms(n=12) ttft=8407ms total=10235ms prompt=9507 cached=7537(79%) out=668 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=16 dispatching 5 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=16 tools=14ms(n=12) ttft=9922ms total=10938ms prompt=10464 cached=8049(77%) out=598 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=17 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=17 tools=0ms(n=12) ttft=7578ms total=13188ms prompt=10644 cached=10353(97%) out=1005 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=12) ttft=1656ms total=2000ms prompt=3316 cached=3313(100%) out=87 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=15ms(n=12) ttft=2843ms total=3032ms prompt=3584 cached=3313(92%) out=197 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=15ms(n=12) ttft=11452ms total=12516ms prompt=5369 cached=3313(62%) out=877 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 update_todos(['todos'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=13655ms total=15608ms prompt=5628 cached=5233(93%) out=984 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=16063ms total=16781ms prompt=5951 cached=5489(92%) out=1045 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=11920ms total=14781ms prompt=6153 cached=5745(93%) out=1582 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=16ms(n=12) ttft=12389ms total=13155ms prompt=6808 cached=3313(49%) out=786 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=12) ttft=4358ms total=5078ms prompt=7000 cached=3441(49%) out=414 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=12) ttft=2766ms total=3891ms prompt=7215 cached=6897(96%) out=284 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=14ms(n=12) ttft=2860ms total=3719ms prompt=7456 cached=7025(94%) out=238 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=10 tools=0ms(n=12) ttft=7454ms total=8297ms prompt=7662 cached=6001(78%) out=333 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=12) ttft=3157ms total=4454ms prompt=7877 cached=7281(92%) out=295 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=0ms(n=12) ttft=9030ms total=9483ms prompt=8100 cached=7537(93%) out=572 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=0ms(n=12) ttft=3500ms total=3843ms prompt=8435 cached=7921(94%) out=123 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=0ms(n=12) ttft=13311ms total=13968ms prompt=9161 cached=6641(72%) out=856 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=15 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=15 tools=0ms(n=12) ttft=8203ms total=11188ms prompt=9324 cached=7665(82%) out=949 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=31ms(n=12) ttft=1655ms total=1671ms prompt=3295 cached=113(3%) out=83 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=0 tools=32ms(n=12) ttft=2420ms total=2436ms prompt=3291 cached=113(3%) out=85 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2063ms total=2641ms prompt=3476 cached=113(3%) out=137 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'list_files']
+[Latency] it=1 tools=16ms(n=12) ttft=2375ms total=2811ms prompt=3477 cached=113(3%) out=89 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=1577ms total=2625ms prompt=4132 cached=3185(77%) out=377 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 6 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=2733ms total=2827ms prompt=3788 cached=3185(84%) out=138 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 2 calls in parallel: ['list_files', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=1422ms total=4531ms prompt=4481 cached=3697(83%) out=635 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 dispatching 10 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file']
+[Latency] it=3 tools=0ms(n=12) ttft=5344ms total=6579ms prompt=5159 cached=3441(67%) out=630 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=12) ttft=13217ms total=15422ms prompt=6340 cached=113(2%) out=1278 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+[Latency] it=4 tools=0ms(n=12) ttft=13313ms total=15594ms prompt=5427 cached=5105(94%) out=1104 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=13844ms total=14704ms prompt=5895 cached=5361(91%) out=927 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=8967ms total=10233ms prompt=6089 cached=113(2%) out=474 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=5 tools=0ms(n=12) ttft=31156ms total=32625ms prompt=6670 cached=3441(52%) out=2292 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=12500ms total=12782ms prompt=6969 cached=113(2%) out=1037 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=12) ttft=30577ms total=35984ms prompt=7267 cached=6513(90%) out=1768 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=1889ms total=2233ms prompt=3291 cached=3185(97%) out=87 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=0 tools=14ms(n=12) ttft=2047ms total=2297ms prompt=3295 cached=3185(97%) out=87 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=1905ms total=2264ms prompt=3477 cached=3313(95%) out=89 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Tools] iter=2 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2953ms total=3781ms prompt=3476 cached=3313(95%) out=138 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'list_files']
+[Latency] it=2 tools=0ms(n=12) ttft=1907ms total=2422ms prompt=3788 cached=3441(91%) out=138 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 2 calls in parallel: ['list_files', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=1811ms total=4061ms prompt=4132 cached=3441(83%) out=377 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 6 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=2172ms total=6516ms prompt=4481 cached=3185(71%) out=638 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 dispatching 10 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=7233ms total=8656ms prompt=5159 cached=113(2%) out=708 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=4829ms total=5688ms prompt=5737 cached=5105(89%) out=447 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=4719ms total=5750ms prompt=5931 cached=3313(56%) out=410 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=4 tools=0ms(n=12) ttft=20952ms total=21656ms prompt=6340 cached=3313(52%) out=1623 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=15ms(n=12) ttft=12047ms total=14266ms prompt=6575 cached=6257(95%) out=1222 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=11811ms total=12311ms prompt=6908 cached=4337(63%) out=1277 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=12) ttft=45891ms total=47609ms prompt=7094 cached=3313(47%) out=3217 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 write_file(['content', 'path'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=12) ttft=23016ms total=23688ms prompt=7393 cached=6897(93%) out=1326 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=0ms(n=12) ttft=3250ms total=3577ms prompt=7571 cached=7281(96%) out=87 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=10 tools=0ms(n=12) ttft=20577ms total=21264ms prompt=7869 cached=6385(81%) out=1370 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=12) ttft=10688ms total=13968ms prompt=8022 cached=7665(96%) out=973 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2125ms total=2514ms prompt=3295 cached=3185(97%) out=113 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=3468ms total=3780ms prompt=3291 cached=3185(97%) out=85 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2639ms total=3389ms prompt=3476 cached=3313(95%) out=138 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'list_files']
+[Latency] it=1 tools=0ms(n=12) ttft=3032ms total=3907ms prompt=3477 cached=3185(92%) out=193 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 3 calls in parallel: ['read_file', 'list_files', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=2859ms total=5532ms prompt=4132 cached=3313(80%) out=376 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 6 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=14ms(n=12) ttft=2516ms total=7157ms prompt=4481 cached=3313(74%) out=635 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 10 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=6546ms total=9500ms prompt=5159 cached=3441(67%) out=660 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=8985ms total=9657ms prompt=5669 cached=3313(58%) out=693 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=2608ms total=2967ms prompt=5863 cached=4081(70%) out=117 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=1890ms total=3092ms prompt=6053 cached=5617(93%) out=185 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=3 tools=0ms(n=12) ttft=21157ms total=25157ms prompt=6340 cached=4337(68%) out=1720 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=22265ms total=23686ms prompt=6953 cached=3441(49%) out=1667 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=14217ms total=14531ms prompt=7252 cached=3313(46%) out=930 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=16ms(n=12) ttft=10343ms total=12906ms prompt=7550 cached=6257(83%) out=1146 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=10) ttft=4875ms total=4922ms prompt=2538 cached=113(4%) out=267 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 web_search(['query'])
+response: https://grokipedia.com/api/typeahead?query=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&limit=1 200
+response: https://www.mojeek.com/search?q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=IETF%20RFC%20first%20standardised%20HTTP/2%20obsoleted%20by 200
+response: https://www.bing.com/images/async?q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&async=1&first=1&count=35 200
+[Search] images('IETF RFC first standardised HTTP/2 obsoleted by') \u2192 6 result(s)
+response: https://yandex.com/search/site/?text=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&web=1&searchid=8677137 200
+response: https://html.duckduckgo.com/html/ 202
+response: https://search.brave.com/search?q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&source=web 200
+[Search] text('IETF RFC first standardised HTTP/2 obsoleted by') \u2192 15 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=10) ttft=10687ms total=11890ms prompt=2533 cached=113(4%) out=579 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=16ms(n=10) ttft=5592ms total=6000ms prompt=6026 cached=113(2%) out=325 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=10) ttft=1639ms total=2014ms prompt=2547 cached=113(4%) out=105 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 web_search(['query'])
+response: https://duckduckgo.com/?q=Mount+Everest+height+announced+jointly+Nepal+China+2020+metres 202
+[Latency] it=1 tools=0ms(n=10) ttft=4625ms total=5500ms prompt=2804 cached=2417(86%) out=285 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['web_search', 'web_search']
+response: https://duckduckgo.com/i.js?o=json&q=Mount+Everest+height+announced+jointly+Nepal+China+2020+metres&l=us-en&vqd=4-66444941283675859598113149566150044059&p=1&ct=AT 403
+response: https://grokipedia.com/api/typeahead?query=Mount+Everest+height+announced+jointly+Nepal+China+2020+metres&limit=1 200
+response: https://duckduckgo.com/?q=Guido+van+Rossum+CWI+worked+on+ABC+programming+language+before+Python 202
+response: https://html.duckduckgo.com/html/ 202
+response: https://duckduckgo.com/?q=creator+Python+programming+language+research+institute+worked+on+earlier+language 202
+response: https://duckduckgo.com/i.js?o=json&q=creator+Python+programming+language+research+institute+worked+on+earlier+language&l=us-en&vqd=4-247554047529463772171402812456766931021&p=1&ct=AT 403
+response: https://www.mojeek.com/search?q=Mount+Everest+height+announced+jointly+Nepal+China+2020+metres 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Mount%20Everest%20height%20announced%20jointly%20Nepal%20China%202020%20metres 200
+response: https://grokipedia.com/api/typeahead?query=creator+Python+programming+language+research+institute+worked+on+earlier+language&limit=1 200
+response: https://grokipedia.com/api/typeahead?query=Guido+van+Rossum+CWI+worked+on+ABC+programming+language+before+Python&limit=1 200
+response: https://www.mojeek.com/search?q=Guido+van+Rossum+CWI+worked+on+ABC+programming+language+before+Python 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=creator%20Python%20programming%20language%20research%20institute%20worked%20on%20earlier%20language 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Guido%20van%20Rossum%20CWI%20worked%20on%20ABC%20programming%20language%20before%20Python 200
+response: https://www.bing.com/images/async?q=Mount+Everest+height+announced+jointly+Nepal+China+2020+metres&async=1&first=1&count=35 200
+response: https://duckduckgo.com/i.js?o=json&q=Guido+van+Rossum+CWI+worked+on+ABC+programming+language+before+Python&l=us-en&vqd=4-263838485795824298921440501818901044054&p=1&ct=AT 200
+[Search] images('Mount Everest height announced jointly Nepal China 2020 metres') \u2192 6 result(s)
+[Search] images('Guido van Rossum CWI worked on ABC programming language before Python') \u2192 6 result(s)
+response: https://www.bing.com/images/async?q=creator+Python+programming+language+research+institute+worked+on+earlier+language&async=1&first=1&count=35 200
+[Search] images('creator Python programming language research institute worked on earlier languag') \u2192 6 result(s)
+response: https://search.yahoo.com/search;_ylt=bdAhBWM_u1jX1QbnBRVZuax9;_ylu=hslrb2ONPkDFenXk6GrrI6tRY8TN1xsmX5rEY8ZN05opsCo?p=Mount+Everest+height+announced+jointly+Nepal+China+2020+metres 200
+response: https://search.yahoo.com/search;_ylt=gDatYcAfdyFbtS5-CKVefSUW;_ylu=4WeBsZ1CtZkQtoS34Ig_cJ-0UTeobDOVbpZ-RzeOwluPtKw?p=creator+Python+programming+language+research+institute+worked+on+earlier+language 200
+response: https://search.yahoo.com/search;_ylt=ZkU3oMiXT5Kq3r9VcHefQgui;_ylu=jvOaVBJvjXrIJk8v86BaoES0weSfBxOnNphTOL8KZ1D3b3M?p=Guido+van+Rossum+CWI+worked+on+ABC+programming+language+before+Python 200
+response: https://search.brave.com/search?q=Mount+Everest+height+announced+jointly+Nepal+China+2020+metres&source=web 200
+[Search] text('Mount Everest height announced jointly Nepal China 2020 metres') \u2192 15 result(s)
+response: https://www.mojeek.com/search?q=creator+Python+programming+language+research+institute+worked+on+earlier+language 200
+response: https://yandex.com/search/site/?text=Guido+van+Rossum+CWI+worked+on+ABC+programming+language+before+Python&web=1&searchid=9679416 200
+[Search] text('Guido van Rossum CWI worked on ABC programming language before Python') \u2192 15 result(s)
+response: https://yandex.com/search/site/?text=creator+Python+programming+language+research+institute+worked+on+earlier+language&web=1&searchid=7152763 200
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+response: https://search.brave.com/search?q=creator+Python+programming+language+research+institute+worked+on+earlier+language&source=web 200
+[Search] text('creator Python programming language research institute worked on earlier languag') \u2192 15 result(s)
+[Latency] it=1 tools=31ms(n=10) ttft=3563ms total=3907ms prompt=6415 cached=113(2%) out=213 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=10) ttft=2906ms total=3390ms prompt=9562 cached=113(1%) out=185 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=10) ttft=4329ms total=5204ms prompt=6529 cached=6257(96%) out=266 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=10) ttft=4296ms total=6077ms prompt=9715 cached=9457(97%) out=370 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=10) ttft=4936ms total=5625ms prompt=2538 cached=113(4%) out=327 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=15ms(n=10) ttft=4125ms total=5016ms prompt=2553 cached=113(4%) out=265 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 update_todos(['todos'])
+[Latency] it=1 tools=0ms(n=10) ttft=3218ms total=3577ms prompt=2812 cached=2417(86%) out=263 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=10) ttft=3438ms total=4250ms prompt=2821 cached=113(4%) out=402 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['web_search', 'web_search']
+response: https://html.duckduckgo.com/html/ 202
+response: https://grokipedia.com/api/typeahead?query=Django+web+framework+first+publicly+released+year&limit=1 200
+response: https://grokipedia.com/api/typeahead?query=Flask+web+framework+first+released+year&limit=1 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Flask%20web%20framework%20first%20released%20year 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Django%20web%20framework%20first%20publicly%20released%20year 200
+response: https://www.bing.com/images/async?q=Flask+web+framework+first+released+year&async=1&first=1&count=35 200
+response: https://www.bing.com/images/async?q=Django+web+framework+first+publicly+released+year&async=1&first=1&count=35 200
+[Search] images('Flask web framework first released year') \u2192 6 result(s)
+[Search] images('Django web framework first publicly released year') \u2192 6 result(s)
+response: https://search.yahoo.com/search;_ylt=u1HUtnaVVjBUOSpQpwPheLIa;_ylu=OnLOuRkpkyBvjdplL2Sacwd-fI4Tiz8YoSASzCgYimHBMNY?p=Django+web+framework+first+publicly+released+year 200
+response: https://www.mojeek.com/search?q=Flask+web+framework+first+released+year 200
+[Latency] it=2 tools=14ms(n=10) ttft=4625ms total=5422ms prompt=3001 cached=113(4%) out=237 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 2 calls in parallel: ['web_search', 'web_search']
+response: https://search.brave.com/search?q=Django+web+framework+first+publicly+released+year&source=web 200
+response: https://duckduckgo.com/?q=Git+first+released+year+Linus+Torvalds 202
+response: https://duckduckgo.com/?q=Linux+kernel+first+public+release+year 202
+[Search] text('Django web framework first publicly released year') \u2192 15 result(s)
+response: https://duckduckgo.com/i.js?o=json&q=Git+first+released+year+Linus+Torvalds&l=us-en&vqd=4-79170037308985035028252235348952682164&p=1&ct=AT 403
+response: https://yandex.com/search/site/?text=Flask+web+framework+first+released+year&web=1&searchid=6347635 200
+response: https://www.mojeek.com/search?q=Git+first+released+year+Linus+Torvalds 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Linux%20kernel%20first%20public%20release%20year 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Git%20first%20released%20year%20Linus%20Torvalds 200
+response: https://duckduckgo.com/i.js?o=json&q=Linux+kernel+first+public+release+year&l=us-en&vqd=4-116510190629048970726579036033534844525&p=1&ct=AT 200
+[Search] images('Linux kernel first public release year') \u2192 6 result(s)
+response: https://grokipedia.com/api/typeahead?query=Linux+kernel+first+public+release+year&limit=1 200
+response: https://grokipedia.com/api/typeahead?query=Git+first+released+year+Linus+Torvalds&limit=1 200
+response: https://www.bing.com/images/async?q=Git+first+released+year+Linus+Torvalds&async=1&first=1&count=35 200
+response: https://yandex.com/search/site/?text=Linux+kernel+first+public+release+year&web=1&searchid=3531781 200
+[Search] images('Git first released year Linus Torvalds') \u2192 6 result(s)
+response: https://search.yahoo.com/search;_ylt=X0guCTKULM2r-jlvv8azCJMA;_ylu=1I1RREZ8CP5GigsUxkaz7bc-29UaEq3RUIYQZhQR4B40HzY?p=Flask+web+framework+first+released+year 200
+response: https://html.duckduckgo.com/html/ 202
+[Search] text('Flask web framework first released year') \u2192 15 result(s)
+[Tools] iter=2 update_todos(['todos'])
+response: https://yandex.com/search/site/?text=Git+first+released+year+Linus+Torvalds&web=1&searchid=7974241 200
+response: https://www.mojeek.com/search?q=Linux+kernel+first+public+release+year 200
+response: https://search.yahoo.com/search;_ylt=gFysgfzOjLzkooehEkvEwFhV;_ylu=b2VW5ejeHnX7b2P6Xkrj7u8xFyNHe_QqFlHcxYNIK471in0?p=Git+first+released+year+Linus+Torvalds 200
+response: https://search.yahoo.com/search;_ylt=jXkIwYxNIH1F9WHsKfopXUb7;_ylu=7LqaD9o-feYVeVyXsji2R80A3xn2wtq2vZqrOTZk9dvbBgo?p=Linux+kernel+first+public+release+year 200
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+response: https://html.duckduckgo.com/html/ 202
+[Search] text('Linux kernel first public release year') \u2192 15 result(s)
+response: https://search.brave.com/search?q=Git+first+released+year+Linus+Torvalds&source=web 200
+[Search] text('Git first released year Linus Torvalds') \u2192 15 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=10) ttft=5186ms total=5702ms prompt=9524 cached=113(1%) out=224 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 web_search(['query'])
+response: https://duckduckgo.com/?q=Flask+0.1+initial+release+April+2010+date 202
+response: https://duckduckgo.com/i.js?o=json&q=Flask+0.1+initial+release+April+2010+date&l=us-en&vqd=4-218328649139369521034089677628648201649&p=1&ct=AT 403
+response: https://grokipedia.com/api/typeahead?query=Flask+0.1+initial+release+April+2010+date&limit=1 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Flask%200.1%20initial%20release%20April%202010%20date 200
+response: https://www.bing.com/images/async?q=Flask+0.1+initial+release+April+2010+date&async=1&first=1&count=35 200
+response: https://yandex.com/search/site/?text=Flask+0.1+initial+release+April+2010+date&web=1&searchid=7162840 200
+[Latency] it=3 tools=15ms(n=10) ttft=3438ms total=3875ms prompt=10146 cached=113(1%) out=194 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+[Search] images('Flask 0.1 initial release April 2010 date') \u2192 6 result(s)
+response: https://html.duckduckgo.com/html/ 202
+response: https://search.yahoo.com/search;_ylt=4s7KIO_0UHN9cidULZj1WnKF;_ylu=3ZRZV9CXLLBzAqiWPtDzfecu1PvmBjMpP8rKhQl3IgJrXRU?p=Flask+0.1+initial+release+April+2010+date 200
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+response: https://search.brave.com/search?q=Flask+0.1+initial+release+April+2010+date&source=web 429
+response: https://www.mojeek.com/search?q=Flask+0.1+initial+release+April+2010+date 200
+[Search] text('Flask 0.1 initial release April 2010 date') \u2192 14 result(s)
+[Latency] it=4 tools=0ms(n=10) ttft=3092ms total=3265ms prompt=10244 cached=113(1%) out=254 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=10) ttft=4327ms total=5484ms prompt=10398 cached=2417(23%) out=359 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=3 tools=0ms(n=10) ttft=7858ms total=9233ms prompt=13519 cached=113(1%) out=528 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=10) ttft=6983ms total=7047ms prompt=2538 cached=113(4%) out=397 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 web_search(['query'])
+[Latency] it=0 tools=16ms(n=10) ttft=6187ms total=7156ms prompt=2533 cached=113(4%) out=306 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 update_todos(['todos'])
+response: https://duckduckgo.com/?q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by 202
+response: https://duckduckgo.com/i.js?o=json&q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&l=us-en&vqd=4-77288563818238992231633950101488205499&p=1&ct=AT 403
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=IETF%20RFC%20first%20standardised%20HTTP/2%20obsoleted%20by 200
+response: https://grokipedia.com/api/typeahead?query=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&limit=1 200
+response: https://search.brave.com/search?q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&source=web 429
+response: https://html.duckduckgo.com/html/ 202
+response: https://www.bing.com/images/async?q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&async=1&first=1&count=35 200
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Search] images('IETF RFC first standardised HTTP/2 obsoleted by') \u2192 6 result(s)
+response: https://yandex.com/search/site/?text=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&web=1&searchid=2565028 200
+response: https://search.yahoo.com/search;_ylt=mdGhKouGXz4HqVl9Xx9242cj;_ylu=rlQx-4d5v1J6s_mrOinXMyVnA4EDDMd0G_XAk5yEKDvIZdQ?p=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by 200
+[Search] text('IETF RFC first standardised HTTP/2 obsoleted by') \u2192 15 result(s)
+[Latency] it=1 tools=0ms(n=10) ttft=3077ms total=3625ms prompt=2813 cached=113(4%) out=193 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 web_search(['query'])
+response: https://duckduckgo.com/?q=creator+Python+programming+language+Guido+van+Rossum+CWI+worked+on+ABC+language 202
+response: https://duckduckgo.com/i.js?o=json&q=creator+Python+programming+language+Guido+van+Rossum+CWI+worked+on+ABC+language&l=us-en&vqd=4-26096670543590300321756226395432969102&p=1&ct=AT 403
+response: https://grokipedia.com/api/typeahead?query=creator+Python+programming+language+Guido+van+Rossum+CWI+worked+on+ABC+language&limit=1 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=creator%20Python%20programming%20language%20Guido%20van%20Rossum%20CWI%20worked%20on%20ABC%20language 200
+response: https://search.yahoo.com/search;_ylt=xP8tRRcVDy9jMalg-oMD2IMM;_ylu=WWj3IUsxmx_MxYOhlbRc_x38UI7LjabFLEAIg-KTPlH4MtM?p=creator+Python+programming+language+Guido+van+Rossum+CWI+worked+on+ABC+language 200
+response: https://www.bing.com/images/async?q=creator+Python+programming+language+Guido+van+Rossum+CWI+worked+on+ABC+language&async=1&first=1&count=35 200
+[Search] images('creator Python programming language Guido van Rossum CWI worked on ABC language') \u2192 6 result(s)
+response: https://html.duckduckgo.com/html/ 202
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+response: https://search.brave.com/search?q=creator+Python+programming+language+Guido+van+Rossum+CWI+worked+on+ABC+language&source=web 429
+response: https://www.mojeek.com/search?q=creator+Python+programming+language+Guido+van+Rossum+CWI+worked+on+ABC+language 200
+response: https://yandex.com/search/site/?text=creator+Python+programming+language+Guido+van+Rossum+CWI+worked+on+ABC+language&web=1&searchid=1364625 200
+[Search] text('creator Python programming language Guido van Rossum CWI worked on ABC language') \u2192 14 result(s)
+[Latency] it=1 tools=0ms(n=10) ttft=4750ms total=5342ms prompt=6196 cached=113(2%) out=411 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=10) ttft=1734ms total=2047ms prompt=2547 cached=113(4%) out=103 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 web_search(['query'])
+response: https://grokipedia.com/api/typeahead?query=Mount+Everest+height+announced+jointly+Nepal+China+2020&limit=1 200
+response: https://www.mojeek.com/search?q=Mount+Everest+height+announced+jointly+Nepal+China+2020 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Mount%20Everest%20height%20announced%20jointly%20Nepal%20China%202020 200
+response: https://www.bing.com/images/async?q=Mount+Everest+height+announced+jointly+Nepal+China+2020&async=1&first=1&count=35 200
+[Search] images('Mount Everest height announced jointly Nepal China 2020') \u2192 6 result(s)
+response: https://search.brave.com/search?q=Mount+Everest+height+announced+jointly+Nepal+China+2020&source=web 429
+response: https://search.yahoo.com/search;_ylt=0R7mZZXrg1SZ8EeZ9MACOjc_;_ylu=be6jkX1ToQn2Z58CGt9_2j3K3FSkerk64geo-PU27DJvymQ?p=Mount+Everest+height+announced+jointly+Nepal+China+2020 200
+[Latency] it=2 tools=16ms(n=10) ttft=5813ms total=6438ms prompt=6051 cached=2545(42%) out=361 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 update_todos(['todos'])
+response: https://yandex.com/search/site/?text=Mount+Everest+height+announced+jointly+Nepal+China+2020&web=1&searchid=9887884 200
+[Search] text('Mount Everest height announced jointly Nepal China 2020') \u2192 15 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=10) ttft=3266ms total=3672ms prompt=6348 cached=113(2%) out=152 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 execute_python(['code'])
+[Latency] it=3 tools=0ms(n=10) ttft=4031ms total=5016ms prompt=6207 cached=2545(41%) out=254 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=10) ttft=5063ms total=5813ms prompt=2538 cached=2417(95%) out=285 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=10) ttft=2577ms total=3014ms prompt=2809 cached=2545(91%) out=223 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=10) ttft=12343ms total=13343ms prompt=6462 cached=2545(39%) out=279 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=10) ttft=7358ms total=8108ms prompt=2996 cached=2673(89%) out=457 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 2 calls in parallel: ['web_search', 'web_search']
+response: https://duckduckgo.com/?q=Git+first+released+year+initial+release 202
+response: https://duckduckgo.com/?q=Linux+kernel+first+public+release+year 202
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Linux%20kernel%20first%20public%20release%20year 200
+response: https://grokipedia.com/api/typeahead?query=Git+first+released+year+initial+release&limit=1 200
+response: https://duckduckgo.com/i.js?o=json&q=Linux+kernel+first+public+release+year&l=us-en&vqd=4-116510190629048970726579036033534844525&p=1&ct=AT 403
+response: https://grokipedia.com/api/typeahead?query=Linux+kernel+first+public+release+year&limit=1 200
+response: https://www.mojeek.com/search?q=Linux+kernel+first+public+release+year 200
+response: https://www.mojeek.com/search?q=Git+first+released+year+initial+release 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Git%20first%20released%20year%20initial%20release 200
+[Latency] it=0 tools=0ms(n=10) ttft=4405ms total=5139ms prompt=2553 cached=2545(100%) out=287 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 dispatching 2 calls in parallel: ['web_search', 'web_search']
+response: https://duckduckgo.com/i.js?o=json&q=Git+first+released+year+initial+release&l=us-en&vqd=4-207331930705067132402233308873466830359&p=1&ct=AT 200
+response: https://html.duckduckgo.com/html/ 202
+response: https://html.duckduckgo.com/html/ 202
+[Search] images('Git first released year initial release') \u2192 6 result(s)
+response: https://html.duckduckgo.com/html/ 202
+response: https://duckduckgo.com/?q=Django+web+framework+first+publicly+released+year 202
+response: https://www.bing.com/images/async?q=Linux+kernel+first+public+release+year&async=1&first=1&count=35 200
+response: https://duckduckgo.com/i.js?o=json&q=Django+web+framework+first+publicly+released+year&l=us-en&vqd=4-266250163579172467116405638520882828263&p=1&ct=AT 403
+[Search] images('Linux kernel first public release year') \u2192 6 result(s)
+response: https://grokipedia.com/api/typeahead?query=Flask+web+framework+first+released+year&limit=1 200
+response: https://grokipedia.com/api/typeahead?query=Django+web+framework+first+publicly+released+year&limit=1 200
+response: https://www.bing.com/images/async?q=Flask+web+framework+first+released+year&async=1&first=1&count=35 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Django%20web%20framework%20first%20publicly%20released%20year 200
+[Search] images('Flask web framework first released year') \u2192 6 result(s)
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Flask%20web%20framework%20first%20released%20year 200
+response: https://search.yahoo.com/search;_ylt=BHppM_jcX3FMUQGJZqusqZ0l;_ylu=91t28TqsnCmYwEICYiBYE2MYPSUE6tE8P0TWEV4x6sLmnGk?p=Linux+kernel+first+public+release+year 200
+response: https://www.bing.com/images/async?q=Django+web+framework+first+publicly+released+year&async=1&first=1&count=35 200
+[Search] images('Django web framework first publicly released year') \u2192 6 result(s)
+response: https://search.yahoo.com/search;_ylt=yHGd9V5rJIKRVPPBUqqLwzbC;_ylu=ATEBz830F4P5G3ekCP30NrSnPcjoAE-qiY34t6EN2l7H4jM?p=Git+first+released+year+initial+release 200
+response: https://search.brave.com/search?q=Django+web+framework+first+publicly+released+year&source=web 429
+response: https://search.yahoo.com/search;_ylt=8NhJzPXTtKLGt719YExM5LNo;_ylu=V-u1tJM3b2HaSAl2ra5ZP-tBLXyZfEeZjP2xNKlMTKmNarE?p=Flask+web+framework+first+released+year 200
+response: https://search.brave.com/search?q=Git+first+released+year+initial+release&source=web 429
+response: https://search.brave.com/search?q=Flask+web+framework+first+released+year&source=web 429
+response: https://yandex.com/search/site/?text=Django+web+framework+first+publicly+released+year&web=1&searchid=4383860 200
+response: https://yandex.com/search/site/?text=Linux+kernel+first+public+release+year&web=1&searchid=9324816 200
+[Search] text('Linux kernel first public release year') \u2192 15 result(s)
+response: https://www.mojeek.com/search?q=Flask+web+framework+first+released+year 200
+response: https://yandex.com/search/site/?text=Git+first+released+year+initial+release&web=1&searchid=2306368 200
+[Search] text('Git first released year initial release') \u2192 15 result(s)
+response: https://search.yahoo.com/search;_ylt=moYLF_5svRewsj9j6etMybDv;_ylu=RuIKfGRsliEdPAjksGA6-X_E-CTAMCm-zIoqlZS7MHORzec?p=Django+web+framework+first+publicly+released+year 200
+response: https://yandex.com/search/site/?text=Flask+web+framework+first+released+year&web=1&searchid=8067459 200
+[Search] text('Flask web framework first released year') \u2192 15 result(s)
+response: https://www.mojeek.com/search?q=Django+web+framework+first+publicly+released+year 200
+[Search] text('Django web framework first publicly released year') \u2192 10 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=10) ttft=2797ms total=3187ms prompt=9630 cached=2545(26%) out=201 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=10) ttft=6625ms total=7061ms prompt=8137 cached=2545(31%) out=203 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=15ms(n=10) ttft=15047ms total=15843ms prompt=9728 cached=2545(26%) out=221 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=16ms(n=10) ttft=5422ms total=6811ms prompt=9881 cached=2801(28%) out=499 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=10) ttft=7311ms total=8093ms prompt=2538 cached=2417(95%) out=343 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 web_search(['query'])
+[Latency] it=0 tools=14ms(n=10) ttft=7235ms total=8157ms prompt=2533 cached=2417(95%) out=349 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 update_todos(['todos'])
+Credential 1 accessed by user 1
+response: https://grokipedia.com/api/typeahead?query=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&limit=1 200
+response: https://www.bing.com/images/async?q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&async=1&first=1&count=35 200
+[Search] images('IETF RFC first standardised HTTP/2 obsoleted by') \u2192 6 result(s)
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=IETF%20RFC%20first%20standardised%20HTTP/2%20obsoleted%20by 200
+response: https://search.yahoo.com/search;_ylt=D8f6HFT3ypTBWeCRE1kIDsUx;_ylu=61Na2iWvf6o5xN9f2YNSCqnhpfe1Tf4Kuc0d19TDsyOwBT0?p=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by 200
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+response: https://www.mojeek.com/search?q=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by 200
+response: https://yandex.com/search/site/?text=IETF+RFC+first+standardised+HTTP%2F2+obsoleted+by&web=1&searchid=8112359 200
+[Search] text('IETF RFC first standardised HTTP/2 obsoleted by') \u2192 15 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=10) ttft=4609ms total=5327ms prompt=2810 cached=2417(86%) out=228 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=10) ttft=4155ms total=4780ms prompt=3001 cached=2545(85%) out=273 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 update_todos(['todos'])
+[Latency] it=1 tools=0ms(n=10) ttft=6938ms total=7577ms prompt=6230 cached=2417(39%) out=461 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=10) ttft=2500ms total=2657ms prompt=2547 cached=2545(100%) out=104 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 web_search(['query'])
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Mount%20Everest%20height%20announced%20jointly%20Nepal%20China%202020 200
+response: https://www.bing.com/images/async?q=Mount+Everest+height+announced+jointly+Nepal+China+2020&async=1&first=1&count=35 200
+response: https://grokipedia.com/api/typeahead?query=Mount+Everest+height+announced+jointly+Nepal+China+2020&limit=1 200
+[Search] images('Mount Everest height announced jointly Nepal China 2020') \u2192 6 result(s)
+response: https://search.yahoo.com/search;_ylt=lSd3vMytBHHqwA_0nJ0_T77_;_ylu=oLuXleW8zcLFk49YpT3hZFAeab-QoYZadoXvX_p7N2WId8c?p=Mount+Everest+height+announced+jointly+Nepal+China+2020 200
+response: https://html.duckduckgo.com/html/ 202
+response: https://www.mojeek.com/search?q=Mount+Everest+height+announced+jointly+Nepal+China+2020 200
+[Latency] it=3 tools=0ms(n=10) ttft=4750ms total=5468ms prompt=3192 cached=2801(88%) out=298 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 update_todos(['todos'])
+response: https://search.brave.com/search?q=Mount+Everest+height+announced+jointly+Nepal+China+2020&source=web 429
+response: https://yandex.com/search/site/?text=Mount+Everest+height+announced+jointly+Nepal+China+2020&web=1&searchid=4806745 200
+[Search] text('Mount Everest height announced jointly Nepal China 2020') \u2192 10 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=10) ttft=2844ms total=3266ms prompt=4981 cached=2545(51%) out=166 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=10) ttft=6858ms total=7781ms prompt=3383 cached=2545(75%) out=286 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 dispatching 2 calls in parallel: ['web_search', 'web_search']
+response: https://duckduckgo.com/?q=Guido+van+Rossum+CWI+worked+on+ABC+programming+language 202
+response: https://duckduckgo.com/i.js?o=json&q=Guido+van+Rossum+CWI+worked+on+ABC+programming+language&l=us-en&vqd=4-133234637709504446357586672410022004625&p=1&ct=AT 403
+response: https://grokipedia.com/api/typeahead?query=Guido+van+Rossum+CWI+worked+on+ABC+programming+language&limit=1 200
+response: https://www.bing.com/images/async?q=creator+Python+programming+language+research+institute+worked&async=1&first=1&count=35 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=creator%20Python%20programming%20language%20research%20institute%20worked 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Guido%20van%20Rossum%20CWI%20worked%20on%20ABC%20programming%20language 200
+response: https://search.yahoo.com/search;_ylt=D-6vphl6YXMYosNtzKlT8FIL;_ylu=h1DZ9A6lKgYzhphdHDrx9Za4QT__-gJUjfpBMRUCT-YlIrY?p=Guido+van+Rossum+CWI+worked+on+ABC+programming+language 200
+[Search] images('creator Python programming language research institute worked') \u2192 6 result(s)
+response: https://search.yahoo.com/search;_ylt=x-BnJrTqFWwYj0HnvabRYRqb;_ylu=BnNolWnPcF8EvZKL6W-f1vjIrlFyEeFn4VuKWBI8Oskijpg?p=creator+Python+programming+language+research+institute+worked 200
+response: https://grokipedia.com/api/typeahead?query=creator+Python+programming+language+research+institute+worked&limit=1 200
+response: https://www.bing.com/images/async?q=Guido+van+Rossum+CWI+worked+on+ABC+programming+language&async=1&first=1&count=35 200
+[Search] images('Guido van Rossum CWI worked on ABC programming language') \u2192 6 result(s)
+response: https://search.brave.com/search?q=Guido+van+Rossum+CWI+worked+on+ABC+programming+language&source=web 429
+response: https://html.duckduckgo.com/html/ 202
+response: https://www.mojeek.com/search?q=creator+Python+programming+language+research+institute+worked 200
+[Latency] it=2 tools=0ms(n=10) ttft=4437ms total=5266ms prompt=5095 cached=2545(50%) out=188 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+response: https://yandex.com/search/site/?text=Guido+van+Rossum+CWI+worked+on+ABC+programming+language&web=1&searchid=2305882 200
+response: https://yandex.com/search/site/?text=creator+Python+programming+language+research+institute+worked&web=1&searchid=8389433 200
+[Search] text('creator Python programming language research institute worked') \u2192 15 result(s)
+response: https://www.mojeek.com/search?q=Guido+van+Rossum+CWI+worked+on+ABC+programming+language 200
+[Search] text('Guido van Rossum CWI worked on ABC programming language') \u2192 10 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=16ms(n=10) ttft=5452ms total=6125ms prompt=8683 cached=2673(31%) out=269 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 update_todos(['todos'])
+[Latency] it=0 tools=0ms(n=10) ttft=8532ms total=9375ms prompt=2538 cached=2417(95%) out=480 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=16ms(n=10) ttft=5375ms total=6156ms prompt=8838 cached=8561(97%) out=235 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=1 tools=16ms(n=10) ttft=4500ms total=5077ms prompt=2812 cached=2673(95%) out=236 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=10) ttft=3625ms total=3735ms prompt=2553 cached=2545(100%) out=243 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 dispatching 2 calls in parallel: ['web_search', 'web_search']
+response: https://duckduckgo.com/?q=Flask+web+framework+first+released+year 202
+response: https://duckduckgo.com/i.js?o=json&q=Flask+web+framework+first+released+year&l=us-en&vqd=4-258984932956642281045729271332802643108&p=1&ct=AT 403
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Flask%20web%20framework%20first%20released%20year 200
+response: https://grokipedia.com/api/typeahead?query=Django+web+framework+first+publicly+released+year&limit=1 200
+response: https://grokipedia.com/api/typeahead?query=Flask+web+framework+first+released+year&limit=1 200
+response: https://www.bing.com/images/async?q=Django+web+framework+first+publicly+released+year&async=1&first=1&count=35 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Django%20web%20framework%20first%20publicly%20released%20year 200
+[Search] images('Django web framework first publicly released year') \u2192 6 result(s)
+response: https://search.yahoo.com/search;_ylt=94ny8nCkUhkWR-PG0Af-ubni;_ylu=TZhjAE_mkri_S7Yzc1BzVTrebeKXcFqmxj1X8UZy_por4e8?p=Django+web+framework+first+publicly+released+year 200
+response: https://www.bing.com/images/async?q=Flask+web+framework+first+released+year&async=1&first=1&count=35 200
+response: https://yandex.com/search/site/?text=Flask+web+framework+first+released+year&web=1&searchid=6726080 200
+[Search] images('Flask web framework first released year') \u2192 6 result(s)
+response: https://html.duckduckgo.com/html/ 202
+[Latency] it=2 tools=16ms(n=10) ttft=4031ms total=4578ms prompt=3001 cached=2673(89%) out=260 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 2 calls in parallel: ['web_search', 'web_search']
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Git%20first%20released%20year%20initial%20release 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Linux%20kernel%20first%20public%20release%20year 200
+response: https://search.brave.com/search?q=Flask+web+framework+first+released+year&source=web 429
+response: https://grokipedia.com/api/typeahead?query=Git+first+released+year+initial+release&limit=1 200
+response: https://www.bing.com/images/async?q=Linux+kernel+first+public+release+year&async=1&first=1&count=35 200
+[Search] images('Linux kernel first public release year') \u2192 6 result(s)
+response: https://yandex.com/search/site/?text=Django+web+framework+first+publicly+released+year&web=1&searchid=6637671 200
+[Search] text('Django web framework first publicly released year') \u2192 15 result(s)
+response: https://www.bing.com/images/async?q=Git+first+released+year+initial+release&async=1&first=1&count=35 200
+response: https://yandex.com/search/site/?text=Git+first+released+year+initial+release&web=1&searchid=2417028 200
+[Search] images('Git first released year initial release') \u2192 6 result(s)
+response: https://grokipedia.com/api/typeahead?query=Linux+kernel+first+public+release+year&limit=1 200
+response: https://yandex.com/search/site/?text=Linux+kernel+first+public+release+year&web=1&searchid=3384201 200
+response: https://www.mojeek.com/search?q=Flask+web+framework+first+released+year 200
+response: https://search.yahoo.com/search;_ylt=NOEmQ1KsWGBToVs65EtgcZ4N;_ylu=f5qNemZdbj2tNeS93nuRnHmjXbXIHZBCu5iDNjfc9eoVlDA?p=Git+first+released+year+initial+release 200
+response: https://search.brave.com/search?q=Linux+kernel+first+public+release+year&source=web 429
+response: https://search.yahoo.com/search;_ylt=zV1eoujpSk4364HKr_ZgCtb6;_ylu=FAN__mX_OGKGsKUJp2gN-PxiYeu5yZCRJLASHagTB1N6ASI?p=Flask+web+framework+first+released+year 200
+[Search] text('Flask web framework first released year') \u2192 15 result(s)
+response: https://search.brave.com/search?q=Git+first+released+year+initial+release&source=web 429
+response: https://search.yahoo.com/search;_ylt=MjN1t87YQ7jDTYkEK6r_E-9m;_ylu=nCkKLdqeQEV4YNTcUIBTnarPGVyMGLQnEM2j5y0YRQXfcf8?p=Linux+kernel+first+public+release+year 200
+response: https://html.duckduckgo.com/html/ 202
+response: https://www.mojeek.com/search?q=Git+first+released+year+initial+release 200
+response: https://html.duckduckgo.com/html/ 202
+[Search] text('Git first released year initial release') \u2192 14 result(s)
+response: https://www.mojeek.com/search?q=Linux+kernel+first+public+release+year 200
+[Search] text('Linux kernel first public release year') \u2192 14 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=10) ttft=3906ms total=4406ms prompt=9057 cached=2673(30%) out=189 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 web_search(['query'])
+response: https://duckduckgo.com/?q=Git+initial+release+2005+Linus+Torvalds+April+7 202
+response: https://duckduckgo.com/i.js?o=json&q=Git+initial+release+2005+Linus+Torvalds+April+7&l=us-en&vqd=4-29838429894808047174216796830804743177&p=1&ct=AT 403
+response: https://grokipedia.com/api/typeahead?query=Git+initial+release+2005+Linus+Torvalds+April+7&limit=1 200
+response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=Git%20initial%20release%202005%20Linus%20Torvalds%20April%207 200
+response: https://www.bing.com/images/async?q=Git+initial+release+2005+Linus+Torvalds+April+7&async=1&first=1&count=35 200
+response: https://search.yahoo.com/search;_ylt=sdRrN0YH3eM8FfwMKbijuDIO;_ylu=XYStnsbKKSA2WKGxrhV4GSSI45FduauUneJ0vqclteEaANs?p=Git+initial+release+2005+Linus+Torvalds+April+7 200
+[Search] images('Git initial release 2005 Linus Torvalds April 7') \u2192 6 result(s)
+response: https://www.mojeek.com/search?q=Git+initial+release+2005+Linus+Torvalds+April+7 200
+[Latency] it=1 tools=15ms(n=10) ttft=8234ms total=8875ms prompt=8981 cached=2673(30%) out=713 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+response: https://yandex.com/search/site/?text=Git+initial+release+2005+Linus+Torvalds+April+7&web=1&searchid=7574271 200
+[Search] text('Git initial release 2005 Linus Torvalds April 7') \u2192 15 result(s)
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=10) ttft=6139ms total=7264ms prompt=12692 cached=2801(22%) out=522 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=14) ttft=1734ms total=2077ms prompt=3715 cached=113(3%) out=91 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=14) ttft=2141ms total=2954ms prompt=3902 cached=113(3%) out=156 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=14) ttft=5702ms total=6547ms prompt=4469 cached=3825(86%) out=355 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=14) ttft=7672ms total=13234ms prompt=4680 cached=113(2%) out=955 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 invoke_subagent(['briefing', 'tasks'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=14) ttft=2469ms total=2750ms prompt=5320 cached=3697(69%) out=81 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 search_agents([])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=14) ttft=1938ms total=5858ms prompt=5467 cached=4337(79%) out=625 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 invoke_subagent(['agent_id', 'briefing', 'tasks'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=12) ttft=3922ms total=5717ms prompt=3321 cached=0(0%) out=65 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=7469ms total=7797ms prompt=3321 cached=0(0%) out=176 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 read_file(['path'])
+[Latency] it=0 tools=0ms(n=12) ttft=7797ms total=8172ms prompt=3321 cached=0(0%) out=196 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=1342ms total=3092ms prompt=3648 cached=3072(84%) out=126 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+[Latency] it=1 tools=0ms(n=12) ttft=1672ms total=5562ms prompt=3648 cached=3072(84%) out=314 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=1157ms total=2297ms prompt=4065 cached=3584(88%) out=102 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=2 tools=15ms(n=12) ttft=1109ms total=3405ms prompt=3838 cached=3584(93%) out=148 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 execute_python(['code'])
+[Latency] it=1 tools=16ms(n=12) ttft=2406ms total=6670ms prompt=3644 cached=3072(84%) out=316 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=1422ms total=2172ms prompt=4209 cached=3840(91%) out=43 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=2172ms total=3140ms prompt=4053 cached=3584(88%) out=152 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=3 tools=14ms(n=12) ttft=1141ms total=3766ms prompt=4008 cached=3584(89%) out=232 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=4 run_python_on_files(['code', 'inputs', 'outputs'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=14ms(n=12) ttft=1719ms total=2485ms prompt=4197 cached=3840(91%) out=67 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Latency] it=0 tools=0ms(n=12) ttft=4639ms total=5561ms prompt=3321 cached=3072(93%) out=193 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=3967ms total=5217ms prompt=4318 cached=3840(89%) out=209 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=5 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=3733ms total=4641ms prompt=4463 cached=4096(92%) out=99 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Latency] it=1 tools=0ms(n=12) ttft=1702ms total=8875ms prompt=3645 cached=3072(84%) out=315 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=10297ms total=10983ms prompt=4068 cached=3584(88%) out=153 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=1672ms total=2608ms prompt=4212 cached=3840(91%) out=44 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=14) ttft=2547ms total=3968ms prompt=6971 cached=113(2%) out=293 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 dispatching 4 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=14) ttft=4686ms total=5718ms prompt=7564 cached=5233(69%) out=373 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 dispatching 4 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=14) ttft=3329ms total=6454ms prompt=8793 cached=6769(77%) out=203 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=0ms(n=14) ttft=3952ms total=7000ms prompt=8993 cached=5361(60%) out=351 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 run_python_on_files(['code', 'inputs', 'outputs'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=10 tools=0ms(n=14) ttft=3061ms total=3670ms prompt=9380 cached=7409(79%) out=227 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=14) ttft=3578ms total=4578ms prompt=9544 cached=4593(48%) out=276 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=31ms(n=14) ttft=2936ms total=3016ms prompt=9757 cached=9457(97%) out=181 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=0ms(n=14) ttft=3234ms total=5812ms prompt=9885 cached=8817(89%) out=277 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=14) ttft=3014ms total=3311ms prompt=3715 cached=3697(100%) out=101 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=14) ttft=2641ms total=2968ms prompt=4025 cached=3697(92%) out=98 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=14) ttft=2484ms total=2921ms prompt=4182 cached=3697(88%) out=90 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=14) ttft=7750ms total=9016ms prompt=4469 cached=3697(83%) out=358 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=30ms(n=14) ttft=7531ms total=12483ms prompt=4689 cached=4337(92%) out=760 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 invoke_subagent(['briefing', 'tasks'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=14) ttft=2702ms total=3077ms prompt=5209 cached=3953(76%) out=70 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 search_agents([])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=14) ttft=2561ms total=4281ms prompt=5356 cached=4593(86%) out=513 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 invoke_subagent(['agent_id', 'briefing', 'tasks'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=6858ms total=7858ms prompt=3328 cached=3072(92%) out=186 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Latency] it=0 tools=0ms(n=12) ttft=6797ms total=7875ms prompt=3328 cached=0(0%) out=185 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 dispatching 2 calls in parallel: ['read_file', 'list_files']
+[Tools] iter=1 dispatching 2 calls in parallel: ['read_file', 'list_files']
+[Latency] it=0 tools=16ms(n=12) ttft=6781ms total=7952ms prompt=3328 cached=3072(92%) out=190 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 dispatching 2 calls in parallel: ['read_file', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=1375ms total=6516ms prompt=3785 cached=3328(88%) out=327 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+[Latency] it=1 tools=0ms(n=12) ttft=1469ms total=6579ms prompt=3789 cached=3328(88%) out=314 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+[Latency] it=1 tools=0ms(n=12) ttft=1422ms total=7750ms prompt=3789 cached=3328(88%) out=331 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=2593ms total=3625ms prompt=4209 cached=3584(85%) out=103 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=2 tools=0ms(n=12) ttft=3515ms total=4217ms prompt=4186 cached=3584(86%) out=139 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=905ms total=13858ms prompt=4353 cached=4096(94%) out=58 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Latency] it=2 tools=0ms(n=12) ttft=4000ms total=16483ms prompt=4202 cached=3584(85%) out=223 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=3 tools=0ms(n=12) ttft=13047ms total=13827ms prompt=4330 cached=4096(95%) out=58 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=2750ms total=3328ms prompt=4347 cached=4096(94%) out=98 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Latency] it=0 tools=0ms(n=12) ttft=3672ms total=5250ms prompt=3328 cached=3072(92%) out=185 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 dispatching 2 calls in parallel: ['read_file', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=1656ms total=10061ms prompt=3792 cached=3328(88%) out=351 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=2641ms total=3453ms prompt=4229 cached=3584(85%) out=148 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=1438ms total=1733ms prompt=4373 cached=4096(94%) out=52 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=14) ttft=5219ms total=6891ms prompt=6559 cached=5105(78%) out=359 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 dispatching 4 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=14) ttft=5094ms total=6000ms prompt=7152 cached=4081(57%) out=228 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=0ms(n=14) ttft=4577ms total=6282ms prompt=7284 cached=7025(96%) out=412 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 dispatching 4 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=10 tools=0ms(n=14) ttft=3608ms total=10516ms prompt=8513 cached=3697(43%) out=1003 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 execute_python(['code'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=14) ttft=4827ms total=5733ms prompt=9541 cached=6385(67%) out=251 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=0ms(n=14) ttft=4139ms total=5030ms prompt=9708 cached=5233(54%) out=247 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=0ms(n=14) ttft=3217ms total=3672ms prompt=9921 cached=113(1%) out=119 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=16ms(n=14) ttft=2187ms total=4687ms prompt=10055 cached=8305(83%) out=220 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=14) ttft=2532ms total=2907ms prompt=3715 cached=3697(100%) out=104 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=14) ttft=3202ms total=3718ms prompt=4025 cached=3697(92%) out=120 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=14) ttft=3077ms total=3500ms prompt=4182 cached=3953(95%) out=90 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=14) ttft=10640ms total=11703ms prompt=4469 cached=3697(83%) out=539 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=14) ttft=5906ms total=10328ms prompt=4732 cached=3697(78%) out=671 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 invoke_subagent(['briefing', 'tasks'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=14) ttft=2890ms total=3108ms prompt=5254 cached=3697(70%) out=72 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 search_agents([])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=14) ttft=2032ms total=4766ms prompt=5401 cached=4081(76%) out=521 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 invoke_subagent(['agent_id', 'briefing', 'tasks'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=3063ms total=4266ms prompt=3334 cached=0(0%) out=65 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 read_file(['path'])
+[Latency] it=0 tools=0ms(n=12) ttft=3328ms total=4358ms prompt=3334 cached=0(0%) out=65 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 read_file(['path'])
+[Latency] it=0 tools=16ms(n=12) ttft=3906ms total=5140ms prompt=3334 cached=0(0%) out=65 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=1656ms total=9795ms prompt=3661 cached=3328(91%) out=318 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=1922ms total=2577ms prompt=4082 cached=3584(88%) out=102 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=1 tools=0ms(n=12) ttft=3297ms total=14313ms prompt=3657 cached=3328(91%) out=314 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2686ms total=14311ms prompt=3661 cached=3328(91%) out=318 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+[Latency] it=3 tools=0ms(n=12) ttft=1780ms total=2562ms prompt=4226 cached=3840(91%) out=48 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=8516ms total=9829ms prompt=4064 cached=3584(88%) out=148 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=0 tools=0ms(n=12) ttft=7375ms total=8311ms prompt=3334 cached=0(0%) out=65 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=1 read_file(['path'])
+[Latency] it=2 tools=0ms(n=12) ttft=8156ms total=9469ms prompt=4075 cached=3584(88%) out=161 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=1858ms total=2391ms prompt=4220 cached=3840(91%) out=48 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Latency] it=3 tools=0ms(n=12) ttft=2313ms total=3108ms prompt=4208 cached=3840(91%) out=47 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Latency] it=1 tools=16ms(n=12) ttft=2250ms total=9016ms prompt=3658 cached=3328(91%) out=315 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=2 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=12141ms total=13500ms prompt=4081 cached=3584(88%) out=138 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=10375ms total=10842ms prompt=4225 cached=3840(91%) out=42 model=openrouter/deepseek/deepseek-v4.1-flash effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=14) ttft=2608ms total=3905ms prompt=6579 cached=5233(80%) out=295 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 dispatching 4 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=14) ttft=5375ms total=5797ms prompt=7172 cached=5105(71%) out=334 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=0ms(n=14) ttft=2891ms total=5250ms prompt=7373 cached=3697(50%) out=382 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 run_python_on_files(['code', 'inputs', 'outputs'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=10 tools=0ms(n=14) ttft=4172ms total=5813ms prompt=7798 cached=4593(59%) out=334 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 dispatching 4 calls in parallel: ['read_file', 'read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=14) ttft=6625ms total=8858ms prompt=9027 cached=7665(85%) out=473 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 run_python_on_files(['code', 'inputs', 'outputs'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=0ms(n=14) ttft=4561ms total=5092ms prompt=9616 cached=6385(66%) out=263 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=0ms(n=14) ttft=3750ms total=4906ms prompt=9810 cached=9457(96%) out=252 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=0ms(n=14) ttft=1984ms total=2407ms prompt=10023 cached=9713(97%) out=137 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=15 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=15 tools=16ms(n=14) ttft=2875ms total=5047ms prompt=10193 cached=4337(43%) out=343 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=15) ttft=3469ms total=3500ms prompt=6309 cached=113(2%) out=205 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=0 tools=0ms(n=15) ttft=3891ms total=4204ms prompt=6308 cached=113(2%) out=185 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=16ms(n=15) ttft=3297ms total=3577ms prompt=6439 cached=113(2%) out=219 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=16ms(n=15) ttft=4406ms total=4781ms prompt=6438 cached=6257(97%) out=215 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+[Latency] it=2 tools=0ms(n=15) ttft=1827ms total=2391ms prompt=6672 cached=113(2%) out=193 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=14ms(n=15) ttft=2610ms total=3282ms prompt=6631 cached=6385(96%) out=204 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=15ms(n=15) ttft=7843ms total=8641ms prompt=7380 cached=6257(85%) out=625 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=15) ttft=3233ms total=8766ms prompt=7651 cached=113(1%) out=916 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=15) ttft=7031ms total=9875ms prompt=7576 cached=113(1%) out=706 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=15) ttft=7156ms total=7750ms prompt=8109 cached=6641(82%) out=389 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 update_todos(['todos'])
+[Latency] it=4 tools=16ms(n=15) ttft=14718ms total=16016ms prompt=8598 cached=7537(88%) out=1048 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 render_workbook(['path', 'sheets'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=15) ttft=5795ms total=11140ms prompt=8265 cached=7409(90%) out=814 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 render_deck(['path', 'slides', 'title'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=15) ttft=2750ms total=3327ms prompt=8911 cached=7921(89%) out=111 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=15) ttft=3079ms total=4579ms prompt=9032 cached=8177(91%) out=183 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=5 tools=16ms(n=15) ttft=17969ms total=19375ms prompt=8987 cached=6513(72%) out=725 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=15) ttft=4063ms total=4375ms prompt=6307 cached=6257(99%) out=191 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=15) ttft=4530ms total=4593ms prompt=6437 cached=113(2%) out=182 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=15) ttft=2842ms total=2922ms prompt=6552 cached=6257(95%) out=81 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=15) ttft=2327ms total=2938ms prompt=6745 cached=6513(97%) out=141 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=15) ttft=6391ms total=7282ms prompt=7227 cached=6641(92%) out=559 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=32ms(n=15) ttft=8952ms total=13250ms prompt=7378 cached=7153(97%) out=958 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 render_document(['blocks', 'path', 'title'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=15) ttft=2593ms total=2688ms prompt=8030 cached=7281(91%) out=73 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=15) ttft=2608ms total=3172ms prompt=6309 cached=6257(99%) out=228 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=15) ttft=3750ms total=3875ms prompt=6308 cached=0(0%) out=128 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=16ms(n=15) ttft=1467ms total=2045ms prompt=6532 cached=6257(96%) out=142 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+[Latency] it=1 tools=0ms(n=15) ttft=4172ms total=4188ms prompt=6589 cached=6257(95%) out=221 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=15) ttft=4983ms total=5344ms prompt=6689 cached=6257(94%) out=157 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+[Latency] it=2 tools=0ms(n=15) ttft=3046ms total=8296ms prompt=7554 cached=6257(83%) out=918 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=15) ttft=3110ms total=3110ms prompt=6804 cached=6385(94%) out=121 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=15) ttft=1452ms total=2422ms prompt=7037 cached=6513(93%) out=192 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+[Latency] it=3 tools=0ms(n=15) ttft=4437ms total=5765ms prompt=8429 cached=6385(76%) out=250 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=15) ttft=6328ms total=6469ms prompt=8565 cached=6257(73%) out=150 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=14ms(n=15) ttft=7360ms total=10032ms prompt=7745 cached=6641(86%) out=825 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=15) ttft=4563ms total=4719ms prompt=8661 cached=8305(96%) out=226 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=15) ttft=8233ms total=8561ms prompt=8201 cached=6897(84%) out=580 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 update_todos(['todos'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=15) ttft=6358ms total=6937ms prompt=8755 cached=6257(71%) out=201 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=15) ttft=5608ms total=5608ms prompt=8849 cached=8433(95%) out=218 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=15) ttft=10250ms total=14281ms prompt=8388 cached=6257(75%) out=1242 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 render_deck(['path', 'slides', 'title'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=8 tools=0ms(n=15) ttft=9141ms total=9532ms prompt=8943 cached=8817(99%) out=1356 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 execute_python(['code'])
+[Latency] it=8 tools=0ms(n=15) ttft=2344ms total=2875ms prompt=9050 cached=7537(83%) out=132 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 update_todos(['todos'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=32ms(n=15) ttft=3390ms total=5233ms prompt=9212 cached=8049(87%) out=213 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=15) ttft=3531ms total=3733ms prompt=6307 cached=6257(99%) out=186 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=9 tools=0ms(n=15) ttft=10860ms total=11360ms prompt=9145 cached=8817(96%) out=1193 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=16ms(n=15) ttft=5000ms total=5406ms prompt=6437 cached=6385(99%) out=192 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=15) ttft=2266ms total=2516ms prompt=6552 cached=113(2%) out=84 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=15) ttft=2781ms total=2875ms prompt=6745 cached=6385(95%) out=140 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 dispatching 2 calls in parallel: ['read_file', 'read_file']
+[Latency] it=10 tools=0ms(n=15) ttft=10422ms total=11000ms prompt=9279 cached=8689(94%) out=1282 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=15) ttft=4843ms total=5686ms prompt=7227 cached=6641(92%) out=420 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=0ms(n=15) ttft=7625ms total=7875ms prompt=9417 cached=113(1%) out=1227 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=0ms(n=15) ttft=2797ms total=3047ms prompt=9629 cached=9201(96%) out=402 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=16ms(n=15) ttft=6686ms total=9875ms prompt=7377 cached=6385(87%) out=1037 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 render_document(['blocks', 'path', 'subtitle', 'title'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=14ms(n=15) ttft=2516ms total=2797ms prompt=8061 cached=7153(89%) out=73 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=13 tools=0ms(n=15) ttft=7358ms total=7563ms prompt=9739 cached=9585(98%) out=752 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=0ms(n=15) ttft=6921ms total=7389ms prompt=9881 cached=8561(87%) out=497 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=15 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=15 tools=0ms(n=15) ttft=32000ms total=32827ms prompt=9995 cached=7409(74%) out=2014 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=16 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=16 tools=0ms(n=15) ttft=17483ms total=18547ms prompt=10147 cached=9585(94%) out=1351 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=17 render_workbook(['path', 'sheets'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=17 tools=0ms(n=15) ttft=24859ms total=26234ms prompt=10486 cached=9841(94%) out=2131 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=18 render_workbook(['overwrite', 'path', 'sheets'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=18 tools=16ms(n=15) ttft=4593ms total=5233ms prompt=10893 cached=10097(93%) out=240 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=15) ttft=1704ms total=1875ms prompt=6308 cached=6257(99%) out=99 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=15ms(n=15) ttft=2546ms total=3077ms prompt=6532 cached=6385(98%) out=142 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=15) ttft=10985ms total=11172ms prompt=6309 cached=6257(99%) out=185 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=15) ttft=3452ms total=8952ms prompt=7554 cached=6385(85%) out=911 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+[Latency] it=1 tools=0ms(n=15) ttft=4079ms total=4141ms prompt=6439 cached=6257(97%) out=151 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=15) ttft=2672ms total=2858ms prompt=6554 cached=6257(95%) out=82 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+[Latency] it=3 tools=0ms(n=15) ttft=4311ms total=4811ms prompt=8427 cached=6385(76%) out=210 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=15) ttft=2672ms total=3717ms prompt=6787 cached=6385(94%) out=192 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=15ms(n=15) ttft=3859ms total=9391ms prompt=8531 cached=6385(75%) out=920 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=15) ttft=7281ms total=8938ms prompt=7495 cached=6385(85%) out=621 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=16ms(n=15) ttft=3875ms total=9391ms prompt=9414 cached=7409(79%) out=890 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=15) ttft=7342ms total=11858ms prompt=7833 cached=6641(85%) out=1005 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 render_deck(['path', 'slides', 'title'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=15) ttft=8282ms total=8719ms prompt=10273 cached=6257(61%) out=489 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 execute_python(['code'])
+[Latency] it=6 tools=0ms(n=15) ttft=2436ms total=3827ms prompt=8498 cached=7409(87%) out=243 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=16ms(n=15) ttft=5125ms total=5500ms prompt=10367 cached=9329(90%) out=188 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=15) ttft=9047ms total=9422ms prompt=6307 cached=6257(99%) out=145 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=15) ttft=3157ms total=3235ms prompt=6531 cached=6257(96%) out=142 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+[Latency] it=8 tools=0ms(n=15) ttft=7811ms total=8264ms prompt=10458 cached=8305(79%) out=502 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=9 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=15) ttft=6594ms total=7594ms prompt=7015 cached=6257(89%) out=665 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=9 tools=0ms(n=15) ttft=11858ms total=12250ms prompt=10653 cached=8433(79%) out=670 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=10 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=15) ttft=8906ms total=13547ms prompt=7178 cached=6897(96%) out=1009 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 render_document(['blocks', 'path', 'title'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=15) ttft=2467ms total=2562ms prompt=7833 cached=6257(80%) out=52 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=10 tools=0ms(n=15) ttft=13358ms total=13750ms prompt=10749 cached=10609(99%) out=1327 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=11 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=11 tools=16ms(n=15) ttft=12047ms total=13140ms prompt=10846 cached=10225(94%) out=564 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=12 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=12 tools=16ms(n=15) ttft=8921ms total=9218ms prompt=11013 cached=6385(58%) out=1174 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=13 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=13 tools=16ms(n=15) ttft=15047ms total=15703ms prompt=11122 cached=10609(95%) out=808 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=14 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=14 tools=0ms(n=15) ttft=5094ms total=5108ms prompt=11268 cached=10737(95%) out=386 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=15 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=15 tools=16ms(n=15) ttft=11671ms total=12202ms prompt=11369 cached=10993(97%) out=1064 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=16 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=16 tools=0ms(n=15) ttft=17672ms total=17922ms prompt=11480 cached=10865(95%) out=1859 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=17 execute_python(['code'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=17 tools=0ms(n=15) ttft=23702ms total=24250ms prompt=11577 cached=11121(96%) out=1200 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=18 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=18 tools=0ms(n=15) ttft=23608ms total=25014ms prompt=11693 cached=113(1%) out=2240 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=19 render_workbook(['path', 'sheets'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=19 tools=0ms(n=15) ttft=15032ms total=17016ms prompt=12089 cached=11505(95%) out=1573 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2686ms total=2952ms prompt=3301 cached=113(3%) out=146 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=4061ms total=4311ms prompt=3297 cached=113(3%) out=228 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=1 tools=0ms(n=12) ttft=2390ms total=2765ms prompt=3430 cached=113(3%) out=122 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=12) ttft=1514ms total=1780ms prompt=3570 cached=3185(89%) out=79 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=2108ms total=2436ms prompt=3680 cached=3313(90%) out=80 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=8156ms total=8515ms prompt=3655 cached=113(3%) out=464 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+[Latency] it=4 tools=16ms(n=12) ttft=1827ms total=2811ms prompt=3883 cached=113(3%) out=219 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 dispatching 3 calls in parallel: ['read_file', 'read_file', 'list_files']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=7250ms total=7437ms prompt=4335 cached=3825(88%) out=402 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=32ms(n=12) ttft=10358ms total=10842ms prompt=3808 cached=3185(84%) out=897 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 delete_file(['path'])
+[Tools] iter=3 delete_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=12) ttft=3061ms total=3093ms prompt=4024 cached=113(3%) out=217 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=7375ms total=8032ms prompt=4475 cached=3441(77%) out=570 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=7 tools=0ms(n=12) ttft=6311ms total=6655ms prompt=4669 cached=3185(68%) out=325 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=9375ms total=10296ms prompt=4307 cached=3185(74%) out=447 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=0 tools=0ms(n=12) ttft=2187ms total=2250ms prompt=3298 cached=3185(97%) out=94 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=1750ms total=1813ms prompt=3306 cached=3185(96%) out=87 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=1 tools=14ms(n=12) ttft=1922ms total=1969ms prompt=3475 cached=113(3%) out=93 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=4281ms total=4688ms prompt=3528 cached=3185(90%) out=337 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=9547ms total=10313ms prompt=3653 cached=3185(87%) out=1066 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=8968ms total=12468ms prompt=3828 cached=3185(83%) out=1197 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=3 tools=0ms(n=12) ttft=6608ms total=7640ms prompt=4145 cached=113(3%) out=588 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=5561ms total=5967ms prompt=4398 cached=113(3%) out=350 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 read_file(['path'])
+[Latency] it=3 tools=0ms(n=12) ttft=7061ms total=7140ms prompt=4331 cached=113(3%) out=493 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=5313ms total=6266ms prompt=4671 cached=4081(87%) out=212 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=12) ttft=5641ms total=5688ms prompt=3306 cached=3185(96%) out=555 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=7063ms total=7454ms prompt=3435 cached=113(3%) out=540 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=3672ms total=4031ms prompt=3587 cached=113(3%) out=230 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 read_file(['path'])
+[Latency] it=4 tools=16ms(n=12) ttft=22500ms total=25327ms prompt=4832 cached=113(2%) out=1616 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Tools] iter=5 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=15ms(n=12) ttft=3782ms total=3782ms prompt=3726 cached=3185(85%) out=268 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=15ms(n=12) ttft=3438ms total=3625ms prompt=3307 cached=3185(96%) out=238 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=8077ms total=9202ms prompt=5352 cached=3697(69%) out=707 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=1 tools=0ms(n=12) ttft=3718ms total=4093ms prompt=3436 cached=3185(93%) out=215 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2811ms total=3139ms prompt=3302 cached=113(3%) out=114 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=2 tools=16ms(n=12) ttft=3562ms total=3906ms prompt=3594 cached=3313(92%) out=126 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2343ms total=2577ms prompt=3479 cached=3185(92%) out=105 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=7313ms total=8032ms prompt=3704 cached=3441(93%) out=462 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+[Latency] it=2 tools=0ms(n=12) ttft=4952ms total=6984ms prompt=3805 cached=3185(84%) out=609 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=12) ttft=2483ms total=2922ms prompt=4228 cached=3441(81%) out=177 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+[Latency] it=4 tools=16ms(n=12) ttft=3983ms total=4266ms prompt=3845 cached=113(3%) out=158 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=3546ms total=3641ms prompt=4382 cached=113(3%) out=180 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=5046ms total=5375ms prompt=3301 cached=3185(96%) out=220 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=5 tools=0ms(n=12) ttft=2359ms total=3032ms prompt=4530 cached=4081(90%) out=125 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=7359ms total=7671ms prompt=3430 cached=3185(93%) out=423 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=3141ms total=3593ms prompt=3593 cached=3185(89%) out=275 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=2656ms total=2813ms prompt=3727 cached=3185(85%) out=214 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=3640ms total=3922ms prompt=3855 cached=3185(83%) out=210 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2093ms total=2202ms prompt=3301 cached=3185(96%) out=111 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=3233ms total=3406ms prompt=3442 cached=3313(96%) out=80 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=15ms(n=12) ttft=1827ms total=2125ms prompt=3646 cached=3313(91%) out=205 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 dispatching 3 calls in parallel: ['read_file', 'read_file', 'list_files']
+[Latency] it=0 tools=0ms(n=12) ttft=7922ms total=8282ms prompt=3297 cached=3185(97%) out=349 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=16ms(n=12) ttft=3031ms total=3311ms prompt=3426 cached=3313(97%) out=175 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=12) ttft=4031ms total=4218ms prompt=3753 cached=3313(88%) out=210 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+[Latency] it=3 tools=16ms(n=12) ttft=8141ms total=9406ms prompt=4101 cached=3569(87%) out=534 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=5592ms total=5967ms prompt=3905 cached=113(3%) out=377 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 delete_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=12) ttft=3858ms total=4063ms prompt=4011 cached=3185(79%) out=226 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 delete_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=10655ms total=11375ms prompt=4295 cached=3953(92%) out=739 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=3842ms total=4203ms prompt=4119 cached=3313(80%) out=159 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=0ms(n=12) ttft=5797ms total=6672ms prompt=4401 cached=3313(75%) out=434 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2516ms total=2875ms prompt=3298 cached=3185(97%) out=93 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=5 tools=0ms(n=12) ttft=11422ms total=11827ms prompt=4631 cached=3313(72%) out=819 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=15ms(n=12) ttft=1859ms total=2280ms prompt=3475 cached=3185(92%) out=96 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 read_file(['path'])
+[Latency] it=0 tools=0ms(n=12) ttft=1608ms total=1858ms prompt=3306 cached=113(3%) out=87 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2281ms total=2781ms prompt=3528 cached=113(3%) out=255 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=8297ms total=9547ms prompt=3653 cached=3441(94%) out=729 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=47ms(n=12) ttft=6452ms total=7030ms prompt=4145 cached=3313(80%) out=711 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=12) ttft=11561ms total=18952ms prompt=3840 cached=3313(86%) out=1233 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=4 tools=0ms(n=12) ttft=6015ms total=6342ms prompt=4398 cached=3313(75%) out=384 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=6765ms total=7125ms prompt=4671 cached=3313(71%) out=442 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=3 tools=0ms(n=12) ttft=8625ms total=9796ms prompt=4399 cached=3697(84%) out=617 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=3718ms total=3875ms prompt=3307 cached=3185(96%) out=353 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=3125ms total=3217ms prompt=3436 cached=113(3%) out=161 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=15ms(n=12) ttft=1702ms total=2016ms prompt=3599 cached=3313(92%) out=128 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+[Latency] it=0 tools=0ms(n=12) ttft=12219ms total=12688ms prompt=3306 cached=3185(96%) out=700 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=5936ms total=5983ms prompt=3476 cached=3185(92%) out=288 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=3 tools=0ms(n=12) ttft=8280ms total=8391ms prompt=3709 cached=113(3%) out=754 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=5109ms total=5141ms prompt=3302 cached=3185(96%) out=278 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=1454ms total=1641ms prompt=3479 cached=3185(92%) out=105 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 read_file(['path'])
+[Latency] it=4 tools=0ms(n=12) ttft=6110ms total=6766ms prompt=3854 cached=113(3%) out=409 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2578ms total=2781ms prompt=3301 cached=3185(96%) out=292 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 write_file(['content', 'path'])
+[Latency] it=2 tools=16ms(n=12) ttft=2967ms total=4250ms prompt=3805 cached=3185(84%) out=590 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2297ms total=2608ms prompt=3466 cached=3185(92%) out=144 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=12) ttft=3000ms total=3077ms prompt=3595 cached=3185(89%) out=141 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=3 tools=0ms(n=12) ttft=5202ms total=5952ms prompt=4229 cached=3185(75%) out=428 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=4484ms total=4938ms prompt=4391 cached=3313(75%) out=182 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=2125ms total=2546ms prompt=4548 cached=3441(76%) out=124 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2608ms total=2936ms prompt=3301 cached=3185(96%) out=144 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=3453ms total=3891ms prompt=3535 cached=3313(94%) out=208 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+[Latency] it=0 tools=0ms(n=12) ttft=7514ms total=7889ms prompt=3297 cached=3185(97%) out=224 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=16ms(n=12) ttft=2796ms total=3093ms prompt=3426 cached=3313(97%) out=150 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=5608ms total=6672ms prompt=3839 cached=3185(83%) out=483 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+[Latency] it=2 tools=0ms(n=12) ttft=2780ms total=3077ms prompt=3589 cached=3313(92%) out=145 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=12) ttft=2469ms total=2625ms prompt=4027 cached=3185(79%) out=124 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=3 tools=0ms(n=12) ttft=3608ms total=3938ms prompt=3916 cached=3313(85%) out=197 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2875ms total=3093ms prompt=3298 cached=3185(97%) out=94 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2047ms total=2327ms prompt=3475 cached=3313(95%) out=88 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=13438ms total=13500ms prompt=4068 cached=3313(81%) out=1181 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 delete_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=10483ms total=11625ms prompt=3653 cached=3313(91%) out=778 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=5437ms total=5812ms prompt=4174 cached=3825(92%) out=318 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 delete_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=14ms(n=12) ttft=3891ms total=4235ms prompt=4282 cached=3185(74%) out=178 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=7 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=11344ms total=12360ms prompt=4145 cached=3313(80%) out=782 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+[Latency] it=7 tools=0ms(n=12) ttft=4093ms total=4452ms prompt=4564 cached=4209(92%) out=211 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=8 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=16ms(n=12) ttft=5703ms total=5922ms prompt=4398 cached=3313(75%) out=465 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=12) ttft=1688ms total=2016ms prompt=3306 cached=3185(96%) out=87 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Latency] it=8 tools=0ms(n=12) ttft=8578ms total=9656ms prompt=4672 cached=4465(96%) out=235 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=3593ms total=3906ms prompt=3528 cached=3185(90%) out=247 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Tools] iter=2 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=16ms(n=12) ttft=6172ms total=6233ms prompt=3306 cached=3185(96%) out=486 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=7702ms total=8092ms prompt=3435 cached=0(0%) out=386 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=9266ms total=16000ms prompt=3828 cached=3313(87%) out=1042 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=4125ms total=4250ms prompt=4401 cached=3313(75%) out=410 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 read_file(['path'])
+[Latency] it=2 tools=0ms(n=12) ttft=8920ms total=9281ms prompt=3598 cached=3185(89%) out=456 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=15ms(n=12) ttft=5188ms total=5218ms prompt=3737 cached=3185(85%) out=219 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=5218ms total=5547ms prompt=3307 cached=3185(96%) out=255 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=16ms(n=12) ttft=2983ms total=3250ms prompt=3436 cached=3185(93%) out=205 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=1781ms total=2092ms prompt=3599 cached=3313(92%) out=128 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=5343ms total=5827ms prompt=3709 cached=3441(93%) out=482 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=2922ms total=3375ms prompt=3850 cached=3569(93%) out=191 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=4 tools=0ms(n=12) ttft=28202ms total=28468ms prompt=4978 cached=3697(74%) out=1390 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=2468ms total=2782ms prompt=3302 cached=3185(96%) out=112 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2233ms total=2655ms prompt=3479 cached=3185(92%) out=105 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=2093ms total=4452ms prompt=3805 cached=3441(90%) out=443 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=4890ms total=5172ms prompt=4310 cached=3313(77%) out=309 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=2156ms total=2500ms prompt=4466 cached=4209(94%) out=128 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=17172ms total=18202ms prompt=5147 cached=4337(84%) out=1537 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=5 tools=0ms(n=12) ttft=2061ms total=2656ms prompt=4617 cached=4337(94%) out=110 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=0ms(n=12) ttft=4625ms total=5030ms prompt=3301 cached=113(3%) out=345 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=14156ms total=14531ms prompt=3430 cached=3313(97%) out=219 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=4234ms total=4266ms prompt=3593 cached=3185(89%) out=232 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=0ms(n=12) ttft=6312ms total=6467ms prompt=3699 cached=3185(86%) out=240 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=2250ms total=2483ms prompt=3833 cached=3569(93%) out=177 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 read_file(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=0ms(n=12) ttft=2203ms total=2625ms prompt=3961 cached=3313(84%) out=173 model=openrouter/meta/muse-spark-1.3-contributor effort=-

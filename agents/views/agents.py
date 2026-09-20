@@ -229,6 +229,12 @@ class AgentSerializer(serializers.Serializer):
         child=serializers.IntegerField(), required=False, default=list,
     )
     skills = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    #: Exactly which built-in tools this agent may use. Empty: everything its
+    #: grants unlock, which is what every agent saved before this means.
+    toolScope = serializers.ListField(
+        child=serializers.CharField(max_length=64), required=False, default=list,
+        max_length=120,
+    )
     #: Sites `browser_act` may act on (bare hostnames; subdomains included).
     #: Empty means it may browse but not act.
     browserDomains = serializers.ListField(
@@ -431,6 +437,23 @@ class AgentSerializer(serializers.Serializer):
     def validate_skills(self, value):
         return self._owned_ids(Skill, value, 'skill')
 
+    def validate_toolScope(self, value):
+        """Only real tool names, and only ones a grant can unlock.
+
+        An unknown name would sit in the config doing nothing while the screen
+        implied the agent had been narrowed to it — the permissions-screen lie
+        `docs/AGENT_TEMPLATES.md` §5 calls unforgivable.
+        """
+        from agents.agent.runtime import GRANT_TOOLS
+
+        grantable = {name for names in GRANT_TOOLS.values() for name in names}
+        unknown = sorted({t.strip() for t in value if t.strip()} - grantable)
+        if unknown:
+            raise serializers.ValidationError(
+                f'Not tools a grant can unlock: {", ".join(unknown[:5])}.'
+            )
+        return sorted({t.strip() for t in value if t.strip()})
+
     def validate_browserDomains(self, value):
         import re
 
@@ -587,6 +610,7 @@ class AgentSerializer(serializers.Serializer):
             'skills': ctx.get('skills', []),
             'delegatesTo': ctx.get('delegatesTo', []),
             'browserDomains': ctx.get('browserDomains', []),
+            'toolScope': ctx.get('toolScope', []),
             'useEnvironment': ctx.get('useEnvironment', False),
             # The contract by name, blank for prose. `output_schema` is stored
             # as `{'contract': name}`; anything else in there is a shape from
@@ -668,6 +692,7 @@ class AgentSerializer(serializers.Serializer):
                 i for i in data.get('delegatesTo', []) if i != workflow.id
             ],
             'browserDomains': data.get('browserDomains', []),
+            'toolScope': data.get('toolScope', []),
             'useEnvironment': data.get('useEnvironment', False),
         }
 

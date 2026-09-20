@@ -56,7 +56,7 @@ _EXTENSION_TYPES = {
     'html': 'html', 'htm': 'html',
     'png': 'image', 'jpg': 'image', 'jpeg': 'image', 'webp': 'image',
     'gif': 'image', 'bmp': 'image', 'tiff': 'image', 'tif': 'image',
-    'image': 'image',
+    'svg': 'image', 'image': 'image',
     'mp4': 'video', 'mov': 'video', 'webm': 'video', 'mkv': 'video',
     'avi': 'video', 'video': 'video',
     'mp3': 'audio', 'wav': 'audio', 'ogg': 'audio', 'm4a': 'audio',

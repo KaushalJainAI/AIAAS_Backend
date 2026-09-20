@@ -18,8 +18,12 @@ cap. When OpenRouter does not report a price, `IMAGE_COST_ESTIMATE_USD` stands
 in — an image that counts as free would make the cap stop applying to exactly
 the calls that spend most per call.
 
-**It is not `sensitive` in chat.** The user asked for the picture in the
-message this turn answers; a second "are you sure?" is friction, not consent.
+**It is `sensitive`, so the user approves each image.** It was not, on the
+reasoning that the request in this turn *was* the consent — but a generation is
+billed per call and a model that decides to make four variations has spent four
+times what was asked for. An approval card naming the model is the cheapest
+place to catch that, and "always allow for this session" is one click for
+someone who really is iterating on a picture.
 
 **Unsupported dials are dropped, not refused** — `imagine.validation.constrain`,
 the conversational policy the Imagine agent already uses. An aspect ratio the
@@ -169,7 +173,8 @@ def _generate(scope, user, args: Dict[str, Any]) -> dict:
             'Generate an image from a description and save it to the user\'s files. '
             'Each image is billed to the user\'s OpenRouter account, so make one '
             'when it is wanted — a cover for a deck, an illustration the user asked '
-            'for — not speculatively, and do not make several variations unasked. '
+            'for — not speculatively, and do not make several variations unasked; '
+            'the user approves each one. '
             'Returns the saved path, which render_deck and render_document accept '
             'as an image. Describe subject, style and composition concretely; '
             'never ask for text inside the image, which models render badly.'
@@ -188,7 +193,7 @@ def _generate(scope, user, args: Dict[str, Any]) -> dict:
             'additionalProperties': False,
         },
     },
-}, requires='files', effect='irreversible')
+}, requires='files', sensitive=True, effect='irreversible')
 async def generate_image(args: Dict, context: Dict) -> str:
     from django.contrib.auth import get_user_model
 

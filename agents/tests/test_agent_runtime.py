@@ -63,11 +63,15 @@ class GrantMappingTests(SimpleTestCase):
         # to draw, so the drawing happens in the reader's browser from data the
         # agent already had. There is no blast radius to gate, and an agent that
         # can only describe numbers in prose writes a worse report.
+        # `notify_user` is the fourth (2026-09-20): it reaches the owner's own
+        # notification feed and nothing else, and an unattended agent that
+        # cannot say "this needs you" is not safer, only quieter. Its own cap
+        # keeps a loop from turning the feed into a log.
         names = toolbox().allowed_names
         self.assertEqual(
             names,
             frozenset({'get_current_time', 'update_todos', 'render_chart',
-                       'read_tool_output', 'recall_context'}),
+                       'notify_user', 'read_tool_output', 'recall_context'}),
         )
 
     def test_a_grant_unlocks_exactly_its_own_tools(self):

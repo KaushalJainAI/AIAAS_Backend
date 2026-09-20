@@ -109,6 +109,9 @@ BINARY_TYPES = {
     'docx': 'docx',
     'pdf': 'pdf',
     'png': 'image', 'jpg': 'image', 'jpeg': 'image', 'webp': 'image', 'gif': 'image',
+    # Text under the hood, an image to everyone who opens it: stored as one
+    # so the preview draws it instead of showing XML.
+    'svg': 'image',
 }
 
 #: How many `name (n).ext` candidates `write_binary` tries before giving up.
@@ -569,6 +572,32 @@ def read_file(scope: FileScope, path: str, *, offset: int = 0,
     return out
 
 
+def read_binary(scope: FileScope, path: str) -> bytes:
+    """The bytes of one stored file in scope — for a tool that must re-read it.
+
+    `read_file` hands a model text; this hands our own code the file, which is
+    what `edit_workbook` needs to change a workbook without the model
+    re-emitting it. Same walk, so the confinement is the same.
+    """
+    parent_parts, name = _split_leaf(scope, path)
+    folder = _folder_at(scope, parent_parts)
+    doc = _document_in(scope, folder, name)
+    shown = render(scope, parent_parts + [name])
+    if doc is None:
+        raise VfsError(f'No such file: {shown}. List the directory to see what is there.')
+    if not doc.file:
+        raise VfsError(
+            f'{shown} is a text file, not a stored document with its own bytes.'
+        )
+    if (doc.file_size or 0) > AGENT_FILE_BINARY_BYTES:
+        raise VfsError(f'{shown} is too large to open here.')
+    with doc.file.open('rb') as handle:
+        data = handle.read(AGENT_FILE_BINARY_BYTES + 1)
+    if len(data) > AGENT_FILE_BINARY_BYTES:
+        raise VfsError(f'{shown} is too large to open here.')
+    return data
+
+
 def read_image(scope: FileScope, path: str) -> tuple[bytes, str]:
     """The bytes of one image in scope, and its rendered path.
 
@@ -594,7 +623,7 @@ def read_image(scope: FileScope, path: str) -> tuple[bytes, str]:
 
 
 def write_file(scope: FileScope, path: str, content: str, *,
-               append: bool = False) -> dict:
+               append: bool = False, overwrite: bool = True) -> dict:
     """Create or overwrite one file, creating parent directories as needed.
 
     `mkdir -p` semantics deliberately: a model that has to create three folders
@@ -622,6 +651,12 @@ def write_file(scope: FileScope, path: str, content: str, *,
 
     folder = _make_dirs(scope, parent_parts)
     doc = _document_in(scope, folder, name)
+    if doc is not None and not overwrite and not append:
+        # `download_file` and friends keep the create-only promise the render
+        # tools make; `write_file`'s own callers still overwrite by default,
+        # which is what the tool's description says it does.
+        name = _free_name(scope, folder, name)
+        doc = None
 
     if doc is None:
         doc = Document.objects.create(
