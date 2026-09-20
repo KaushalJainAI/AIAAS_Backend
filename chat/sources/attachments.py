@@ -22,7 +22,12 @@ FILE_TYPES = {
     "image": (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"),
     "pdf": (".pdf",),
     "pptx": (".pptx", ".ppt"),
-    "text": (".txt", ".md", ".csv", ".json", ".xml", ".html"),
+    # Word and Excel were missing until 2026-09-20: both classified as "other"
+    # and extracted to an empty string, so attaching a spreadsheet to a message
+    # gave the model its name and nothing else.
+    "docx": (".docx", ".doc"),
+    "xlsx": (".xlsx", ".xlsm", ".xls"),
+    "text": (".txt", ".md", ".csv", ".json", ".xml", ".html", ".yml", ".yaml"),
 }
 
 
@@ -74,15 +79,47 @@ def extract_pptx_text(data: bytes) -> str:
         return ""
 
 
+def extract_docx_text(data: bytes) -> str:
+    """Paragraphs and tables of a Word attachment."""
+    import io
+
+    from inference.utils import extract_docx_text as _from_file
+
+    try:
+        return _from_file(io.BytesIO(data))
+    except Exception:
+        logger.exception("[Upload] DOCX extraction failed")
+        return ""
+
+
+def extract_xlsx_text(data: bytes) -> str:
+    """Sheets, headers and cells of a spreadsheet attachment."""
+    import io
+
+    from inference.utils import extract_xlsx_text as _from_file
+
+    try:
+        return _from_file(io.BytesIO(data))
+    except Exception:
+        logger.exception("[Upload] XLSX extraction failed")
+        return ""
+
+
 def extract_text(data: bytes, file_type: str) -> str:
     match file_type:
         case "pdf":
             return extract_pdf_text(data)
         case "pptx":
             return extract_pptx_text(data)
+        case "docx":
+            return extract_docx_text(data)
+        case "xlsx":
+            return extract_xlsx_text(data)
         case "text":
             return data.decode("utf-8", errors="ignore")
         case _:
+            # A format with no reader yet. The bytes are kept, so
+            # `run_python_on_files` can open it; nothing is invented here.
             return ""
 
 

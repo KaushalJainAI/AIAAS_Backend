@@ -11,7 +11,7 @@ import magic
 from django.core.exceptions import ValidationError
 from pypdf import PdfReader
 
-from workflow_backend.thresholds import MAX_DOCUMENT_SIZE
+from workflow_backend.thresholds import MAX_DOCUMENT_SIZE, XLSX_EXTRACT_ROWS
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,8 @@ _EXTENSION_TYPES = {
     'txt': 'txt', 'text': 'txt', 'log': 'txt',
     'md': 'md', 'markdown': 'md',
     'docx': 'docx', 'doc': 'docx',
+    'xlsx': 'xlsx', 'xlsm': 'xlsx', 'xls': 'xlsx',
+    'pptx': 'pptx', 'ppt': 'pptx',
     'csv': 'csv', 'tsv': 'csv',
     'json': 'json',
     'html': 'html', 'htm': 'html',
@@ -57,18 +59,32 @@ _EXTENSION_TYPES = {
     'image': 'image',
     'mp4': 'video', 'mov': 'video', 'webm': 'video', 'mkv': 'video',
     'avi': 'video', 'video': 'video',
+    'mp3': 'audio', 'wav': 'audio', 'ogg': 'audio', 'm4a': 'audio',
+    'flac': 'audio', 'aac': 'audio', 'audio': 'audio',
 }
 
 #: MIME prefix → type, consulted when the extension says nothing useful.
 _MIME_PREFIX_TYPES = (
     ('image/', 'image'),
     ('video/', 'video'),
+    ('audio/', 'audio'),
     ('application/pdf', 'pdf'),
+    # Last, so a more specific rule above wins: a sniffed `text/*` with no
+    # usable extension is text, which is what a README or a `.env` sample is.
+    ('text/', 'txt'),
 )
 
-#: What an unrecognised file is called. Text extraction treats it as text,
-#: which is the old behaviour for anything unknown.
-DEFAULT_FILE_TYPE = 'txt'
+#: What an unrecognised file is called (2026-09-20). It used to be `txt`, and
+#: that was the bug behind the `.docx`-as-zip-noise class: an unknown *binary*
+#: was read as UTF-8 with errors ignored and its noise stored as searchable
+#: text. `other` says what is true — we keep the bytes and have no reader for
+#: them yet — and `extract_text_from_file` returns nothing rather than rubbish.
+#: The file is still downloadable and still readable by `execute_python`
+#: through `run_python_on_files`, which is how a rare format gets handled.
+DEFAULT_FILE_TYPE = 'other'
+
+#: Types whose bytes *are* text. Everything else is left to a real reader.
+TEXT_FILE_TYPES = frozenset({'txt', 'md', 'csv', 'json', 'html'})
 
 
 def normalize_file_type(filename: str, mime_type: str = '') -> str:
@@ -169,12 +185,70 @@ def extract_docx_text(file_path) -> str:
     return '\n'.join(_docx_blocks(body))
 
 
+def extract_xlsx_text(source) -> str:
+    """Sheet names, headers and cell values of a workbook, as searchable text.
+
+    Formulas are read as written (`=SUM(B2:B9)`): openpyxl without
+    `data_only` returns the formula, and a cached value is only present if
+    some spreadsheet application has opened the file. The formula is the
+    honest thing to index — it is what the cell contains.
+    """
+    try:
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(source, read_only=True)
+    except Exception as e:  # noqa: BLE001 — a corrupt upload is not a crash
+        logger.warning('Could not read workbook %s: %s', source, e)
+        return ''
+    lines = []
+    try:
+        for sheet in workbook.worksheets:
+            lines.append(f'# Sheet: {sheet.title}')
+            for row in sheet.iter_rows(max_row=XLSX_EXTRACT_ROWS, values_only=True):
+                cells = ['' if v is None else str(v) for v in row]
+                if any(cell.strip() for cell in cells):
+                    lines.append(' | '.join(cells))
+    finally:
+        workbook.close()
+    return '\n'.join(lines)
+
+
+def extract_pptx_text(source) -> str:
+    """Every slide's text, its tables, and its speaker notes."""
+    try:
+        from pptx import Presentation
+
+        deck = Presentation(source)
+    except Exception as e:  # noqa: BLE001
+        logger.warning('Could not read presentation %s: %s', source, e)
+        return ''
+    lines = []
+    for n, slide in enumerate(deck.slides, 1):
+        lines.append(f'# Slide {n}')
+        for shape in slide.shapes:
+            if shape.has_text_frame and shape.text_frame.text.strip():
+                lines.append(shape.text_frame.text)
+            if getattr(shape, 'has_table', False) and shape.has_table:
+                for row in shape.table.rows:
+                    lines.append(' | '.join(cell.text for cell in row.cells))
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
+            lines.append(f'Notes: {slide.notes_slide.notes_text_frame.text}')
+    return '\n'.join(lines)
+
+
 class DocumentProcessor:
+    #: Formats we can read *today*. Kept as documentation and for the error
+    #: message; it is no longer the gate — see `BLOCKED_MIME_TYPES`.
     ALLOWED_MIME_TYPES = [
         'application/pdf',
         'text/plain',
         'text/markdown',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  # .docx
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',        # .xlsx
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',  # .pptx
+        'application/vnd.ms-excel',
+        'application/vnd.ms-powerpoint',
+        'application/msword',
         'text/csv',
         'application/json',
         'text/html',
@@ -183,7 +257,36 @@ class DocumentProcessor:
         'image/webp',
         'video/mp4',
         'video/quicktime',
+        'audio/mpeg',
+        'audio/wav',
     ]
+
+    #: **Uploads are allowed by default and refused by exception** (2026-09-20).
+    #: An allow-list made the library smaller than the platform: a `.xlsx` could
+    #: be *written* by an agent and not *uploaded* by its owner, and every
+    #: format we had no parser for was refused rather than kept. Bytes here are
+    #: inert — nothing executes an upload, downloads are served
+    #: `as_attachment`, and the only code that runs is the model's own in the
+    #: sandbox — so keeping an unreadable file costs a row and buys the case
+    #: this exists for: `run_python_on_files` opening it later.
+    #:
+    #: What stays refused is the small set whose only purpose is to be run on
+    #: someone's machine. A shared knowledge base is a distribution channel,
+    #: and that is the one thing it must not become.
+    BLOCKED_MIME_TYPES = frozenset({
+        'application/x-dosexec',
+        'application/x-msdownload',
+        'application/vnd.microsoft.portable-executable',
+        'application/x-msi',
+        'application/x-executable',
+        'application/x-mach-binary',
+        'application/x-sharedlib',
+        'application/vnd.android.package-archive',
+        'application/x-apple-diskimage',
+    })
+    BLOCKED_EXTENSIONS = frozenset({
+        'exe', 'dll', 'msi', 'scr', 'com', 'bat', 'cmd', 'apk', 'dmg', 'jar',
+    })
 
     @classmethod
     def validate_file_upload(cls, file_obj):
@@ -202,8 +305,14 @@ class DocumentProcessor:
         finally:
             file_obj.seek(initial_pos)
 
-        if mime_type not in cls.ALLOWED_MIME_TYPES:
-            raise ValidationError(f"Unsupported file type: {mime_type}. Allowed types: PDF, Text, Markdown, Docx, CSV, JSON, HTML.")
+        name = (getattr(file_obj, 'name', '') or '').lower()
+        extension = name.rsplit('.', 1)[-1] if '.' in name else ''
+        if mime_type in cls.BLOCKED_MIME_TYPES or extension in cls.BLOCKED_EXTENSIONS:
+            raise ValidationError(
+                "Executable files cannot be uploaded. Everything else is "
+                "accepted; a format we cannot read yet is stored as-is and can "
+                "be opened with Python."
+            )
 
         return mime_type
 
@@ -221,7 +330,10 @@ class DocumentProcessor:
         file_type = file_type.lower()
 
         try:
-            if file_type in ('image', 'video'):
+            if file_type in ('image', 'video', 'audio', 'other'):
+                # Nothing to read: `other` is a format we keep but cannot parse
+                # yet, and reading it as UTF-8 is what stored zip noise as
+                # searchable text before 2026-09-04.
                 return ""
 
             if file_type == 'pdf':
@@ -241,15 +353,26 @@ class DocumentProcessor:
                 # as `content_text` — then chunked and embedded it.
                 text = extract_docx_text(file_path)
 
+            elif file_type == 'xlsx':
+                text = extract_xlsx_text(file_path)
+
+            elif file_type == 'pptx':
+                text = extract_pptx_text(file_path)
+
             elif file_type == 'csv':
                 with open(file_path, 'r', encoding='utf-8') as f:
                     reader = csv.reader(f)
                     for row in reader:
                         text += " ".join(row) + "\n"
 
-            else:
+            elif file_type in TEXT_FILE_TYPES:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     text = f.read()
+
+            else:
+                # A type we have no reader for. Keep the file, store no text —
+                # a searchable index of mojibake is worse than an empty one.
+                return ""
 
         except Exception as e:
             logger.error(f"Error extracting text from {file_path}: {e}")
@@ -263,7 +386,8 @@ ALLOWED_MIME_TYPES = DocumentProcessor.ALLOWED_MIME_TYPES
 validate_file_upload = DocumentProcessor.validate_file_upload
 __all__ = [
     'ALLOWED_MIME_TYPES', 'DEFAULT_FILE_TYPE', 'DocumentProcessor',
-    'extract_docx_text', 'extract_text_from_file', 'normalize_file_type',
+    'TEXT_FILE_TYPES', 'extract_docx_text', 'extract_pptx_text',
+    'extract_xlsx_text', 'extract_text_from_file', 'normalize_file_type',
     'sanitize_document_content', 'user_document_path', 'validate_file_upload',
 ]
 sanitize_document_content = DocumentProcessor.sanitize_document_content

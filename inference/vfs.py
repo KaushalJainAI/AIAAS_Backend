@@ -1047,8 +1047,16 @@ def _extension(name: str) -> str:
 
 
 def is_binary(doc: Document) -> bool:
-    """A document whose bytes live in its `FileField`, not in `content_text`."""
-    return bool(doc.file) and doc.file_type in set(BINARY_TYPES.values())
+    """A document whose bytes live in its `FileField`, not in `content_text`.
+
+    Decided by what the type is *not*: anything with a stored file that is not
+    one of the text types is binary, so a format uploaded before we had a
+    reader for it (`other`, `audio`) is still handed to the sandbox as bytes
+    rather than as an empty string.
+    """
+    from .utils import TEXT_FILE_TYPES
+
+    return bool(doc.file) and doc.file_type not in TEXT_FILE_TYPES
 
 
 def _refuse_binary_name(name: str, tool: str) -> None:

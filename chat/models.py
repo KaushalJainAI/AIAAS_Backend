@@ -174,6 +174,8 @@ class ChatAttachment(models.Model):
         ('image', 'Image'),
         ('pdf', 'PDF'),
         ('pptx', 'PowerPoint'),
+        ('docx', 'Word Document'),
+        ('xlsx', 'Excel Workbook'),
         ('text', 'Text File'),
         ('other', 'Other'),
     ]

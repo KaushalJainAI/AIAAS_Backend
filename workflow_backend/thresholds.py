@@ -176,6 +176,10 @@ EXECUTION_TTL_SECONDS = 3600  # 1 hour execution data TTL
 
 # ==================== Upload & Request Limits ====================
 MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # 50MB limit for general uploads
+#: Rows per sheet kept when indexing an uploaded workbook. A spreadsheet is
+#: usually wide rather than deep in the part that describes it, and the file
+#: itself stays downloadable for anything past this.
+XLSX_EXTRACT_ROWS = 500
 DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100MB for request payload memory
 FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100MB for file upload memory
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000    # Increase field limit for complex workflows

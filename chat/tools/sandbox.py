@@ -261,7 +261,9 @@ def _load_inputs(scope, paths: list[str]) -> dict[str, bytes]:
                 f"No such file: {vfs.render(scope, parent_parts + [leaf])}. "
                 f"List the directory to see what is there."
             )
-        if doc.file and vfs.is_binary(doc):
+        # Any stored bytes go in as bytes — including a format we have no
+        # reader for, which is the case `execute_python` is the answer to.
+        if doc.file:
             with doc.file.open('rb') as handle:
                 data = handle.read(SANDBOX_FILE_MAX_BYTES + 1)
         else:

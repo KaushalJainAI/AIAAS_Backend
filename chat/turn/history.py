@@ -26,13 +26,13 @@ from chat.models import ChatAttachment, ChatMessage, ChatSession
 logger = logging.getLogger(__name__)
 
 #: Attachment kind → the AIModel capability flag required to send it.
-#: pdf/pptx/text are absent on purpose: they are read as extracted text, so they
-#: ride in as ordinary tokens and need no special support.
+#: pdf/pptx/docx/xlsx/text are absent on purpose: they are read as extracted
+#: text, so they ride in as ordinary tokens and need no special support.
 _REQUIRED_CAPABILITY = {
     "image": "supports_image_input",
     "video": "supports_video_input",
 }
-_TEXT_EXTRACTED_TYPES = frozenset({"pdf", "pptx", "text"})
+_TEXT_EXTRACTED_TYPES = frozenset({"pdf", "pptx", "docx", "xlsx", "text"})
 
 #: How many past turns may still contribute their uploaded files.
 _ATTACHMENT_LOOKBACK = 5

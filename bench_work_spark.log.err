@@ -1,0 +1,50 @@
+[Embedder] Using API model nvidia/nemotron-3-embed-1b @ https://integrate.api.nvidia.com/v1
+[Checkpoints] SQLite checkpointer at C:\Users\91700\Desktop\AIAAS\Backend\checkpoints.sqlite3
+Credential 1 accessed by user 1
+Credential 1 accessed by user 1
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=31ms(n=12) ttft=3657ms total=3702ms prompt=3305 cached=113(3%) out=80 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=31ms(n=12) ttft=4906ms total=5250ms prompt=3295 cached=113(3%) out=93 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2422ms total=3250ms prompt=3570 cached=113(3%) out=193 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=1 tools=0ms(n=12) ttft=2686ms total=3545ms prompt=3560 cached=113(3%) out=198 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=2 dispatching 3 calls in parallel: ['read_file', 'read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=0ms(n=12) ttft=10436ms total=15952ms prompt=4556 cached=3185(70%) out=1693 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=2 tools=16ms(n=12) ttft=8406ms total=27686ms prompt=5686 cached=3185(56%) out=2650 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=3 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=12) ttft=11858ms total=14545ms prompt=5367 cached=3441(64%) out=1176 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 execute_python(['code'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=3 tools=16ms(n=12) ttft=10797ms total=11483ms prompt=9204 cached=5617(61%) out=927 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=4 write_file(['content', 'path'])
+[Latency] it=4 tools=15ms(n=12) ttft=7047ms total=7891ms prompt=5915 cached=5233(88%) out=480 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=4 tools=0ms(n=12) ttft=5718ms total=6280ms prompt=9375 cached=9073(97%) out=298 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=5 write_file(['content', 'path'])
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=5 tools=16ms(n=12) ttft=8922ms total=9000ms prompt=6093 cached=113(2%) out=875 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=6 read_file(['path'])
+[Latency] it=5 tools=0ms(n=12) ttft=4843ms total=5657ms prompt=9530 cached=3441(36%) out=394 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Tools] iter=6 dispatching 2 calls in parallel: ['read_file', 'read_file']
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=6 tools=63ms(n=12) ttft=5406ms total=7608ms prompt=6265 cached=113(2%) out=615 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=6 tools=0ms(n=12) ttft=5938ms total=8157ms prompt=9846 cached=113(1%) out=484 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTTP/1.1 200 OK"
+[Latency] it=0 tools=31ms(n=12) ttft=2608ms total=2936ms prompt=3295 cached=3185(97%) out=147 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Latency] it=0 tools=16ms(n=12) ttft=2938ms total=2983ms prompt=3305 cached=3185(96%) out=83 model=openrouter/meta/muse-spark-1.3-contributor effort=-
+[Tools] iter=1 list_files(['path'])
+[Tools] iter=1 dispatching 2 calls in parallel: ['read_file', 'list_files']

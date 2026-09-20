@@ -264,6 +264,10 @@ class Document(models.Model):
         ('html', 'HTML'),
         ('image', 'Image'),
         ('video', 'Video'),
+        ('audio', 'Audio'),
+        # A format we keep but have no reader for yet: downloadable, and
+        # readable by `execute_python` through `run_python_on_files`.
+        ('other', 'Other'),
     ]
     
     document_id = models.UUIDField(
