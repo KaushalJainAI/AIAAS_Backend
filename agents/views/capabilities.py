@@ -30,8 +30,14 @@ GRANT_SCOPES: dict[str, str | None] = {
     'publish': None,
     'subAgents': 'delegatesTo',
     'mcp': 'connectors',
+    'voice': 'fileAccess',
+    'esign': 'fileAccess',
+    'talk': 'recipients',
+    'data': 'dataConnections',
+    'api': 'apiConnections',
+    'compute': 'workspaceEgress',
+    'shell': 'codeProjects',
 }
-
 #: One line per grant, for the builder. What it costs or reaches, not what it
 #: does — the builder already describes that.
 GRANT_RISKS: dict[str, str] = {
@@ -46,6 +52,13 @@ GRANT_RISKS: dict[str, str] = {
     'publish': 'Puts pages on the internet; above link visibility asks first.',
     'subAgents': 'Runs your other agents, with their grants by proxy.',
     'mcp': 'Reaches connected accounts under your credentials.',
+    'voice': 'Transcribes recordings; synthesis spends money per call.',
+    'esign': 'Sends documents out for signature; completion arrives by webhook.',
+    'talk': 'Messages on four channels; unattended sends need recipients.',
+    'data': 'Reads databases; writes only where the owner allowed.',
+    'api': 'Calls HTTP APIs; auth comes from the vault.',
+    'compute': 'Runs commands on your workspace; quotas apply.',
+    'shell': 'Edits code in your projects; pushes pause for review.',
 }
 
 
@@ -62,6 +75,31 @@ def _engine_live(grant: str) -> tuple[bool, str]:
 
         engine = getattr(settings, 'SANDBOX_ENGINE', 'inprocess')
         return True, '' if engine else f'Engine: {engine or "inprocess"}.'
+    if grant == 'voice':
+        from voice.stt import stt_available
+        from voice.tts import tts_available
+
+        if stt_available() or tts_available():
+            return True, ''
+        return False, 'No speech engine is configured (STT_ENGINE/TTS_ENGINE=none).'
+    if grant == 'esign':
+        from esign.provider import esign_available
+
+        if esign_available():
+            return True, ''
+        return False, 'No e-signature provider is configured (ESIGN_ENGINE=none).'
+    if grant == 'compute':
+        from workspaces.engine import workspace_available
+
+        if workspace_available():
+            return True, ''
+        return False, 'No workspace engine is configured (WORKSPACE_ENGINE=none).'
+    if grant == 'shell':
+        from workspaces.engine import workspace_available
+
+        if workspace_available():
+            return True, ''
+        return False, 'No workspace engine is configured (WORKSPACE_ENGINE=none).'
     return True, ''
 
 

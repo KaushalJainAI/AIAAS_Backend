@@ -22,6 +22,8 @@ from workflow_backend.thresholds import (
 
 from tools_config.overlay import alimit
 
+from tools_config.settings_schema import _SCRAPE_CHAR_LIMIT
+
 from .registry import tool
 
 logger = logging.getLogger(__name__)
@@ -425,7 +427,8 @@ async def scrape_webpage(args: Dict, context: Dict) -> str:
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(html_bytes, 'html.parser')
         except ImportError:
-            text = html_bytes.decode('utf-8', errors='ignore')[:READ_URL_CHAR_LIMIT]
+            limit = await alimit(context, "scrape_webpage", "charLimit")
+            text = html_bytes.decode('utf-8', errors='ignore')[:limit]
             return json.dumps({"url": url, "text": text, "error": "BeautifulSoup not installed, returning raw text"})
 
         # Iterated in registry order, not in the order the caller listed them.

@@ -28,7 +28,7 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from llm.pricing import format_usd
@@ -58,7 +58,7 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # instructing the agent to call things it would then be refused, and an
     # agent whose KB was keyword- or raw-backed could not read it at all.
     'rag': ('list_knowledge_bases', 'knowledge_base_search', 'keyword_search',
-            'list_documents', 'read_document', 'extract_data'),
+            'list_documents', 'read_document', 'extract_data', 'ocr_document'),
     'codeExecution': ('execute_python', 'run_python_on_files'),
     # The virtual filesystem over the user's own Folder/Document tree
     # (`inference/vfs.py`). What the agent may actually do with these is a
@@ -79,6 +79,38 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # spends the user's money per call, and saved into the file scope, so it
     # needs `fileAccess` exactly as `office` does.
     'media': ('generate_image',),
+    # Speech in both directions (`chat/tools/voice.py`): transcription of a
+    # recording the user has, synthesis into an audio file. Behind one-door
+    # engines; with no engine the tools are not offered. Both need a file
+    # scope to read from and save into.
+    'voice': ('transcribe_audio', 'text_to_speech'),
+    # Documents out for e-signature (`chat/tools/esign.py`). Outward-facing
+    # like `publish`, so the send is `sensitive` + `irreversible`; completion
+    # arrives on the webhook. Needs a file scope to read the document.
+    'esign': ('request_signature', 'signature_status'),
+    # One tool set for every messaging channel (`chat/tools/talk.py`):
+    # channels, search, read, draft, send. The grant says whether an agent
+    # may message; `recipients` says whom an unattended run may reach.
+    'talk': ('message_channels', 'message_search', 'message_read',
+             'message_draft', 'message_send'),
+    # The user's databases (`chat/tools/data.py`): list, describe, read, and
+    # writes where the owner allowed them. `dataConnections` says which.
+    'data': ('list_data_connections', 'describe_schema', 'query_sql',
+             'execute_sql'),
+    # The user's HTTP APIs (`chat/tools/apicaller.py`): operations and calls.
+    # `apiConnections` says which, each in `read` or `all` mode.
+    'api': ('list_api_operations', 'call_api'),
+    # One persistent, isolated machine per user (`chat/tools/compute.py`,
+    # `workspaces/engine.py`): short commands and detached jobs. `compute`
+    # says whether; `workspaceEgress` says which hosts it may reach.
+    'compute': ('workspace_exec', 'start_job', 'job_status', 'job_logs',
+                'cancel_job', 'sync_files'),
+    # Our own sandboxed coding agent (`chat/tools/code.py`): the workspace
+    # file tools plus git. Serves the `shell` grant, which leaves
+    # UNSERVED_GRANTS in the same change.
+    'shell': ('ws_list', 'ws_read', 'ws_search', 'ws_write', 'ws_edit',
+              'ws_apply_patch', 'ws_run', 'git_status', 'git_diff',
+              'git_commit', 'git_push', 'open_pull_request'),
     # A remote browser (`chat/tools/browser.py`). Reading is harmless;
     # acting is scoped to `agent_context['browserDomains']` at dispatch.
     'browser': ('browse_page', 'browser_act'),
@@ -105,17 +137,10 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
 }
 
 #: Granted in the builder but with no implementation the runtime is willing to
-#: serve. `shell` has no sandbox at all (AGENT_TEMPLATES.md §9.1), so the
-#: runtime refuses and says so rather than pretending the grant was honoured.
-#:
-#: `fileOps` was here too, because the chat file tools that were deliberately
-#: removed reached the *host* filesystem and re-adding them through an agent
-#: grant would have undone that decision silently. It is served now because
-#: what it unlocks is a different capability: `inference/vfs.py` addresses rows
-#: in the user's own document tree and cannot name a path on any disk. The half
-#: of that decision that is still true — no host filesystem from a chat turn —
-#: is still pinned by `chat/tests/test_rework.py::RemovedCapabilityTests`.
-UNSERVED_GRANTS = frozenset({'shell'})
+#: serve. Empty since P6 served `shell` through the workspace code tools —
+#: kept as the set (rather than deleted) so the next unserved grant has a
+#: named place to land, and the capabilities endpoint keeps its `served` bit.
+UNSERVED_GRANTS = frozenset()
 
 #: Available whatever the grants say: no side effects, no egress, no reads of
 #: anything the user owns.
@@ -135,7 +160,20 @@ UNSERVED_GRANTS = frozenset({'shell'})
 #: `notify_user` joins them (2026-09-20): it reaches only the owner's own
 #: notification feed, and an unattended agent that cannot say "this needs
 #: you" is not safer, only quieter. Capped per run inside the tool.
-ALWAYS_AVAILABLE = ('get_current_time', 'update_todos', 'render_chart', 'notify_user')
+#: `render_dashboard` joins them (P8): it writes nothing, reaches nothing,
+#: and hands the client a validated spec to draw — the same terms as
+#: `render_chart`.
+#: `mission_status`, `wait_for`, `complete_mission`, `report_progress`
+#: (P7) join them: they read or affect only the mission chain this run
+#: belongs to — the run's own state, like `update_todos` — and answer with
+#: an error outside one. Gating them behind a grant would mean a mission run
+#: could be told what it is missing with no way to fetch it.
+#: `save_dashboard` (P8) joins them: it writes a row the user owns, like
+#: `notify_user`, reversible and scoped to the caller.
+ALWAYS_AVAILABLE = ('get_current_time', 'update_todos', 'render_chart',
+                    'render_dashboard', 'notify_user', 'mission_status',
+                    'wait_for', 'complete_mission', 'report_progress',
+                    'save_dashboard')
 
 #: Offered only once this run has actually stored something — a tool result too
 #: large to replay, or a step the curator removed. Both read back the run's own
@@ -227,6 +265,20 @@ class AgentToolbox:
     #: output is not narrower, only more forgetful.
     tool_scope: tuple[str, ...] = ()
 
+    #: Per-tool allow/ask/deny for built-in tools, or `{}`.
+    #:
+    #: The fourth axis after the grant (may it at all), the scope (which
+    #: rows) and `tool_scope` (which tools): *how* this agent may use each
+    #: one. Empty is today's behaviour — the grants, `toolScope` and the
+    #: autonomy ladder decide alone — which is what every agent saved before
+    #: the field existed carries.
+    #:
+    #: `deny` withholds the tool here and refuses it in `dispatch`; `ask`
+    #: and `allow` only move the approval gate (see
+    #: `TurnContext.tool_permissions`) and never widen what the grants
+    #: reach — an `allow` on a tool whose grant is off stays unoffered.
+    tool_permissions: dict[str, str] = field(default_factory=dict)
+
     #: The MCP descriptors this run resolved, or None before the first pass.
     #: One toolbox serves one run, so this is a per-run memo: `descriptors` is
     #: called before *every* model call, and resolving connectors costs a
@@ -255,7 +307,8 @@ class AgentToolbox:
                    file_scope=file_scope, read_only=read_only,
                    session_key=session_key, archive_scopes=archive_scopes,
                    mcp_scope=connector_scope.for_agent(agent),
-                   tool_scope=tool_scope_for(agent))
+                   tool_scope=tool_scope_for(agent),
+                   tool_permissions=tool_permissions_for(agent))
 
     @property
     def allowed_names(self) -> frozenset[str]:
@@ -279,6 +332,12 @@ class AgentToolbox:
             # Narrowed to the chosen tools, plus the infrastructure ones that
             # are never a capability: the plan, the clock, the archive.
             names &= set(self.tool_scope) | set(ALWAYS_AVAILABLE) | set(RETRIEVAL_TOOLS)
+        if self.tool_permissions:
+            # Refused per tool, not per grant. Withheld rather than left to
+            # refuse at call time, for the reason the file-scope block below
+            # gives — with `dispatch` re-checking anyway, because advertising
+            # is not access control.
+            names -= {n for n, m in self.tool_permissions.items() if m == 'deny'}
         if self.read_only:
             from chat.tools import READ_ONLY_TOOLS
             names &= set(READ_ONLY_TOOLS)
@@ -289,6 +348,29 @@ class AgentToolbox:
 
             if not browser_available():
                 names -= set(GRANT_TOOLS['browser'])
+        if names & set(GRANT_TOOLS['voice']):
+            from voice.stt import stt_available
+            from voice.tts import tts_available
+
+            if not stt_available():
+                names -= {'transcribe_audio'}
+            if not tts_available():
+                names -= {'text_to_speech'}
+        if names & set(GRANT_TOOLS['esign']):
+            from esign.provider import esign_available
+
+            if not esign_available():
+                names -= set(GRANT_TOOLS['esign'])
+        if names & set(GRANT_TOOLS['compute']):
+            from workspaces.engine import workspace_available
+
+            if not workspace_available():
+                names -= set(GRANT_TOOLS['compute'])
+        if names & set(GRANT_TOOLS['shell']):
+            from workspaces.engine import workspace_available
+
+            if not workspace_available():
+                names -= set(GRANT_TOOLS['shell'])
         if self.file_scope is None:
             # Granted `fileOps` but `fileAccess='none'` — the two settings
             # disagree, and the safe reading is the narrower one. Withheld
@@ -302,6 +384,11 @@ class AgentToolbox:
                 | set(GRANT_TOOLS['office'])
                 | set(GRANT_TOOLS['media'])
                 | {'run_python_on_files'}
+                # File-backed tools outside `fileOps`: transcription reads
+                # audio and writes the transcript; speech saves audio; OCR
+                # reads documents; a signature sends one.
+                | {'transcribe_audio', 'text_to_speech', 'ocr_document',
+                   'request_signature'}
             )
         return frozenset(names)
 
@@ -471,6 +558,16 @@ class AgentToolbox:
         if name in ('execute_python', 'run_python_on_files') and not self.grants.get('codeExecution'):
             return _denied(name, 'code execution')
 
+        if self.tool_permissions.get(name) == 'deny':
+            # Named refusal rather than the grant-shaped `_denied` below: the
+            # grant *is* held and the screen said so, so "was not granted"
+            # would send the owner to flip a switch that changes nothing.
+            return (
+                f"Error: '{name}' is not permitted for this agent — its "
+                f"per-tool permission is 'deny'. Do not try it again; solve "
+                f"the task with the tools you have, or say what you would need."
+            )
+
         if name not in self.allowed_names:
             return _denied(name, name)
 
@@ -542,10 +639,129 @@ def tool_scope_for(agent) -> tuple[str, ...]:
     return tuple(sorted({str(t).strip() for t in raw if str(t).strip()}))
 
 
+#: Per-tool permission modes for `agent_context['toolPermissions']`.
+TOOL_PERMISSION_MODES = ('allow', 'ask', 'deny')
+
+
+def tool_permissions_for(agent) -> dict[str, str]:
+    """This agent's per-tool allow/ask/deny map, or `{}`.
+
+    Built-ins only: MCP and native connector names are minted at runtime, so
+    a stored one would rot the way `tool_scope_for`'s docstring describes,
+    and `connector_scope` already answers that question. `ALWAYS_AVAILABLE`
+    and `RETRIEVAL_TOOLS` are refused for the reason `tool_scope` ignores
+    them — the plan, the clock and the archive are infrastructure, not
+    capabilities.
+
+    Defensive rather than validated here: the serializer rejects unknown
+    names and modes on save, but rows predate every field and the runtime
+    must never 500 on a stale one. Anything unrecognised is dropped, which
+    can only ever leave today's behaviour in place.
+    """
+    grantable = {name for names in GRANT_TOOLS.values() for name in names}
+    raw = (agent.agent_context or {}).get('toolPermissions') or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(name).strip(): str(mode).strip().lower()
+        for name, mode in raw.items()
+        if str(name).strip() in grantable
+        and str(mode).strip().lower() in TOOL_PERMISSION_MODES
+    }
+
+
+def merge_tool_permissions(parent: dict[str, str],
+                           worker: dict[str, str]) -> dict[str, str]:
+    """Most-restrictive-wins merge of a delegating run's map with its worker's.
+
+    A worker may narrow what its parent allowed, never widen it: `deny`
+    beats `ask` beats `allow`/unset. Without this a parent denied
+    `delete_file` could delegate to a worker allowed it and get the deletion
+    by proxy — the same hole `delegation_scope_for` closed for whole agents.
+    """
+    rank = {'allow': 0, 'ask': 1, 'deny': 2}
+    merged = dict(worker)
+    for name, mode in parent.items():
+        if rank.get(mode, 0) > rank.get(merged.get(name, 'allow'), 0):
+            merged[name] = mode
+    return merged
+
+
 def browser_domains_for(agent) -> tuple[str, ...]:
     """Sites this agent's `browser_act` may act on. Empty: it may only read."""
     raw = (agent.agent_context or {}).get('browserDomains') or []
     return tuple(sorted({str(d).lower().strip().strip('.') for d in raw if str(d).strip()}))
+
+
+def browser_logins_for(agent) -> tuple[str, ...]:
+    """Vault logins this agent's `browser_act` may fill. Empty: none."""
+    raw = (agent.agent_context or {}).get('browserLogins') or []
+    return tuple(sorted({str(s).strip() for s in raw if str(s).strip()}))
+
+
+def recipients_for(agent) -> tuple[str, ...] | None:
+    """Who this agent's unattended runs may message. None means no allowlist
+    was written — and an unattended send with none is refused, so there is no
+    way to inherit messaging reach by forgetting to configure it."""
+    raw = (agent.agent_context or {}).get('recipients')
+    if raw is None:
+        return None
+    return tuple(sorted({str(r).strip() for r in raw if str(r).strip()}))
+
+
+def data_connections_for(agent) -> tuple[int, ...] | None:
+    """Which databases this agent's runs may touch, or None for any the user
+    owns. Empty means none — the field arrives with the feature."""
+    raw = (agent.agent_context or {}).get('dataConnections')
+    if raw is None:
+        return None
+    return tuple(sorted({
+        v for v in raw if isinstance(v, int) and not isinstance(v, bool)}))
+
+
+def api_connections_for(agent) -> dict[int, str] | None:
+    """Which HTTP APIs this agent's runs may reach, as {id: read|all}, or
+    None for any the user owns. Empty means none. Entries may be bare ids
+    (full mode) or {"id", "mode": "read"} — the connector-scope shape."""
+    raw = (agent.agent_context or {}).get('apiConnections')
+    if raw is None:
+        return None
+    out: dict[int, str] = {}
+    for entry in raw or []:
+        if isinstance(entry, dict):
+            try:
+                key = int(entry.get('id'))
+            except (TypeError, ValueError):
+                continue
+            out[key] = 'read' if str(entry.get('mode') or '').lower() == 'read' else 'all'
+        else:
+            try:
+                out[int(entry)] = 'all'
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _host_scope(agent, key: str) -> tuple[str, ...]:
+    """Extra hosts a scope allowlist adds. Empty: connections' own hosts."""
+    raw = (agent.agent_context or {}).get(key) or []
+    return tuple(sorted({str(h).lower().strip().strip('.')
+                         for h in raw if str(h).strip()}))
+
+
+def workspace_egress_for(agent) -> tuple[str, ...]:
+    """Extra hosts the workspace may reach. Empty: the default egress."""
+    return _host_scope(agent, 'workspaceEgress')
+
+
+def code_projects_for(agent) -> tuple[int, ...] | None:
+    """Which code projects this agent's runs may touch, or None for any the
+    user owns. Empty means none — the field arrives with the feature."""
+    raw = (agent.agent_context or {}).get('codeProjects')
+    if raw is None:
+        return None
+    return tuple(sorted({
+        v for v in raw if isinstance(v, int) and not isinstance(v, bool)}))
 
 
 def delegation_scope_for(agent) -> tuple[int, ...] | None:
@@ -675,13 +891,14 @@ def switchable_modes(toolbox: AgentToolbox) -> dict:
 #: are its callers; they differ in configuration, never in code path. A second
 #: way to start a run is a second place for the guardrail checks to be
 #: forgotten.
-CALLERS = frozenset({'chat', 'orchestrator', 'trigger', 'api', 'eval'})
+CALLERS = frozenset({'chat', 'orchestrator', 'trigger', 'api', 'eval', 'mission'})
 
 #: Callers where no human is present at the moment the run starts. `chat` and
 #: `api` are both a person pressing something; `orchestrator` inherits the
 #: attendedness of whatever started *it*, and is treated as unattended because
-#: the safe answer is the one that asks more often, not less.
-UNATTENDED_CALLERS = frozenset({'trigger', 'orchestrator'})
+#: the safe answer is the one that asks more often, not less. `mission` runs
+#: on a sweep with nobody watching.
+UNATTENDED_CALLERS = frozenset({'trigger', 'orchestrator', 'mission'})
 
 
 class AgentTurnFailed(RuntimeError):
@@ -1526,6 +1743,10 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             # `tools_node` ignores the override entirely, which is what chat
             # wants and what any caller that has not opted in gets.
             approval_modes=switchable_modes(toolbox),
+            # Per-tool allow/ask/deny, folded into the approval gate by
+            # `tools_node` after the level above is resolved. Empty for chat
+            # and for every agent saved before the field existed.
+            tool_permissions=tool_permissions_for(agent),
             on_tool_result=stream.on_tool_result,
             # One `AgentTurn` row per model call. Without it every tool call in
             # the run is unattributed, and the reasoning behind the run is lost
@@ -1566,6 +1787,21 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             delegation_scope=delegation_scope_for(agent),
             # Where `browser_act` may act. Always a tuple for an agent run.
             browser_domains=browser_domains_for(agent),
+            # Which vault logins it may fill. Empty means none: the field
+            # arrives with the feature, so no existing agent holds one.
+            browser_logins=browser_logins_for(agent),
+            # Who its unattended runs may message. None means no allowlist.
+            recipients=recipients_for(agent),
+            # Which databases and APIs its runs may reach. None means any
+            # the user owns; empty means none.
+            data_connections=data_connections_for(agent),
+            api_connections=api_connections_for(agent),
+            db_hosts=_host_scope(agent, 'dbHosts'),
+            api_hosts=_host_scope(agent, 'apiHosts'),
+            # Extra hosts the workspace may reach. Empty: the default egress.
+            workspace_egress=workspace_egress_for(agent),
+            # Which code projects `shell` tools may touch. None: any owned.
+            code_projects=code_projects_for(agent),
             # And which knowledge bases the KB tools may reach. The builder's
             # selection, finally enforced rather than merely printed into the
             # prompt: before this an agent configured for one KB could search

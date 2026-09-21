@@ -38,10 +38,14 @@ PAD = 28
 SHAPES = ('box', 'round', 'diamond')
 
 
-def validate(args: dict) -> dict:
+def validate(args: dict, *, max_nodes: int = MAX_NODES,
+               max_edges: int = MAX_EDGES) -> dict:
+    """The normalised spec, or `SpecError`. Knobs (`render_diagram.maxNodes /
+    maxEdges`) narrow, never widen past the module ceilings."""
     theme_name = choice(args.get('theme'), 'theme', tuple(THEMES), 'clean')
     title = text(args.get('title'), 'title', 120)
-    raw_nodes = items(args.get('nodes'), 'nodes', MAX_NODES, required=True)
+    raw_nodes = items(args.get('nodes'), 'nodes',
+                      max(1, min(max_nodes, MAX_NODES)), required=True)
 
     nodes: dict[str, dict] = {}
     for i, node in enumerate(raw_nodes, 1):
@@ -60,7 +64,8 @@ def validate(args: dict) -> dict:
         }
 
     edges = []
-    for i, edge in enumerate(items(args.get('edges'), 'edges', MAX_EDGES), 1):
+    for i, edge in enumerate(items(args.get('edges'), 'edges',
+                                   max(1, min(max_edges, MAX_EDGES))), 1):
         if not isinstance(edge, dict):
             raise SpecError(f'Edge {i} must be an object with from and to.')
         source = text(edge.get('from'), f'edge {i} from', 40, required=True)

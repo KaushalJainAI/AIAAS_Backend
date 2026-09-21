@@ -51,12 +51,16 @@ CAPTION_CHARS = 300
 _INLINE = re.compile(r'(\*\*.+?\*\*|\*[^*\s][^*]*?\*)')
 
 
-def validate(args: dict) -> dict:
+def validate(args: dict, *, max_blocks: int = MAX_BLOCKS) -> dict:
+    """The normalised spec, or `SpecError`. The knob
+    (`render_document/render_pdf.maxBlocks`) narrows, never widens."""
     theme = choice(args.get('theme'), 'theme', DOC_THEMES, 'clean')
     title = text(args.get('title'), 'title', TITLE_CHARS, required=True)
     subtitle = text(args.get('subtitle'), 'subtitle', TITLE_CHARS)
     blocks = []
-    for n, raw in enumerate(items(args.get('blocks'), 'blocks', MAX_BLOCKS, required=True), 1):
+    for n, raw in enumerate(items(args.get('blocks'), 'blocks',
+                                  max(1, min(max_blocks, MAX_BLOCKS)),
+                                  required=True), 1):
         if not isinstance(raw, dict):
             raise SpecError(f'Block {n} must be an object with a type.')
         kind = choice(raw.get('type'), f'Block {n} type', BLOCK_TYPES, 'paragraph')

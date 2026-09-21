@@ -28,6 +28,8 @@ from asgiref.sync import sync_to_async
 
 from .registry import tool
 
+from tools_config.overlay import alimit
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,7 +95,9 @@ async def _run(context: Dict, fn, *args, **kwargs) -> str:
 async def list_files(args: Dict, context: Dict) -> str:
     from inference import vfs
 
-    return await _run(context, vfs.list_dir, args.get("path") or "/")
+    return await _run(
+        context, vfs.list_dir, args.get("path") or "/",
+        limit=await alimit(context, "list_files", "maxEntries"))
 
 
 @tool({
@@ -129,6 +133,7 @@ async def read_file(args: Dict, context: Dict) -> str:
     return await _run(
         context, vfs.read_file, args.get("path") or "",
         offset=args.get("offset") or 0,
+        window=await alimit(context, "read_file", "windowChars"),
     )
 
 
@@ -170,6 +175,7 @@ async def write_file(args: Dict, context: Dict) -> str:
     return await _run(
         context, vfs.write_file, args.get("path") or "",
         args.get("content") or "", append=bool(args.get("append")),
+        max_chars=await alimit(context, "write_file", "maxChars"),
     )
 
 
@@ -224,6 +230,7 @@ async def edit_file(args: Dict, context: Dict) -> str:
         context, vfs.edit_file, args.get("path") or "",
         args.get("old_text") or "", args.get("new_text") or "",
         replace_all=bool(args.get("replace_all")),
+        max_chars=await alimit(context, "edit_file", "maxChars"),
     )
 
 
@@ -322,4 +329,6 @@ async def find_files(args: Dict, context: Dict) -> str:
         # A model that sends "20 files" gets the default, not a crash: the
         # cap is a bound we own, not something the caller has to get right.
         limit = 0
+    if not limit:
+        limit = await alimit(context, "find_files", "maxEntries")
     return await _run(context, vfs.find, args.get("query") or "", limit=limit)

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import HITLReminderSchedule, Notification, NotificationPreference
+from .models import HITLReminderSchedule, Notification, NotificationPreference, PushSubscription
 
 
 @admin.register(Notification)
@@ -34,4 +34,12 @@ class HITLReminderScheduleAdmin(admin.ModelAdmin):
     list_filter = ('stage',)
     search_fields = ('user__username', 'hitl_request__title')
     raw_id_fields = ('user', 'hitl_request')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(PushSubscription)
+class PushSubscriptionAdmin(admin.ModelAdmin):
+    list_display = ('user', 'endpoint', 'created_at')
+    search_fields = ('user__username', 'user__email', 'endpoint')
+    raw_id_fields = ('user',)
     readonly_fields = ('created_at', 'updated_at')

@@ -284,6 +284,21 @@ How to work:
 """
 
 
+REVIEWER_PROMPT = """\
+You review code read-only and answer with findings, not prose.
+
+How to work:
+- Read the target first: the uncommitted diff (git_diff), the working tree
+  (ws_read), or the files given. Never edit anything — a review never edits.
+- One finding per issue: the file, the line, the severity (blocker, major,
+  minor, nit), the category (correctness, security, performance,
+  readability, tests), what is wrong, and a concrete suggestion.
+- An empty list means the code is clean. Say so; do not invent issues to
+  fill the report.
+- Return the findings contract and nothing else.
+"""
+
+
 #: slug -> the gallery entry. `config` is a flat `AgentConfig`; anything it
 #: omits takes the serializer's default, which is the cautious end of every
 #: dial.
@@ -718,6 +733,33 @@ TEMPLATES: dict[str, dict[str, Any]] = {
             'autonomy': 'auto',
             'spendCapRupees': 300,
             'outputContract': 'files',
+        },
+    },
+
+    'reviewer': {
+        'name': 'Reviewer',
+        'tagline': 'Reviews a diff or folder read-only and returns findings.',
+        'description': (
+            'Reads a code project\'s uncommitted diff or a folder and returns '
+            'a findings list — file, line, severity, category, summary and a '
+            'concrete suggestion per issue. Runs under plan autonomy with '
+            'read tools only: a review never edits, and fixing stays a '
+            'separate approved step.'
+        ),
+        'icon': 'code',
+        'tags': ['code', 'review'],
+        'requirements': [],
+        'config': {
+            'name': 'Reviewer',
+            'brief': REVIEWER_PROMPT,
+            'temperature': 0.1,
+            'tools': {'shell': True, 'fileOps': True},
+            'fileAccess': 'read_all_write_own',
+            # `plan`: withhold everything mutating, so the run can only look
+            # and report. Enforced by removing the tools, not by gating them.
+            'autonomy': 'plan',
+            'spendCapRupees': 300,
+            'outputContract': 'findings',
         },
     },
 }

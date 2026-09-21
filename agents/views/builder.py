@@ -249,8 +249,7 @@ def _timezone(value, _cat):
 #: One line per grant the runtime actually serves — `TOOL_KEYS` minus
 #: `runtime.UNSERVED_GRANTS`, asserted in the tests, so a tool added to the
 #: runtime cannot quietly go undescribed to the model that hands it out.
-#: `shell` is absent on purpose: nothing serves it, so a model offered it would
-#: grant a capability that does nothing while the board showed it switched on.
+#: Empty since P6 served `shell` through the workspace code tools.
 TOOL_HELP = {
     'codeExecution': 'run Python in the sandbox — arithmetic, CSV work, anything computed',
     'webSearch': 'search the web',
@@ -266,15 +265,47 @@ TOOL_HELP = {
     ),
     'browser': (
         'use a real browser: read JavaScript pages, and click/type on the sites '
-        'listed in `browserDomains` (empty: read only). Off unless the platform '
-        'has a browser configured'
+        'listed in `browserDomains` (empty: read only). Sessions keep logins '
+        'per site; vault logins in `browserLogins` are typed, never shown. '
+        'Off unless the platform has a browser configured'
     ),
     'publish': (
         'publish hosted pages shareable by link (report, HTML or file). '
         'Outward-facing: above link visibility it pauses for a human, and an '
         'unattended run may only publish link pages'
     ),
-    'rag': "search the user's knowledge bases",
+    'rag': "search the user's knowledge bases (and read scanned documents)",
+    'voice': (
+        'transcribe recordings the user has, and speak text into audio files. '
+        'Needs `fileAccess` other than none. Off unless the platform has '
+        'speech engines configured'
+    ),
+    'esign': (
+        'send documents out for e-signature and check whether they came back. '
+        'Outward-facing: sending pauses for a human. Needs `fileAccess` other '
+        'than none. Off unless the platform has an e-sign provider configured'
+    ),
+    'talk': (
+        'message on Slack, WhatsApp, Teams and SMS: read, draft and send. '
+        'Sending pauses for a human; unattended runs may only reach '
+        '`recipients`'
+    ),
+    'data': (
+        'query the user\'s databases and write where allowed. '
+        '`dataConnections` says which'
+    ),
+    'api': (
+        'call the user\'s HTTP APIs. `apiConnections` says which, each in '
+        'read or full mode'
+    ),
+    'compute': (
+        'run commands and long jobs on your workspace machine. '
+        '`workspaceEgress` says which extra hosts it may reach'
+    ),
+    'shell': (
+        'edit code in its projects: read, write, test, commit, open a PR. '
+        '`codeProjects` says which projects'
+    ),
     'mcp': (
         'reach connected accounts (Gmail, Drive, Slack, …). Needed for any '
         'connector to work; pair it with `connectors`'

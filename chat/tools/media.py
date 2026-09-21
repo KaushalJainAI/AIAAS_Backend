@@ -141,7 +141,7 @@ def _record_cost(user, context: Dict[str, Any], out: dict) -> None:
         logger.exception('[Media] Failed to record image cost')
 
 
-def _generate(scope, user, args: Dict[str, Any]) -> dict:
+def _generate(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_CHARS) -> dict:
     """Blocking half: call the provider, keep the bytes, report the cost."""
     from imagine.services.capabilities import capabilities_for
     from imagine.services.catalog import default_model_id, find_model
@@ -154,8 +154,8 @@ def _generate(scope, user, args: Dict[str, Any]) -> dict:
     prompt = str(args.get('prompt') or '').strip()
     if not prompt:
         raise MediaError('Describe the image in `prompt`.')
-    if len(prompt) > PROMPT_CHARS:
-        raise MediaError(f'The prompt is {len(prompt)} characters; keep it under {PROMPT_CHARS}.')
+    if len(prompt) > prompt_cap:
+        raise MediaError(f'The prompt is {len(prompt)} characters; keep it under {prompt_cap}.')
 
     try:
         service = OpenRouterService.for_user(user)
@@ -248,7 +248,10 @@ async def generate_image(args: Dict, context: Dict) -> str:
     if user is None:
         return json.dumps({'error': 'No user context.'})
     try:
-        out = await sync_to_async(_generate)(scope, user, args)
+        from tools_config.overlay import alimit
+
+        prompt_cap = await alimit(context, "generate_image", "promptChars")
+        out = await sync_to_async(_generate)(scope, user, args, prompt_cap)
     except (MediaError, VfsError) as exc:
         return json.dumps({'error': str(exc)})
     except Exception:

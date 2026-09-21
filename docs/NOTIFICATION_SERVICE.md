@@ -149,11 +149,20 @@ frame. Two clients listen on `ws/hitl/`:
   raises a desktop notification through `notify()`.
 
  **Scope**: the browser Notifications API only fires while a tab is open,
-backgrounded or not. Delivery to a *fully closed* browser needs Web Push
-(service worker + VAPID), which is not implemented — the daily email digest is
-the closed-browser channel. Quiet hours suppress the OS ping only; the in-app
-row is still written and the ladder still advances, so a request cannot get
-stuck behind a permanently swallowed nudge.
+backgrounded or not. Delivery to a *fully closed* browser goes through **Web
+Push**: the browser subscribes with the server's VAPID key (Settings →
+Background notifications, `hooks/useWebPush.ts`), the subscription is stored in
+`notifications.PushSubscription`, and `notifications/webpush.py::send_web_push`
+sends alongside every socket ping (escalation, hourly, digest, `agent_update`).
+The service worker (`better-n8n-frontend/public/sw.js`) renders the OS
+notification and handles the click. Setup: `python manage.py
+generate_vapid_keys` → `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` /
+`VAPID_SUBJECT` in `.env`. Blank keys = push silently off; sockets, toasts and
+the digest email all keep working. Expired endpoints (push service 404/410) are
+pruned on send. Quiet hours and the device toggle gate both transports — the
+in-app row is still written and the ladder still advances, so a request cannot
+get stuck behind a permanently swallowed nudge. The
+daily email digest remains a second closed-browser channel.
 
 ### Settings
 

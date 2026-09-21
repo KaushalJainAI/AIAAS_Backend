@@ -17,6 +17,14 @@ from django.core.exceptions import ValidationError
 
 from .registry import tool
 
+from tools_config.overlay import alimit
+
+from tools_config.settings_schema import (
+    _AGENT_ANSWER_CHARS,
+    _AGENT_SEARCH_DEFAULT,
+    _AGENT_SEARCH_MAX,
+)
+
 logger = logging.getLogger(__name__)
 
 async def _parent_step_id(context: Dict) -> int | None:
@@ -76,7 +84,8 @@ AGENT_ANSWER_CHAR_LIMIT = 20_000
 _TERMINAL_RUN_STATUSES = {'cancelled', 'failed', 'completed', 'timeout'}
 
 
-async def _await_agent_run(execution_id: str, wait_seconds: int) -> Dict[str, Any]:
+async def _await_agent_run(execution_id: str, wait_seconds: int,
+                           answer_chars: int = _AGENT_ANSWER_CHARS) -> Dict[str, Any]:
     """Poll a run to a terminal state, or give up and report it still going."""
     from asgiref.sync import sync_to_async
     from logs.models import ExecutionLog
@@ -119,7 +128,7 @@ async def _await_agent_run(execution_id: str, wait_seconds: int) -> Dict[str, An
     output = row.get("output_data") or {}
     return {
         "status": row["status"],
-        "answer": (output.get("answer") or "")[:AGENT_ANSWER_CHAR_LIMIT],
+        "answer": (output.get("answer") or "")[:answer_chars],
         "error": row.get("error_message") or "",
         "tokens_used": row.get("tokens_used") or 0,
     }
@@ -169,13 +178,13 @@ def _agent_summary(row: dict) -> dict:
     }
 
 
-def _agent_search_limit(args: Dict) -> int:
+def _agent_search_limit(args: Dict, max_results: int) -> int:
     """The caller's `limit`, clamped. A model can send anything here."""
     try:
-        limit = int(args.get("limit", AGENT_SEARCH_DEFAULT_LIMIT))
+        limit = int(args.get("limit", _AGENT_SEARCH_DEFAULT))
     except (TypeError, ValueError):
-        limit = AGENT_SEARCH_DEFAULT_LIMIT
-    return max(1, min(limit, AGENT_SEARCH_MAX_LIMIT))
+        limit = _AGENT_SEARCH_DEFAULT
+    return max(1, min(limit, max_results))
 
 
 @tool({
@@ -215,7 +224,8 @@ async def search_agents(args: Dict, context: Dict) -> str:
     if not user_id:
         return json.dumps({"error": "No user context."})
 
-    limit = _agent_search_limit(args)
+    max_results = await alimit(context, "search_agents", "maxResults")
+    limit = _agent_search_limit(args, max_results)
     terms = [t for t in re.split(r"\s+", (args.get("query") or "").lower()) if len(t) > 1]
 
     # None is unrestricted; a selection narrows discovery as well as dispatch,
@@ -565,6 +575,21 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
         # Workers never inherit the right to delegate, whatever the saved row
         # says — see `orchestrator.worker_grants`.
         worker_agent.tool_grants = worker_grants(worker_agent.tool_grants)
+        # Nor may a worker widen its parent's per-tool rules. The parent's
+        # map flows down most-restrictive-wins, so a parent denied
+        # `delete_file` cannot get the deletion by proxy — the same hole
+        # `delegation_scope` closed for whole agents.
+        parent_permissions = context.get("tool_permissions") or {}
+        if isinstance(parent_permissions, dict) and parent_permissions:
+            from agents.agent.runtime import (
+                merge_tool_permissions,
+                tool_permissions_for,
+            )
+            merged = merge_tool_permissions(
+                parent_permissions, tool_permissions_for(worker_agent))
+            if merged != tool_permissions_for(worker_agent):
+                worker_agent.agent_context = dict(
+                    worker_agent.agent_context or {}, toolPermissions=merged)
 
     if worker_agent is None:
         return json.dumps({

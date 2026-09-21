@@ -47,6 +47,10 @@ logger = logging.getLogger(__name__)
 #: model narrating. Extra items are dropped from the end with a note, rather
 #: than the write being refused, because a refused `update_todos` leaves the
 #: previous list standing and the model believing it was replaced.
+#:
+#: The hard ceiling lives here (sync code cannot await the overlay); the
+#: workspace knob (`update_todos.maxItems`) only ever narrows it — see
+#: `normalize_for`. A knob above this is clamped down, never widened past it.
 MAX_TODOS = 20
 
 #: Characters per item. An item is a label, not a description — the reasoning
@@ -102,6 +106,15 @@ def normalize(raw: Any) -> list[dict[str, str]]:
         if len(out) >= MAX_TODOS:
             break
     return out
+
+
+def normalize_for(raw: Any, limit: int) -> list[dict[str, str]]:
+    """`normalize` with a caller-supplied cap, never wider than `MAX_TODOS`.
+
+    The tool layer resolves the workspace knob and passes it in; sync callers
+    without a user context keep calling `normalize`.
+    """
+    return normalize(raw)[:max(1, min(int(limit), MAX_TODOS))]
 
 
 def unfinished(todos: list[dict[str, str]]) -> list[dict[str, str]]:

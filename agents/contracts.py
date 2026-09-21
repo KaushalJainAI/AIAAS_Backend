@@ -124,8 +124,45 @@ FILES = Contract(
     repair=_repair_files,
 )
 
+def _repair_findings(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept the near-misses a model produces for review findings."""
+    findings = payload.get('findings')
+    if isinstance(findings, dict):
+        payload['findings'] = [findings]
+    items = payload.get('findings')
+    if isinstance(items, list):
+        cleaned = []
+        for item in items:
+            if isinstance(item, str):
+                cleaned.append({'file': '', 'line': None, 'severity': 'minor',
+                                'category': 'readability', 'summary': item,
+                                'suggestion': ''})
+            elif isinstance(item, dict):
+                cleaned.append(item)
+        payload['findings'] = cleaned
+    return payload
+
+
+FINDINGS = Contract(
+    name='findings',
+    instruction=(
+        'Return your final answer as a single JSON object and nothing else, '
+        'with this key:\n'
+        '  "findings" — the issues you found, as a list of '
+        '{"file", "line", "severity", "category", "summary", "suggestion"}. '
+        'Severity is one of blocker, major, minor, nit; category is one of '
+        'correctness, security, performance, readability, tests. '
+        'One finding per issue, with a concrete suggestion. '
+        'An empty list means the code is clean — say so, do not invent issues.\n'
+        'Do not wrap it in a code fence. Do not add commentary around it.'
+    ),
+    required=('findings',),
+    optional={'type': 'findings'},
+    repair=_repair_findings,
+)
+
 #: Name -> contract. Closed on purpose; see the module docstring.
-CONTRACTS: dict[str, Contract] = {c.name: c for c in (RESEARCH, EXTRACTION, FILES)}
+CONTRACTS: dict[str, Contract] = {c.name: c for c in (RESEARCH, EXTRACTION, FILES, FINDINGS)}
 
 
 def get(name: str) -> Contract | None:

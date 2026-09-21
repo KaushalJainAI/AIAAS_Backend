@@ -67,11 +67,20 @@ class GrantMappingTests(SimpleTestCase):
         # notification feed and nothing else, and an unattended agent that
         # cannot say "this needs you" is not safer, only quieter. Its own cap
         # keeps a loop from turning the feed into a log.
+        # `render_dashboard` is the fifth (P8): tiles the client draws from
+        # data the agent already had — same terms as `render_chart`.
+        # Mission tools (P7) and `save_dashboard` (P8) join on the same
+        # terms: they read or affect only the run's own chain or a row the
+        # user owns, answer with an error outside one, and cost nothing to
+        # offer — an agent that may not report progress is only quieter.
         names = toolbox().allowed_names
         self.assertEqual(
             names,
             frozenset({'get_current_time', 'update_todos', 'render_chart',
-                       'notify_user', 'read_tool_output', 'recall_context'}),
+                       'render_dashboard', 'notify_user', 'mission_status',
+                       'wait_for', 'complete_mission', 'report_progress',
+                       'save_dashboard', 'read_tool_output',
+                       'recall_context'}),
         )
 
     def test_a_grant_unlocks_exactly_its_own_tools(self):
@@ -83,11 +92,13 @@ class GrantMappingTests(SimpleTestCase):
     def test_unserved_grants_are_reported_not_silently_dropped(self):
         agent = SubAgent(tool_grants={'shell': True, 'fileOps': True, 'rag': True})
         box = AgentToolbox.for_agent(agent, user_id=1)
-        # `fileOps` used to be here beside `shell`. It is served now — see
-        # `AgentFileAccessTests` — so `shell` is the only grant the runtime
-        # still declines to honour.
-        self.assertEqual(box.unserved, ('shell',))
-        self.assertNotIn('shell', box.allowed_names)
+        # `shell` is served since P6 (workspace code tools) and `fileOps`
+        # since the vfs — so nothing is unserved, and the set stays as the
+        # named place for the next unserved grant. `ws_run` needs a workspace
+        # engine, which test settings leave at `none`, so the grant is served
+        # but the tools are withheld — served and offered are different gates.
+        self.assertEqual(box.unserved, ())
+        self.assertNotIn('ws_run', box.allowed_names)
 
 
 class AgentFileAccessTests(SimpleTestCase):
@@ -396,7 +407,8 @@ class ExecuteEndpointTests(APITestCase):
     def test_unserved_grants_are_reported_when_the_run_starts(self):
         # Named so the caller can tell the user a configured capability was not
         # honoured, rather than leaving them to infer it. Available up front
-        # because it is derived from the grants, not from the run.
+        # because it is derived from the grants, not from the run. Empty since
+        # P6 served `shell` — the last unserved grant — through the workspace.
         self.agent.tool_grants = {'rag': True, 'shell': True}
         self.agent.save(update_fields=['tool_grants'])
 
@@ -407,7 +419,7 @@ class ExecuteEndpointTests(APITestCase):
                    side_effect=fake_start):
             response = self.client.post(self.url, {'goal': 'go'}, format='json')
 
-        self.assertEqual(response.data['unserved_grants'], ['shell'])
+        self.assertEqual(response.data['unserved_grants'], [])
 
     def test_a_run_opens_and_closes_an_execution_log(self):
         """The ledger the `runs` / `unattended` / `spend` stats are counted from.

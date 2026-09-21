@@ -198,10 +198,16 @@ INSTALLED_APPS = [
     'mcp_integration',
     'skills',
     'chat',
+    'browsing',
+    'esign',
+    'messaging',
+    'data',
     'django_celery_beat',
     'notifications',
     'imagine',
     'tools_config',
+    'workspaces',
+    'missions',
     # Evaluation of sub-agents. Label is `eval` (singular): the deleted `evals`
     # app left inert `evals_*` tables and an `evals.0001_initial` row in dev
     # databases, so the new tables must not be named the same thing.
@@ -327,6 +333,48 @@ else:
 BROWSER_ENGINE = os.environ.get('BROWSER_ENGINE', 'none')
 BROWSER_REMOTE_URL = os.environ.get('BROWSER_REMOTE_URL', '')
 BROWSER_API_TOKEN = os.environ.get('BROWSER_API_TOKEN', '')
+#: A logged-in profile idles this long before the sweep closes it, and lives
+#: at most this long whatever is happening. Bounds a run's blast radius rather
+#: than the box: the provider holds the profile, we hold the row.
+BROWSER_SESSION_IDLE_SECONDS = int(os.environ.get('BROWSER_SESSION_IDLE_SECONDS', '600'))
+BROWSER_SESSION_MAX_SECONDS = int(os.environ.get('BROWSER_SESSION_MAX_SECONDS', '3600'))
+
+# ---------------------------------------------------------------------------
+# Voice and e-sign
+# ---------------------------------------------------------------------------
+# One-door engines, all `none` by default: with no engine the tools are not
+# offered, never offered-then-refusing. Heavy work never runs on the app box.
+STT_ENGINE = os.environ.get('STT_ENGINE', 'none')
+STT_REMOTE_URL = os.environ.get('STT_REMOTE_URL', '')
+STT_API_TOKEN = os.environ.get('STT_API_TOKEN', '')
+TTS_ENGINE = os.environ.get('TTS_ENGINE', 'none')
+TTS_REMOTE_URL = os.environ.get('TTS_REMOTE_URL', '')
+TTS_API_TOKEN = os.environ.get('TTS_API_TOKEN', '')
+ESIGN_ENGINE = os.environ.get('ESIGN_ENGINE', 'none')
+ESIGN_REMOTE_URL = os.environ.get('ESIGN_REMOTE_URL', '')
+ESIGN_API_TOKEN = os.environ.get('ESIGN_API_TOKEN', '')
+
+# ---------------------------------------------------------------------------
+# Messaging
+# ---------------------------------------------------------------------------
+# Inbound rows are a window, not an archive: purged after this many days.
+MESSAGING_RETENTION_DAYS = int(os.environ.get('MESSAGING_RETENTION_DAYS', '90'))
+# Provider verification. Slack signs every event; WhatsApp verifies the
+# handshake token. Start both verifications on day one — Business verification
+# and SMS DLT registration take days to weeks and must not block the code.
+SLACK_SIGNING_SECRET = os.environ.get('SLACK_SIGNING_SECRET', '')
+WHATSAPP_VERIFY_TOKEN = os.environ.get('WHATSAPP_VERIFY_TOKEN', '')
+# SMS route: none | msg91 | twilio. MSG91 for India (needs DLT sender and
+# template ids on the connection); Twilio is not wired yet.
+SMS_ENGINE = os.environ.get('SMS_ENGINE', 'none')
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+# Trust the owner's own configured database host as written, including private
+# ranges, for self-hosted deployments. Off by default: with it off the P0
+# egress guard applies to every database host.
+DATA_ALLOW_PRIVATE_HOSTS = os.environ.get('DATA_ALLOW_PRIVATE_HOSTS', 'False') == 'True'
 
 # ---------------------------------------------------------------------------
 # Code execution sandbox
@@ -342,6 +390,17 @@ SANDBOX_SERVICE_URL = os.environ.get('SANDBOX_SERVICE_URL', 'http://sandbox:8100
 SANDBOX_WALL_SECONDS = int(os.environ.get('SANDBOX_WALL_SECONDS', '10'))
 SANDBOX_CPU_SECONDS = int(os.environ.get('SANDBOX_CPU_SECONDS', '8'))
 SANDBOX_MEM_MB = int(os.environ.get('SANDBOX_MEM_MB', '384'))
+
+# ---------------------------------------------------------------------------
+# Compute workspaces (P5)
+# ---------------------------------------------------------------------------
+# One persistent machine per user. `none` (default) means the `compute` tools
+# are not offered; `docker` is dev only; a provider name is production.
+# Quotas are per tier (decision D8); idle hibernate after 15 min.
+WORKSPACE_ENGINE = os.environ.get('WORKSPACE_ENGINE', 'none')
+WORKSPACE_IDLE_SECONDS = int(os.environ.get('WORKSPACE_IDLE_SECONDS', '900'))
+WORKSPACE_DISK_GB = int(os.environ.get('WORKSPACE_DISK_GB', '5'))
+WORKSPACE_CPU_MINUTES_PER_DAY = int(os.environ.get('WORKSPACE_CPU_MINUTES_PER_DAY', '120'))
 
 # ---------------------------------------------------------------------------
 # Agent run checkpoints
@@ -582,6 +641,16 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'orchestrator.recover_runs',
         'schedule': RUN_RECOVERY_SWEEP_SECONDS,
     },
+    # Idle workspaces hibernate. Also runnable as `manage.py sweep_workspaces`.
+    'sweep-workspaces': {
+        'task': 'workspaces.sweep_workspaces',
+        'schedule': 900,
+    },
+    # Mission chains. Also runnable as `manage.py run_missions`.
+    'sweep-missions': {
+        'task': 'missions.sweep_missions',
+        'schedule': 300,
+    },
 }
 
 # How long a trashed folder or document stays restorable before the sweep
@@ -646,6 +715,13 @@ DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'no
 NOTIFICATIONS_EMAIL_ENABLED = os.environ.get('NOTIFICATIONS_EMAIL_ENABLED', 'True') == 'True'
 NOTIFICATIONS_EMAIL_TYPES = _split_env_list(os.environ.get('NOTIFICATIONS_EMAIL_TYPES', ''))
 NOTIFICATIONS_EMAIL_SUBJECT_PREFIX = os.environ.get('NOTIFICATIONS_EMAIL_SUBJECT_PREFIX', '[AIAAS]')
+
+# Web Push (closed-browser OS notifications). Public key is served to signed-in
+# users at GET /api/notifications/push/vapid-key/; the private key never leaves
+# the server. Blank = Web Push disabled, everything else keeps working.
+VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '')
+VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '')
+VAPID_SUBJECT = os.environ.get('VAPID_SUBJECT', 'mailto:no-reply@aiaas.local')
 
 SOCIALACCOUNT_PROVIDERS = {
     'google': {

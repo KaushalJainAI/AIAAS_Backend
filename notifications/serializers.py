@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import HITLReminderSchedule, Notification, NotificationPreference
+from .models import HITLReminderSchedule, Notification, NotificationPreference, PushSubscription
 
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -63,3 +63,23 @@ class HITLReminderScheduleSerializer(serializers.ModelSerializer):
 
     def get_stage_label(self, obj):
         return HITLReminderSchedule.STAGE_LABELS.get(obj.stage, 'done')
+
+
+class PushSubscriptionSerializer(serializers.ModelSerializer):
+    """
+    What the browser's `PushManager.subscribe()` returns, flattened.
+
+    `endpoint` is the upsert key: re-subscribing the same browser refreshes its
+    keys rather than duplicating the row.
+    """
+
+    p256dh = serializers.CharField(max_length=255)
+    auth = serializers.CharField(max_length=255)
+
+    class Meta:
+        model = PushSubscription
+        fields = ['id', 'endpoint', 'p256dh', 'auth', 'user_agent', 'created_at']
+        read_only_fields = ['id', 'created_at']
+        extra_kwargs = {
+            'endpoint': {'validators': []},
+        }

@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # than an always-on capability because those tools reach real systems under
 # the user's credentials — see mcp_integration/credential_injector.py.
 TOOL_KEYS = {'codeExecution', 'shell', 'webSearch', 'scrape', 'fileOps', 'office', 'media', 'publish', 'browser', 'rag',
-             'mcp', 'subAgents'}
+             'mcp', 'subAgents', 'voice', 'esign', 'talk', 'data', 'api', 'compute'}
 # `connectors` holds `MCPServer` ids, validated against what the user can
 # actually see. It used to be a hardcoded set of six presentation slugs
 # ({'gdrive', 'gmail', 'sheets', 'photos', 'calendar', 'slack'}) that nothing
@@ -235,10 +235,52 @@ class AgentSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=64), required=False, default=list,
         max_length=120,
     )
+    #: Per-tool allow/ask/deny, keyed by built-in tool name. Empty: the
+    #: grants, `toolScope` and the autonomy ladder decide alone — which is
+    #: what every agent saved before this means.
+    toolPermissions = serializers.DictField(
+        child=serializers.ChoiceField(choices=['allow', 'ask', 'deny']),
+        required=False, default=dict,
+    )
     #: Sites `browser_act` may act on (bare hostnames; subdomains included).
     #: Empty means it may browse but not act.
     browserDomains = serializers.ListField(
         child=serializers.CharField(max_length=253), required=False, default=list, max_length=20,
+    )
+    #: Vault logins `browser_act` may fill, as credential slugs. Empty: none.
+    browserLogins = serializers.ListField(
+        child=serializers.CharField(max_length=100), required=False, default=list, max_length=20,
+    )
+    #: Who this agent's unattended runs may message (channel ids, phone
+    #: numbers, `@domain` for a whole email domain). Unattended sends outside
+    #: this list are refused; chat approval covers the rest.
+    recipients = serializers.ListField(
+        child=serializers.CharField(max_length=255), required=False, default=list, max_length=50,
+    )
+    #: Database rows this agent's runs may touch. Empty means none.
+    dataConnections = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, default=list, max_length=50,
+    )
+    #: HTTP APIs this agent's runs may reach: bare ids (full) or
+    #: {"id", "mode": "read"}. Empty means none.
+    apiConnections = serializers.ListField(
+        child=serializers.JSONField(), required=False, default=list, max_length=50,
+    )
+    #: Extra hosts the run may reach beyond its connections' own hosts.
+    dbHosts = serializers.ListField(
+        child=serializers.CharField(max_length=253), required=False, default=list, max_length=20,
+    )
+    apiHosts = serializers.ListField(
+        child=serializers.CharField(max_length=253), required=False, default=list, max_length=20,
+    )
+    #: Extra hosts the workspace may reach beyond PyPI/npm/GitHub.
+    #: Empty: the workspace's own default egress and nothing else.
+    workspaceEgress = serializers.ListField(
+        child=serializers.CharField(max_length=253), required=False, default=list, max_length=20,
+    )
+    #: Code projects this agent's runs may touch. Empty means none.
+    codeProjects = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, default=list, max_length=50,
     )
     #: `useOrgContext` was removed from the wire (2026-09-03): it defaulted on,
     #: was stored on every agent, and no prompt builder ever read it. There is
@@ -454,6 +496,30 @@ class AgentSerializer(serializers.Serializer):
             )
         return sorted({t.strip() for t in value if t.strip()})
 
+    def validate_toolPermissions(self, value):
+        """Only real built-in names, with a real mode each.
+
+        The same closed-world rule as `toolScope`: an unknown name would sit
+        in the config implying a narrowed agent while the runtime ignored
+        it. MCP and native connector tools are refused here on purpose —
+        their names are minted at runtime, so a stored list would rot, and
+        `connector_scope` already answers that question per connection.
+        `ALWAYS_AVAILABLE` / `RETRIEVAL_TOOLS` fail the same check, which is
+        the point: the plan, the clock and the archive are infrastructure,
+        not capabilities, and no grant unlocks them.
+        """
+        from agents.agent.runtime import GRANT_TOOLS
+
+        grantable = {name for names in GRANT_TOOLS.values() for name in names}
+        cleaned = {str(k).strip(): v for k, v in (value or {}).items()
+                   if str(k).strip()}
+        unknown = sorted(set(cleaned) - grantable)
+        if unknown:
+            raise serializers.ValidationError(
+                f'Not tools a per-tool rule can name: {", ".join(unknown[:5])}.'
+            )
+        return cleaned
+
     def validate_browserDomains(self, value):
         import re
 
@@ -465,6 +531,105 @@ class AgentSerializer(serializers.Serializer):
                 raise serializers.ValidationError(f'"{raw}" is not a domain like example.com.')
             out.append(domain)
         return sorted(set(out))
+
+    def validate_browserLogins(self, value):
+        import re
+
+        out = []
+        for raw in value:
+            slug = str(raw).strip()
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', slug):
+                raise serializers.ValidationError(
+                    f'"{raw}" is not a credential slug.')
+            out.append(slug)
+        return sorted(set(out))
+
+    def validate_recipients(self, value):
+        out = [str(r).strip() for r in value if str(r).strip()]
+        if len(out) != len(value):
+            raise serializers.ValidationError('Recipients must not be blank.')
+        return sorted(set(out))
+
+    def _owned_data_ids(self, model, value: list, noun: str) -> list[int]:
+        """Connection ids the caller owns. A foreign id is refused, never
+        skipped: silently dropping one would narrow the agent without saying
+        so, and the tools refuse unselected connections anyway."""
+        from django.contrib.auth import get_user_model  # noqa: F401
+
+        ids = []
+        for raw in value or []:
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(f'"{raw}" is not a connection id.')
+        if not ids:
+            return []
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None or getattr(user, 'is_anonymous', False):
+            raise serializers.ValidationError('Authentication required.')
+        owned = set(model.objects.filter(user=user, id__in=ids).values_list('id', flat=True))
+        foreign = sorted(set(ids) - owned)
+        if foreign:
+            raise serializers.ValidationError(
+                f'These {noun} are not yours: {", ".join(map(str, foreign))}.')
+        return sorted(owned)
+
+    def validate_dataConnections(self, value):
+        from data.models import DataConnection
+
+        return self._owned_data_ids(DataConnection, value, 'databases')
+
+    def validate_codeProjects(self, value):
+        from workspaces.models import CodeProject
+
+        return self._owned_data_ids(CodeProject, value, 'projects')
+
+    def validate_apiConnections(self, value):
+        from data.models import ApiConnection
+
+        cleaned = []
+        for entry in value or []:
+            if isinstance(entry, dict):
+                try:
+                    key = int(entry.get('id'))
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError(f'{entry!r} is not a connection.')
+                mode = str(entry.get('mode') or 'all').lower()
+                if mode not in ('read', 'all'):
+                    raise serializers.ValidationError(
+                        f'Mode for connection {key} must be read or all.')
+                cleaned.append({'id': key, 'mode': mode} if mode == 'read' else key)
+            else:
+                try:
+                    cleaned.append(int(entry))
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError(f'{entry!r} is not a connection.')
+        ids = [c['id'] if isinstance(c, dict) else c for c in cleaned]
+        owned = self._owned_data_ids(ApiConnection, ids, 'APIs')
+        return [c for c in cleaned
+                if (c['id'] if isinstance(c, dict) else c) in owned]
+
+    def _validate_hosts(self, value, noun: str):
+        import re
+
+        out = []
+        for raw in value or []:
+            host = str(raw).strip().lower().removeprefix('https://').removeprefix('http://')
+            host = host.split('/')[0].strip('.')
+            if not re.fullmatch(r'[a-z0-9-]+(\.[a-z0-9-]+)+', host):
+                raise serializers.ValidationError(f'"{raw}" is not a host like {noun}.')
+            out.append(host)
+        return sorted(set(out))
+
+    def validate_dbHosts(self, value):
+        return self._validate_hosts(value, 'db.example.com')
+
+    def validate_apiHosts(self, value):
+        return self._validate_hosts(value, 'api.example.com')
+
+    def validate_workspaceEgress(self, value):
+        return self._validate_hosts(value, 'pypi.org')
 
     def validate_delegatesTo(self, value):
         """Only agents the caller owns, checked the way knowledge bases are.
@@ -610,7 +775,16 @@ class AgentSerializer(serializers.Serializer):
             'skills': ctx.get('skills', []),
             'delegatesTo': ctx.get('delegatesTo', []),
             'browserDomains': ctx.get('browserDomains', []),
+            'browserLogins': ctx.get('browserLogins', []),
+            'recipients': ctx.get('recipients', []),
+            'dataConnections': ctx.get('dataConnections', []),
+            'apiConnections': ctx.get('apiConnections', []),
+            'dbHosts': ctx.get('dbHosts', []),
+            'apiHosts': ctx.get('apiHosts', []),
+            'workspaceEgress': ctx.get('workspaceEgress', []),
+            'codeProjects': ctx.get('codeProjects', []),
             'toolScope': ctx.get('toolScope', []),
+            'toolPermissions': ctx.get('toolPermissions', {}),
             'useEnvironment': ctx.get('useEnvironment', False),
             # The contract by name, blank for prose. `output_schema` is stored
             # as `{'contract': name}`; anything else in there is a shape from
@@ -692,7 +866,20 @@ class AgentSerializer(serializers.Serializer):
                 i for i in data.get('delegatesTo', []) if i != workflow.id
             ],
             'browserDomains': data.get('browserDomains', []),
+            'browserLogins': data.get('browserLogins', []),
+            'recipients': data.get('recipients', []),
+            'dataConnections': data.get('dataConnections', []),
+            'apiConnections': data.get('apiConnections', []),
+            'dbHosts': data.get('dbHosts', []),
+            'apiHosts': data.get('apiHosts', []),
+            'workspaceEgress': data.get('workspaceEgress', []),
+            'codeProjects': data.get('codeProjects', []),
             'toolScope': data.get('toolScope', []),
+            # Stored as sent, even naming a tool whose grant is currently
+            # off: the grant decides reachability and wins, so a stale entry
+            # is inert rather than wrong — and pruning it here would eat the
+            # setting the user meant to keep while the grant is briefly off.
+            'toolPermissions': data.get('toolPermissions', {}),
             'useEnvironment': data.get('useEnvironment', False),
         }
 

@@ -1,10 +1,12 @@
 # Platform Capabilities Plan — messaging, data, browser, compute, Code tab, long runs, dashboards, auto mode
 
-Status: **P0 + P3 implemented 2026-09-21; P1, P2, P4–P9 proposed.** Written to be handed to another
-engineer or AI to implement phase by phase. Each phase lists the gap, the design,
-the files, the tests and the exit criteria. Read §1 and §2 before touching any
-phase: they are the rules every phase follows, and most of them are already
-enforced by code and tests.
+Status: **P0–P10 implemented 2026-09-21 in this working tree
+(P0 and P3 committed, the rest uncommitted; the `/code`, `/missions` and
+`/dashboards` pages are not built).** Written
+to be handed to another engineer or AI to implement phase by phase. Each phase
+lists the gap, the design, the files, the tests and the exit criteria. Read §1
+and §2 before touching any phase: they are the rules every phase follows, and
+most of them are already enforced by code and tests.
 
 Scope, as the owner decided it:
 
@@ -29,20 +31,26 @@ and is not touched** (see CLAUDE.md).
 
 ## 0. Phase map
 
-| # | Phase | Size | Depends on | Unlocks |
-|---|-------|------|------------|---------|
-| P0 | Foundations: secret references, cost ledger, egress guard, capability registry | M | — | everything |
-| P1 | `talk`: Slack, WhatsApp, Teams, SMS | L | P0 | briefs, follow-ups, reminders |
-| P2 | Browser Pro: sessions, vault logins, downloads, live view | M | P0 | portal work (GST, courier, bank, vendors) |
-| P3 | Auto mode: chat autonomy, account default, action reviewer | M | — | using the platform without clicking all day |
-| P4 | `data`: SQL + generic API caller | L | P0 | CRM/DB work without a connector per system |
-| P5 | Compute plane + `run_code` Pro (pip, internet, long jobs) | L | P0 | real pipelines, scheduled jobs |
-| P6 | Code tab (serves the `shell` grant) | XL | P5, P3 | coding agent, sandboxed per user |
-| P7 | Long-horizon missions | L | P3 (P5 optional) | multi-day goals |
-| P8 | Dashboards: live run view, mission board, agent-built dashboards | L | P4, P7 | seeing what agents are doing |
-| P9 | Voice + documents: transcription, TTS, OCR, e-sign | M | P0 | meeting notes → .docx + tasks; scanned bills; offer letters |
+| # | Phase | Size | Depends on | Unlocks | State (2026-09-21) |
+|---|-------|------|------------|---------|--------------------|
+| P0 | Foundations: secret references, cost ledger, egress guard, capability registry | M | — | everything | **Done, committed.** `credentials/refs.py`, `logs/costs.py` + `CostEntry`, `check_egress`, `GET /api/orchestrator/capabilities/`. |
+| P1 | `talk`: Slack, WhatsApp, Teams, SMS | L | P0 | briefs, follow-ups, reminders | **Done in tree, uncommitted.** `messaging/` app (`MessagingAccount`, `OutboundMessage`, `InboundMessage`, webhooks, retention sweep, beat task + `purge_inbound` command); `chat/tools/talk.py` + `chat/tools/messaging/{common,slack,whatsapp,teams,sms}.py` (`message_channels/search/read/draft/send`, 20/run + 5/recipient caps, unattended `recipients` gate, ledger cost for WhatsApp/SMS); 16 tests (`messaging/tests/test_messaging.py`). |
+| P2 | Browser Pro: sessions, vault logins, downloads, live view | M | P0 | portal work (GST, courier, bank, vendors) | **Done in tree, uncommitted.** `browsing/models.py::BrowserSession` (+migration, sweep command + beat task), session-scoped `browser_act` with `session`/`trace`, `fill_secret` via P0 refs against `browserLogins`, `ask_user` OTP/CAPTCHA pause, downloads → VFS, submit gate feeding P3 reviewer, per-minute ledger; new step verbs (`scroll`, `download`, `extract`); tests (`browsing/tests/test_sessions.py`). Uploads still refused by design. |
+| P3 | Auto mode: chat autonomy, account default, action reviewer | M | — | using the platform without clicking all day | **Done, committed** (P0/P3 commit `94a9292` + docs `2b7d907`; 24 backend + 2 frontend tests). |
+| P4 | `data`: SQL + generic API caller | L | P0 | CRM/DB work without a connector per system | **Done in tree, uncommitted.** `data/` app (`DataConnection`, `ApiConnection`, one migration); `data/drivers.py` + `data/sqlcheck.py` (parsed reads, read-only txn, 30 s timeout, 1,000 inline rows → CSV spill, max 50k spill rows); `chat/tools/data.py` (`list_data_connections`, `describe_schema`, `query_sql`, `execute_sql`) + `chat/tools/apicaller.py` (`list_api_operations`, `call_api`); `dataConnections`/`apiConnections`/`dbHosts`/`apiHosts` scopes, both doors; 18 tests (`data/tests/test_data.py`). |
+| P5 | Compute plane + `run_code` Pro (pip, internet, long jobs) | L | P0 | real pipelines, scheduled jobs | **Done in tree, uncommitted.** `workspaces/` app (models + `0001_initial` + `engine.py` one-door `none/docker/<provider>`, `ensure/exec/read/write/listdir/hibernate/destroy`, views + `hooks/<secret>/` → `job.finished` event, sweep + `sweep_workspaces` command + beat task, `WORKSPACE_ENGINE/WORKSPACE_IDLE_SECONDS` + quotas); `chat/tools/compute.py` (`workspace_exec`, `start_job`, `job_status`, `job_logs`, `cancel_job`, `sync_files`, `requires='workspace'`); `compute` grant end-to-end (runtime, TOOL_KEYS, builder help, capabilities scope map + engine gate, frontend labels, tools library). Tests: `chat/tests/test_phases_p5_p8.py`. |
+| P6 | Code tab (serves the `shell` grant) | XL | P5, P3 | coding agent, sandboxed per user | **Done in tree, uncommitted (backend + tools; `/code` page not built).** `shell` served: `GRANT_TOOLS['shell']` (12 `ws_*`/`git_*` tools in `chat/tools/code.py`), `UNSERVED_GRANTS` empty, `codeProjects` scope both doors, `CodeProject` + `CodeChange` (+migration `0002`), tools library `shell` category real, builder `TOOL_HELP` + toggles + types. Frontend `/code` page (Monaco/xterm/diff review) not built. |
+| P7 | Long-horizon missions | L | P3 (P5 optional) | multi-day goals | **Done in tree, uncommitted (backend; `/missions` board not built).** `missions/` app (model + `0001_initial`, `service.after_run`, sweep + `run_missions` command + beat task), `caller='mission'` (+ `UNATTENDED_CALLERS`, `ExecutionLog.mission` + migration), mission tools (`chat/tools/missions.py`: `mission_status`, `wait_for`, `complete_mission`, `report_progress`, `start_mission`). Frontend `/missions` board not built. |
+| P8 | Dashboards: live run view, mission board, agent-built dashboards | L | P4, P7 | seeing what agents are doing | **Done in tree, uncommitted (agent-built dashboards; run-view upgrades not built).** `render_dashboard` in `ALWAYS_AVAILABLE` + `save_dashboard`, `chat/tools/dashboards.py` (tiles `kpi|chart|table|text`, chart tile = `render_chart` spec), `inference.Dashboard` (+migration `0020`, visibility `link<platform<public`). Live run-view/mission-board upgrades not built. |
+| P9 | Voice + documents: transcription, TTS, OCR, e-sign | M | P0 | meeting notes → .docx + tasks; scanned bills; offer letters | **Done in tree, uncommitted.** `voice/` (`stt.py`, `tts.py`, one-door `none` default), `esign/` app (model + provider + 404-uniform webhook + migration + sweep-less rows), `chat/tools/voice.py` (`transcribe_audio`, `text_to_speech`), `chat/tools/docs.py` (`ocr_document`: PDF pages/tables/`fields` via extraction engine), `chat/tools/esign.py` (`request_signature`, `signature_status`); new `voice` + `esign` grants with engine-gated offering and `fileAccess` file withholding; 21 tests (`chat/tests/test_voice.py` + `esign/tests/`). |
 
-**Recommended order:** P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9.
+| P10 | Slash commands: `/goal`, `/code-review`, `/memory`, `/agent <name>`, and more (§18) | M | P3, P7 | reaching every capability above from the chat box | **Done in tree, uncommitted.** `chat/commands/` registry + resolve + 7 domain modules, `TurnRequest.command`, pipeline resolve + trailing-context expansion + `/agent` one-door start, `GET /api/chat/commands/` + `/complete/` + `POST /commands/run/` + `/commands/confirm/`, `POST /api/missions/` + list/pause/resume/cancel (the routes P7 left out), `findings` contract + `reviewer` template; GUI `CommandPalette.tsx` (leading-`/` only, 44px rows, sheet on phones) + `CommandCard.tsx` (mission, status, cost, memory, findings, confirm sheets) + `TurnRequest.command` transport; tests (`chat/tests/test_commands.py`, `src/lib/__tests__/commands.test.ts`). |
+
+**Recommended order:** P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10.
+What is still open from P6–P8 is frontend work (`/code`, `/missions`,
+`/dashboards`, the live run view). **P10 should come before those pages**:
+commands like `/goal` and `/code-review` give missions and the code tools a way
+in from chat while the full pages are still being built.
 The review's advice holds: if only two packs ship, ship **messaging (P1) and
 browser actions (P2)**. P3 comes next because it is cheap and every later pack
 makes approval fatigue worse. **Start the WhatsApp Business verification and the
@@ -51,28 +59,32 @@ days to weeks, and they should not block the code.
 
 ---
 
-## 1. Where we are (verified 2026-09-21)
+## 1. Where we are
 
-| Capability | Today | Where |
+The first two columns are the state when this plan was written. The last column
+is the state of the working tree on 2026-09-21, after P0–P9. §17 has the full
+handoff detail, including what is committed and what is not.
+
+| Capability | Before the plan (2026-09-21 morning) | Now (working tree, 2026-09-21) |
 |---|---|---|
-| Email, calendar, files, sheets | Gmail, Calendar, Drive, Sheets as native REST tools | `chat/tools/google/`, `mcp_integration/native.py` |
-| Messaging other than email | none | — |
-| Workspace files | VFS over `Folder`/`Document`, binary files included | `inference/vfs.py` |
-| Python | sidecar with numpy/pandas, **no network, no pip, ~90 s, 300 MB** | `sandbox_service/`, `sandbox/engine.py` |
-| Shell | `shell` grant exists and is **deliberately unserved** | `agents/agent/runtime.py::UNSERVED_GRANTS` |
-| Browser | `browse_page` + `browser_act`: 5 verbs (`click type select press wait`), **stateless** (each call is one remote function, so no login survives), domain allowlist for acting, screenshot to VFS, `BROWSER_ENGINE=none` in prod | `browsing/engine.py`, `chat/tools/browser.py` |
-| Databases / APIs | none (no SQL, no generic HTTP caller) | — |
-| Audio | none (Imagine generates audio but it is off the tool surface on purpose) | `imagine/` |
-| OCR | `ask_vision` witness + `nemotron-parse` second reading | `chat/vision/` |
-| Office output | decks, workbooks, docs, PDF, diagrams, pages | `chat/tools/office/`, `chat/tools/publish.py` |
-| Run length | `MAX_RUN_SECONDS` = 2 h, 24–40 iterations (`iteration_limit`), durable checkpoints + recovery sweep | `workflow_backend/thresholds.py`, `agents/budget.py`, `agents/recovery.py` |
-| Plan inside a run | `update_todos`, kept in metadata, never curated away | `chat/turn/todos.py` |
-| Plan across runs | none: each run starts fresh | — |
-| Autonomy | 5-rung ladder `plan review ask auto full` on **agents**, switchable mid-run; chat only has approve once / session / always | `agents/agent/runtime.py::AUTONOMY_LADDER`, `chat/turn/steering.py` |
-| Triggers | schedule / webhook / event, one sweep | `agents/triggers.py`, `agents/sweep.py` |
-| Dashboards | `/overview` (activity, top tools, repeat failures, active agents), `/runs`, `/evals` | `pages/Overview.tsx`, `Runs.tsx`, `Evals.tsx` |
-| Non-token cost | read back from `AgentStep.result` | `agents/agent/runtime.py::_tool_costs` |
-| Host | **one 913 MB EC2 box**, app containers capped at 128–384 MB | `docker-compose.prod.yml` |
+| Email, calendar, files, sheets | Gmail, Calendar, Drive, Sheets as native REST tools (`chat/tools/google/`) | unchanged |
+| Messaging other than email | none | **Slack, WhatsApp, Teams, SMS** through five shared tools (`chat/tools/talk.py`, `messaging/`); inbound webhooks fire `message.received`; `recipients` allowlist required for unattended sends |
+| Workspace files | VFS over `Folder`/`Document`, binary files included | unchanged |
+| Python | sidecar with numpy/pandas, **no network, no pip, ~90 s** | sidecar unchanged; **plus a per-user workspace** (`workspaces/`, `compute` grant: `workspace_exec`, `start_job` up to 6 h, `job.finished` event). Engine `none` by default |
+| Shell | `shell` grant **deliberately unserved** | **served**: 12 `ws_*`/`git_*` tools (`chat/tools/code.py`), `CodeProject`/`CodeChange`, `UNSERVED_GRANTS` empty. **The `/code` page is not built** |
+| Browser | 5 verbs, stateless, `BROWSER_ENGINE=none` in prod | sessions (`BrowserSession`), `fill_secret` from the vault, `ask_user` for OTP/CAPTCHA, downloads to the VFS, `extract`, `scroll`, trace, submit gate. **Uploads still refused** |
+| Databases / APIs | none | `data/` app: read-only `query_sql` (parsed, read-only transaction, row cap, CSV spill), opt-in `execute_sql`, OpenAPI-driven `call_api` |
+| Audio | none | `transcribe_audio`, `text_to_speech` behind `STT_ENGINE`/`TTS_ENGINE` (`none` by default) |
+| OCR | `ask_vision` + `nemotron-parse` | plus `ocr_document` (pages, tables, `fields` through the extraction engine) |
+| E-signature | none | `request_signature`, `signature_status` behind `ESIGN_ENGINE`; `esign.completed` event |
+| Office output | decks, workbooks, docs, PDF, diagrams, pages | unchanged |
+| Run length | 2 h, 24–40 iterations per run | unchanged per run; **missions** chain runs across days (`missions/`, `caller='mission'`). **The `/missions` board and mission HTTP routes are not built**; a mission can only be started through the `start_mission` tool |
+| Plan across runs | none | mission plan + `NOTES.md` notebook handed between runs |
+| Autonomy | ladder on agents only | **chat Ask · Auto · Plan**, account default, action reviewer, argument-shaped trust rules, pause-all (committed). Plus per-tool `allow/ask/deny` on agents (`toolPermissions`) |
+| Dashboards | `/overview`, `/runs`, `/evals` | plus `render_dashboard` / `save_dashboard` and the `inference.Dashboard` model. **There is no `/dashboards` page, no list/refresh routes, and the live run view and mission board are not built** |
+| Non-token cost | read back from `AgentStep.result` | `CostEntry` ledger, counted in the spend cap |
+| Slash commands | none | **none. §18 (P10) is the plan** |
+| Host | **one 913 MB EC2 box** | unchanged, so everything heavy stays behind a remote engine |
 
 The last row decides most of this plan. **No heavy process runs on the app
 box**: no Chromium, no per-user VM, no Whisper. Every heavy capability sits
@@ -794,3 +806,356 @@ AUTO_REVIEWER_PROVIDER= / AUTO_REVIEWER_MODEL=   (from nodes_aimodel, is_active=
 A milestone is done when its demo runs on the deployed site, its benchmark suite
 is green (guardrail groups at 100%), and CLAUDE.md + API.md describe what
 shipped.
+
+---
+
+## 17. Build status (2026-09-21, uncommitted work — P0–P9 + tools-list limits)
+
+This section is the handoff state. It exists because everything below is
+**not yet committed, not yet deployed, and not yet tested as a whole** — the
+plan above would otherwise read as shipped what is still only in the working
+tree.
+
+**Committed (on `origin/agent`):**
+
+- P0 — `credentials/refs.py`, `logs/costs.py` + `CostEntry`, `check_egress`,
+  `GET /api/orchestrator/capabilities/`, image spend moved to the ledger with
+  the no-double-count guard in `agents/spend.py`.
+- P3 — chat Ask · Auto · Plan, mode picker + Shift+Tab + amber Auto,
+  steer-mailbox mid-turn switch, action reviewer (`chat/turn/reviewer.py`,
+  ask-floor, >3 s/failure = ask), `AgentStep.approval` audit, plan-withholding
+  via `READ_ONLY_TOOLS`, `ToolPermission.match`, `paused_until` in
+  `check_guardrails`.
+
+**In the working tree, uncommitted (the next commit):**
+
+- P1 §4 in full: `messaging/` (models, webhooks, retention, sweep + command +
+  beat task), `chat/tools/talk.py`, `chat/tools/messaging/` (4 adapters),
+  `recipients` scope on `TurnContext` + runtime wiring + serializer +
+  `recipients_for`, `talk` grant end-to-end (runtime, TOOL_KEYS, builder help,
+  capabilities scope map, frontend labels). 16 tests passing (`.pyc` present).
+- P2 §5 deltas: `browsing/models.py::BrowserSession` + `0001_initial`,
+  `browsing/sessions.py`, engine verbs + download/trace/live payload,
+  `browser_act` `session`/`trace`/`fill_secret`/`ask_user`/submit-gate/CostEntry,
+  `browserLogins` scope wiring, reviewer submit rules, sweep + beat task,
+  settings (`BROWSER_SESSION_*`). Tests passing.
+- P4 §7 in full: `data/` app + migration, `data/drivers.py`,
+  `data/sqlcheck.py`, `chat/tools/data.py`, `chat/tools/apicaller.py`,
+  `dataConnections`/`apiConnections`/`dbHosts`/`apiHosts` scopes both doors
+  (runtime + serializer + `TurnContext`), `data` + `api` grants end-to-end,
+  `DATA_ALLOW_PRIVATE_HOSTS`. 18 tests passing.
+- P9 §12 in full: `voice/` engines, `esign/` app + webhook + migration,
+  `chat/tools/voice.py`, `chat/tools/docs.py`, `chat/tools/esign.py`,
+  `voice` + `esign` grants end-to-end with engine-gated offering,
+  audio extensions in `vfs.BINARY_TYPES`. 21 tests passing.
+- P5 §8 in full: `workspaces/` app (models + `0001_initial`, `engine.py`
+  one-door `none/docker/<provider>`, views + `hooks/<secret>/`, sweep +
+  `sweep_workspaces` command + beat task, `WORKSPACE_ENGINE` + quotas),
+  `chat/tools/compute.py` (6 tools, `requires='workspace'`), `compute` grant
+  end-to-end, `workspaceEgress` scope both doors. Tests:
+  `chat/tests/test_phases_p5_p8.py`.
+- P6 §9 (backend + tools; `/code` page not built): `shell` served —
+  `GRANT_TOOLS['shell']` (12 `ws_*`/`git_*` tools, `chat/tools/code.py`),
+  `UNSERVED_GRANTS` empty, `codeProjects` scope both doors, `CodeProject` +
+  `CodeChange` (+migration `0002`), tools library `shell` category real,
+  builder `TOOL_HELP` + toggles + types.
+- P7 §10 (backend; `/missions` board not built): `missions/` app (model +
+  `0001_initial`, `service.after_run`, sweep + `run_missions` command + beat
+  task), `caller='mission'` (+ `UNATTENDED_CALLERS`, `ExecutionLog.mission` +
+  migration `logs.0025`), mission tools (`chat/tools/missions.py`).
+- P8 §11 (agent-built dashboards; run-view upgrades not built):
+  `render_dashboard` in `ALWAYS_AVAILABLE` + `save_dashboard`
+  (`chat/tools/dashboards.py`), `inference.Dashboard` (+migration `0020`).
+- Tools-list limits: `tools_config` catalogue synced — every grant-gated tool
+  under its own `LIBRARY_GROUPS` key (was: 22 tools falling through to
+  `system`), new `delegation`/`authoring`/`memory` chat-only groups,
+  `GRANT_CATEGORIES` complete, `system` carries all four `ALWAYS_AVAILABLE`;
+  `TOOL_SETTINGS` 12 → 48 tools with knobs (scrape, KB, files via `vfs.*`
+  params, SQL `row_cap` through `drivers.run`, API, browser, TTS, OCR, esign,
+  talk, agent search, history/recall, todos, extract/notify, office, sandbox
+  files, image prompts), each wired via `alimit()` with the module constant
+  as the narrowing-only ceiling. Tests: `tools_config/tests/test_config.py`
+  (15) + `chat/tests/test_phases_p5_p8.py` (11).
+- Plus: `voice`/`esign`/`talk`/`data`/`api`/`compute`/`shell` frontend grant
+  labels; scope serializer + config round-trip (`browserLogins`,
+  `recipients`, data scopes, `workspaceEgress`, `codeProjects`);
+  `TOOL_KEYS`/`GRANT_SCOPES`/`GRANT_RISKS`/`TOOL_HELP` extended; `API.md`
+  §§21–23 (workspaces, missions, dashboards); unrelated web-push
+  notification files riding along (needs splitting before commit).
+- Frontend `/code`, `/missions`, `/dashboards` pages not built; live run-view
+  and mission-board upgrades not built; `Dashboard` has no list/refresh
+  routes yet (tool-only so far).
+
+**Before the next commit:** split the web-push files into their own commit,
+run the full backend suite + frontend `vitest`/`tsc`, and record the demo
+state per §16.
+
+---
+
+## 18. P10 — Slash commands in the chat box
+
+**Gap:** every capability in this plan is reachable only by describing it in
+prose and hoping the model picks the right tool. Nothing lets a user say
+exactly what they mean in one line, the way `/goal` or `/review` does in Claude
+Code. There is no `/` handling in the composer at all today
+(`components/chat/StandaloneChat.tsx`).
+
+### 18.1 The one design decision: a command is structured input, not a prompt template
+
+The easy version (the frontend swaps `/code-review` for a paragraph of
+instructions) is the wrong one, for three reasons this codebase has already
+learned:
+
+- **A second copy drifts.** The prompt would live in the browser while the
+  tools, grants and contracts it depends on live in the backend. This is the
+  cron-wording problem again, and the fix is the same: one copy.
+- **It bypasses validation.** Text typed as "run agent 12" gets whatever the
+  model makes of it. A command carrying `{agent_id: 12}` is checked by the same
+  ownership predicate the builder uses before anything runs.
+- **Other clients get nothing.** The API, the Inbox and any future client would
+  all have to re-implement the templates.
+
+So: **the client sends `TurnRequest.command = {"name": ..., "args": {...},
+"text": ...}` and the backend resolves it.** The registry is code, declared the
+way tools are (registration *is* the schema):
+
+```python
+# chat/commands/registry.py
+@command(
+    name="agent",
+    summary="Hand a task to one of your agents",
+    args=[Arg("agent", kind="agent", required=True), Arg("task", kind="text")],
+    kind="turn",               # client | action | turn  (see 18.2)
+    requires=None,             # e.g. "workspace", "missions": hidden when unmet
+    guest=False,
+)
+async def agent_command(call: CommandCall, ctx: CommandContext) -> CommandResult: ...
+```
+
+`GET /api/chat/commands/` lists the commands this user can run, filtered the
+way `get_available_tools` filters tools: an engine set to `none` or a missing
+grant hides the command rather than showing one that refuses.
+`GET /api/chat/commands/complete/?command=agent&arg=agent&q=rep` returns
+argument candidates, **computed with the same predicate the command validates
+against** (the template rule: a picker that offers what the validator refuses is
+worse than an empty one).
+
+### 18.2 Three kinds of command
+
+| Kind | What happens | Model call? | Examples |
+|---|---|---|---|
+| **client** | Handled entirely in the browser: changes a setting or opens a panel | no | `/help`, `/new`, `/mode auto`, `/model`, `/effort high` |
+| **action** | `POST /api/chat/commands/run/` does one thing server-side and returns a card | no | `/memory add …`, `/pause`, `/status`, `/cost` |
+| **turn** | Starts a normal chat turn. The resolved command becomes a **trailing context message** for that turn (never the system prompt: that is the clock trap) and may pin an intent or narrow the toolbox | yes | `/agent`, `/goal`, `/code-review`, `/research`, `/skill` |
+
+Every turn command is stored on the user message
+(`metadata.command = {name, args}`), so the transcript shows a chip
+("/agent Reporter") rather than expanded text, and a regenerate replays exactly
+the same command.
+
+**Consent rule.** A command the user typed is the user's own instruction. That
+covers the **first** action it names: `/agent Reporter …` starts the run without
+the `run_agent` approval card, just as the Run button on `/agents` does. It
+covers nothing after that. Every tool call the model or the started agent then
+makes is gated by the usual autonomy, grants, scopes and `toolPermissions`.
+Commands whose first action spends money or leaves the platform (`/goal`
+creates a budgeted mission) open a **confirm sheet** that shows the resolved
+arguments. Pressing Start on that sheet is the approval.
+
+### 18.3 The composer
+
+- Typing `/` **at the start of the input** opens a palette above the composer:
+  fuzzy match on name + summary, ↑/↓, Enter/Tab to pick, Esc to close. A `/`
+  anywhere else is plain text (a path like `/Chat/notes.md` in a sentence must
+  never trigger it).
+- Once a command is picked, each argument completes from
+  `/commands/complete/`. A resolved entity (an agent, a skill, a file, a
+  connection) becomes a **chip** carrying its id, so the request never
+  re-resolves a name the user already chose.
+- A command typed out in full and sent without the palette
+  (`/agent Reporter summarise inbox`) is parsed by the backend. Anything that
+  fails to parse or resolve returns a 400 naming the problem ("No agent called
+  'Reprter'. Did you mean Reporter?"), shown under the input with the text left
+  in place. It is **never sent to the model as plain text**, because a silently
+  un-run command reads to the user as a command that ran.
+- Files: `lib/commands.ts` (parse, fuzzy match; pure and vitest-covered),
+  `components/chat/CommandPalette.tsx`, `hooks/useCommands.ts` (fetched once per
+  session, refetched when Connections or the builder change).
+- Guests see only `guest=True` commands (`/help`, `/new`, `/research`).
+
+### 18.4 `/agent <name> [task]` — assessment
+
+This is the most valuable command on the list and should ship first. It makes
+the agents a user built reachable from where they already work, instead of from
+a separate page. Three decisions shape it:
+
+1. **Delegate, don't hand off, in v1.** `/agent Reporter summarise this week's
+   Slack` starts that agent's run through the one door (`start_agent_run`,
+   `caller='chat'`) with its own prompt, model, grants, spend cap and autonomy.
+   Chat shows a live run card (status, todos, files, link to `/runs/:id`), and
+   the answer lands back in the conversation as a message attributed to the
+   agent. The chat model then sees that answer and can use it, which is what
+   makes "ask Reporter, then chart it" work. Nothing new is added to the
+   permission model: the agent is exactly as capable here as when it runs on a
+   schedule. **Handoff** (`/agent use Reporter`, where the rest of the
+   conversation runs *as* that agent until `/agent off`) is the natural v2. It
+   needs a `ChatSession.agent_id`, a clear header badge, and a decision on a real
+   question: chat turns would then be billed and gated as that agent. That is
+   worth settling separately.
+2. **Names resolve safely.** `SubAgent` names are unique per user
+   (`unique_together = ['user', 'name']`), so `/agent <name>` is unambiguous.
+   Matching is case-insensitive, completion shows description + grants, and the
+   chip carries the id. Only the caller's own agents resolve, and a paused or
+   archived agent is refused with the reason.
+3. **Say what the agent can see.** An agent cannot see the conversation
+   (`run_agent`'s own schema says so). By default the command sends only the
+   task. A **"with context"** toggle on the chip adds a **bounded briefing**: the
+   last few turns folded by the curation model, capped by the same
+   `check_delegation_payload` limits, and delivered as *context, not
+   instruction*, exactly as fan-out briefings are. Pasting the transcript would
+   bring back the delegation-payload problem.
+
+Edge cases to pin in tests: no task text (the card asks for one rather than
+starting an empty run); template requirements missing (refuse and link to the
+builder); spend cap reached (the preflight 402, shown as an error and never as an
+agent reply); chat in `plan` mode (refuse, because starting a run is not a read).
+
+A later sibling, `@Reporter` inside a sentence, can reuse the same resolver.
+Ship `/agent` first.
+
+### 18.5 The three commands asked for
+
+**`/goal <what you want done>`** starts a mission (§10). It opens a confirm
+sheet: goal text, agent (defaults to the user's most recent general-purpose
+agent, or offers to install one from the gallery), budget (required), deadline
+(default 7 days), max runs (default 20). Start calls a **new**
+`POST /api/missions/` route that goes through the same service `start_mission`
+uses. That route does not exist yet, and without it only the model can start a
+mission. The chat then shows a mission card (status, progress from todos, spend
+vs budget, next wake) that updates live. `/goal` on its own lists active
+missions, and `/goal pause|resume|cancel <id>` are action commands.
+
+**`/code-review [target]`** is a read-only review that answers with
+**findings, not prose**:
+
+- Targets, resolved by the argument completer: a `CodeProject`'s uncommitted
+  diff (P6 `git_diff`), a GitHub PR URL (read through the vault token), or VFS
+  files/folders (`/code-review /Agents/Reporter/`).
+- Runs a new `reviewer` gallery agent under **`plan` autonomy** (a review never
+  edits), with `shell` narrowed by `toolScope` to its read tools, plus
+  read-only `fileOps`.
+- A new output contract `findings` in `agents/contracts.py`
+  (`[{file, line, severity, category, summary, suggestion}]`), rendered as a
+  findings card with a per-item "Fix it" that starts a normal turn scoped to
+  that finding. Fixing stays a separate step that can be approved.
+- Hidden when there is neither a workspace engine nor any code file in the VFS.
+
+**`/memory`** is the UI over `core.UserMemory`, which today is reachable only
+through the model's `remember_about_user` / `forget_about_user` and
+`/api/auth/memory/`:
+
+- `/memory` opens a panel listing facts by category, with edit and delete
+  (a client command backed by the existing `UserMemoryView`).
+- `/memory <fact>` is an action that writes through `core/memory.py`, the same
+  door the tool uses, so dedup-as-touch, per-category caps and eviction still
+  apply. No model call.
+- `/memory forget <text>` shows the matching facts and asks which one to delete.
+  It never deletes on a fuzzy match the user has not seen.
+- Chat only. Agents still read memory and cannot write it, and the command does
+  not change that.
+
+### 18.6 More commands worth having
+
+Ranked by value for the effort, all built on things that already exist.
+
+**Tier 1: ship with P10**
+
+| Command | Kind | What it does | Built on |
+|---|---|---|---|
+| `/help` | client | Everything available to *this* user, grouped | `/commands/` |
+| `/new` | client | New conversation (alias `/clear`) | sessions |
+| `/mode ask\|auto\|plan` | client | Switch chat autonomy (same as the picker / Shift+Tab) | P3 |
+| `/model <name>`, `/effort <level>` | client | Switch model or effort for this conversation, with completion | model picker, `llm/effort.py` |
+| `/agent <name> [task]` | turn | §18.4 | `start_agent_run` |
+| `/goal <text>` | turn + sheet | §18.5 | missions |
+| `/memory …` | client/action | §18.5 | `core/memory.py` |
+| `/skill <name> [text]` | turn | Applies one of the user's **Skills** (`skills.Skill.content`) as instructions for this turn. The skills app exists and nothing in chat uses it | `skills/` |
+| `/research <question>` | turn | Pins the `research` intent (`deep_research`), same as the intent pill | intents |
+| `/status` | action | Running runs, active missions, pending approvals, paused-until | logs, missions, HITL |
+| `/pause [duration]`, `/resume` | action | Pause everything for this user | `UserProfile.paused_until` |
+
+**Tier 2: next**
+
+| Command | Kind | What it does |
+|---|---|---|
+| `/code-review [target]` | turn | §18.5 (needs the `reviewer` template + `findings` contract) |
+| `/schedule <agent> <when>` | action + sheet | "every weekday at 9" → cron through the existing preview endpoint, showing `describe()`'s sentence before saving (the one mistake nothing downstream catches) |
+| `/file <path>` | client | Attach a VFS file by path, with completion. A chip, not an upload |
+| `/cost` | action | This conversation's spend: tokens + `CostEntry` by kind |
+| `/summarize` | turn | Conversation → `/Chat/<title> summary.md` |
+| `/export md\|docx\|pdf` | action | Conversation to a file through the office renderers |
+| `/deck`, `/doc`, `/sheet`, `/dashboard` `<what>` | turn | Pin the matching office or dashboard tool so the model builds the right artifact |
+| `/eval` | action | Save the last answer as an eval case (like `cases/from-run/`, for chat) |
+
+**Tier 3: once their pages exist**
+
+`/code <project>` (open the Code tab on a project), `/browse <url>` (a
+browser-pinned turn with the live view open), `/sql <connection> <question>`,
+`/connect <service>` (open that Connections card), `/approvals` (open the
+Inbox), `/publish` (publish the last artifact through the page visibility
+sheet).
+
+**User-defined commands.** Every Skill a user writes becomes invocable as
+`/<skill-slug>`: Claude Code's custom commands, with a row instead of a file.
+Built-in names always win a collision, and the palette shows skills in their own
+group so the source is visible. This is the cheapest way to grow the command
+list without code.
+
+**Deliberately not commands:** `/send` (messaging a person goes through
+`message_draft` → approval, not a one-line fire), anything that switches chat to
+`full` autonomy (refused today and stays refused), and bulk `/delete`-style
+actions.
+
+### 18.7 Backend work
+
+- `chat/commands/` package: `registry.py` (`@command`, `Arg` kinds `agent |
+  skill | file | model | effort | connection | project | text | duration`),
+  `resolve.py` (parse + validate + complete, sharing predicates with
+  `AgentSerializer`, `visible_servers_sync` and `vfs`), and one module per domain
+  (`agents.py`, `missions.py`, `memory.py`, `review.py`, `session.py`).
+- `TurnRequest.command` parsed in `TurnRequest.parse`; `pipeline.run_chat_turn`
+  resolves it **after** `llm.preflight()` (a command must not make a turn look
+  busy before it is known to be payable) and before history is built.
+- Routes: `GET /api/chat/commands/`, `GET /api/chat/commands/complete/`,
+  `POST /api/chat/commands/run/` (action kind), and `POST /api/missions/` plus
+  list/pause/resume/cancel (the mission routes P7 left out). All go into
+  `API.md`.
+- `agents/contracts.py`: `findings`. `agents/gallery.py`: `reviewer` template.
+
+### 18.8 Tests
+
+- `chat/tests/test_commands.py`: the registry lists only commands whose
+  `requires` are met; completion and validation agree (run over the same
+  fixtures); an unknown or unresolvable command is a 400 and never a model turn;
+  `/agent` resolves only the caller's own agents, refuses in `plan` mode, and
+  starts exactly one run with `caller='chat'`; the command is stored on the
+  message and replayed by regenerate; the expansion rides in the trailing
+  context message and the system prompt is byte-identical to a turn without a
+  command (prefix-cache guard).
+- `chat/tests/test_command_consent.py`: the first action runs without approval;
+  every later tool call is still gated; `/goal` does nothing until confirmed.
+- `src/lib/__tests__/commands.test.ts`: parsing (only a leading `/`; paths
+  inside sentences ignored), fuzzy ranking, chip serialisation.
+- `chat/tests/test_turn_output_e2e.py`: add a `/agent` turn and assert on the
+  frames a client receives (run card, the agent's answer as a message).
+- Playwright: open the palette, pick `/agent`, complete a name, send, see the
+  run card.
+
+### 18.9 Exit criteria
+
+From the chat box alone: `/agent Reporter summarise my unread mail` returns the
+agent's answer into the conversation; `/goal chase the three overdue invoices`
+starts a budgeted mission after one confirm and shows its card;
+`/memory I work in IST` adds a fact the next turn uses; `/code-review` on a
+project returns a findings card; `/help` lists only what the user can actually
+run.

@@ -12,6 +12,7 @@ from .views import (
     stop_message_stream,
     upload_file,
 )
+from chat.commands import views as command_views
 from chat.guest import views as guest_views
 
 router = DefaultRouter()
@@ -28,6 +29,12 @@ urlpatterns = [
     path('runs/', active_runs, name='active_runs'),
     path('sessions/<str:session_id>/messages/<int:message_id>/', delete_message, name='delete_message'),
     path('sessions/<str:session_id>/upload/', upload_file, name='upload_file'),
+
+    # Slash commands (P10, §18): the palette, completion, and action runs.
+    path('commands/', command_views.command_list, name='command_list'),
+    path('commands/complete/', command_views.command_complete, name='command_complete'),
+    path('commands/run/', command_views.command_run, name='command_run'),
+    path('commands/confirm/', command_views.command_confirm, name='command_confirm'),
 
     # Guest (unauthenticated) chat endpoints — NVIDIA NIM only, IP-rate-limited.
     path('guest/sessions/', guest_views.create_guest_session, name='guest_create_session'),

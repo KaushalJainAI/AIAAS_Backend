@@ -187,10 +187,17 @@ async def run_python_on_files(args: Dict, context: Dict) -> str:
     raw_outputs = args.get("outputs") or []
     if not isinstance(raw_inputs, list) or not isinstance(raw_outputs, list):
         return json.dumps({"error": "'inputs' and 'outputs' must be lists."})
-    if len(raw_inputs) > SANDBOX_FILE_MAX_FILES or len(raw_outputs) > SANDBOX_FILE_MAX_FILES:
+    from tools_config.overlay import alimit as _sandbox_alimit
+    from tools_config.settings_schema import _SANDBOX_MAX_FILES as _sandbox_max
+
+    try:
+        file_cap = await _sandbox_alimit(context, "run_python_on_files", "maxFiles")
+    except KeyError:
+        file_cap = _sandbox_max
+    if len(raw_inputs) > file_cap or len(raw_outputs) > file_cap:
         return json.dumps({
-            "error": f"At most {SANDBOX_FILE_MAX_FILES} input and "
-                     f"{SANDBOX_FILE_MAX_FILES} output files per run."
+            "error": f"At most {file_cap} input and "
+                     f"{file_cap} output files per run."
         })
 
     inputs = [_bare_name(v) for v in raw_inputs if _bare_name(v)]

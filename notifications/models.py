@@ -201,3 +201,36 @@ class HITLReminderSchedule(models.Model):
         if self.next_due_at is not None:
             self.next_due_at = None
             self.save(update_fields=['next_due_at', 'updated_at'])
+
+
+class PushSubscription(models.Model):
+    """
+    One browser's Web Push subscription — the closed-browser channel.
+
+    The socket (`ws/hitl/`) only fires while a tab is open. A stored
+    subscription lets the server reach the browser's push service (via VAPID)
+    when every tab is closed, and the service worker (`public/sw.js`) turns it
+    into an OS notification. One row per (user, endpoint): re-subscribing the
+    same browser upserts rather than duplicating.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='push_subscriptions',
+    )
+    endpoint = models.URLField(max_length=2000, unique=True)
+    p256dh = models.CharField(max_length=255)
+    auth = models.CharField(max_length=255)
+    user_agent = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"Push subscription for {self.user_id} @ {self.endpoint[:60]}"

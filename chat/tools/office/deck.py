@@ -73,10 +73,13 @@ _BOLD = re.compile(r'\*\*(.+?)\*\*')
 # Validation
 # ---------------------------------------------------------------------------
 
-def validate(args: dict) -> dict:
+#: Workspace knob (`render_deck.maxSlides`); the constant stays as the floor
+#: under a failed overlay read — validation clamps the knob to never exceed it.
+def validate(args: dict, *, max_slides: int = MAX_SLIDES) -> dict:
     """The normalised spec, or `SpecError` naming the slide and what to fix."""
     theme = choice(args.get('theme'), 'theme', THEME_NAMES, DEFAULT_THEME)
-    slides_raw = items(args.get('slides'), 'slides', MAX_SLIDES, required=True)
+    slides_raw = items(args.get('slides'), 'slides',
+                       max(1, min(max_slides, MAX_SLIDES)), required=True)
     slides = []
     for n, raw in enumerate(slides_raw, 1):
         if not isinstance(raw, dict):

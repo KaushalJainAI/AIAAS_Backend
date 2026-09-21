@@ -149,6 +149,17 @@ class TurnContext:
     tool_dispatch: ToolDispatch | None = None
     sensitive_tools: frozenset[str] | None = None
 
+    #: Per-tool allow/ask/deny for this run (`{name: mode}`), from the agent's
+    #: `agent_context['toolPermissions']` — merged most-restrictive-wins with
+    #: the delegating parent's map for workers. Read in `tools_node`, which
+    #: folds `ask` into the pause-on-sight set and `allow` out of it, *after*
+    #: the mid-run autonomy override is resolved, so the overrides survive a
+    #: switch. Empty for chat and for every agent saved before the field
+    #: existed, where the autonomy ladder decides alone. `deny` never gates
+    #: here: denied tools are withheld and refused by the toolbox instead.
+    tool_permissions: dict[str, str] = field(default_factory=dict, repr=False,
+                                             compare=False)
+
     #: Scratch space for work that is the same on every pass of this turn's
     #: loop, so it is paid for once instead of per iteration. Mutable inside a
     #: frozen dataclass on purpose: the *binding* is what must not change, and
@@ -176,6 +187,45 @@ class TurnContext:
     #: may browse but not act — because this scope arrived with the tool, so
     #: no agent predates it that an empty default would silently cut off.
     browser_domains: tuple[str, ...] | None = None
+
+    #: Vault logins `browser_act` may fill (`fill_secret`), as credential
+    #: slugs, or empty for none. Empty means none — unlike `browser_domains`,
+    #: no run predates this scope, so there is nothing an empty default would
+    #: cut off. A slug here still resolves only its owner's credential, and
+    #: the value is scrubbed from everything handed back.
+    browser_logins: tuple[str, ...] = ()
+
+    #: Who an unattended run may message (`message_send`), or None for no
+    #: allowlist. Chat passes None: a human is typing and watching, and
+    #: approval is the gate. An agent run passes its own selection; an
+    #: unattended send to anyone not on it is refused whatever the autonomy
+    #: level, because autonomy decides whether a call pauses, never who it
+    #: may reach. None and empty both refuse there — an allowlist nobody
+    #: wrote is not an allowlist.
+    recipients: tuple[str, ...] | None = None
+
+    #: Which databases `query_sql` / `execute_sql` may touch (row ids), or
+    #: None for any the user owns. An agent run passes its own selection;
+    #: empty means none — the field arrives with the feature, so no agent
+    #: predates it that an empty default would cut off.
+    data_connections: tuple[int, ...] | None = None
+
+    #: Which HTTP APIs `call_api` may reach (`{id: read|all}`), or None for
+    #: any the user owns. Empty means none, for the same reason as above.
+    api_connections: dict[int, str] | None = None
+
+    #: Extra hosts the run may reach, added to what its connections already
+    #: allow (`dbHosts` for databases, `apiHosts` for APIs). Empty: the
+    #: connections' own hosts and nothing else.
+    db_hosts: tuple[str, ...] = ()
+    api_hosts: tuple[str, ...] = ()
+
+    #: Extra hosts the compute workspace may reach. Empty: the default egress.
+    workspace_egress: tuple[str, ...] = ()
+
+    #: Which code projects `shell` tools may touch, or None for any owned.
+    #: Empty means none — the field arrives with the feature.
+    code_projects: tuple[int, ...] | None = None
 
     #: Which knowledge bases the KB tools may reach this turn, or None for "any
     #: the user owns". The agent runtime sets it from the builder's KB selection
@@ -1273,7 +1323,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     turn = _context(config)
     last = state["messages"][-1]
     if not isinstance(last, AIMessage) or not last.tool_calls:
-        return {"messages": []}
+        return {"messages": [], "metadata": dict(state.get("metadata", {}))}
 
     meta = dict(state.get("metadata", {}))
     trace = list(state.get("tool_trace", []))
@@ -1305,8 +1355,18 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # not given. None is unrestricted, as everywhere else.
         "delegation_scope": turn.delegation_scope,
         "browser_domains": turn.browser_domains,
+        "browser_logins": turn.browser_logins,
+        "recipients": turn.recipients,
+        "data_connections": turn.data_connections,
+        "api_connections": turn.api_connections,
+        "db_hosts": turn.db_hosts,
+        "api_hosts": turn.api_hosts,
         # Extra archives the retrieval tools may read — a worker's parent.
         "archive_scopes": turn.archive_scopes,
+        # This run's per-tool allow/ask/deny. Read by `invoke_subagent`, so
+        # a worker inherits its parent's restrictions most-restrictive-wins
+        # rather than re-widening them by holding a looser row.
+        "tool_permissions": dict(turn.tool_permissions or {}),
         # Who started the run. `publish_page` refuses above-`link`
         # visibilities from unattended callers.
         "caller": turn.caller,
@@ -1334,6 +1394,15 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         chosen = steering.autonomy(turn.session_id)
         if chosen and chosen in turn.approval_modes:
             sensitive, policy = turn.approval_modes[chosen]
+
+    # Per-tool ask/allow, folded in after the autonomy level (and any mid-run
+    # switch of it) is resolved, so the overrides survive a switch. `ask`
+    # pauses even under `auto`/`full`; `allow` frees even under `ask` or
+    # `review`. `deny` is not a gate — denied tools are withheld and refused
+    # by the toolbox before this node ever sees them.
+    if turn.tool_permissions:
+        sensitive = permissions.apply_tool_permission_overrides(
+            sensitive, turn.tool_permissions)
 
     calls = [
         ToolCall(id=raw["id"], name=raw["name"], arguments=dict(raw.get("args") or {}))
@@ -1588,6 +1657,10 @@ async def steering_node(state: AgentState, config: RunnableConfig) -> dict[str, 
     then have to tell apart from an approval.
 
     Costs one dict lookup per tool round when nobody is steering.
+
+    Returns nothing (not even passthrough state): like `curate_node`, it
+    rewrites `messages` and nothing else, so the plan parked in `metadata`
+    stays immune by construction (`test_todos.py` pins this shape).
     """
     from . import steering
 

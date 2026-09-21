@@ -26,6 +26,54 @@ from workflow_backend.thresholds import (
     VIDEO_SEARCH_MAX_RESULTS,
 )
 
+#: Local defaults for knobs below. Each mirrors the module constant its tool
+#: reads as the floor under a failed overlay lookup — declared once here so
+#: the catalogue, the clamp range and the tool agree, instead of three copies
+#: drifting. Where a thresholds.py value already exists it is imported above.
+_SCRAPE_CHAR_LIMIT = 15_000
+_KB_TOP_K = 5
+_KB_SNIPPET_CHARS = 2_000
+_DOC_LIST_CAP = 50
+_READ_WINDOW_CHARS = 12_000
+_FILE_LIST_LIMIT = 200
+_FILE_READ_CHARS = 30_000
+_FILE_WRITE_CHARS = 200_000
+_SQL_ROW_CAP = 1_000
+_API_OP_LIST_LIMIT = 30
+_API_RESPONSE_CHARS = 32_000
+_BROWSER_TEXT_CHARS = 15_000
+_BROWSER_MAX_STEPS = 15
+_TTS_MAX_CHARS = 5_000
+_OCR_MAX_PAGES = 20
+_OCR_PAGE_CHARS = 8_000
+_OCR_MAX_ROWS = 200
+_ESIGN_MAX_SIGNERS = 10
+_TALK_SEARCH_LIMIT = 50
+_TALK_READ_LIMIT = 100
+_TALK_BODY_CHARS = 4_000
+_TALK_MAX_PER_RUN = 20
+_TALK_MAX_PER_RECIPIENT = 5
+_AGENT_SEARCH_DEFAULT = 10
+_AGENT_SEARCH_MAX = 25
+_AGENT_ANSWER_CHARS = 20_000
+_HISTORY_MAX_MATCHES = 12
+_HISTORY_MAX_TOTAL_CHARS = 12_000
+_HISTORY_SNIPPET_CHARS = 600
+_RECALL_MAX_MATCHES = 3
+_RECALL_MAX_TOTAL_CHARS = 6_000
+_UPDATE_TODOS_MAX = 20
+_EXTRACT_MAX_DOCS = 25
+_NOTIFY_MAX_PER_RUN = 3
+_DECK_MAX_SLIDES = 40
+_WORKBOOK_MAX_ROWS = 5_000
+_WORKBOOK_MAX_SHEETS = 10
+_DOCUMENT_MAX_BLOCKS = 300
+_DIAGRAM_MAX_NODES = 24
+_DIAGRAM_MAX_EDGES = 40
+_WORKBOOK_EDIT_MAX = 200
+_SANDBOX_MAX_FILES = 5
+_IMAGE_PROMPT_CHARS = 2_000
+
 
 @dataclass(frozen=True, slots=True)
 class Setting:
@@ -126,6 +174,216 @@ TOOL_SETTINGS: dict[str, tuple[Setting, ...]] = {
         Setting('outputLimit', 'Output kept',
                 'How much printed output comes back from one run.',
                 20_000, 1_000, 60_000, 'characters'),
+    ),
+    'scrape_webpage': (
+        Setting('charLimit', 'Characters per page',
+                'How much text is kept from one scraped page. Longer pages are cut.',
+                _SCRAPE_CHAR_LIMIT, 2_000, 60_000, 'characters'),
+    ),
+    'knowledge_base_search': (
+        Setting('topK', 'Results per search',
+                'How many chunks one knowledge-base search brings back.',
+                _KB_TOP_K, 1, 20),
+        Setting('snippetChars', 'Characters per chunk',
+                'How much text is kept from each matching chunk.',
+                _KB_SNIPPET_CHARS, 500, 8_000, 'characters'),
+    ),
+    'keyword_search': (
+        Setting('topK', 'Results per search',
+                'How many chunks one keyword search brings back.',
+                _KB_TOP_K, 1, 20),
+        Setting('snippetChars', 'Characters per chunk',
+                'How much text is kept from each matching chunk.',
+                _KB_SNIPPET_CHARS, 500, 8_000, 'characters'),
+    ),
+    'list_documents': (
+        Setting('maxDocs', 'Documents per listing',
+                'How many documents one listing returns.',
+                _DOC_LIST_CAP, 10, 200),
+    ),
+    'read_document': (
+        Setting('windowChars', 'Characters per read',
+                'How much text one document read returns. Longer documents are read in windows.',
+                _READ_WINDOW_CHARS, 2_000, 60_000, 'characters'),
+    ),
+    'list_files': (
+        Setting('maxEntries', 'Entries per listing',
+                'How many folders and documents one file listing returns.',
+                _FILE_LIST_LIMIT, 20, 1_000),
+    ),
+    'find_files': (
+        Setting('maxEntries', 'Files per search',
+                'How many files one file search returns.',
+                _FILE_LIST_LIMIT, 20, 1_000),
+    ),
+    'read_file': (
+        Setting('windowChars', 'Characters per read',
+                'How much text one file read returns. Longer files are read in windows.',
+                _FILE_READ_CHARS, 2_000, 60_000, 'characters'),
+    ),
+    'write_file': (
+        Setting('maxChars', 'Characters per write',
+                'How much text one file write may store.',
+                _FILE_WRITE_CHARS, 10_000, 500_000, 'characters'),
+    ),
+    'edit_file': (
+        Setting('maxChars', 'Characters per edit',
+                'How much text one file edit may store.',
+                _FILE_WRITE_CHARS, 10_000, 500_000, 'characters'),
+    ),
+    'query_sql': (
+        Setting('maxRows', 'Rows per query',
+                'How many rows come back inline. More are saved to a CSV file.',
+                _SQL_ROW_CAP, 100, 5_000, 'rows'),
+    ),
+    'list_api_operations': (
+        Setting('maxOps', 'Operations per listing',
+                'How many API operations one listing returns.',
+                _API_OP_LIST_LIMIT, 5, 100),
+    ),
+    'call_api': (
+        Setting('responseChars', 'Characters per response',
+                'How much of an API response comes back inline. Larger responses are saved to a file.',
+                _API_RESPONSE_CHARS, 4_000, 64_000, 'characters'),
+    ),
+    'browse_page': (
+        Setting('textChars', 'Characters per page',
+                'How much rendered text one browser read keeps.',
+                _BROWSER_TEXT_CHARS, 2_000, 60_000, 'characters'),
+    ),
+    'browser_act': (
+        Setting('maxSteps', 'Steps per call',
+                'How many browser steps one call may take.',
+                _BROWSER_MAX_STEPS, 3, 30, 'steps'),
+    ),
+    'text_to_speech': (
+        Setting('maxChars', 'Characters per call',
+                'How much text one call speaks. Split longer passages yourself.',
+                _TTS_MAX_CHARS, 1_000, 10_000, 'characters'),
+    ),
+    'ocr_document': (
+        Setting('maxPages', 'Pages per call',
+                'How many PDF pages one call re-reads. Fewer is faster.',
+                _OCR_MAX_PAGES, 1, 50, 'pages'),
+        Setting('pageChars', 'Characters per page',
+                'How much text is kept from each re-read page.',
+                _OCR_PAGE_CHARS, 2_000, 20_000, 'characters'),
+        Setting('maxRows', 'Rows per table read',
+                'How many rows a table-mode read returns.',
+                _OCR_MAX_ROWS, 20, 1_000, 'rows'),
+    ),
+    'request_signature': (
+        Setting('maxSigners', 'Signers per request',
+                'How many signers one signature request may name.',
+                _ESIGN_MAX_SIGNERS, 1, 20),
+    ),
+    'message_search': (
+        Setting('maxResults', 'Messages per search',
+                'How many messages one messaging search returns.',
+                _TALK_SEARCH_LIMIT, 10, 200),
+    ),
+    'message_read': (
+        Setting('maxLimit', 'Messages per read',
+                'How many messages one conversation read returns.',
+                _TALK_READ_LIMIT, 10, 200),
+    ),
+    'message_send': (
+        Setting('bodyChars', 'Characters per message',
+                'How much text one message holds. Split longer messages.',
+                _TALK_BODY_CHARS, 500, 10_000, 'characters'),
+        Setting('maxPerRun', 'Messages per run',
+                'How many messages one run may send in total.',
+                _TALK_MAX_PER_RUN, 1, 50),
+        Setting('maxPerRecipient', 'Messages per recipient',
+                'How many messages one run may send to one recipient.',
+                _TALK_MAX_PER_RECIPIENT, 1, 20),
+    ),
+    'message_draft': (
+        Setting('bodyChars', 'Characters per draft',
+                'How much text one draft holds.',
+                _TALK_BODY_CHARS, 500, 10_000, 'characters'),
+    ),
+    'search_agents': (
+        Setting('maxResults', 'Agents per search',
+                'How many agents one search returns.',
+                _AGENT_SEARCH_MAX, 5, 50),
+    ),
+    'search_conversation_history': (
+        Setting('maxMatches', 'Messages per search',
+                'How many past messages one history search returns.',
+                _HISTORY_MAX_MATCHES, 3, 50),
+        Setting('totalChars', 'Total characters',
+                'Ceiling on the whole history-search result.',
+                _HISTORY_MAX_TOTAL_CHARS, 2_000, 60_000, 'characters'),
+    ),
+    'recall_context': (
+        Setting('maxMatches', 'Items per recall',
+                'How many archived items one recall returns.',
+                _RECALL_MAX_MATCHES, 1, 10),
+        Setting('totalChars', 'Total characters',
+                'Ceiling on the whole recall result.',
+                _RECALL_MAX_TOTAL_CHARS, 1_000, 30_000, 'characters'),
+    ),
+    'update_todos': (
+        Setting('maxItems', 'Steps per plan',
+                'How many steps one plan may hold. Track work in fewer, larger steps.',
+                _UPDATE_TODOS_MAX, 5, 50),
+    ),
+    'extract_data': (
+        Setting('maxDocs', 'Documents per call',
+                'How many documents one extraction call may take.',
+                _EXTRACT_MAX_DOCS, 1, 100),
+    ),
+    'notify_user': (
+        Setting('maxPerRun', 'Notifications per run',
+                'How many notifications one run may send.',
+                _NOTIFY_MAX_PER_RUN, 1, 10),
+    ),
+    'render_deck': (
+        Setting('maxSlides', 'Slides per deck',
+                'How many slides one deck may hold.',
+                _DECK_MAX_SLIDES, 10, 100),
+    ),
+    'render_workbook': (
+        Setting('maxRows', 'Rows per sheet',
+                'How many data rows one sheet may hold.',
+                _WORKBOOK_MAX_ROWS, 500, 20_000, 'rows'),
+        Setting('maxSheets', 'Sheets per workbook',
+                'How many sheets one workbook may hold.',
+                _WORKBOOK_MAX_SHEETS, 1, 20),
+    ),
+    'render_document': (
+        Setting('maxBlocks', 'Blocks per document',
+                'How many content blocks one document may hold.',
+                _DOCUMENT_MAX_BLOCKS, 50, 1_000),
+    ),
+    'render_pdf': (
+        Setting('maxBlocks', 'Blocks per document',
+                'How many content blocks one PDF may hold.',
+                _DOCUMENT_MAX_BLOCKS, 50, 1_000),
+    ),
+    'render_diagram': (
+        Setting('maxNodes', 'Nodes per diagram',
+                'How many boxes one diagram may hold.',
+                _DIAGRAM_MAX_NODES, 5, 50),
+        Setting('maxEdges', 'Arrows per diagram',
+                'How many arrows one diagram may hold.',
+                _DIAGRAM_MAX_EDGES, 5, 100),
+    ),
+    'edit_workbook': (
+        Setting('maxEdits', 'Edits per call',
+                'How many cell edits one call may make.',
+                _WORKBOOK_EDIT_MAX, 20, 1_000),
+    ),
+    'run_python_on_files': (
+        Setting('maxFiles', 'Files per run',
+                'How many files one sandbox run accepts in each direction.',
+                _SANDBOX_MAX_FILES, 1, 10, 'files'),
+    ),
+    'generate_image': (
+        Setting('promptChars', 'Characters per prompt',
+                'How long an image prompt may be.',
+                _IMAGE_PROMPT_CHARS, 500, 5_000, 'characters'),
     ),
 }
 

@@ -20,13 +20,24 @@ from asgiref.sync import sync_to_async
 
 from .registry import tool
 
+from tools_config.overlay import alimit
+
+from tools_config.settings_schema import (
+    _EXTRACT_MAX_DOCS,
+    _NOTIFY_MAX_PER_RUN,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Notifications one run may send. A run that has something to say has one
-#: thing to say; without a cap, a loop turns the feed into a log.
+#: thing to say; without a cap, a loop turns the feed into a log. Now a
+#: per-workspace knob (`notify_user.maxPerRun`); the constant stays as the
+#: floor under a failed overlay read.
 MAX_NOTIFICATIONS_PER_RUN = 3
 TITLE_CHARS = 120
 MESSAGE_CHARS = 1000
+#: Now a per-workspace knob (`extract_data.maxDocs`); the constant stays as
+#: the floor under a failed overlay read.
 MAX_EXTRACT_DOCUMENTS = 25
 
 
@@ -83,7 +94,7 @@ def _run_extraction(user_id: int, schema_id: int, paths: list[str], scope) -> di
                 'paths': {
                     'type': 'array',
                     'items': {'type': 'string'},
-                    'description': f"Documents to extract from, at most {MAX_EXTRACT_DOCUMENTS}.",
+                    'description': "Documents to extract from.",
                 },
             },
             'required': ['schema_id', 'paths'],
@@ -100,10 +111,11 @@ async def extract_data(args: Dict, context: Dict) -> str:
     paths = [str(p).strip() for p in (args.get('paths') or []) if str(p).strip()]
     if not paths:
         return json.dumps({'error': 'Give the paths of the documents to extract from.'})
-    if len(paths) > MAX_EXTRACT_DOCUMENTS:
+    cap = await alimit(context, "extract_data", "maxDocs")
+    if len(paths) > cap:
         return json.dumps({
             'error': f'{len(paths)} documents is more than one call may take '
-                     f'({MAX_EXTRACT_DOCUMENTS}). Run it in batches.'
+                     f'({cap}). Run it in batches.'
         })
     try:
         schema_id = int(args.get('schema_id'))
@@ -170,10 +182,12 @@ async def notify_user(args: Dict, context: Dict) -> str:
 
     # Counted on the turn context, which is per run: a loop cannot fill the
     # feed, and the model is told it has stopped rather than silently dropped.
+    # The ceiling is a workspace knob (`notify_user.maxPerRun`).
+    cap = await alimit(context, "notify_user", "maxPerRun")
     sent = context.setdefault('_notifications_sent', [0])
-    if sent[0] >= MAX_NOTIFICATIONS_PER_RUN:
+    if sent[0] >= cap:
         return json.dumps({
-            'error': f'This run has already sent {MAX_NOTIFICATIONS_PER_RUN} notifications, '
+            'error': f'This run has already sent {cap} notifications, '
                      f'which is the limit. Put the rest in your answer.'
         })
 
@@ -188,7 +202,22 @@ async def notify_user(args: Dict, context: Dict) -> str:
         user = get_user_model().objects.filter(id=user_id).first()
         if user is None:
             return None
-        return create_notification(user, 'agent_update', title, message, data=data, send_email=False)
+        notif = create_notification(user, 'agent_update', title, message, data=data, send_email=False)
+        if notif is not None:
+            # Closed-browser twin of the socket ping above, gated on the same
+            # device toggle — never email, never loud when the user muted us.
+            try:
+                from notifications.models import NotificationPreference
+                from notifications.webpush import send_web_push
+
+                prefs = NotificationPreference.objects.filter(user=user).first()
+                if prefs is None or prefs.device_notifications_enabled:
+                    send_web_push(user, title=title, body=message,
+                                  action_url=data.get('action_url') or '/inbox',
+                                  kind='agent_update')
+            except Exception:
+                logger.exception('[Notify] web push failed')
+        return notif
 
     try:
         notification = await sync_to_async(work)()
@@ -201,6 +230,6 @@ async def notify_user(args: Dict, context: Dict) -> str:
     sent[0] += 1
     return json.dumps({
         'sent': True,
-        'remaining': MAX_NOTIFICATIONS_PER_RUN - sent[0],
+        'remaining': (await alimit(context, "notify_user", "maxPerRun")) - sent[0],
         'rendered': 'The user has been notified. Do not repeat this in every turn.',
     })

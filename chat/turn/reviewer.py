@@ -70,6 +70,14 @@ def static_check(
         if visibility != 'link':
             return False, f'Publishing above {visibility!r} always needs a human.'
     if tool_name == 'browser_act':
+        from browsing.engine import looks_submitting
+
+        if looks_submitting(args.get('steps')):
+            return False, (
+                'These steps move toward submitting, paying or sending, '
+                'and the whole call needs a human.'
+            )
+    if tool_name == 'browser_act':
         steps = args.get('steps') or []
         Touchy = ('download', 'upload')
         if isinstance(steps, list) and any(

@@ -148,6 +148,7 @@ class ExecutionLog(models.Model):
         ('orchestrator', 'Delegated by another agent'),
         ('trigger', 'Trigger'),
         ('eval', 'Evaluation sweep'),
+        ('mission', 'Mission chain'),
     ]
 
     execution_id = models.UUIDField(
@@ -181,6 +182,14 @@ class ExecutionLog(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='execution_logs',
+    )
+    #: The mission this run belongs to, if it is one link in a chain.
+    mission = models.ForeignKey(
+        'missions.Mission',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='runs',
     )
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')

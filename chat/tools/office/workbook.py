@@ -38,6 +38,10 @@ from .themes import LIGHT_PALETTE
 MAX_SHEETS = 10
 MAX_COLUMNS = 50
 MAX_ROWS = 5000
+#: Workspace knobs (`render_workbook.maxRows/maxSheets`); the constants stay
+#: as the floor under a failed overlay read — validation takes the knob and
+#: clamps it to never exceed these, so a stored value cannot widen past the
+#: code ceiling.
 MAX_CELL_CHARS = 2000
 MAX_HEADER_CHARS = 80
 #: Rows per sheet kept in the stored spec for the in-app preview. The file has
@@ -75,9 +79,16 @@ GRID = '#D9DDE3'
 # Validation
 # ---------------------------------------------------------------------------
 
-def validate(args: dict) -> dict:
-    """The normalised spec, or `SpecError` saying what to fix."""
-    sheets_raw = items(args.get('sheets'), 'sheets', MAX_SHEETS, required=True)
+def validate(args: dict, *, max_sheets: int = MAX_SHEETS,
+               max_rows: int = MAX_ROWS) -> dict:
+    """The normalised spec, or `SpecError` saying what to fix.
+
+    `max_sheets` / `max_rows` are the caller's workspace knobs
+    (`render_workbook.maxSheets/maxRows`) resolved by the tool layer, clamped
+    to never exceed the module ceilings — a stored knob narrows, never widens.
+    """
+    sheets_raw = items(args.get('sheets'), 'sheets',
+                       max(1, min(max_sheets, MAX_SHEETS)), required=True)
     sheets: list[dict] = []
     seen: set[str] = set()
     for i, raw in enumerate(sheets_raw, 1):
@@ -90,7 +101,8 @@ def validate(args: dict) -> dict:
 
         columns = _columns(raw.get('columns'), name)
         headers = [c['header'] for c in columns]
-        rows = _rows(raw.get('rows'), name, headers)
+        rows = _rows(raw.get('rows'), name, headers,
+                     max_rows=max(1, min(max_rows, MAX_ROWS)))
         sheets.append({
             'name': name,
             'columns': columns,
@@ -128,9 +140,10 @@ def _columns(raw: Any, sheet: str) -> list[dict]:
     return out
 
 
-def _rows(raw: Any, sheet: str, headers: list[str]) -> list[list]:
+def _rows(raw: Any, sheet: str, headers: list[str],
+            max_rows: int = MAX_ROWS) -> list[list]:
     out: list[list] = []
-    for r, row in enumerate(items(raw, f'{sheet}: rows', MAX_ROWS), 1):
+    for r, row in enumerate(items(raw, f'{sheet}: rows', max_rows), 1):
         if isinstance(row, dict):
             # Keyed by header: the shape a model most often has the data in
             # already, and one where a missing key is plainly a blank cell.

@@ -70,6 +70,9 @@ urlpatterns = [
     # Standalone Chat
     path('api/chat/', include('chat.urls')),
 
+    # Missions — the HTTP routes P7 left out (only the model could start one).
+    path('api/missions/', include('missions.urls')),
+
 
     # Notifications
     path('api/notifications/', include('notifications.urls')),
@@ -80,8 +83,17 @@ urlpatterns = [
     # Extract (document -> rows, owned by inference)
     path('api/extraction/', include('inference.extraction_urls')),
 
+    # E-sign webhook (provider callbacks; the secret is the credential)
+    path('api/esign/', include('esign.urls')),
+
+    # Messaging webhooks (provider callbacks; channel + secret attribute)
+    path('api/messaging/', include('messaging.urls')),
+
     # Eval (sub-agent evaluation + human supervision of the graders)
     path('api/eval/', include('eval.urls')),
+
+    # Workspaces (compute plane: jobs wake the agent on exit)
+    path('api/workspaces/', include('workspaces.urls')),
 ]
 
 

@@ -18,11 +18,22 @@ from typing import Dict, List
 
 from .registry import tool
 
+from tools_config.overlay import alimit
+
+from tools_config.settings_schema import (
+    _DOC_LIST_CAP,
+    _KB_SNIPPET_CHARS,
+    _KB_TOP_K,
+    _READ_WINDOW_CHARS,
+)
+
 logger = logging.getLogger(__name__)
 
 #: How much of one document read_document hands back per call. Matches the
 #: read_tool_output window on purpose: paging exists so the model can pick
-#: what it needs, not reassemble whole documents in context.
+#: what it needs, not reassemble whole documents in context. Now a per-tool
+#: knob (`read_document.windowChars`); the constant stays as the floor under
+#: a failed overlay read.
 READ_WINDOW_CHARS = 12_000
 
 
@@ -191,7 +202,11 @@ async def knowledge_base_search(args: Dict, context: Dict) -> str:
     query = args.get("query", "")
     if not query:
         return "Error: Missing search query"
-    top_k = min(int(args.get("top_k", 5)), 20)
+    try:
+        top_k = int(args.get("top_k", await alimit(context, "knowledge_base_search", "topK")))
+    except (TypeError, ValueError):
+        top_k = _KB_TOP_K
+    top_k = max(1, min(top_k, 20))
     user_id = context.get("user_id")
     if not user_id:
         return json.dumps({"error": "No user context for knowledge base search."})
@@ -203,7 +218,9 @@ async def knowledge_base_search(args: Dict, context: Dict) -> str:
 
         # A keyword-only KB has no vectors to search. Route rather than fail.
         if kb_model.backend == 'fulltext':
-            result = await _keyword_search_impl(kb_model, query, top_k)
+            result = await _keyword_search_impl(
+                kb_model, query, top_k,
+                await alimit(context, "knowledge_base_search", "snippetChars"))
             payload = json.loads(result)
             payload["note"] = (
                 f"KB '{kb_model.name}' is keyword-indexed; results are exact/prefix "
@@ -231,7 +248,7 @@ async def knowledge_base_search(args: Dict, context: Dict) -> str:
             {
                 "document_id": r.document_id,
                 "score": round(r.score, 4),
-                "content": r.content[:2000],
+                "content": r.content[:await alimit(context, "knowledge_base_search", "snippetChars")],
                 "metadata": r.metadata,
                 "is_image": r.is_image,
             }
@@ -274,7 +291,11 @@ async def keyword_search(args: Dict, context: Dict) -> str:
     query = args.get("query", "")
     if not query.strip():
         return "Error: Missing search query"
-    top_k = min(int(args.get("top_k", 5)), 20)
+    try:
+        top_k = int(args.get("top_k", await alimit(context, "keyword_search", "topK")))
+    except (TypeError, ValueError):
+        top_k = _KB_TOP_K
+    top_k = max(1, min(top_k, 20))
     user_id = context.get("user_id")
     if not user_id:
         return json.dumps({"error": "No user context for keyword search."})
@@ -300,12 +321,15 @@ async def keyword_search(args: Dict, context: Dict) -> str:
                 ),
             })
 
-        return await _keyword_search_impl(kb_model, query, top_k)
+        return await _keyword_search_impl(
+            kb_model, query, top_k,
+            await alimit(context, "keyword_search", "snippetChars"))
     except Exception as e:
         return f"Error: Keyword search failed: {str(e)}"
 
 
-async def _keyword_search_impl(kb_model, query: str, top_k: int) -> str:
+async def _keyword_search_impl(kb_model, query: str, top_k: int,
+                               snippet_chars: int = _KB_SNIPPET_CHARS) -> str:
     from inference.backends.fulltext import FullTextBackend
     backend = FullTextBackend(kb_model)
     results = await backend.search(query, top_k=top_k)
@@ -320,7 +344,7 @@ async def _keyword_search_impl(kb_model, query: str, top_k: int) -> str:
             "document_name": r.metadata.get("name"),
             "match": r.metadata.get("match"),
             "score": round(r.score, 4),
-            "content": r.content[:2000],
+            "content": r.content[:snippet_chars],
         }
         for r in results
     ]
@@ -356,7 +380,7 @@ async def list_documents(args: Dict, context: Dict) -> str:
         if error:
             return error
 
-        cap = 50
+        cap = await alimit(context, "list_documents", "maxDocs")
 
         def _docs():
             # -id breaks ties: uploads inside one clock tick (coarse on some
@@ -466,7 +490,7 @@ async def read_document(args: Dict, context: Dict) -> str:
                 f"({len(text):,} characters). Nothing to read."
             )
 
-        window = text[offset:offset + READ_WINDOW_CHARS]
+        window = text[offset:offset + await alimit(context, "read_document", "windowChars")]
         end = offset + len(window)
         remaining = len(text) - end
         footer = (

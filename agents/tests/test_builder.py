@@ -122,17 +122,18 @@ class SanitiseTests(APITestCase):
     def test_controls_that_do_nothing_are_not_offered(self):
         """A grant nothing serves, and a guardrail nothing reads, are promises.
 
-        The builder chat offered both: `shell` switched on a tool no run is
-        handed, and `reviewAgent` told the user a second agent would check the
-        answers when nothing ever did.
+        The builder chat used to offer both: `shell` switched on a tool no run
+        was handed (served since P6 through the workspace code tools), and
+        `reviewAgent` told the user a second agent would check the answers
+        when nothing ever did.
         """
-        self.assertNotIn('tools.shell', KNOBS)
+        self.assertIn('tools.shell', KNOBS)
         self.assertNotIn('reviewAgent', KNOBS)
         out = self._sanitise([
             {'path': 'tools.shell', 'value': True},
             {'path': 'reviewAgent', 'value': True},
         ])
-        self.assertEqual(out, [])
+        self.assertEqual([c['path'] for c in out], ['tools.shell'])
 
     def test_the_prompt_does_not_ask_for_the_retired_trigger_field(self):
         from agents.views.builder import SYSTEM

@@ -88,9 +88,39 @@ GRANT_META: dict[str, dict[str, str]] = {
         'description': 'Tools from your connected accounts (Gmail, Drive, Calendar and MCP servers), using your credentials.',
         'icon': 'plug',
     },
+    'voice': {
+        'label': 'Voice',
+        'description': 'Transcribe recordings and speak text into audio files.',
+        'icon': 'mic',
+    },
+    'esign': {
+        'label': 'E-signatures',
+        'description': 'Send documents out for e-signature and check their status.',
+        'icon': 'pen',
+    },
+    'talk': {
+        'label': 'Messaging',
+        'description': 'Read, draft and send on Slack, WhatsApp, Teams and SMS.',
+        'icon': 'message',
+    },
+    'data': {
+        'label': 'Databases',
+        'description': 'Query SQL databases, and write where the owner allowed it.',
+        'icon': 'database',
+    },
+    'api': {
+        'label': 'API calls',
+        'description': 'Call the user\'s HTTP APIs through one generic caller.',
+        'icon': 'plug',
+    },
+    'compute': {
+        'label': 'Compute',
+        'description': 'Run commands and long jobs on your own workspace machine.',
+        'icon': 'terminal',
+    },
     'shell': {
         'label': 'Shell',
-        'description': 'Host shell access - not served. Leave off.',
+        'description': 'Edit code in projects: read, test, commit, open a PR.',
         'icon': 'terminal',
     },
     'system': {
@@ -118,49 +148,99 @@ GRANT_META: dict[str, dict[str, str]] = {
         'description': 'Call this platform as the user - sensitive, gated.',
         'icon': 'shield',
     },
+    'delegation': {
+        'label': 'Agent runs',
+        'description': 'Run and check saved agents from chat - not grant-gated, chat-only.',
+        'icon': 'users',
+    },
+    'authoring': {
+        'label': 'Agent authoring',
+        'description': 'Create and edit saved agents from chat - sensitive, chat-only.',
+        'icon': 'wrench',
+    },
+    'memory': {
+        'label': 'User memory',
+        'description': 'Durable facts about the user, across sessions - chat-only.',
+        'icon': 'message',
+    },
 }
 
 
-# Logical grouping for library display - broader than GRANT_TOOLS so the
-# catalogue is complete even for chat-only tools that are not grant-gated.
-# The library shows the *intent* of each tool; the grant check still uses
-# GRANT_TOOLS in AgentToolbox.
+# Logical grouping for library display. Every grant in GRANT_TOOLS has a key
+# here — including the five (voice/esign/talk/data/api) whose GRANT_META rows
+# were added uncommitted — so `_grant_for_tool` never falls through to
+# 'system' for a grant-gated tool. The library shows the *intent* of each
+# tool; the grant check still uses GRANT_TOOLS in AgentToolbox.
+#
+# Two deliberate extras beyond GRANT_TOOLS, both chat-only and unreachable by
+# an agent no matter the grants: `authoring` (create_agent/update_agent,
+# gated by being absent from every GRANT_TOOLS value) and `memory`
+# (remember/forget_about_user). They are grouped so the catalogue names them
+# honestly instead of dumping them in 'system'.
 LIBRARY_GROUPS: dict[str, tuple[str, ...]] = {
     'webSearch': ('web_search', 'deep_research', 'image_search', 'video_search'),
     'scrape': ('scrape_webpage', 'read_url', 'download_file'),
     'rag': ('list_knowledge_bases', 'knowledge_base_search', 'keyword_search',
-            'list_documents', 'read_document', 'extract_data'),
+            'list_documents', 'read_document', 'extract_data', 'ocr_document'),
     'codeExecution': ('execute_python', 'run_python_on_files'),
     'office': ('render_deck', 'render_workbook', 'render_document', 'render_pdf',
                'edit_workbook', 'render_diagram'),
     'media': ('generate_image',),
     'publish': ('publish_page',),
     'browser': ('browse_page', 'browser_act'),
-    'fileOps': ('list_files', 'read_file', 'write_file', 'make_directory',
-                'delete_file'),
-    'subAgents': ('search_agents', 'run_agent', 'get_agent_run', 'invoke_subagent'),
-    'system': ('get_current_time', 'notify_user'),
+    'voice': ('transcribe_audio', 'text_to_speech'),
+    'esign': ('request_signature', 'signature_status'),
+    'talk': ('message_channels', 'message_search', 'message_read',
+             'message_draft', 'message_send'),
+    'data': ('list_data_connections', 'describe_schema', 'query_sql',
+             'execute_sql'),
+    'api': ('list_api_operations', 'call_api'),
+    'compute': ('workspace_exec', 'start_job', 'job_status', 'job_logs',
+                'cancel_job', 'sync_files'),
+    'fileOps': ('list_files', 'find_files', 'read_file', 'write_file',
+                'edit_file', 'make_directory', 'delete_file'),
+    # `run_agent` / `get_agent_run` are deliberately absent: GRANT_TOOLS only
+    # unlocks search_agents + invoke_subagent, and the library must not imply
+    # a grant unlocks tools the runtime never serves through it. Both still
+    # appear in the catalogue — via the 'delegation' key below — so the page
+    # names them instead of hiding them. `start_mission` joins them: chat-only
+    # like `create_agent`, but kept apart so the page can say "missions" where
+    # it means missions.
+    'subAgents': ('search_agents', 'invoke_subagent'),
+    'delegation': ('run_agent', 'get_agent_run', 'start_mission'),
+    'authoring': ('create_agent', 'update_agent'),
+    'memory': ('remember_about_user', 'forget_about_user'),
+    'system': ('get_current_time', 'update_todos', 'render_chart',
+               'render_dashboard', 'notify_user', 'mission_status', 'wait_for',
+               'complete_mission', 'report_progress', 'save_dashboard'),
     'mcp': (),
-    'shell': (),
+    'shell': ('ws_list', 'ws_read', 'ws_search', 'ws_write', 'ws_edit',
+              'ws_apply_patch', 'ws_run', 'git_status', 'git_diff',
+              'git_commit', 'git_push', 'open_pull_request'),
     'chat': ('search_conversation_history', 'get_chat_message_full_text',
              'read_attachment_text', 'read_tool_output', 'recall_context'),
     'vision': ('ask_vision',),
-    'artifacts': ('render_html_artifact',),
+    'artifacts': ('render_html_artifact', 'render_chart'),
     'internal': ('call_internal_api',),
 }
 
-#: Display order. The six grant groups first, because those are the ones an
-#: agent's permissions screen mirrors; everything always-on below them.
+#: Display order. Grant groups first, because those are the ones an agent's
+#: permissions screen mirrors; chat-only groups (delegation/authoring/memory)
+#: and everything always-on below them.
 CATEGORY_ORDER = [
     'webSearch', 'scrape', 'rag', 'codeExecution', 'fileOps', 'office', 'media',
-    'publish', 'browser', 'subAgents', 'system', 'chat', 'vision', 'artifacts', 'internal', 'mcp', 'shell',
+    'publish', 'browser', 'voice', 'esign', 'talk', 'data', 'api', 'compute',
+    'subAgents', 'mcp', 'shell',
+    'delegation', 'authoring', 'memory',
+    'system', 'chat', 'vision', 'artifacts', 'internal',
 ]
 
-#: The six that mirror a grant in the agent builder. Sent to the client so the
+#: Grants that mirror a toggle in the agent builder. Sent to the client so the
 #: split between "granted per agent" and "always on" is decided here, next to
 #: GRANT_TOOLS, rather than by a literal array in the page.
 GRANT_CATEGORIES = ['webSearch', 'scrape', 'rag', 'codeExecution', 'fileOps',
-                    'office', 'media', 'publish', 'browser', 'subAgents']
+                    'office', 'media', 'publish', 'browser', 'voice', 'esign',
+                    'talk', 'data', 'api', 'compute', 'shell', 'subAgents', 'mcp']
 
 
 def _display_name(tool_name: str) -> str:
@@ -248,13 +328,6 @@ def _build_catalogue(user_id: int | None):
             category['note'] = (
                 'Plugin tools appear here at runtime once a plugin is connected '
                 'and its connector is linked. Manage them in'
-            )
-            categories.append(category)
-            continue
-        if grant_key == 'shell' and not category_tools:
-            category['note'] = (
-                'No sandbox exists for host shell access, so the runtime refuses '
-                'it even when an agent has been granted it.'
             )
             categories.append(category)
             continue

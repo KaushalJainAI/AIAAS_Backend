@@ -29,14 +29,17 @@ from .spec import SpecError, items, text
 from .workbook import MAX_CELL_CHARS, MAX_ROWS, _UNSAFE_FORMULA
 
 CELL_REF = re.compile(r'^\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}$')
+#: Workspace knob (`edit_workbook.maxEdits`); the constant stays as the floor
+#: under a failed overlay read — validation clamps the knob to never exceed it.
 MAX_EDITS = 200
 
 
-def validate(args: dict) -> dict:
+def validate(args: dict, *, max_edits: int = MAX_EDITS) -> dict:
     """The normalised edit, or `SpecError` saying what to fix."""
     sheet = text(args.get('sheet'), 'sheet', 31)
     rows = items(args.get('append_rows'), 'append_rows', MAX_ROWS)
-    cells = items(args.get('set_cells'), 'set_cells', MAX_EDITS)
+    cells = items(args.get('set_cells'), 'set_cells',
+                  max(1, min(max_edits, MAX_EDITS)))
     if not rows and not cells:
         raise SpecError('Give append_rows, set_cells, or both.')
 

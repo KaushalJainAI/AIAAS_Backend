@@ -81,7 +81,14 @@ async def update_todos(args: Dict, context: Dict) -> str:
     second way for state to change, and the first thing to disagree with the
     checkpoint.
     """
-    items = todo_state.normalize(args.get("todos"))
+    from tools_config.overlay import alimit
+    from tools_config.settings_schema import _UPDATE_TODOS_MAX
+
+    try:
+        cap = await alimit(context, "update_todos", "maxItems")
+    except KeyError:
+        cap = _UPDATE_TODOS_MAX
+    items = todo_state.normalize_for(args.get("todos"), cap)
     if not items:
         return json.dumps({
             "error": "Send at least one step, each with text and a status.",
@@ -96,6 +103,6 @@ async def update_todos(args: Dict, context: Dict) -> str:
     if sent > len(items):
         payload["note"] = (
             f"{sent - len(items)} item(s) were dropped: the limit is "
-            f"{todo_state.MAX_TODOS} steps. Track the work in fewer, larger steps."
+            f"{cap} steps. Track the work in fewer, larger steps."
         )
     return json.dumps(payload)

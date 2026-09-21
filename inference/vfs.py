@@ -66,6 +66,17 @@ from workflow_backend.thresholds import (
     CHAT_HOME_ROOT,
 )
 
+#: Workspace knobs for the file tools (`list_files`/`find_files.maxEntries`,
+#: `read_file.windowChars`, `write_file`/`edit_file.maxChars`). The thresholds
+#: stay as the defaults these clamp to — see `tools_config/settings_schema`.
+#: Sync functions take them as keyword args; the tool layer resolves the knob
+#: and passes it in, so a stored value narrows and never widens past these.
+from tools_config.settings_schema import (  # noqa: E402 — thresholds first, knobs next
+    _FILE_LIST_LIMIT,
+    _FILE_READ_CHARS,
+    _FILE_WRITE_CHARS,
+)
+
 from . import filesystem as fs
 from .models import Document, Folder
 
@@ -112,6 +123,11 @@ BINARY_TYPES = {
     # Text under the hood, an image to everyone who opens it: stored as one
     # so the preview draws it instead of showing XML.
     'svg': 'image',
+    # Spoken audio and recordings: `text_to_speech` saves here, and a meeting
+    # file a user uploads lands here too. Without these, audio had a file type
+    # nothing could write — the choice list named it, no door produced it.
+    'mp3': 'audio', 'wav': 'audio', 'ogg': 'audio', 'm4a': 'audio',
+    'mp4': 'video', 'webm': 'video', 'mov': 'video',
 }
 
 #: How many `name (n).ext` candidates `write_binary` tries before giving up.
@@ -475,23 +491,29 @@ def _split_leaf(scope: FileScope, path: str) -> tuple[list[str], str]:
 # Operations
 # ---------------------------------------------------------------------------
 
-def list_dir(scope: FileScope, path: str = '/') -> dict:
-    """Directories and files directly inside `path`."""
+def list_dir(scope: FileScope, path: str = '/',
+               limit: int = AGENT_FILE_LIST_LIMIT) -> dict:
+    """Directories and files directly inside `path`.
+
+    `limit` is the caller's workspace knob, clamped to never exceed the
+    module ceiling — a stored knob narrows, never widens.
+    """
+    limit = max(1, min(int(limit), AGENT_FILE_LIST_LIMIT))
     parts = _scope_parts(scope, path)
     folder = _folder_at(scope, parts)
 
-    dirs = list(fs.children(scope.user, folder)[: AGENT_FILE_LIST_LIMIT + 1])
+    dirs = list(fs.children(scope.user, folder)[: limit + 1])
     docs = list(
         Document.objects
         .filter(user=scope.user, folder=folder)
         .order_by('name')
         .values('id', 'name', 'file_type', 'file_size', 'updated_at')
-        [: AGENT_FILE_LIST_LIMIT + 1]
+        [: limit + 1]
     )
 
-    truncated = len(dirs) > AGENT_FILE_LIST_LIMIT or len(docs) > AGENT_FILE_LIST_LIMIT
-    dirs = dirs[:AGENT_FILE_LIST_LIMIT]
-    docs = docs[:AGENT_FILE_LIST_LIMIT]
+    truncated = len(dirs) > limit or len(docs) > limit
+    dirs = dirs[:limit]
+    docs = docs[:limit]
 
     return {
         'path': render(scope, parts),
@@ -513,14 +535,19 @@ def list_dir(scope: FileScope, path: str = '/') -> dict:
         # A capped listing and a complete one must not look alike — the same
         # rule the HTTP list endpoints follow.
         'truncated': truncated,
-        **({'note': f'Listing capped at {AGENT_FILE_LIST_LIMIT} entries per kind.'}
+        **({'note': f'Listing capped at {limit} entries per kind.'}
            if truncated else {}),
     }
 
 
 def read_file(scope: FileScope, path: str, *, offset: int = 0,
-              limit: int | None = None) -> dict:
-    """Text of one file, from `offset`, capped at `AGENT_FILE_READ_CHARS`."""
+              limit: int | None = None, window: int = AGENT_FILE_READ_CHARS) -> dict:
+    """Text of one file, from `offset`.
+
+    `window` is the caller's workspace knob (`read_file.windowChars`),
+    clamped to never exceed the module ceiling. `limit` stays as the legacy
+    per-call override, also clamped.
+    """
     parent_parts, name = _split_leaf(scope, path)
     folder = _folder_at(scope, parent_parts)
     doc = _document_in(scope, folder, name)
@@ -530,7 +557,8 @@ def read_file(scope: FileScope, path: str, *, offset: int = 0,
             f'List the directory to see what is there.'
         )
 
-    cap = min(limit or AGENT_FILE_READ_CHARS, AGENT_FILE_READ_CHARS)
+    window = max(1, min(int(window), AGENT_FILE_READ_CHARS))
+    cap = min(limit or window, window)
     body = doc.content_text or ''
     offset = max(0, int(offset or 0))
     window = body[offset:offset + cap]
@@ -623,14 +651,19 @@ def read_image(scope: FileScope, path: str) -> tuple[bytes, str]:
 
 
 def write_file(scope: FileScope, path: str, content: str, *,
-               append: bool = False, overwrite: bool = True) -> dict:
+               append: bool = False, overwrite: bool = True,
+               max_chars: int = AGENT_FILE_WRITE_CHARS) -> dict:
     """Create or overwrite one file, creating parent directories as needed.
 
     `mkdir -p` semantics deliberately: a model that has to create three folders
     before it can save a file will spend three tool calls doing it and get one
     of them wrong. The directories it creates are ordinary folders the user can
     see, move and delete.
+
+    `max_chars` is the caller's workspace knob, clamped to never exceed the
+    module ceiling.
     """
+    max_chars = max(1, min(int(max_chars), AGENT_FILE_WRITE_CHARS))
     parent_parts, raw_name = _split_leaf(scope, path)
     # Checked before `_make_dirs`, not after: creating three folders and *then*
     # refusing the file would leave the tree littered with directories from a
@@ -643,10 +676,10 @@ def write_file(scope: FileScope, path: str, content: str, *,
     _refuse_binary_name(name, 'write_file')
 
     text = content if isinstance(content, str) else str(content)
-    if len(text) > AGENT_FILE_WRITE_CHARS:
+    if len(text) > max_chars:
         raise VfsError(
             f'That is {len(text):,} characters; the limit for one write is '
-            f'{AGENT_FILE_WRITE_CHARS:,}. Write it in parts, or write less.'
+            f'{max_chars:,}. Write it in parts, or write less.'
         )
 
     folder = _make_dirs(scope, parent_parts)
@@ -676,10 +709,10 @@ def write_file(scope: FileScope, path: str, content: str, *,
         created = True
     else:
         text = (doc.content_text or '') + text if append else text
-        if len(text) > AGENT_FILE_WRITE_CHARS:
+        if len(text) > max_chars:
             raise VfsError(
                 f'Appending would make this file {len(text):,} characters, over '
-                f'the {AGENT_FILE_WRITE_CHARS:,} limit.'
+                f'the {max_chars:,} limit.'
             )
         doc.content_text = text
         doc.file_size = len(text.encode('utf-8'))
@@ -790,7 +823,8 @@ def write_binary(scope: FileScope, path: str, data: bytes, *, text: str = '',
 
 
 def edit_file(scope: FileScope, path: str, old_text: str, new_text: str,
-              *, replace_all: bool = False) -> dict:
+              *, replace_all: bool = False,
+              max_chars: int = AGENT_FILE_WRITE_CHARS) -> dict:
     """Replace an exact run of text inside one file, leaving the rest untouched.
 
     The alternative was the only thing on offer: `write_file`, which replaces
@@ -866,10 +900,11 @@ def edit_file(scope: FileScope, path: str, old_text: str, new_text: str,
 
     # The same ceiling a write is held to. An edit is a write; a growing
     # replacement is the one way it can push a file past the cap.
-    if len(updated) > AGENT_FILE_WRITE_CHARS:
+    max_chars = max(1, min(int(max_chars), AGENT_FILE_WRITE_CHARS))
+    if len(updated) > max_chars:
         raise VfsError(
             f'That edit would make this file {len(updated):,} characters, over '
-            f'the {AGENT_FILE_WRITE_CHARS:,} limit.'
+            f'the {max_chars:,} limit.'
         )
 
     doc.content_text = updated
@@ -907,12 +942,15 @@ def find(scope: FileScope, query: str, *, limit: int = 0) -> dict:
     not computed; a model given a ranked list of near-misses treats the top one
     as the answer, while a model given "three files contain this string" goes
     and reads them.
+
+    `limit` is the caller's workspace knob, clamped to never exceed the
+    module ceiling.
     """
     needle = (query or '').strip()
     if len(needle) < 2:
         raise VfsError('Give at least two characters to search for.')
 
-    cap = min(limit or AGENT_FILE_LIST_LIMIT, AGENT_FILE_LIST_LIMIT)
+    cap = max(1, min(int(limit or _FILE_LIST_LIMIT), AGENT_FILE_LIST_LIMIT))
 
     rows = Document.objects.filter(user=scope.user)
     if scope.root is not None:

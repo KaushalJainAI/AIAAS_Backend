@@ -25,6 +25,13 @@ from workflow_backend.thresholds import (
 
 from .registry import tool
 
+from tools_config.overlay import alimit
+
+from tools_config.settings_schema import (
+    _HISTORY_MAX_MATCHES,
+    _HISTORY_MAX_TOTAL_CHARS,
+)
+
 
 class _Hit(NamedTuple):
     """One row's best match. Named because it used to be a bare 4-tuple
@@ -196,6 +203,8 @@ async def search_conversation_history(args: Dict, context: Dict) -> str:
     if not terms:
         return json.dumps({"error": "Query too short to search."})
 
+    max_matches = await alimit(context, "search_conversation_history", "maxMatches")
+
     def _search() -> list[dict]:
         qs = ChatMessage.objects.filter(session_id=session_id)
         # Ownership: the session must belong to the caller. Scoping by
@@ -228,7 +237,7 @@ async def search_conversation_history(args: Dict, context: Dict) -> str:
             })
 
         scored.sort(key=lambda x: (-x["score"], -x["message_id"]))
-        return scored[:HISTORY_SEARCH_MAX_MATCHES]
+        return scored[:max_matches]
 
     try:
         matches = await sync_to_async(_search)()
@@ -248,10 +257,11 @@ async def search_conversation_history(args: Dict, context: Dict) -> str:
     # Final ceiling. The whole point of this tool is to keep the context small,
     # so it must not be able to return more than the window it is protecting —
     # drop whole matches rather than truncating mid-snippet.
+    ceiling = await alimit(context, "search_conversation_history", "totalChars")
     payload, total = [], 0
     for m in matches:
         cost = len(m["snippet"])
-        if total + cost > HISTORY_SEARCH_MAX_TOTAL_CHARS:
+        if total + cost > ceiling:
             break
         payload.append(m)
         total += cost

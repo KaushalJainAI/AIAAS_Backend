@@ -303,8 +303,14 @@ async def recall(query: str, context: dict[str, Any]) -> str:
     `search_conversation_history` is: the store is small per session, the match
     is a scoring function rather than a predicate, and SQLite has no ranking to
     push it down to.
+
+    The match count and the total ceiling are per-workspace knobs
+    (`recall_context.maxMatches/totalChars`); the scan depth stays a code
+    constant — it bounds work, not what the model sees.
     """
     from chat.models import ToolOutput
+
+    from tools_config.overlay import alimit
 
     terms = [t for t in {w.lower() for w in query.split()} if len(t) > 2]
     if not terms:
@@ -339,15 +345,17 @@ async def recall(query: str, context: dict[str, Any]) -> str:
 
     scored.sort(key=lambda item: (-item[0], item[1]))
 
+    max_matches = await alimit(context, "recall_context", "maxMatches")
+    ceiling = await alimit(context, "recall_context", "totalChars")
     parts: list[str] = []
     used = 0
-    for _, _, row, position in scored[:RECALL_MAX_MATCHES]:
+    for _, _, row, position in scored[:max_matches]:
         snippet = _window(row.content, position)
         block = (
             f"[archived: {row.tool_name} · id '{row.id}' · "
             f"{row.total_chars:,} chars total]\n{snippet}"
         )
-        if used + len(block) > RECALL_MAX_TOTAL_CHARS:
+        if used + len(block) > ceiling:
             break
         parts.append(block)
         used += len(block)

@@ -47,6 +47,14 @@ class Event(StrEnum):
     ASK_PERMISSION = "ask_permission"
     ERROR = "error"
     DONE = "done"
+    #: A delegated agent run started by `/agent`: status, todos, files and a
+    #: link to `/runs/:id` while going; the answer when it lands. The run card
+    #: renders from these frames live and from `metadata.agent_run` on reload.
+    AGENT_RUN = "agent_run"
+    #: A command card: mission, status, cost, memory, schedule preview, goal
+    #: confirm, findings, help. Rendered live from the frame and on reload
+    #: from `metadata.command_card`.
+    COMMAND_CARD = "command_card"
     #: Steers that arrived after the run's last tool boundary, so the model never
     #: read them. Sent after DONE, carrying `messages` as the user wrote them, so
     #: the client can put them back in front of the user. Before this, they sat in

@@ -769,3 +769,46 @@ class PublishedPage(models.Model):
 
     def __str__(self):
         return f'{self.title} ({self.slug})'
+
+
+class Dashboard(models.Model):
+    """A live dashboard: tiles bound to sources, refreshed without an LLM.
+
+    A tile binds to a source (a stored `query_sql`, a Sheet range, a saved
+    GET API call) instead of inline data. A schedule refreshes the sources
+    with no LLM call — the query is stored and re-run. Shareable with the
+    published-page visibility levels (`link < platform < public`, same 404
+    rule for every refusal).
+    """
+
+    VISIBILITY_CHOICES = [
+        ('link', 'Anyone with the link'),
+        ('platform', 'Everyone on the platform'),
+        ('public', 'Anyone, including people without an account'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='dashboards',
+    )
+    title = models.CharField(max_length=200)
+    #: Validated tiles (kpi | chart | table | text) — see chat/tools/dashboards.
+    spec = models.JSONField(default=dict, blank=True)
+    #: Sources the tiles bind to: [{type: sql|sheet|api, ...}].
+    sources = models.JSONField(default=list, blank=True)
+    refresh_cron = models.CharField(max_length=100, blank=True, default='')
+    visibility = models.CharField(
+        max_length=10, choices=VISIBILITY_CHOICES, default='platform',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['user', '-updated_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.title} ({self.user_id})'

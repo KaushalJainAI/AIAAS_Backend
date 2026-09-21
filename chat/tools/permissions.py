@@ -258,3 +258,27 @@ async def unattended_policy(name: str, args: dict, context: dict[str, Any]) -> b
 async def never(name: str, args: dict, context: dict[str, Any]) -> bool:
     """Gate nothing. For `autonomy='full'`, where the user has said so."""
     return False
+
+
+def apply_tool_permission_overrides(
+    sensitive: frozenset[str] | set[str],
+    tool_permissions: dict[str, str] | None,
+) -> frozenset[str]:
+    """Fold a subagent's per-tool ask/allow into the approval gate set.
+
+    Pure, so both sides pin it without running a graph: the agent toolbox
+    tests own the offer/dispatch half, the turn tests own this half. `ask`
+    adds the tool to the pause-on-sight set whatever the autonomy level
+    says; `allow` removes it. `deny` is absent on purpose — a denied tool
+    never reaches a gate, withheld in `AgentToolbox.allowed_names` and
+    refused in `dispatch`.
+    """
+    if not tool_permissions:
+        return frozenset(sensitive)
+    gated = set(sensitive)
+    for name, mode in tool_permissions.items():
+        if mode == 'ask':
+            gated.add(name)
+        elif mode == 'allow':
+            gated.discard(name)
+    return frozenset(gated)

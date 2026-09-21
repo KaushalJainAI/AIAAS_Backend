@@ -218,8 +218,13 @@ async def _save(context: Dict, work) -> str:
     },
 }, requires='files', effect='reversible')
 async def render_workbook(args: Dict, context: Dict) -> str:
+    from tools_config.overlay import alimit
+
     try:
-        spec = workbook.validate(args)
+        spec = workbook.validate(
+            args,
+            max_sheets=await alimit(context, 'render_workbook', 'maxSheets'),
+            max_rows=await alimit(context, 'render_workbook', 'maxRows'))
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
@@ -329,8 +334,11 @@ _BULLETS = {
     },
 }, requires='files', effect='reversible')
 async def render_deck(args: Dict, context: Dict) -> str:
+    from tools_config.overlay import alimit
+
     try:
-        spec = deck.validate(args)
+        spec = deck.validate(
+            args, max_slides=await alimit(context, 'render_deck', 'maxSlides'))
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
@@ -402,8 +410,11 @@ async def render_deck(args: Dict, context: Dict) -> str:
     },
 }, requires='files', effect='reversible')
 async def render_document(args: Dict, context: Dict) -> str:
+    from tools_config.overlay import alimit
+
     try:
-        spec = document.validate(args)
+        spec = document.validate(
+            args, max_blocks=await alimit(context, 'render_document', 'maxBlocks'))
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
@@ -475,8 +486,11 @@ async def render_document(args: Dict, context: Dict) -> str:
     },
 }, requires='files', effect='reversible')
 async def render_pdf(args: Dict, context: Dict) -> str:
+    from tools_config.overlay import alimit
+
     try:
-        spec = document.validate(args)
+        spec = document.validate(
+            args, max_blocks=await alimit(context, 'render_pdf', 'maxBlocks'))
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
@@ -541,8 +555,11 @@ async def render_pdf(args: Dict, context: Dict) -> str:
     },
 }, requires='files', sensitive=True, effect='reversible')
 async def edit_workbook(args: Dict, context: Dict) -> str:
+    from tools_config.overlay import alimit
+
     try:
-        change = edit.validate(args)
+        change = edit.validate(
+            args, max_edits=await alimit(context, 'edit_workbook', 'maxEdits'))
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
@@ -634,8 +651,13 @@ def _workbook_text(data: bytes) -> str:
     },
 }, requires='files', effect='reversible')
 async def render_diagram(args: Dict, context: Dict) -> str:
+    from tools_config.overlay import alimit
+
     try:
-        spec = diagram.validate(args)
+        spec = diagram.validate(
+            args,
+            max_nodes=await alimit(context, 'render_diagram', 'maxNodes'),
+            max_edges=await alimit(context, 'render_diagram', 'maxEdges'))
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 

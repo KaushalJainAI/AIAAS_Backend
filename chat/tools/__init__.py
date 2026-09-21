@@ -23,9 +23,15 @@ What lives where:
    office        .pptx / .xlsx / .docx rendered from a spec into that filesystem
   media         `generate_image`, billed to the user and saved into their files
   browser       a remote Chromium: `browse_page` reads, `browser_act` acts (domain-scoped)
++  voice         transcription and speech, behind one-door engines
++  docs          `ocr_document`: scanned PDFs and photos as text, rows or fields
++  esign         documents out for e-signature, completed by webhook
++  talk          one tool set for Slack, WhatsApp, Teams and SMS
 +  publish       hosted pages: snapshots shareable by link (`link`/`platform`/`public`)
    internal      this platform's own API, called as the user
   clock         wall-clock time
++  data          SQL over the user's databases (read, and writes where allowed)
++  apicaller     one generic caller for the user's HTTP APIs
   fetch         `download_file`: a URL the user named, kept as their file
   workspace     the platform itself: `extract_data`, `notify_user`
   google        native Gmail / Drive / Sheets / Calendar connector tools
@@ -43,12 +49,19 @@ from typing import Any, Dict, List
 
 from . import (  # noqa: F401  — imported for their registration side effect
     agents,
+    apicaller,
     artifacts,
     authoring,
     browser,
     charts,
     clock,
+    code,
+    compute,
     conversation,
+    dashboards,
+    data,
+    docs,
+    esign,
     fetch,
     files,
     google,
@@ -56,11 +69,14 @@ from . import (  # noqa: F401  — imported for their registration side effect
     knowledge,
     media,
     memory,
+    missions,
     office,
     planning,
     publish,
     sandbox,
+    talk,
     vision,
+    voice,
     web,
     workspace,
 )
@@ -217,6 +233,22 @@ async def _requirement_met(
         from browsing.engine import browser_available
 
         return browser_available()
+    if requirement == "stt":
+        from voice.stt import stt_available
+
+        return stt_available()
+    if requirement == "tts":
+        from voice.tts import tts_available
+
+        return tts_available()
+    if requirement == "esign":
+        from esign.provider import esign_available
+
+        return esign_available()
+    if requirement == "workspace":
+        from workspaces.engine import workspace_available
+
+        return workspace_available()
     if requirement == "vision":
         if user_id is None:
             return False  # no user, no credential, no witness

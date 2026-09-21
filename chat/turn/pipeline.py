@@ -119,6 +119,11 @@ class TurnRequest:
     reject_tool_call: str | None = None
     reject_reason: str = ""
     regenerate_of: int | None = None
+    #: A slash command the client resolved through the palette
+    #: (`TurnRequest.command = {"name", "args", "text"}`). The backend
+    #: re-resolves it: chips carry ids, but a typed line is parsed here, so
+    #: both arrive validated rather than trusted.
+    command: dict[str, Any] | None = None
 
     @classmethod
     def parse(cls, payload: Mapping[str, Any]) -> TurnRequest:
@@ -137,9 +142,13 @@ class TurnRequest:
             regenerate_of = int(regenerate_of) if regenerate_of is not None else None
         except (TypeError, ValueError):
             regenerate_of = None
+        command = payload.get("command")
+        if command is not None and not isinstance(command, dict):
+            raise TurnError("'command' must be an object.")
         return cls(
             content=content,
             regenerate_of=regenerate_of,
+            command=dict(command) if isinstance(command, dict) else None,
             intent=requested if requested in SELECTABLE_INTENTS else None,
             provider=(payload.get("llm_provider") or "").strip() or None,
             model=(payload.get("llm_model") or "").strip() or None,
@@ -166,11 +175,26 @@ class TurnRequest:
 
 
 def classify_intent(content: str) -> tuple[str, str]:
-    """Infer the intent and strip any leading slash command."""
+    """Infer the intent and strip any legacy slash command.
+
+    The legacy `/search`, `/image`, `/video`, `/research` prefixes predate
+    slash commands: they carry no arguments and are stripped here so the
+    question reaches the turn clean. Anything else starting with `/` is left
+    intact for `_resolve_command`, which owns parsing, validation and the
+    400-quality errors — a silently un-run command reads as one that ran.
+    """
     text = content.strip()
     command, _, remainder = text.partition(" ")
     if (intent := _SLASH_COMMANDS.get(command.lower())) and remainder.strip():
-        return intent, remainder.strip()
+        # A bare legacy prefix with no known command behind it (`/research`
+        # alone, or `/search` with nothing after) is not a command line: the
+        # command registry owns those words now, and stripping the prefix
+        # would hide a typo (`/reserach x`) as a plain chat message.
+        from chat.commands.registry import get as _get_command
+
+        if _get_command(command.lower()) is None:
+            return intent, remainder.strip()
+        return "chat", text
 
     lowered = text.lower()
     # Recall wins over the search openers, which overlap badly with it: "what is
@@ -186,6 +210,194 @@ def looks_like_recall(content: str) -> bool:
     """Whether the user is asking about something said earlier in this chat."""
     lowered = (content or "").lower()
     return any(marker in lowered for marker in _RECALL_MARKERS)
+
+
+# ── Slash commands (P10, §18) ────────────────────────────────────────────
+
+@dataclass(slots=True)
+class CommandResolution:
+    """What resolving a command line decided, before the turn runs."""
+
+    command: Any = None
+    args: dict[str, Any] = field(default_factory=dict)
+    #: The free text left after the command's arguments (the task, the goal).
+    text: str = ""
+    #: Trailing context block for this turn (never the system prompt).
+    context_block: str = ""
+    intent: str = ""
+    #: Tool names to pin for this turn, or None to leave the toolbox alone.
+    tool_pin: tuple[str, ...] | None = None
+    #: A run to start through the one door before the chat model runs.
+    start: dict[str, Any] = field(default_factory=dict)
+    #: Stored on the user message so regenerate replays the same call.
+    command_json: dict[str, Any] | None = None
+    #: A rewritten question for the transcript (the chip text stays short).
+    question: str | None = None
+
+
+async def _resolve_command(*, session, user, request, intent: str,
+                           question: str) -> CommandResolution:
+    """Resolve `TurnRequest.command` or a typed `/line` into a turn plan.
+
+    Raises `TurnError` for anything that fails to parse or resolve — shown
+    under the input with the text left in place, never sent to the model as
+    plain text, because a silently un-run command reads as one that ran.
+    """
+    from chat.commands import registry as command_registry
+    from chat.commands.resolve import (
+        CommandError,
+        resolve_arg_value,
+        resolve_line,
+        split_leading_command,
+    )
+    from chat.commands.resolve import _requires_met
+
+    autonomy = (getattr(session, "autonomy", "") or "ask").strip().lower()
+    ctx_kwargs = dict(user_id=user.id, session_id=str(session.id),
+                      autonomy=autonomy, guest=False)
+    from chat.commands.registry import CommandContext
+
+    ctx = CommandContext(**ctx_kwargs)
+    payload = request.command
+    try:
+        if payload is not None:
+            name = str(payload.get("name") or "").strip().lower().lstrip("/")
+            raw_args = payload.get("args") or {}
+            text = str(payload.get("text") or "")
+            cmd = command_registry.get(name)
+            if cmd is None:
+                raise CommandError(f"No command called '/{name}'. Try /help.")
+            if not _requires_met(cmd, ctx)[0]:
+                raise CommandError(f"/{cmd.name} is not available right now.")
+            args: dict[str, Any] = {}
+            text_args = [a for a in cmd.args if a.kind == "text"]
+            first_text = text_args[0] if text_args else None
+            for arg in cmd.args:
+                if arg.name in raw_args and str(raw_args[arg.name] or "").strip():
+                    args[arg.name] = await resolve_arg_value(
+                        arg, str(raw_args[arg.name]), ctx)
+                elif arg.name in (raw_args or {}):
+                    args[arg.name] = raw_args[arg.name]
+                elif arg.kind == "text" and arg is first_text and text.strip():
+                    # The trailing free text fills the first text argument —
+                    # required or not — mirroring `resolve_line`.
+                    args[arg.name] = text.strip()
+                    text = ""
+                elif arg.required and arg.name not in args:
+                    # An empty trailing text is not a refusal for a text
+                    # argument: the handler asks for it. Required *entity*
+                    # arguments already refused above.
+                    if arg.kind == "text":
+                        continue
+                    raise CommandError(f"'{arg.name}' is required. {arg.hint}".strip())
+                elif arg.default is not None:
+                    args[arg.name] = arg.default
+        else:
+            # A typed `/line` sent without the palette: parsed by the backend.
+            # `question` is the classify_intent-stripped text (`/research`
+            # arrives as the bare query), so re-resolve from the raw content.
+            cmd, args, text = await resolve_line(request.content, ctx)
+    except CommandError as exc:
+        raise TurnError(str(exc)) from exc
+
+    from chat.commands.registry import CommandCall
+
+    try:
+        result = await cmd.handler(CommandCall(name=cmd.name, args=args, text=text), ctx)
+    except Exception:  # noqa: BLE001
+        logger.exception("[Commands] /%s handler failed", cmd.name)
+        raise TurnError(f"/{cmd.name} could not run.") from None
+    if result.status == "error":
+        raise TurnError(result.message or f"/{cmd.name} failed.")
+    if result.status == "confirm":
+        # A command whose first action spends money or leaves the platform
+        # does nothing until confirmed — the confirm sheet is the approval.
+        names = {"goal": "a mission", "schedule": "a schedule",
+                 "publish": "a published page", "code-review": "a review"}
+        raise TurnError(
+            (result.message or f"/{cmd.name} needs confirmation.")
+            + f" Open /{cmd.name} from the command menu to review "
+              f"{names.get(cmd.name, 'it')} before it starts."
+        )
+    resolution = CommandResolution(
+        command=cmd, args=dict(result.args or args), text=text,
+        context_block=result.context_block or "",
+        intent=result.intent or "", tool_pin=result.tool_pin,
+        start=dict(result.start or {}),
+        command_json={"name": cmd.name, "args": dict(result.args or args)},
+        question=question,
+    )
+    if result.intent:
+        resolution.intent = result.intent
+    # Client-kind commands never reach the turn: they run in the browser.
+    if cmd.kind == "client":
+        raise TurnError(
+            f"/{cmd.name} runs in the app itself — pick it from the command menu.")
+    return resolution
+
+
+async def _command_toolbox(resolution: CommandResolution | None, *, user,
+                           session, file_scope) -> dict[str, Any]:
+    """Narrow the turn's toolbox when a command pins tools (`/deck`, ...)."""
+    if resolution is None or not resolution.tool_pin:
+        return {}
+    from chat.turn import reviewer as _reviewer
+
+    pinned = frozenset(resolution.tool_pin)
+
+    async def _source():
+        source = _reviewer.read_only_source(
+            user_id=user.id, memory_enabled=session.memory_enabled,
+            session_key=str(session.id), file_scope=file_scope,
+        ) if (getattr(session, "autonomy", "") or "ask") == "plan" else None
+        if source is not None:
+            offered = await source()
+        else:
+            from chat.tools import get_available_tools
+
+            offered = await get_available_tools(
+                user.id, memory_enabled=session.memory_enabled,
+                session_key=str(session.id), file_scope=file_scope,
+            )
+        names = {t["function"]["name"] for t in offered}
+        keep = (pinned & names) | {
+            "get_current_time", "update_todos", "render_chart",
+            "render_dashboard", "notify_user",
+        }
+        return [t for t in offered if t["function"]["name"] in keep]
+
+    return {"tool_source": _source}
+
+
+async def _start_command_run(resolution: CommandResolution, *, session, user,
+                             sink, metadata: dict[str, Any]) -> None:
+    """Start a `/agent` delegation through the one door, before the chat turn.
+
+    The typed command is the consent for the first action (like the Run
+    button); every tool call the started agent then makes is gated as usual.
+    The run card streams as `agent_run` frames so the transcript shows status,
+    todos, files and a link to `/runs/:id`, and the answer lands back as a
+    message attributed to the agent.
+    """
+    start = resolution.start or {}
+    if start.get("type") != "agent_run":
+        return
+    from chat.commands.agents import run_agent_start
+
+    try:
+        info = await run_agent_start(user=user, start=start,
+                                     session_id=str(session.id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Commands] /agent start failed: %s", exc)
+        raise TurnError(f"The agent could not be started: {exc}") from None
+    metadata["agent_run"] = {
+        "agent_id": info["agent_id"], "agent_name": info["agent_name"],
+        "execution_id": info["execution_id"],
+    }
+    await sink(Event.STATUS, {
+        "phase": "agent_run", "message": f'{info["agent_name"]} is working...',
+        "agent_run": metadata["agent_run"],
+    })
 
 
 # ── Outcome ──────────────────────────────────────────────────────────────────
@@ -564,6 +776,25 @@ async def run_chat_turn(
         else classify_intent(request.content)
     )
 
+    # ── Slash command ──
+    # Resolved here (before `llm.preflight()`), applied after: `intent` and
+    # `question` are needed from the top — the chip text is the question —
+    # while the expansion rides the trailing context message built below
+    # (§18.7), never the system prompt (the clock trap), so the baseline
+    # stays byte-identical to a turn without one (prefix-cache guard). A
+    # command that cannot be paid for still raises at preflight below, so a
+    # command never makes a turn look busy before it is known to be payable.
+    command_resolution = None
+    if request.command is not None or question.lstrip().startswith("/"):
+        command_resolution = await _resolve_command(
+            session=session, user=user, request=request,
+            intent=intent, question=question,
+        )
+        if command_resolution.intent:
+            intent = command_resolution.intent
+        if command_resolution.question is not None:
+            question = command_resolution.question
+
     phases = _PhaseTimer()
     # Model calls made inside tools on other models (the vision witness) are
     # collected here and priced into this turn — see `side_calls`.
@@ -614,12 +845,23 @@ async def run_chat_turn(
 
     # An approval or a refusal carries no new text, so it resumes against the
     # message that triggered the pause rather than inventing a new turn.
+    # The slash command rides on the user message (the transcript chip), and
+    # on the assistant message via `_persist_answer(..., command_json=...)` —
+    # regenerate replays the same call from either row. `dict(...)` because
+    # the ORM keeps the very object it is given: handing it the resolution's
+    # own dict lets a later mutation rewrite the stored row.
+    _command_json: dict[str, Any] | None = (
+        dict(command_resolution.command_json)
+        if command_resolution is not None
+        and command_resolution.command_json else None
+    )
     user_message = (
         await ChatMessage.objects.filter(session=session, role="user").alast()
         if (request.approve_tool_call or request.reject_tool_call) else None
     ) or await ChatMessage.objects.acreate(
         session=session, role="user",
         content=question or "[Approved tool call]", message_type="chat",
+        metadata={"command": _command_json} if _command_json else {},
     )
     phases.mark("user_message")
 
@@ -695,6 +937,11 @@ async def run_chat_turn(
     context_update = prompts.build_context_update(
         session, _now_string(prefs), intent, blocked_notice=blocked_notice
     )
+    if command_resolution is not None and command_resolution.context_block:
+        context_update = (
+            f"{context_update}\n\n{command_resolution.context_block}"
+            if context_update else command_resolution.context_block
+        )
     if context_update:
         wire_history.append({"role": "system", "content": context_update})
 
@@ -754,6 +1001,10 @@ async def run_chat_turn(
             session_key=str(session.id), file_scope=file_scope,
         )} if session_autonomy == 'plan' else {}),
         **({'approval_policy': _auto_policy} if session_autonomy == 'auto' else {}),
+        **((await _command_toolbox(
+            command_resolution, user=user, session=session,
+            file_scope=file_scope,
+        )) if command_resolution is not None else {}),
         approval_modes={
             'ask': (frozenset(_sensitive_names()), _permissions.default_policy),
             'review': (frozenset(
@@ -762,6 +1013,16 @@ async def run_chat_turn(
             'auto': (frozenset(), _auto_policy),
         },
     )
+
+    # A command that starts a run directly (`/agent`): the typed command is
+    # the consent for the first action, so it starts here — through the one
+    # door — before the chat model ever runs. The chat turn still runs after,
+    # and the run card + the agent's answer land in the same transcript.
+    if command_resolution is not None and command_resolution.start:
+        await _start_command_run(
+            command_resolution, session=session, user=user, sink=sink,
+            metadata=metadata,
+        )
 
     seed_text, seed_trace = await _seed_intent_tool(intent, question, turn, metadata)
     phases.mark("intent_seed")
@@ -789,6 +1050,10 @@ async def run_chat_turn(
     assistant_message = await _persist_answer(
         session=session, user=user, turn=turn, result=result,
         question=question, intent=intent, elapsed_s=turn_elapsed_s,
+        command_json=(
+            command_resolution.command_json
+            if command_resolution is not None else None
+        ),
     )
     await _notify(user, session, assistant_message)
 
@@ -841,6 +1106,7 @@ async def _persist_answer(
     question: str,
     intent: str,
     elapsed_s: float = 0,
+    command_json: dict[str, Any] | None = None,
 ) -> ChatMessage:
     """Store the assistant's reply and everything the UI needs alongside it."""
     answer = _INTERNAL_TAGS.sub("", result.answer or "").strip()
@@ -863,6 +1129,18 @@ async def _persist_answer(
     )
     if result.awaiting_approval:
         metadata["awaiting_approval"] = True
+    # The slash command rides here (not through the graph): regenerate replays
+    # the same call, and the transcript chip reads it. The graph deliberately
+    # never sees it — working metadata is graph state, and every node returns
+    # it untouched-or-not at all (`test_todos.py` pins that nodes rewrite
+    # `messages` and nothing else).
+    if command_json is not None:
+        metadata["command"] = command_json
+    # Cards survive the turn the same way: a reload replays them from the
+    # message rather than re-running anything.
+    for key in ("agent_run",):
+        if key in result.metadata and key not in metadata:
+            metadata[key] = result.metadata[key]
 
     # Every model call this turn made on the user's model, not only the answer:
     # the conversation's cost is shown in the header, and a figure that leaves
