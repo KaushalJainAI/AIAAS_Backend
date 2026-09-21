@@ -768,16 +768,27 @@ class AgentSerializer(serializers.Serializer):
         now = timezone.now()
 
         if existing:
-            after = max(now, existing.starts_at) if existing.starts_at else now
+            # Recompute the next firing only when the schedule itself moved (or
+            # was never armed). Every builder save used to re-arm from now, so
+            # saving the agent after a slot went due but before the sweep ticked
+            # silently skipped that firing — the same silent skip the trigger
+            # PATCH path had. The goal still syncs: the prompt may have changed
+            # even when the cadence did not.
+            schedule_moved = (
+                (existing.config or {}).get('cron') != cron
+                or ((existing.timezone or '').strip() or 'UTC') != tz
+                or existing.next_due_at is None
+            )
             existing.config = {'cron': cron}
             existing.timezone = tz
             existing.origin = 'builder'
             existing.goal = agent.prompt or ''
-            existing.next_due_at = next_run_after(cron, after, tz)
-            existing.save(update_fields=[
-                'config', 'timezone', 'origin', 'goal', 'next_due_at',
-                'updated_at',
-            ])
+            fields = ['config', 'timezone', 'origin', 'goal', 'updated_at']
+            if schedule_moved:
+                after = max(now, existing.starts_at) if existing.starts_at else now
+                existing.next_due_at = next_run_after(cron, after, tz)
+                fields.append('next_due_at')
+            existing.save(update_fields=fields)
             return
 
         Trigger.objects.create(

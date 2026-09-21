@@ -150,6 +150,15 @@ class UserProfile(models.Model):
         validators=[MinValueValidator(1)],
         help_text='Default max tokens for AI responses'
     )
+    #: Autonomy new chat sessions and new agents start with: `ask` (approve
+    #: side effects), `auto` (the reviewer may allow clear matches) or `plan`
+    #: (look, don't touch). Set in Settings; `full` is not a default anyone
+    #: should wake up in.
+    default_autonomy = models.CharField(max_length=10, default='ask')
+    #: "Pause all my runs" until this time. Checked in `check_guardrails` and
+    #: honoured by cancelling in-flight runs — auto mode plus schedules plus
+    #: missions needs one button that stops everything. Null means not paused.
+    paused_until = models.DateTimeField(null=True, blank=True)
 
     # Appearance
     THEME_CHOICES = [

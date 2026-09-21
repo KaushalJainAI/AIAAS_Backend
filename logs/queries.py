@@ -231,6 +231,26 @@ def _chat_spend(user, *, days: int) -> dict[str, Any]:
     }
 
 
+def _cost_entries_by_kind(user, *, days: int) -> list[dict[str, Any]]:
+    """Non-token spend grouped by kind, newest window only.
+
+    Empty list when nothing was recorded — a missing key and an empty one
+    must not read differently to a client, so this always returns a list.
+    """
+    from .models import CostEntry
+
+    return list(
+        CostEntry.objects.filter(user=user, created_at__gte=_since(days))
+        .values('kind')
+        .annotate(
+            total=Sum('amount_inr'),
+            entries=Count('id'),
+            estimated_entries=Count('id', filter=Q(estimated=True)),
+        )
+        .order_by('-total')
+    )
+
+
 def cost_breakdown(user, *, days: int) -> dict[str, Any]:
     """Token and credit usage over the last `days`, split by agent and tool.
 
@@ -344,6 +364,28 @@ def cost_breakdown(user, *, days: int) -> dict[str, Any]:
         "by_caller": dict(
             executions.values('caller').annotate(count=Count('id')).values_list('caller', 'count')
         ),
+        # Non-token spend (`CostEntry`: images, browser minutes, …). Token
+        # sums cannot see it — it lives on its own table, written by priced
+        # tools through `logs/costs.py::record`. Rupees, as stored: the cap
+        # is denominated in rupees, so this is the unit the guardrail reads.
+        "by_kind": [
+            {
+                "kind": row['kind'],
+                "amount_inr": row['total'] or 0,
+                "entries": row['entries'],
+                "estimated": row['estimated_entries'] or 0,
+            }
+            for row in _cost_entries_by_kind(user, days=days)
+        ],
+        # Agent runs by cost provenance. Chat already carries `paid_by`;
+        # runs carry no payer column, so this is the honest split we can
+        # give: how many runs were billed, estimated, or unpriced.
+        "agents_by_cost_source": {
+            "billed": totals['billed_runs'] or 0,
+            "estimated": (totals['total_runs'] or 0)
+            - (totals['unpriced_runs'] or 0) - (totals['billed_runs'] or 0),
+            "unpriced": totals['unpriced_runs'] or 0,
+        },
         "daily_usage": _stringify_dates(list(
             executions.annotate(date=TruncDate('created_at'))
             .values('date')
@@ -363,6 +405,7 @@ def execution_page(
     agent_id: int | None = None,
     status: str | None = None,
     caller: str | None = None,
+    failure_category: str | None = None,
 ) -> dict[str, Any]:
     """One keyset-paginated page of the user's runs, newest first.
 
@@ -375,6 +418,8 @@ def execution_page(
         qs = qs.filter(subagent_id=agent_id)
     if status:
         qs = qs.filter(status=status)
+    if failure_category:
+        qs = qs.filter(failure_category=failure_category)
     if caller:
         qs = qs.filter(caller=caller)
     else:
@@ -754,6 +799,279 @@ def quality_summary(user, *, days: int = 30) -> dict[str, Any]:
         'signals_by_kind': by_signal,
         'recent_thumbs_down': targets,
     }
+
+
+def _median_approve_ms(user, *, days: int) -> int | None:
+    """Median ms from HITL open to answer in the window, or None.
+
+    Pending rows have no answer yet and rows answered before the window are
+    not this period's responsiveness, so both are excluded. Computed in
+    Python: the window is small and a median is not an aggregate the ORM
+    speaks portably across SQLite/Postgres.
+    """
+    try:
+        from agents.models import HITLRequest
+    except Exception:  # noqa: BLE001
+        return None
+    rows = (
+        HITLRequest.objects.filter(
+            user=user,
+            created_at__gte=_since(days),
+            responded_at__isnull=False,
+        )
+        .exclude(status='pending')
+        .values_list('created_at', 'responded_at')[:200]
+    )
+    gaps = [
+        int((answered - opened).total_seconds() * 1000)
+        for opened, answered in rows
+        if opened and answered and answered >= opened
+    ]
+    if not gaps:
+        return None
+    import statistics
+
+    return int(statistics.median(gaps))
+
+
+def _example_failures(
+    *, user, days: int, per_tool: list[str], per_agent: list[int | None],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    """Latest failed run + error excerpt per tool and per agent.
+
+    Bounded: one query per axis, capped to the leaderboard sizes the page
+    renders (12 tools, 8 agents). A tool/agent with no failure in the window
+    is simply absent — the client renders no link rather than a dead one.
+    """
+    since = _since(days)
+    tool_examples: dict[str, dict[str, str]] = {}
+    if per_tool:
+        for row in (
+            AgentStep.objects.filter(
+                execution__user=user,
+                execution__created_at__gte=since,
+                status='failed',
+                tool__in=per_tool,
+            )
+            .exclude(execution__caller='eval')
+            .order_by('-created_at')
+            .values('tool', 'error_message', 'execution__execution_id')[:200]
+        ):
+            tool = row['tool']
+            if tool not in tool_examples:
+                tool_examples[tool] = {
+                    'execution_id': str(row['execution__execution_id']),
+                    'error': (row['error_message'] or '')[:280],
+                }
+            if len(tool_examples) >= len(per_tool):
+                break
+    agent_examples: dict[str, dict[str, str]] = {}
+    agent_ids = [a for a in per_agent if a is not None]
+    if agent_ids:
+        for row in (
+            ExecutionLog.objects.filter(
+                user=user,
+                created_at__gte=since,
+                status='failed',
+                subagent_id__in=agent_ids,
+            )
+            .exclude(caller='eval')
+            .order_by('-created_at')
+            .values('subagent_id', 'execution_id', 'error_message')[:200]
+        ):
+            key = str(row['subagent_id'])
+            if key not in agent_examples:
+                agent_examples[key] = {
+                    'execution_id': str(row['execution_id']),
+                    'error': (row['error_message'] or '')[:280],
+                }
+            if len(agent_examples) >= len(agent_ids):
+                break
+    return tool_examples, agent_examples
+
+
+def insights_overview(user, *, days: int = 30, compare: bool = False) -> dict[str, Any]:
+    """One call for the Insights page: runs, spend, tools, delegation, quality.
+
+    The page used to read only `/api/usage/insights/` (a DAG-era counter table
+    nothing writes any more), so it showed zeros beside real runs. The richer
+    endpoints existed but each answered one question, leaving the page to fire
+    four requests and join them in the browser. This joins them on the server:
+    `execution_statistics` + `cost_breakdown` + `quality_summary` plus the three
+    answers none of them gave — which tools fail, who delegates to whom, and
+    which agents earn their spend.
+    """
+    stats = execution_statistics(user, days=days)
+    costs = cost_breakdown(user, days=days)
+    quality = quality_summary(user, days=days)
+
+    since = _since(days)
+    runs = ExecutionLog.objects.filter(user=user, created_at__gte=since).exclude(caller='eval')
+    steps = AgentStep.objects.filter(execution__user=user, execution__created_at__gte=since).exclude(
+        execution__caller='eval')
+
+    # Tools: count plus success rate. `by_tool` in costs counts only; a tool
+    # used 200 times with a 40% failure rate reads as "popular" there.
+    tool_rows = list(
+        steps.values('tool').annotate(
+            total=Count('id'),
+            ok=Count('id', filter=Q(status='completed')),
+            failed=Count('id', filter=Q(status='failed')),
+        ).order_by('-total')[:12]
+    )
+    tool_names = [r['tool'] for r in tool_rows]
+
+    # Delegation: workers are runs with a parent step; orchestrators are the
+    # runs behind those steps. One generation is enough for the page — the
+    # full tree lives on the run detail.
+    delegated_qs = runs.filter(parent_step__isnull=False)
+    delegated_total = delegated_qs.count()
+    top_workers = [
+        {
+            'workflow_id': r['subagent__id'],
+            'workflow_name': r['subagent__name'] or 'Deleted agents',
+            'runs': r['runs'],
+        }
+        for r in delegated_qs.values('subagent__id', 'subagent__name').annotate(
+            runs=Count('id')).order_by('-runs')[:8]
+    ]
+    top_orchestrators = [
+        {
+            'workflow_id': r['parent_step__execution__subagent__id'],
+            'workflow_name': r['parent_step__execution__subagent__name'] or 'Deleted agents',
+            'delegated_runs': r['runs'],
+        }
+        for r in delegated_qs.values(
+            'parent_step__execution__subagent__id',
+            'parent_step__execution__subagent__name').annotate(
+            runs=Count('id')).order_by('-runs')[:8]
+    ]
+
+    # Agent leaderboard: most runs, most spend, weakest reliability (min 3 runs
+    # so one failure is not a verdict). Deleted agents group under one null id.
+    per_agent = list(
+        runs.values('subagent__id', 'subagent__name').annotate(
+            runs=Count('id'),
+            ok=Count('id', filter=Q(status='completed')),
+            failed=Count('id', filter=Q(status='failed')),
+            tokens=Sum('tokens_used'),
+            cost=Sum('cost_usd'),
+            unpriced=Count('id', filter=Q(cost_source='unpriced')),
+            billed=Count('id', filter=Q(cost_source='billed')),
+        )
+    )
+    leaders = [
+        {
+            'workflow_id': r['subagent__id'],
+            'workflow_name': r['subagent__name'] or 'Deleted agents',
+            'runs': r['runs'],
+            'success_rate': _percent(r['ok'], r['runs']),
+            'failed': r['failed'],
+            'tokens': r['tokens'] or 0,
+            'cost_usd': format_usd(r['cost']),
+            'cost_source': _source_of(r['runs'], r['unpriced'] or 0, r['billed'] or 0),
+        }
+        for r in per_agent
+    ]
+    most_active = sorted(leaders, key=lambda r: r['runs'], reverse=True)[:8]
+    # Most expensive is by money, not tokens: tokens alone are wrong by up to
+    # an order of magnitude across models, and an unpriced sum omits runs —
+    # so unpriced agents sort last, never as "free".
+    def _spend_key(row: dict[str, Any]) -> tuple:
+        from decimal import Decimal as _D
+
+        if row['cost_source'] == 'unpriced':
+            return (0, _D('0'))
+        try:
+            return (1, _D(row['cost_usd'] or '0'))
+        except Exception:  # noqa: BLE001
+            return (1, _D('0'))
+
+    most_expensive = sorted(
+        [r for r in leaders if (r['tokens'] or 0) > 0 or (r['cost_usd'] or '0') != '0.000000'],
+        key=_spend_key, reverse=True)[:8]
+    weakest = sorted(
+        [r for r in leaders if r['runs'] >= 3],
+        key=lambda r: r['success_rate'])[:5]
+
+    # One example failure per tool/agent so every number opens a run rather
+    # than a filtered list the user must search by eye.
+    tool_examples, agent_examples = _example_failures(
+        user=user, days=days,
+        per_tool=tool_names,
+        per_agent=[r['workflow_id'] for r in leaders],
+    )
+    tools = [
+        {
+            'tool': r['tool'],
+            'calls': r['total'],
+            'success_rate': _percent(r['ok'], r['total']),
+            'failed': r['failed'],
+            **tool_examples.get(r['tool'], {}),
+        }
+        for r in tool_rows
+    ]
+    for row in leaders:
+        ex = agent_examples.get(str(row['workflow_id']))
+        if ex:
+            row['example_execution_id'] = ex['execution_id']
+            row['example_error'] = ex['error']
+
+    try:
+        from agents.models import HITLRequest
+
+        pending_hitl = HITLRequest.objects.filter(user=user, status='pending').count()
+    except Exception:  # noqa: BLE001
+        pending_hitl = 0
+    median_approve_ms = _median_approve_ms(user, days=days)
+
+    distinct_agents = len(per_agent)
+
+    payload: dict[str, Any] = {
+        'days': days,
+        'runs': stats,
+        'spend': costs,
+        'quality': quality,
+        'tools': tools,
+        'delegation': {
+            'delegated_runs': delegated_total,
+            'top_workers': top_workers,
+            'top_orchestrators': top_orchestrators,
+        },
+        'agents': {
+            'distinct': distinct_agents,
+            'most_active': most_active,
+            'most_expensive': most_expensive,
+            'needs_attention': weakest,
+            'pending_hitl': pending_hitl,
+            'median_approve_ms': median_approve_ms,
+        },
+    }
+    if compare:
+        # Previous window of the same length, for delta badges. Computed with
+        # the same helpers over a shifted range rather than a second set of
+        # queries drifting from the first.
+        prev_since = _since(days * 2)
+        prev_until = _since(days)
+        prev_runs = ExecutionLog.objects.filter(
+            user=user, created_at__gte=prev_since,
+            created_at__lt=prev_until).exclude(caller='eval')
+        prev_total = prev_runs.count()
+        prev_ok = prev_runs.filter(status='completed').count()
+        from chat.models import ChatMessage as _ChatMessage
+
+        prev_chat = _ChatMessage.objects.filter(
+            session__user=user, role='assistant',
+            created_at__gte=prev_since, created_at__lt=prev_until).count()
+        prev_cost = prev_runs.aggregate(total=Sum('cost_usd'))['total']
+        payload['previous'] = {
+            'days': days,
+            'total_executions': prev_total,
+            'success_rate': _percent(prev_ok, prev_total),
+            'chat_messages': prev_chat,
+            'cost_usd': format_usd(prev_cost),
+        }
+    return payload
 
 
 def _delegated_by(execution: ExecutionLog) -> dict[str, Any] | None:

@@ -196,6 +196,38 @@ class SweepTests(TestCase):
 
         self.assertEqual(started, [])
 
+    def test_a_fired_run_completes_in_a_sync_context(self):
+        """The sweep, the management command and the run-now button are all sync
+        contexts with no persistent event loop. `start_agent_run` detaches with
+        `background.spawn()`, which dies with `async_to_sync`'s temporary loop —
+        so the sweep opened a log, re-armed as `fired`, and the agent never ran
+        (the orphan `running` row then held every later firing `busy` behind the
+        overlap policy). `fire` must wait for the spawned task on the same loop.
+        """
+        from workflow_backend.background import spawn as bg_spawn
+
+        done = []
+
+        async def fake_start(agent, goal, **kwargs):
+            async def _work():
+                done.append(True)
+
+            bg_spawn(_work(), name='agent-run:exec-9')
+            return 'exec-9'
+
+        from unittest.mock import patch
+
+        from agents import sweep
+
+        with patch('agents.agent.runtime.start_agent_run', fake_start):
+            counts = sweep.run_trigger_sweep()
+
+        self.assertEqual(counts.get('fired'), 1)
+        self.assertEqual(done, [True])
+        self.trigger.refresh_from_db()
+        self.assertEqual(self.trigger.last_outcome, 'fired')
+        self.assertGreater(self.trigger.next_due_at, timezone.now())
+
 
 class WebhookTests(APITestCase):
     def setUp(self):
@@ -313,6 +345,111 @@ class TriggerApiTests(APITestCase):
         trigger = Trigger.objects.get(id=response.data['id'])
         self.assertIsNotNone(trigger.next_due_at)
         self.assertEqual(trigger.cron, '0 9 * * *')
+
+    def test_a_schedule_on_an_agent_not_cleared_for_unattended_runs_is_rejected(self):
+        """The runtime refuses every such firing, so saving it arms five silent
+        refusals followed by a self-disabled row. The builder already refuses
+        this pair; the Schedules page must too."""
+        SubAgent.objects.filter(id=self.agent.id).update(allow_unattended=False)
+
+        response = self.client.post(
+            reverse('orchestrator:trigger_list'),
+            {'subagent': self.agent.id, 'mode': 'schedule', 'cron': '0 9 * * *',
+             'goal': 'Do it.'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('subagent', response.data)
+
+    def test_a_webhook_on_a_locked_agent_is_rejected(self):
+        SubAgent.objects.filter(id=self.agent.id).update(allow_unattended=False)
+
+        response = self.client.post(
+            reverse('orchestrator:trigger_list'),
+            {'subagent': self.agent.id, 'mode': 'webhook', 'goal': 'Go.'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('subagent', response.data)
+
+    def test_a_disabled_trigger_may_still_be_saved_on_a_locked_agent(self):
+        """Disabling, or staging a schedule while disabled, must never be held
+        hostage by the gate — otherwise a dead trigger cannot even be stood
+        down without first widening the agent."""
+        SubAgent.objects.filter(id=self.agent.id).update(allow_unattended=False)
+
+        response = self.client.post(
+            reverse('orchestrator:trigger_list'),
+            {'subagent': self.agent.id, 'mode': 'schedule', 'cron': '0 9 * * *',
+             'goal': 'Do it.', 'enabled': False},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+    def test_event_mode_is_refused(self):
+        """Nothing drives event triggers — the sweep only walks schedules and
+        webhooks fire by URL — so an enabled row would sit looking armed for
+        ever and never fire."""
+        response = self.client.post(
+            reverse('orchestrator:trigger_list'),
+            {'subagent': self.agent.id, 'mode': 'event',
+             'config': {'event': 'run.completed'}},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('mode', response.data)
+
+    def test_editing_a_goal_does_not_skip_a_due_firing(self):
+        """Every PATCH used to re-arm from now, so renaming a trigger silently
+        skipped a firing that was already due."""
+        from unittest.mock import patch
+
+        from agents import sweep
+
+        trigger = Trigger.objects.create(
+            subagent=self.agent, mode='schedule', config={'cron': '0 9 * * *'},
+            goal='Old goal.',
+            next_due_at=timezone.now() - timedelta(minutes=1),
+        )
+        response = self.client.patch(
+            reverse('orchestrator:trigger_detail', args=[trigger.id]),
+            {'goal': 'New goal.'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        trigger.refresh_from_db()
+        self.assertEqual(trigger.goal, 'New goal.')
+        # Still due — the edit must not have re-armed it into the future.
+        self.assertLessEqual(trigger.next_due_at, timezone.now())
+
+        async def fake_start(agent, goal, **kwargs):
+            return 'exec-1'
+
+        with patch('agents.agent.runtime.start_agent_run', fake_start):
+            counts = sweep.run_trigger_sweep()
+        self.assertEqual(counts.get('fired'), 1)
+
+    def test_editing_a_trigger_preserves_an_owed_firing(self):
+        """An overlap policy that queued a firing had it wiped by any unrelated
+        edit, because re-arming cleared `queued_for`."""
+        trigger = Trigger.objects.create(
+            subagent=self.agent, mode='schedule', config={'cron': '0 9 * * *'},
+            overlap='queue', goal='Do it.',
+            next_due_at=timezone.now() + timedelta(hours=20),
+            queued_for=timezone.now() - timedelta(minutes=5),
+        )
+        response = self.client.patch(
+            reverse('orchestrator:trigger_detail', args=[trigger.id]),
+            {'name': 'Morning'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        trigger.refresh_from_db()
+        self.assertIsNotNone(trigger.queued_for)
 
     def test_a_schedule_without_a_cron_is_rejected(self):
         response = self.client.post(

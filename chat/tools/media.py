@@ -99,6 +99,48 @@ def _slug(prompt: str) -> str:
     return '-'.join(words) or 'image'
 
 
+def _record_cost(user, context: Dict[str, Any], out: dict) -> None:
+    """File this generation in the cost ledger (`logs.CostEntry`).
+
+    The `cost_usd` in the result above stays — it is what the chat turn prices
+    and what `_roll_up_cost` sums, and removing it would break both. The ledger
+    row is the same charge in rupees for the spend cap, and `aggregate_rupees`
+    excludes the `image` kind for exactly that reason, so one image is counted
+    once. Best-effort: a failed ledger write must not fail the image.
+    """
+    try:
+        from decimal import Decimal as _Decimal
+
+        from agents.spend import rupees_for_usd
+        from logs.costs import record
+
+        cost = _Decimal(str(out.get('cost_usd') or '0'))
+        if cost <= 0:
+            return
+        execution = None
+        session_id = context.get('session_id')
+        if session_id:
+            from logs.models import ExecutionLog
+
+            # An agent run uses its thread id as its session id, and the log
+            # carries an indexed copy of it — so this joins without threading
+            # an execution id through `TurnContext` and every tool context.
+            execution = ExecutionLog.objects.filter(thread_id=session_id).first()
+        record(
+            user=user,
+            kind='image',
+            amount_inr=rupees_for_usd(cost),
+            execution=execution,
+            units=1,
+            unit='image',
+            estimated=(out.get('cost_source') != 'billed'),
+            source=f"generate_image:{context.get('call_id') or ''}",
+            dedupe_key=f"generate_image:{context.get('call_id') or ''}" if execution else '',
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception('[Media] Failed to record image cost')
+
+
 def _generate(scope, user, args: Dict[str, Any]) -> dict:
     """Blocking half: call the provider, keep the bytes, report the cost."""
     from imagine.services.capabilities import capabilities_for
@@ -212,6 +254,7 @@ async def generate_image(args: Dict, context: Dict) -> str:
     except Exception:
         logger.exception('[Media] generate_image failed')
         return json.dumps({'error': 'The image could not be generated. Try a simpler prompt.'})
+    await sync_to_async(_record_cost)(user, context, out)
     return json.dumps(out, default=str)
 
 

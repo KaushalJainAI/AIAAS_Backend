@@ -175,8 +175,16 @@ def mcp_reads_only(tool_name: str) -> bool:
     return looks_read_only(strip_encoded_digest(decoded[1]))
 
 
-async def is_remembered(tool_name: str, context: dict[str, Any]) -> bool:
-    """Whether the user has already said "always allow" for this tool."""
+async def is_remembered(
+    tool_name: str, context: dict[str, Any], args: dict | None = None,
+) -> bool:
+    """Whether the user has already said "always allow" for this tool call.
+
+    A row with an empty `match` allows the tool regardless of arguments; a row
+    with `match` allows it only when the call's arguments equal the listed keys
+    exactly. No patterns in v1 — exact keys cover the channel/recipient cases
+    that recur, and a pattern language is a second matcher to get wrong.
+    """
     from django.db.models import Q
 
     from chat.models import ToolPermission
@@ -189,14 +197,27 @@ async def is_remembered(tool_name: str, context: dict[str, Any]) -> bool:
 
     session_key = str(context.get("session_id") or "")[:64]
     try:
-        return await ToolPermission.objects.filter(
+        rows = ToolPermission.objects.filter(
             Q(session_key="") | Q(session_key=session_key),
             user_id=user_id,
             tool_name=tool_name[:160],
-        ).aexists()
+        ).values_list("match", flat=True)
+        matches = [row async for row in rows]
     except Exception:  # noqa: BLE001
         logger.exception("[Permissions] Could not read saved decisions")
         return False
+    if not matches:
+        return False
+    if args is None:
+        return any(not (m or {}) for m in matches)
+    args = args or {}
+    for rule in matches:
+        rule = rule or {}
+        if not rule:
+            return True
+        if all(args.get(k) == v for k, v in rule.items()):
+            return True
+    return False
 
 
 async def default_policy(name: str, args: dict, context: dict[str, Any]) -> bool:
@@ -217,7 +238,7 @@ async def default_policy(name: str, args: dict, context: dict[str, Any]) -> bool
             return False
     elif looks_read_only(await _original_name(name)):
         return False
-    return not await is_remembered(name, context)
+    return not await is_remembered(name, context, args)
 
 
 async def unattended_policy(name: str, args: dict, context: dict[str, Any]) -> bool:
@@ -231,7 +252,7 @@ async def unattended_policy(name: str, args: dict, context: dict[str, Any]) -> b
     """
     if not await carries_credentials(name):
         return False
-    return not await is_remembered(name, context)
+    return not await is_remembered(name, context, args)
 
 
 async def never(name: str, args: dict, context: dict[str, Any]) -> bool:

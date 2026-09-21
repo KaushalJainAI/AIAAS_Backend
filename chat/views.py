@@ -84,7 +84,24 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         return ChatSessionSerializer
 
     def perform_create(self, serializer) -> None:
-        serializer.save(user=self.request.user)
+        # A new conversation starts at the account's default autonomy, not
+        # always at ask: someone who chose Auto should not have to choose it
+        # again every morning. An explicit value on the request wins — read
+        # from the raw input, because the serializer already filled the model
+        # default by validation time and the two are indistinguishable there.
+        if not (self.request.data or {}).get('autonomy'):
+            try:
+                from core.models import UserProfile
+
+                profile = UserProfile.objects.filter(user=self.request.user).first()
+                autonomy = (getattr(profile, 'default_autonomy', '') or 'ask')
+            except Exception:  # noqa: BLE001 — a profile read must not stop a chat
+                autonomy = 'ask'
+            if autonomy not in ('ask', 'auto', 'plan'):
+                autonomy = 'ask'
+            serializer.save(user=self.request.user, autonomy=autonomy)
+        else:
+            serializer.save(user=self.request.user)
 
     def perform_destroy(self, instance) -> None:
         """Delete the session along with its RAG documents and vector index."""
@@ -251,16 +268,35 @@ async def steer_message_stream(request, session_id: str):
     if user is None:
         return JsonResponse({"detail": "Authentication required."}, status=401)
 
+    try:
+        body = json.loads(request.body or b"{}")
+    except (json.JSONDecodeError, TypeError):
+        body = {}
+
+    # A mode chosen before the run cannot answer a question raised during it:
+    # `autonomy` rides the same mailbox, stands for the rest of the run, and
+    # needs no running turn to be set — it applies at the next tool boundary,
+    # or the next turn if none is running. `plan` is refused: the toolbox is
+    # already built, so it could only gate, not withdraw.
+    if body.get('autonomy') is not None:
+        level = str(body.get('autonomy') or '').strip().lower()
+        if level not in ('ask', 'auto', 'review'):
+            return JsonResponse(
+                {"detail": "Autonomy must be ask, auto or review mid-run."},
+                status=400,
+            )
+        try:
+            session = await get_session(session_id, user)
+        except Exception:  # noqa: BLE001 — TurnError means not yours / not real
+            return JsonResponse({"detail": "No such chat."}, status=404)
+        steering.set_autonomy(str(session.id), level)
+        return JsonResponse({"autonomy": level})
+
     run = runs.get(session_id)
     if run is None or run.status != "running" or run.user_id != user.id:
         return JsonResponse(
             {"detail": "No turn is running for this chat."}, status=404,
         )
-
-    try:
-        body = json.loads(request.body or b"{}")
-    except (json.JSONDecodeError, TypeError):
-        body = {}
 
     message = str(body.get("message") or "").strip()
     if not message:

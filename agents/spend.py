@@ -37,6 +37,13 @@ from workflow_backend.thresholds import RUPEES_PER_MILLION_TOKENS
 #: blended rate rather than at zero.
 PRICED_SOURCES = ('billed', 'estimated')
 
+#: CostEntry kinds already inside `ExecutionLog.cost_usd` through the step-result
+#: rollup (`runtime._tool_costs` parses `cost_usd` out of `AgentStep.result`).
+#: Those rows are the ledger copy of the same charge, so `aggregate_rupees`
+#: excludes them — counting both would charge one image twice. Every other
+#: kind is ledger-only and is added on top.
+LEDGER_ROLLED_KINDS = frozenset({'image'})
+
 
 def rupees_for(tokens: int | None) -> int:
     """Approximate rupee cost of `tokens` at the blended rate, rounded up.
@@ -85,8 +92,15 @@ def aggregate_rupees(queryset) -> int:
     `cost_source` is a plain CharField, so `exclude` is safe here — unlike the
     JSON-key filter in `notifications/reminders.py`, where `NOT (key = False)`
     is NULL for a missing key and silences the rows it should match.
+
+    On top of both, the cost ledger (`logs.CostEntry`): non-token spend filed
+    by priced tools through `logs/costs.py::record`. Kinds already inside
+    `cost_usd` (`LEDGER_ROLLED_KINDS`) are excluded, so one image is never
+    charged twice; every other kind counts here and nowhere else.
     """
     from django.db.models import Q, Sum
+
+    from logs.models import CostEntry
 
     totals = queryset.aggregate(
         priced_usd=Sum('cost_usd', filter=Q(cost_source__in=PRICED_SOURCES)),
@@ -94,7 +108,11 @@ def aggregate_rupees(queryset) -> int:
             'tokens_used', filter=~Q(cost_source__in=PRICED_SOURCES)
         ),
     )
+    ledger = CostEntry.objects.filter(execution__in=queryset).exclude(
+        kind__in=LEDGER_ROLLED_KINDS
+    ).aggregate(total=Sum('amount_inr'))['total'] or 0
     return (
         rupees_for_usd(totals['priced_usd'])
         + rupees_for(totals['unpriced_tokens'])
+        + int(ledger)
     )

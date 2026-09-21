@@ -566,3 +566,33 @@ class BuilderScheduleOwnershipTests(APITestCase):
         config = AgentSerializer.to_config(self.agent)
         self.assertEqual(config['schedule'], '0 9 * * *')
         self.assertEqual(config['scheduleTimezone'], 'Asia/Kolkata')
+
+    def test_resaving_the_agent_without_touching_the_schedule_does_not_rearm(self):
+        """Every builder save used to recompute `next_due_at` from now, so
+        saving the agent after a slot went due but before the sweep ticked
+        silently skipped that firing."""
+        self._save_agent(schedule='0 9 * * *', scheduleTimezone='UTC')
+        trigger = Trigger.objects.get(
+            subagent=self.agent, mode='schedule', origin='builder')
+        Trigger.objects.filter(id=trigger.id).update(
+            next_due_at=timezone.now() - timedelta(minutes=1))
+        trigger.refresh_from_db()
+
+        self._save_agent(schedule='0 9 * * *', scheduleTimezone='UTC')
+
+        trigger.refresh_from_db()
+        self.assertLessEqual(trigger.next_due_at, timezone.now())
+
+    def test_changing_the_schedule_still_rearms(self):
+        """The fix above must not freeze arming: a new cron re-points the row."""
+        self._save_agent(schedule='0 9 * * *', scheduleTimezone='UTC')
+        trigger = Trigger.objects.get(
+            subagent=self.agent, mode='schedule', origin='builder')
+        Trigger.objects.filter(id=trigger.id).update(
+            next_due_at=timezone.now() - timedelta(minutes=1))
+
+        self._save_agent(schedule='0 10 * * *', scheduleTimezone='UTC')
+
+        trigger.refresh_from_db()
+        self.assertEqual(trigger.cron, '0 10 * * *')
+        self.assertGreater(trigger.next_due_at, timezone.now())

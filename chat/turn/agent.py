@@ -1392,6 +1392,18 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
 
         entry = {"tool": call.name, "args": arguments, "iteration": iteration,
                  "thought": reasoning, "summary": reasoning, "call_id": call.id}
+        # An `auto` reviewer that let this through (or asked about it) leaves
+        # its audit on the trace entry, so the run stays auditable afterwards.
+        # Read off the policy pass 1 actually consulted — a mid-run switch may
+        # have replaced the turn's own — never the turn's, which may be neither.
+        try:
+            from .reviewer import audit_for as _audit_for
+
+            _audit = _audit_for(policy, call.name, arguments)
+        except Exception:  # noqa: BLE001 — audit must not break the plan
+            _audit = None
+        if _audit is not None:
+            entry["approval"] = _audit
         trace.append(entry)
         await turn.sink(Event.AGENT_TRACE, {"sub_type": "tool", **entry})
         planned.append((call, arguments))
@@ -1518,10 +1530,18 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             # Never let an observer break a tool call that already succeeded —
             # it exists to watch the run, not to take part in it.
             try:
+                _approval = None
+                try:
+                    from .reviewer import audit_for as _audit_for2
+
+                    _approval = _audit_for2(policy, call.name, arguments)
+                except Exception:  # noqa: BLE001
+                    _approval = None
                 await turn.on_tool_result(
                     call_id=call.id, name=call.name, args=arguments,
                     output=output, status=status, duration_ms=duration_ms,
                     iteration=iteration, thought=reasoning,
+                    approval=_approval,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("[Tools] on_tool_result observer raised")

@@ -132,6 +132,8 @@ def _notify_device(prefs, *, notif_type: str, title: str, message: str, data: di
     from .utils import create_notification
 
     # send_email=False is load-bearing: email belongs to the digest alone.
+    # push_socket=False too: the reminder push below is the louder frame for
+    # this row, and a generic one alongside it would double-notify.
     create_notification(
         user=prefs.user,
         type=notif_type,
@@ -139,6 +141,7 @@ def _notify_device(prefs, *, notif_type: str, title: str, message: str, data: di
         message=message,
         data=data,
         send_email=False,
+        push_socket=False,
     )
 
     if prefs.device_notifications_enabled and not _in_quiet_hours(prefs, timezone.now()):
@@ -388,6 +391,7 @@ def _sweep_daily_digests(now: datetime) -> int:
                     'action_url': '/inbox',
                     'request_ids': [str(r.request_id) for r in pending[:50]],
                 },
+                push_socket=False,
             )
             if prefs.device_notifications_enabled:
                 push_device_notification(prefs.user_id, {

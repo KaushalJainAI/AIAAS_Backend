@@ -280,6 +280,15 @@ class UpcomingConnectorTests(TestCase):
                 server = MCPServer.objects.get(name=name, user__isnull=True)
                 self.assertIn("Coming soon", server.setup_notes)
 
+    def test_upcoming_notes_contain_no_setup_jargon(self):
+        # 0020 trimmed the notes to what a user can act on (nothing): no
+        # credential field names, no dashboard URLs, no token prefixes.
+        for name in self.UPCOMING:
+            with self.subTest(server=name):
+                server = MCPServer.objects.get(name=name, user__isnull=True)
+                self.assertNotIn("`", server.setup_notes)
+                self.assertNotIn("Requires a", server.setup_notes)
+
     def test_upcoming_connectors_are_invisible_to_agents(self):
         # The end that matters: an announced connector must not still be
         # resolvable as a tool source.

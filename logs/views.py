@@ -64,6 +64,34 @@ def cost_breakdown(request):
     return Response(queries.cost_breakdown(request.user, days=params['days']))
 
 
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def insights_overview(request):
+    """One call for the Insights page: runs, spend, tools, delegation, quality."""
+    params = _validated(AnalyticsFilterSerializer, request)
+    from django.core.cache import cache
+
+    days = params['days']
+    compare = bool(params.get('compare'))
+    key = f'insights:overview:{request.user.id}:{days}:{int(compare)}'
+    try:
+        cached = cache.get(key)
+    except Exception:  # noqa: BLE001
+        cached = None
+    if cached is not None:
+        return Response(cached)
+    payload = queries.insights_overview(request.user, days=days, compare=compare)
+    try:
+        # 60s, same TTL as the witness/tool-overlay caches: there is no
+        # invalidation hook here, so the TTL is the whole bound. A cache
+        # failure computes live rather than returning empty.
+        cache.set(key, payload, 60)
+    except Exception:  # noqa: BLE001
+        pass
+    return Response(payload)
+
+
 # ======================== Execution history ========================
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})
@@ -79,6 +107,7 @@ def execution_list(request):
         agent_id=params.get('workflow_id'),
         status=params.get('status'),
         caller=params.get('caller'),
+        failure_category=params.get('failure_category') or None,
     ))
 
 

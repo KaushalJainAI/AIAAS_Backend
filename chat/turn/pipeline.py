@@ -717,6 +717,23 @@ async def run_chat_turn(
     file_scope = await _chat_file_scope(user)
     phases.mark("file_scope")
 
+    # ── Autonomy ──
+    # `ask` is today's behaviour. `auto` lets the reviewer downgrade clear
+    # matches; `plan` withholds every mutating tool. Mid-turn switches arrive
+    # through the steer mailbox against `approval_modes`; `plan` is not
+    # switchable because the toolbox is already built.
+    from chat.tools import permissions as _permissions
+    from chat.tools import schemas as _schemas
+    from chat.tools.registry import sensitive_names as _sensitive_names
+    from chat.turn import reviewer as _reviewer
+
+    session_autonomy = (getattr(session, 'autonomy', '') or 'ask').strip().lower()
+    if session_autonomy not in ('ask', 'auto', 'plan', 'review'):
+        session_autonomy = 'ask'
+    _auto_policy = _reviewer.auto_policy(
+        user_text=question, provider=provider, model=model,
+    )
+
     turn = TurnContext(
         file_scope=file_scope,
         provider=provider,
@@ -732,6 +749,18 @@ async def run_chat_turn(
         max_iterations=agent.iteration_limit(intent),
         effort=effort or None,
         sink=sink,
+        **({'tool_source': _reviewer.read_only_source(
+            user_id=user.id, memory_enabled=session.memory_enabled,
+            session_key=str(session.id), file_scope=file_scope,
+        )} if session_autonomy == 'plan' else {}),
+        **({'approval_policy': _auto_policy} if session_autonomy == 'auto' else {}),
+        approval_modes={
+            'ask': (frozenset(_sensitive_names()), _permissions.default_policy),
+            'review': (frozenset(
+                t['function']['name'] for t in _schemas()
+            ), _permissions.default_policy),
+            'auto': (frozenset(), _auto_policy),
+        },
     )
 
     seed_text, seed_trace = await _seed_intent_tool(intent, question, turn, metadata)

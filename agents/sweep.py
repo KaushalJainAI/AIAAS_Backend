@@ -149,8 +149,14 @@ def fire(trigger, now: datetime | None = None) -> str:
     written to
     `last_outcome` so the same distinction survives until someone looks at the
     schedule, rather than living only in a log line nobody has access to.
+
+    Runs blocking, to completion: every caller here (the beat task, the
+    management command, the run-now button) is a sync context with no
+    persistent event loop, so a detached `start_agent_run` would die with the
+    temporary `async_to_sync` loop before doing any work. See
+    `runtime.start_agent_run_and_wait`.
     """
-    from agents.agent.runtime import AgentRunRefused, start_agent_run
+    from agents.agent.runtime import AgentRunRefused, start_agent_run_and_wait
 
     now = now or timezone.now()
 
@@ -240,8 +246,16 @@ def fire(trigger, now: datetime | None = None) -> str:
                       'This trigger has no goal and its agent has no brief, so '
                       'there is no instruction to run.')
 
+    # Re-arm BEFORE the execution, not after: this runs blocking and a run may
+    # take minutes, so a second sweep tick during it must find nothing due
+    # rather than fire the same slot twice.
+    pre = _rearm(trigger, now)
+    if pre in ('stopped', 'expired'):
+        # No next slot — the row just closed itself; nothing to run.
+        return pre
+
     try:
-        async_to_sync(start_agent_run)(
+        async_to_sync(start_agent_run_and_wait)(
             agent, goal, user=agent.user, trigger_type='schedule',
             caller='trigger',
         )
@@ -260,8 +274,13 @@ def fire(trigger, now: datetime | None = None) -> str:
 
     trigger.consecutive_failures = 0
     trigger.queued_for = None
-    trigger.save(update_fields=['consecutive_failures', 'queued_for', 'updated_at'])
-    _rearm(trigger, now, 'fired', '', fired=True)
+    trigger.last_outcome = 'fired'
+    trigger.last_error = ''
+    trigger.last_fired_at = now
+    trigger.save(update_fields=[
+        'consecutive_failures', 'queued_for', 'last_outcome', 'last_error',
+        'last_fired_at', 'updated_at',
+    ])
     return 'fired'
 
 

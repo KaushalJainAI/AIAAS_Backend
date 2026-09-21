@@ -141,6 +141,29 @@ class TriggerSerializer(serializers.ModelSerializer):
         mode = attrs.get('mode') or getattr(self.instance, 'mode', None)
         cron = (attrs.pop('cron', '') or '').strip()
 
+        if mode == 'event':
+            # Nothing drives event triggers — the sweep only walks schedules,
+            # webhooks fire by URL, and no UI offers this mode. An enabled row
+            # here would sit looking armed for ever and never fire.
+            raise serializers.ValidationError(
+                {'mode': 'Event triggers have no runtime yet — '
+                         'use a schedule or a webhook.'}
+            )
+
+        if mode in ('schedule', 'webhook'):
+            # The runtime refuses anything unattended on an agent that was never
+            # cleared for it, so saving an enabled trigger there arms five silent
+            # refusals followed by a self-disabled row. The builder already
+            # refuses this pair; the Schedules page must too.
+            agent = attrs.get('subagent') or getattr(self.instance, 'subagent', None)
+            enabled = attrs.get('enabled', getattr(self.instance, 'enabled', True))
+            if enabled and agent is not None and not agent.allow_unattended:
+                raise serializers.ValidationError(
+                    {'subagent': f'"{agent.name}" is not enabled for unattended '
+                                 'runs. Turn on "allow unattended" in its settings '
+                                 'first — otherwise every firing is refused.'}
+                )
+
         if mode == 'schedule':
             existing = (getattr(self.instance, 'config', None) or {}).get('cron', '')
             cron = cron or existing
@@ -272,13 +295,22 @@ def trigger_detail(request, trigger_id: int):
         trigger, data=request.data, partial=True, context={'request': request},
     )
     serializer.is_valid(raise_exception=True)
+    before = (trigger.config, trigger.timezone, trigger.starts_at,
+              trigger.ends_at, trigger.enabled)
     trigger = serializer.save()
     # Re-enabling clears the failure count, otherwise a trigger that disabled
     # itself would fire once and disable again immediately.
     if trigger.enabled and trigger.consecutive_failures:
         trigger.consecutive_failures = 0
         trigger.save(update_fields=['consecutive_failures', 'updated_at'])
-    _arm(trigger)
+    after = (trigger.config, trigger.timezone, trigger.starts_at,
+             trigger.ends_at, trigger.enabled)
+    # Re-arm only when the schedule itself moved (or the row was re-enabled).
+    # Every PATCH used to recompute `next_due_at` from now and clear
+    # `queued_for`, so renaming a trigger silently skipped a firing that was
+    # already due — or dropped one an overlap policy had patiently queued.
+    if before != after:
+        _arm(trigger)
     return Response(TriggerSerializer(trigger).data)
 
 

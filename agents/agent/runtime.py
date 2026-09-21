@@ -1043,6 +1043,23 @@ async def check_guardrails(agent, user) -> None:
     The spend cap is checked before the run, not after: a cap enforced only on
     completion has already let the money go.
     """
+    from django.utils import timezone as _tz
+
+    try:
+        from core.models import UserProfile
+
+        profile = await UserProfile.objects.filter(user=user).afirst()
+        paused = getattr(profile, 'paused_until', None) if profile else None
+        if paused and paused > _tz.now():
+            raise AgentRunRefused(
+                'All runs are paused for this account until '
+                f'{paused.astimezone().strftime("%H:%M %Z")}. '
+                'Resume them from Settings to run anything.'
+            )
+    except AgentRunRefused:
+        raise
+    except Exception:  # noqa: BLE001 — a profile read must not stop a run
+        logger.exception('[Agent] Could not read pause state')
     cap = (agent.guardrails or {}).get('spendCapRupees')
     if cap:
         spent = await _spend_this_month(agent, user)
@@ -1827,6 +1844,34 @@ async def start_agent_run(agent, goal: str, *, user,
 
     spawn(_run(), name=f'agent-run:{log.execution_id}')
     return str(log.execution_id)
+
+
+async def start_agent_run_and_wait(agent, goal: str, *, user,
+                                   trigger_type: str = 'schedule',
+                                   caller: str = 'trigger') -> str:
+    """Start a run and wait for its background task to finish (blocking).
+
+    The sync-context twin of `start_agent_run`, for callers with no persistent
+    event loop — the trigger sweep (`agents/sweep.py`), whether reached as the
+    Celery beat task or as `manage.py run_due_triggers`.
+
+    `start_agent_run` detaches its work with `background.spawn()`, which is
+    correct on the ASGI loop that outlives the request and fatal anywhere else:
+    wrapped in `async_to_sync` the spawn lands on a temporary loop that is
+    closed the moment the start returns, so the sweep opened an `ExecutionLog`,
+    re-armed the trigger as `fired`, and the agent never ran — with the orphan
+    `running` row then holding every later firing `busy` behind the overlap
+    policy. Awaiting the spawned task on this same loop runs it to completion
+    instead. Pre-start refusals raise exactly as with `start_agent_run`;
+    anything the run itself records stays on its `ExecutionLog`.
+    """
+    execution_id = await start_agent_run(
+        agent, goal, user=user, trigger_type=trigger_type, caller=caller,
+    )
+    task = _live_task(execution_id)
+    if task is not None:
+        await task
+    return execution_id
 
 
 async def resume_agent_run(agent, *, user, thread_id: str) -> str | None:

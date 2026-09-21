@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from django.test import SimpleTestCase
 
-from core.safety.net import redact_headers, validate_url
+from core.safety.net import check_egress, redact_headers, validate_url
 
 
 class SsrfValidationTests(SimpleTestCase):
@@ -74,3 +74,48 @@ class HeaderRedactionTests(SimpleTestCase):
 
     def test_matching_is_case_insensitive(self):
         self.assertEqual(redact_headers({"sEt-CooKie": "x"})["sEt-CooKie"], "[redacted]")
+
+
+class EgressGuardTests(SimpleTestCase):
+    def test_ssrf_refusal_wins_over_the_allowlist(self):
+        ok, reason = check_egress(
+            'http://169.254.169.254/latest/meta-data/',
+            {'apiHosts': ['169.254.169.254']},
+        )
+        self.assertFalse(ok)
+        self.assertTrue(reason)
+
+    def test_a_listed_host_passes_with_its_subdomains(self):
+        # github.com resolves in CI (see SsrfValidationTests above); the point
+        # here is the allowlist match, not the DNS.
+        for target in ('https://api.github.com/repos', 'https://github.com/'):
+            ok, reason = check_egress(target, {'apiHosts': ['github.com']})
+            self.assertTrue(ok, f'{target}: {reason}')
+
+    def test_an_unlisted_host_is_refused_with_a_usable_reason(self):
+        ok, reason = check_egress(
+            'https://api.github.com/repos', {'apiHosts': ['example.com']},
+        )
+        self.assertFalse(ok)
+        self.assertIn('allowlist', reason)
+
+    def test_a_suffix_trick_does_not_match(self):
+        ok, _ = check_egress(
+            'https://example.com.evil.com/', {'apiHosts': ['example.com']},
+        )
+        self.assertFalse(ok)
+
+    def test_no_allowlist_means_the_ssrf_answer_stands(self):
+        ok, _ = check_egress('https://api.github.com/repos', {})
+        self.assertTrue(ok)
+        ok, _ = check_egress('not-a-url', {})
+        self.assertFalse(ok)
+
+    def test_bare_hosts_are_accepted_for_database_scopes(self):
+        ok, _ = check_egress('db.example.com', {'dbHosts': ['example.com']})
+        self.assertTrue(ok)
+
+    def test_a_bare_private_ip_is_refused_without_dns(self):
+        ok, reason = check_egress('169.254.169.254', {'dbHosts': ['example.com']})
+        self.assertFalse(ok)
+        self.assertTrue(reason)

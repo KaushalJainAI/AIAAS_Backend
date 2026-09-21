@@ -62,7 +62,7 @@ class ChatSessionSerializer(serializers.ModelSerializer):
         model = ChatSession
         fields = [
             'id', 'title', 'intent', 'llm_provider', 'llm_model', 'llm_effort',
-            'system_prompt', 'memory_enabled', 'total_tokens_used',
+            'system_prompt', 'memory_enabled', 'autonomy', 'total_tokens_used',
             'total_cost_usd', 'cost_source', 'paid_by',
             'created_at', 'updated_at', 'messages'
         ]
@@ -109,6 +109,16 @@ class ChatSessionSerializer(serializers.ModelSerializer):
         if level is None:
             raise serializers.ValidationError(
                 'Not a reasoning effort level.'
+            )
+        return level
+
+    def validate_autonomy(self, value):
+        """ask | auto | plan. `full` stays an agent-builder choice — chat never
+        offers a mode that asks about nothing."""
+        level = (value or '').strip().lower()
+        if level not in ('ask', 'auto', 'plan'):
+            raise serializers.ValidationError(
+                'Autonomy must be ask, auto or plan.'
             )
         return level
 

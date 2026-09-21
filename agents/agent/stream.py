@@ -358,7 +358,8 @@ class AgentRunStream:
 
     async def on_tool_result(self, *, call_id: str, name: str, args: dict[str, Any],
                              output: Any, status: str, duration_ms: int,
-                             iteration: int = 0, thought: str = '') -> None:
+                             iteration: int = 0, thought: str = '',
+                             approval: dict[str, Any] | None = None) -> None:
         """A `ToolObserver`. Persist the step, then announce it.
 
         `iteration` and `thought` are still accepted because the turn loop still
@@ -377,12 +378,12 @@ class AgentRunStream:
                 await self._record_step(
                     call_id=call_id, tool=name, order=self._order, args=args,
                     output=output, status=status, duration_ms=duration_ms,
-                    error=error,
+                    error=error, approval=approval,
                 )
             else:
                 await self._close_step(
                     step_id=step_id, output=output, status=status,
-                    duration_ms=duration_ms, error=error,
+                    duration_ms=duration_ms, error=error, approval=approval,
                 )
         except Exception:  # noqa: BLE001
             logger.exception('[AgentStream] Failed to persist step %s', call_id)
@@ -404,7 +405,8 @@ class AgentRunStream:
 
     @sync_to_async
     def _close_step(self, *, step_id: int, output: Any, status: str,
-                    duration_ms: int, error: str) -> None:
+                    duration_ms: int, error: str,
+                    approval: dict[str, Any] | None = None) -> None:
         """Finish the row `_open_step` created, rather than writing a second."""
         from logs.models import AgentStep
 
@@ -414,12 +416,14 @@ class AgentRunStream:
             duration_ms=duration_ms,
             error_message=error,
             completed_at=timezone.now(),
+            **({'approval': approval} if approval is not None else {}),
         )
 
     @sync_to_async
     def _record_step(self, *, call_id: str, tool: str, order: int,
                      args: dict[str, Any], output: Any, status: str,
-                     duration_ms: int, error: str) -> None:
+                     duration_ms: int, error: str,
+                     approval: dict[str, Any] | None = None) -> None:
         """Write a finished step that was never opened. See `on_tool_result`."""
         from logs.models import AgentStep
 
@@ -435,6 +439,7 @@ class AgentRunStream:
             duration_ms=duration_ms,
             error_message=error,
             completed_at=timezone.now(),
+            **({'approval': approval} if approval is not None else {}),
         )
 
     # ── run lifecycle ────────────────────────────────────────────────────────

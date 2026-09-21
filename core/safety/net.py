@@ -146,6 +146,92 @@ def assert_url_safe(url: str) -> None:
         raise UnsafeURLError(reason)
 
 
+#: Scope keys that each carry a host allowlist, checked by `check_egress`.
+#: One function for every caller — `call_api`, `query_sql`, `download_file`,
+#: the browser and workspace egress — so "may this host be reached" has one
+#: answer instead of five similar ones that drift.
+EGRESS_SCOPE_KEYS = ('apiHosts', 'dbHosts', 'browserDomains', 'workspaceEgress')
+
+
+def _normalise_host(value: str) -> str:
+    """A hostname out of a URL or a bare host, lower-cased and de-dotted."""
+    value = (value or '').strip()
+    if '://' in value:
+        try:
+            host = urlparse(value).hostname or ''
+        except Exception:  # noqa: BLE001 — unparseable is "no host"
+            return ''
+    else:
+        host = value.split('/')[0].split(':')[0]
+    return host.lower().rstrip('.')
+
+
+def _host_allowed(host: str, allowed: list[str]) -> bool:
+    """Registrable-domain match plus explicit subdomains: `example.com` covers
+    `api.example.com` but not `example.com.evil.com`."""
+    for entry in allowed:
+        domain = str(entry or '').lower().strip().lstrip('.').rstrip('.')
+        if domain and (host == domain or host.endswith('.' + domain)):
+            return True
+    return False
+
+
+def check_egress(url_or_host: str, scope: dict | None = None) -> tuple[bool, str]:
+    """May this host be reached under `scope`? Returns (allowed, reason).
+
+    Two checks, in order. First the SSRF guard (`validate_url`) for URLs — a
+    host the platform must never reach is refused whatever any allowlist says.
+    Then the per-scope allowlist: when the scope names allowed hosts, the host
+    must match one of them, and the reason names what to do (add the host, not
+    "denied" — a model told only "denied" retries until the iteration cap ends
+    the run). When the scope names none, the SSRF answer stands alone, so
+    callers without a scope concept keep working.
+    """
+    scope = scope or {}
+    host = _normalise_host(url_or_host)
+    if not host:
+        return False, 'No hostname could be read from that address.'
+
+    listed: list[str] = []
+    for key in EGRESS_SCOPE_KEYS:
+        entries = scope.get(key) or []
+        if isinstance(entries, str):
+            entries = [entries]
+        listed.extend(str(e) for e in entries if str(e).strip())
+
+    text = (url_or_host or '').strip()
+    if '://' in text:
+        # A URL: the full SSRF guard first, including DNS. A host the
+        # platform must never reach is refused whatever any allowlist says.
+        ok, reason = validate_url(text)
+        if not ok:
+            return False, reason
+    else:
+        # A bare host (a database hostname, a scope entry): no DNS here, just
+        # the offline checks — a literal private IP or a known metadata alias
+        # is refused without a lookup.
+        try:
+            literal = ipaddress.ip_address(host)
+        except ValueError:
+            literal = None
+        if literal is not None:
+            for blocked in _BLOCKED_IP_RANGES:
+                if literal in blocked:
+                    return False, 'Access to internal or private network addresses is blocked'
+        elif host in _BLOCKED_HOSTNAMES:
+            return False, f"Access to '{host}' is blocked"
+        elif '.' not in host:
+            return False, 'No hostname could be read from that address.'
+
+    if listed and not _host_allowed(host, listed):
+        return (
+            False,
+            f'Host {host!r} is not on this run\'s allowlist. '
+            'Ask the user to add it to the agent\'s allowed hosts.',
+        )
+    return True, ""
+
+
 class _ValidatingRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Re-runs the guard on every hop of a redirect chain."""
 

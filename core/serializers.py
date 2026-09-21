@@ -42,6 +42,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'llm_provider', 'llm_model', 'llm_effort', 'llm_credential_id',
             'vision_provider', 'vision_model',
             'default_temperature', 'default_max_tokens',
+            'default_autonomy', 'paused_until',
             'theme_preference', 'accent_color',
             'created_at', 'updated_at'
         ]
@@ -59,6 +60,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'default_max_tokens',
             'created_at', 'updated_at'
         ]
+
+    def validate_default_autonomy(self, value):
+        """ask | auto | plan. `full` is not a default anyone wakes up in."""
+        level = (value or '').strip().lower()
+        if level not in ('ask', 'auto', 'plan'):
+            raise serializers.ValidationError(
+                'Autonomy must be ask, auto or plan.'
+            )
+        return level
 
     def validate_timezone(self, value):
         """An IANA zone, or the save is refused.

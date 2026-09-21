@@ -580,6 +580,11 @@ class AgentStep(models.Model):
     args = models.JSONField(default=dict, blank=True)
     result = models.JSONField(default=dict, blank=True)
 
+    #: How this call got past the gate under `auto`: {mode, verdict, reason,
+    #: reviewed_by}. Null for calls that asked, were remembered, or ran read —
+    #: the column records reviewer decisions, not every dispatch.
+    approval = models.JSONField(null=True, blank=True)
+
     error_message = models.TextField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -598,3 +603,74 @@ class AgentStep(models.Model):
 
     def __str__(self):
         return f"{self.tool} ({self.status})"
+
+
+class CostEntry(models.Model):
+    """Non-token spend: images, messages, browser minutes, compute, transcription.
+
+    Reading `AgentStep.result` for costs was right for one priced tool
+    (`generate_image`). It does not scale to six: each tool would need its own
+    parsing rule in the rollup, and a step re-run on resume would double-count
+    what it re-records. So priced tools write here through `logs/costs.py::record`
+    — the only writer — and `agents/spend.py` sums tokens + these rows for the
+    spend cap. An unpriced call is estimated, never free.
+
+    Either `execution` or `session` names where the spend happened; both null
+    means platform-attributed (a calibration run, a reviewer call).
+    """
+
+    KIND_CHOICES = [
+        ('image', 'Image generation'),
+        ('sms', 'SMS'),
+        ('whatsapp', 'WhatsApp'),
+        ('browser', 'Browser minutes'),
+        ('compute', 'Compute minutes'),
+        ('transcription', 'Transcription'),
+        ('esign', 'E-signature'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='cost_entries',
+    )
+    execution = models.ForeignKey(
+        ExecutionLog,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='cost_entries',
+    )
+    session = models.ForeignKey(
+        'chat.ChatSession',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='cost_entries',
+    )
+    kind = models.CharField(max_length=24, choices=KIND_CHOICES)
+    units = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal('0'))
+    unit = models.CharField(max_length=16, blank=True, default='')
+    #: Rupees, rounded up at write time — the spend cap is denominated in
+    #: rupees, so the stored unit is the one the guardrail compares against.
+    amount_inr = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    #: False only when a provider reported the charge. True means our estimate,
+    #: which still counts — an unpriced call must never read as free.
+    estimated = models.BooleanField(default=True)
+    source = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text='Tool or provider that produced the charge, e.g. generate_image',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Cost entry'
+        verbose_name_plural = 'Cost entries'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['execution', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} ₹{self.amount_inr} ({self.user_id})"

@@ -61,6 +61,17 @@ class ChatSession(models.Model):
     # and is deliberately not what this does.
     memory_enabled = models.BooleanField(default=True)
 
+    #: How much this conversation asks before acting: `ask` (today's behaviour),
+    #: `auto` (the reviewer may let matching irreversible calls through) or
+    #: `plan` (mutating tools withheld — look and report only). `full` is never
+    #: offered in chat; it stays an agent-builder choice. Switchable mid-turn
+    #: through the steer mailbox, exactly like an agent run's level.
+    AUTONOMY_CHOICES = [
+        ('ask', 'Ask'),
+        ('auto', 'Auto'),
+        ('plan', 'Plan'),
+    ]
+    autonomy = models.CharField(max_length=10, default='ask')
     # Token usage tracking
     total_tokens_used = models.IntegerField(default=0)
 
@@ -328,6 +339,13 @@ class ToolPermission(models.Model):
     tool_name = models.CharField(max_length=160)
     #: Empty for "in every conversation"; a `TurnContext.session_id` otherwise.
     session_key = models.CharField(max_length=64, blank=True, default="")
+    #: Argument-shaped trust, from the approval card ("Always allow sending to
+    #: #team-ops"). Exact match on the listed keys against the call's arguments;
+    #: empty means the tool regardless of arguments. No patterns in v1 — a
+    #: pattern is a second matching language to get wrong, and exact keys cover
+    #: the channel/recipient cases that actually recur. Listed and revocable in
+    #: Settings → Permissions.
+    match = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

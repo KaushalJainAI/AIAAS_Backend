@@ -18,6 +18,9 @@ class AnalyticsFilterSerializer(serializers.Serializer):
 
     days = serializers.IntegerField(default=30, min_value=1, max_value=365)
     workflow_id = serializers.IntegerField(required=False, allow_null=True)
+    #: When true, the overview also returns the previous `days` window as
+    #: `previous` so the page can show deltas rather than bare totals.
+    compare = serializers.BooleanField(default=False, required=False)
 
 
 class ExecutionListFilterSerializer(serializers.Serializer):
@@ -39,6 +42,16 @@ class ExecutionListFilterSerializer(serializers.Serializer):
     )
     limit = serializers.IntegerField(default=20, min_value=1, max_value=100)
     cursor = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    #: Machine-readable failure kind (`ExecutionLog.failure_category`). Validated
+    #: against the model's own choices so a typo 400s rather than returning an
+    #: empty list that reads as "no such runs".
+    failure_category = serializers.ChoiceField(
+        choices=[
+            'provider', 'step_budget', 'tool_error', 'guardrail', 'contract',
+            'timeout', 'cancelled', 'interrupted', 'other',
+        ],
+        required=False, allow_null=True, allow_blank=True,
+    )
 
 
 class RevisionListFilterSerializer(serializers.Serializer):

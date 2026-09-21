@@ -444,8 +444,13 @@ SPECTACULAR_SETTINGS = {
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=360),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    # The frontend silently refreshes on 401, so the access lifetime is
+    # about request churn, not about staying logged in — 24h keeps a day's
+    # worth of turns on one token. The refresh lifetime *is* the "logout
+    # time": 30 days means a monthly visitor is still signed in. Rotation
+    # stays on, so a stolen refresh token is single-use.
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),

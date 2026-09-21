@@ -10,6 +10,7 @@ from django.urls import path
 from .views import (
     agents,
     builder,
+    capabilities,
     gallery,
     hitl,
     runs,
@@ -57,6 +58,10 @@ urlpatterns = [
     # something you own, and the ownership check is the same
     # `user=request.user` lookup every other agent route makes.
     path('agents/<int:agent_id>/share/', gallery.agent_share, name='agent_share'),
+    # What an agent may be granted: tools, scope field and engine state per
+    # grant, derived from the runtime rather than hand-written, so the builder
+    # can grey out what cannot run.
+    path('capabilities/', capabilities.capability_list, name='capability_list'),
 
     # The public catalogue: the second unauthenticated surface in this app,
     # after the webhook receiver. Reads only, `visibility='public'` only, and
