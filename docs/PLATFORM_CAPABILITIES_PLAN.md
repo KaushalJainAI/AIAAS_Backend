@@ -1,6 +1,6 @@
 # Platform Capabilities Plan — messaging, data, browser, compute, Code tab, long runs, dashboards, auto mode
 
-Status: **P0 implemented 2026-09-21; P1–P9 proposed.** Written to be handed to another
+Status: **P0 + P3 implemented 2026-09-21; P1, P2, P4–P9 proposed.** Written to be handed to another
 engineer or AI to implement phase by phase. Each phase lists the gap, the design,
 the files, the tests and the exit criteria. Read §1 and §2 before touching any
 phase: they are the rules every phase follows, and most of them are already
