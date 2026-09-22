@@ -121,21 +121,21 @@ def _unattended(context: Dict) -> bool:
         'description': (
             'List the messaging channels and addressable targets: Slack '
             'channels and DMs, WhatsApp contacts who wrote to the business, '
-            'Teams chats, SMS numbers. Call it before sending anywhere you '
-            'have not sent before.'
+            'Teams chats, SMS numbers, Telegram chats. Call it before '
+            'sending anywhere you have not sent before.'
         ),
         'parameters': {
             'type': 'object',
             'properties': {
                 'channel': {'type': 'string',
-                            'description': 'slack, whatsapp, teams or sms. Omit for all.'},
+                            'description': 'slack, whatsapp, teams, sms or telegram. Omit for all.'},
             },
             'additionalProperties': False,
         },
     },
 }, effect='read')
 async def message_channels(args: Dict, context: Dict) -> str:
-    from .messaging.common import CHANNELS, Unsupported, adapter_for
+    from .messaging.common import CHANNELS, Unsupported, adapter_for, validate_channel
 
     user_id = context.get('user_id')
     if not user_id:
@@ -175,7 +175,7 @@ async def message_channels(args: Dict, context: Dict) -> str:
         'parameters': {
             'type': 'object',
             'properties': {
-                'channel': {'type': 'string', 'description': 'slack, whatsapp, teams or sms.'},
+                'channel': {'type': 'string', 'description': 'slack, whatsapp, teams, sms or telegram.'},
                 'query': {'type': 'string', 'description': 'Words to match.'},
                 'from': {'type': 'string', 'description': 'Only messages from this sender.'},
                 'since': {'type': 'string', 'description': 'Only messages after this date.'},
@@ -225,7 +225,7 @@ def _truncate_hits(hits: list, cap: int) -> tuple[list, bool]:
         'parameters': {
             'type': 'object',
             'properties': {
-                'channel': {'type': 'string', 'description': 'slack, whatsapp, teams or sms.'},
+                'channel': {'type': 'string', 'description': 'slack, whatsapp, teams, sms or telegram.'},
                 'conversation': {'type': 'string', 'description': 'Channel, thread or contact id.'},
                 'limit': {'type': 'integer', 'description': 'Messages to read (default 30, max 100).'},
             },
@@ -277,7 +277,7 @@ async def message_read(args: Dict, context: Dict) -> str:
         'parameters': {
             'type': 'object',
             'properties': {
-                'channel': {'type': 'string', 'description': 'slack, whatsapp, teams or sms.'},
+                'channel': {'type': 'string', 'description': 'slack, whatsapp, teams, sms or telegram.'},
                 'to': {'type': 'string', 'description': 'Who it is for.'},
                 'body': {'type': 'string', 'description': 'What it says.'},
             },
@@ -339,7 +339,7 @@ async def message_draft(args: Dict, context: Dict) -> str:
         'parameters': {
             'type': 'object',
             'properties': {
-                'channel': {'type': 'string', 'description': 'slack, whatsapp, teams or sms.'},
+                'channel': {'type': 'string', 'description': 'slack, whatsapp, teams, sms or telegram.'},
                 'to': {'type': 'string', 'description': 'Who it is for.'},
                 'body': {'type': 'string', 'description': 'What it says. Omit when sending a draft.'},
                 'draft_id': {'type': 'integer', 'description': 'A draft to send instead of new text.'},

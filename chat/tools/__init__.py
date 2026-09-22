@@ -75,6 +75,7 @@ from . import (  # noqa: F401  — imported for their registration side effect
     publish,
     sandbox,
     talk,
+    tasks,
     vision,
     voice,
     web,

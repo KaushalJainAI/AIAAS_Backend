@@ -43,6 +43,9 @@ CREDENTIAL_SLUGS: dict[str, tuple[str, ...]] = {}
 #: user has no personal credential, so the app works out of the box.
 #: NVIDIA is the one the product ships configured, so a user who has set up
 #: nothing still gets a working assistant.
+#:
+#: `opencode` is absent on purpose: Zen's ToS limits a key to its holder's own
+#: use, so a platform key would serve third parties. Users bring their own.
 PLATFORM_ENV_KEYS: dict[str, tuple[str, ...]] = {
     'nvidia': ('NVIDIA_API_KEY',),
     'openrouter': ('OPENROUTER_API_KEY', 'OPEN_ROUTER_KEY'),

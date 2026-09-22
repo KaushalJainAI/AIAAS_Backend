@@ -35,7 +35,10 @@ async def _tokens(user_id: int, account) -> tuple[str | None, str | None]:
         data = None
     if not data:
         return None, None
-    return data.get('bot_token'), data.get('user_token')
+    # The vault's `token` field is the bot token (xoxb); `bot_token` is the
+    # same value under the older standalone seeder's name. Either unlocks
+    # posting; only `user_token` (xoxp) unlocks search.
+    return data.get('token') or data.get('bot_token'), data.get('user_token')
 
 
 def _need_what(bot: str | None, user: str | None, verb: str) -> None:

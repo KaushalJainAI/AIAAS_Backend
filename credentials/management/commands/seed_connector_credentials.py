@@ -277,6 +277,11 @@ CREDENTIAL_TYPES: list[dict] = [
             # "Please set SLACK_BOT_TOKEN and SLACK_TEAM_ID environment
             # variables". A token on its own could never connect.
             _field("teamId", "Workspace ID", placeholder="T01234567"),
+            # The messaging adapter posts with the bot token and searches
+            # with a user token (`search:read`); one field cannot serve both
+            # authorities. Optional so existing connections keep working.
+            _field("user_token", "User OAuth Token", secret=True, required=False,
+                   placeholder="xoxp-..."),
         ],
     },
     {
@@ -397,6 +402,12 @@ CREDENTIAL_TYPES: list[dict] = [
         "name": "NVIDIA NIM", "slug": "nvidia", "auth_method": "api_key",
         "description": "NVIDIA NIM / build.nvidia.com API key", "icon": "Brain",
         "fields_schema": _api_key("API Key", "nvapi-..."),
+    },
+    {
+        "name": "OpenCode Zen", "slug": "opencode", "auth_method": "api_key",
+        "description": "OpenCode Zen API key (opencode.ai/zen) — free models run on your own account",
+        "icon": "Brain",
+        "fields_schema": _api_key("API Key"),
     },
 
     # ---- Search / research -------------------------------------------------

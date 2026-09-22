@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 
-CHANNELS = ('slack', 'whatsapp', 'teams', 'sms')
+CHANNELS = ('slack', 'whatsapp', 'teams', 'sms', 'telegram')
 
 
 class Unsupported(RuntimeError):
@@ -26,9 +26,10 @@ def validate_channel(channel: str) -> str:
 
 def adapter_for(channel: str):
     """The adapter module for `channel`."""
-    from . import sms, slack, teams, whatsapp
+    from . import sms, slack, teams, telegram, whatsapp
 
-    return {'slack': slack, 'whatsapp': whatsapp, 'teams': teams, 'sms': sms}[channel]
+    return {'slack': slack, 'whatsapp': whatsapp, 'teams': teams,
+            'sms': sms, 'telegram': telegram}[channel]
 
 
 async def vault_field(user_id: int, slug: str, field: str) -> str | None:

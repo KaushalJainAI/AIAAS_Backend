@@ -68,7 +68,7 @@ def _scope(context: Dict) -> dict | None:
 
 
 async def _connection(user_id: int, connection_id: int, context: Dict):
-    from data.models import ApiConnection
+    from datasources.models import ApiConnection
 
     try:
         wanted = int(connection_id)
@@ -138,7 +138,7 @@ async def list_api_operations(args: Dict, context: Dict) -> str:
     if not user_id:
         return json.dumps({'error': 'No user context.'})
     try:
-        from data.models import ApiConnection
+        from datasources.models import ApiConnection
 
         rows = [row async for row in ApiConnection.objects.filter(
             user_id=user_id).order_by('name')]

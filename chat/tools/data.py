@@ -38,7 +38,7 @@ def _scope_ids(context: Dict) -> list[int] | None:
 
 
 async def _connection(user_id: int, connection_id: int, context: Dict):
-    from data.models import DataConnection
+    from datasources.models import DataConnection
 
     try:
         wanted = int(connection_id)
@@ -56,7 +56,7 @@ async def _connection(user_id: int, connection_id: int, context: Dict):
 
 
 def _present(connections) -> list[dict]:
-    from data.drivers import available_kinds
+    from datasources.drivers import available_kinds
 
     kinds = set(available_kinds())
     out = []
@@ -72,7 +72,7 @@ def _present(connections) -> list[dict]:
 
 
 async def _list_rows(user_id: int):
-    from data.models import DataConnection
+    from datasources.models import DataConnection
 
     return [row async for row in DataConnection.objects.filter(
         user_id=user_id).order_by('name')]
@@ -122,7 +122,7 @@ async def list_data_connections(args: Dict, context: Dict) -> str:
     },
 }, effect='read')
 async def describe_schema(args: Dict, context: Dict) -> str:
-    from data import drivers
+    from datasources import drivers
 
     user_id = context.get('user_id')
     if not user_id:
@@ -175,7 +175,7 @@ def _egress_hosts(context: Dict) -> list:
     },
 }, effect='read')
 async def query_sql(args: Dict, context: Dict) -> str:
-    from data import drivers
+    from datasources import drivers
 
     user_id = context.get('user_id')
     if not user_id:
@@ -194,7 +194,7 @@ async def query_sql(args: Dict, context: Dict) -> str:
             scope_hosts=_egress_hosts(context),
             row_cap=await alimit(context, 'query_sql', 'maxRows'))
     except (drivers.DataError, Exception) as exc:
-        from data.drivers import DataError
+        from datasources.drivers import DataError
 
         if isinstance(exc, DataError):
             return json.dumps({'error': str(exc)})
@@ -210,7 +210,7 @@ async def query_sql(args: Dict, context: Dict) -> str:
                 file_scope=context.get('file_scope'),
                 scope_hosts=_egress_hosts(context), full=True)
         except (drivers.DataError, Exception) as exc:
-            from data.drivers import DataError
+            from datasources.drivers import DataError
 
             if isinstance(exc, DataError):
                 return json.dumps({'error': str(exc)})
@@ -285,7 +285,7 @@ async def _spill_csv(context: Dict, connection, out: dict) -> str:
     },
 }, sensitive=True, effect='irreversible')
 async def execute_sql(args: Dict, context: Dict) -> str:
-    from data import drivers
+    from datasources import drivers
 
     user_id = context.get('user_id')
     if not user_id:
@@ -307,7 +307,7 @@ async def execute_sql(args: Dict, context: Dict) -> str:
             file_scope=context.get('file_scope'),
             scope_hosts=_egress_hosts(context), write=True)
     except (drivers.DataError, Exception) as exc:
-        from data.drivers import DataError
+        from datasources.drivers import DataError
 
         if isinstance(exc, DataError):
             return json.dumps({'error': str(exc)})

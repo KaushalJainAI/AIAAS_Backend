@@ -2,8 +2,8 @@
 Messaging channels: one account row, one outbox, one inbox per channel.
 
 Gmail is the only channel that ends at send. Everything else — Slack, Teams,
-WhatsApp, SMS — goes through here so drafts, sends, searches and inbound
-replies share one shape instead of four similar ones that drift.
+WhatsApp, SMS, Telegram — goes through here so drafts, sends, searches and
+inbound replies share one shape instead of five similar ones that drift.
 
 - `MessagingAccount`: one user's presence on one channel. The `secret` in its
   webhook path attributes inbound traffic to its owner — a provider-level
@@ -30,6 +30,7 @@ class MessagingAccount(models.Model):
         ('whatsapp', 'WhatsApp'),
         ('teams', 'Teams'),
         ('sms', 'SMS'),
+        ('telegram', 'Telegram'),
     ]
 
     user = models.ForeignKey(
@@ -48,7 +49,8 @@ class MessagingAccount(models.Model):
     )
     verified = models.BooleanField(
         default=False,
-        help_text='The channel handshake completed (Slack OAuth, WhatsApp verification)',
+        help_text='The channel handshake completed (Slack OAuth, WhatsApp '
+                  'verification, Telegram webhook)',
     )
     #: The webhook credential. In the path, like every other receiver here.
     secret = models.CharField(max_length=64, unique=True, default=secrets.token_urlsafe)

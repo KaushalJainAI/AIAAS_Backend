@@ -1,5 +1,6 @@
 """
-Inbound messaging webhooks: Slack events, WhatsApp and Twilio callbacks.
+Inbound messaging webhooks: Slack events, WhatsApp and Twilio callbacks,
+Telegram updates.
 
 `POST /api/messaging/hooks/<channel>/<secret>/` verifies the provider
 signature, answers the same 404 for every refusal, writes `InboundMessage`
@@ -27,6 +28,16 @@ def _refused():
     return JsonResponse({'detail': 'Not found.'}, status=404)
 
 
+def _verify_telegram(request, account) -> bool:
+    """Telegram echoes back the `secret_token` given to `setWebhook` in
+    `X-Telegram-Bot-Api-Secret-Token`. We register the account's own path
+    secret as that token, so one value verifies both halves."""
+    presented = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+    if not presented or not account.secret:
+        return False
+    return hmac.compare_digest(presented, account.secret)
+
+
 def _verify_slack(request) -> bool:
     """Slack signs every event with the app signing secret."""
     secret = (getattr(settings, 'SLACK_SIGNING_SECRET', '') or '').encode()
@@ -51,7 +62,7 @@ async def message_hook(request, channel: str, secret: str):
     from messaging.models import InboundMessage, MessagingAccount
 
     channel = str(channel or '').strip().lower()
-    if channel not in ('slack', 'whatsapp', 'teams', 'sms'):
+    if channel not in ('slack', 'whatsapp', 'teams', 'sms', 'telegram'):
         return _refused()
     account = await MessagingAccount.objects.filter(
         channel=channel, secret=secret).select_related('user').afirst()
@@ -77,6 +88,8 @@ async def message_hook(request, channel: str, secret: str):
 
     if channel == 'slack' and not _verify_slack(request):
         return _refused()
+    if channel == 'telegram' and not _verify_telegram(request, account):
+        return _refused()
     try:
         body = json.loads(request.body or b'{}')
     except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -99,10 +112,11 @@ async def message_hook(request, channel: str, secret: str):
         row = InboundMessage.objects.create(
             user_id=account.user_id, account=account, channel=channel,
             sender=parsed['sender'], thread_id=parsed.get('thread', ''),
-            body=parsed.get('body', '')[:4000], raw={})
+            body=parsed.get('body', '')[:4000], raw=parsed.get('raw') or {})
+        who = parsed.get('sender_name') or parsed['sender'] or 'someone'
         create_notification(
             account.user, 'new_message',
-            f'New {channel} message from {parsed["sender"] or "someone"}',
+            f'New {channel} message from {who}',
             (parsed.get('body', '') or '')[:200],
             data={'action_url': '/ai-chat'}, send_email=False)
         return row
@@ -153,4 +167,23 @@ def _parse(channel: str, body: dict) -> dict | None:
         if not text:
             return None
         return {'sender': sender, 'thread': '', 'body': text}
+    if channel == 'telegram':
+        # Plain messages and edited ones; anything else (joins, reactions,
+        # callbacks without text) is acknowledged, not stored.
+        msg = body.get('message') or body.get('edited_message') or {}
+        if not isinstance(msg, dict):
+            return None
+        text = str(msg.get('text') or msg.get('caption') or '').strip()
+        if not text:
+            return None
+        chat = msg.get('chat') or {}
+        sender = msg.get('from') or {}
+        # The chat id is what a reply is addressed to; the display name is
+        # only for the notification.
+        name = (sender.get('username') or sender.get('first_name')
+                or chat.get('username') or '')
+        return {'sender': str(chat.get('id') or ''),
+                'sender_name': str(name),
+                'thread': str(chat.get('id') or ''),
+                'body': text}
     return None
