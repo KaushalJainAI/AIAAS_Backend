@@ -54,13 +54,17 @@ class BackfillTurnsMigrationTests(TransactionTestCase):
 
     @staticmethod
     def _tip():
-        """The app's latest migration, as the executor spells a target."""
+        """Every app's latest migration, as the executor spells targets.
+
+        Rewinding `logs` also unapplies whatever *depends* on the rewound
+        range (`workspaces.0002` needs `logs.0024`, `agents.0025` needs
+        `logs.0026`), dropping those apps' tables. Restoring only the
+        `logs` leaves therefore left the schema rewound for the rest of
+        the session — the same bug class the 0017 incident below describes.
+        """
         executor = MigrationExecutor(connection)
         executor.loader.build_graph()
-        return [
-            node for node in executor.loader.graph.leaf_nodes()
-            if node[0] == 'logs'
-        ]
+        return list(executor.loader.graph.leaf_nodes())
 
     def _seed(self, apps):
         User = apps.get_model('auth', 'User')
@@ -217,9 +221,12 @@ class ThreadIdBackfillMigrationTests(TransactionTestCase):
 
     @staticmethod
     def _tip():
+        # All apps, not just `logs`: rewinding `logs` unapplies dependents
+        # too (workspaces.0002, agents.0025), and restoring only `logs`
+        # leaves would drop their tables for the rest of the session.
         executor = MigrationExecutor(connection)
         executor.loader.build_graph()
-        return [n for n in executor.loader.graph.leaf_nodes() if n[0] == 'logs']
+        return list(executor.loader.graph.leaf_nodes())
 
     def _seed(self, apps, **rows):
         User = apps.get_model('auth', 'User')
