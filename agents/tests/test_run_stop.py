@@ -89,6 +89,68 @@ class StopEndpointTests(APITestCase):
         self.assertEqual(self.client.post(_url('not-a-uuid')).status_code, 404)
 
 
+class WorkerEndpointTests(APITestCase):
+    """The plan panel's per-lane buttons, addressed by execution.
+
+    `agent_steer` addresses the latest running run of an agent — the wrong
+    worker when one implementer has two going — so these address the execution
+    the lane already shows.
+    """
+
+    def setUp(self):
+        from chat.turn import steering
+
+        steering.clear()
+        self.addCleanup(steering.clear)
+        self.user = User.objects.create_user(username='panel', password='pw')
+        self.client.force_authenticate(self.user)
+        self.agent = SubAgent.objects.create(user=self.user, name='Impl')
+
+    def _run(self, **fields):
+        fields.setdefault('status', 'running')
+        return ExecutionLog.objects.create(
+            user=self.user, subagent=self.agent,
+            input_data={'goal': 'g', 'thread_id': f't-{uuid.uuid4()}'}, **fields,
+        )
+
+    def test_steer_lands_in_the_workers_mailbox(self):
+        from chat.turn import steering
+
+        log = self._run()
+        thread = log.input_data['thread_id']
+        response = self.client.post(
+            f'/api/orchestrator/runs/{log.execution_id}/steer/',
+            {'message': 'also check the changelog'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(steering.take(thread), 'also check the changelog')
+
+    def test_autonomy_switches_the_worker_mid_run(self):
+        from chat.turn import steering
+
+        log = self._run()
+        thread = log.input_data['thread_id']
+        response = self.client.post(
+            f'/api/orchestrator/runs/{log.execution_id}/autonomy/',
+            {'level': 'auto'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(steering.autonomy(thread), 'auto')
+
+    def test_a_finished_worker_is_409_not_silently_accepted(self):
+        log = self._run(status='completed')
+        response = self.client.post(
+            f'/api/orchestrator/runs/{log.execution_id}/steer/',
+            {'message': 'hi'}, format='json')
+        self.assertEqual(response.status_code, 409)
+
+    def test_someone_elses_worker_is_404(self):
+        other = User.objects.create_user(username='other', password='pw')
+        log = ExecutionLog.objects.create(user=other, status='running')
+        response = self.client.post(
+            f'/api/orchestrator/runs/{log.execution_id}/steer/',
+            {'message': 'hi'}, format='json')
+        self.assertEqual(response.status_code, 404)
+
+
 class LiveTaskTests(TransactionTestCase):
     """A task in this process is cancelled, and its own handler closes the run."""
 

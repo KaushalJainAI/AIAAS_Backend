@@ -269,6 +269,15 @@ class Trigger(models.Model):
     last_outcome = models.CharField(max_length=12, blank=True, default='')
     last_error = models.TextField(blank=True, default='')
 
+    #: The run the last firing started, so the UI can link straight to it
+    #: instead of describing a run the user must go and find. `SET_NULL`
+    #: because the run's own retention must never be held hostage by a
+    #: schedule pointing at it.
+    last_execution = models.ForeignKey(
+        'logs.ExecutionLog', null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -315,6 +324,29 @@ class Trigger(models.Model):
         if self.ends_at and now > self.ends_at:
             return 'expired'
         return 'live'
+
+
+class SchedulerLease(models.Model):
+    """Which process is running the periodic trigger sweep, and when it last did.
+
+    One row per loop name (`'triggers'`). The holder renews it every tick;
+    anyone may take it once `expires_at` has passed, so a dead process stops
+    owning the sweep after one lease period. `beat_at` is what the UI reads
+    to say "the scheduler is not running" instead of showing a card that
+    looks healthy while nothing fires.
+
+    Taken with a single conditional UPDATE (`scheduler.try_acquire`), never a
+    read-then-write — no advisory locks, no `select_for_update`, so it is
+    atomic on SQLite and Postgres alike.
+    """
+
+    name = models.CharField(max_length=40, primary_key=True)
+    holder = models.CharField(max_length=80)
+    expires_at = models.DateTimeField()
+    beat_at = models.DateTimeField()
+
+    def __str__(self):
+        return f'scheduler lease {self.name} held by {self.holder}'
 
 
 class HITLRequest(models.Model):

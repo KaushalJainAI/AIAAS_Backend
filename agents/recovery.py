@@ -105,6 +105,20 @@ def _fail(log, message: str) -> None:
         )
     fresh.save(update_fields=['status', 'error_message', 'failure_category',
                               'completed_at', 'duration_ms'])
+    # A crashed worker must not hold `src/**` for ever: its leases die with it.
+    # Best-effort here — the expiry TTL is the backstop when this never runs.
+    try:
+        from workspaces.leases import release_holder
+
+        release_holder(fresh.id)
+    except Exception:  # noqa: BLE001
+        logger.warning('[Recovery] Could not release leases for run %s', log.id)
+    try:
+        from workspaces import reads as _reads
+
+        _reads.discard_thread((fresh.input_data or {}).get('thread_id') or '')
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def _has_state(thread_id: str) -> bool:

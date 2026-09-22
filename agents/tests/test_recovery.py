@@ -128,7 +128,28 @@ class RecoveryOutcomeTests(TestCase):
         self.assertEqual(tally['failed'], 1)
         self.assertEqual(tally['resumed'], 0)
         self.assertEqual(self.log.status, 'failed')
-        self.assertIn('interrupted', self.log.error_message)
+
+    def test_a_crashed_worker_releases_its_leases(self):
+        """Guardrail C7-4: a worker killed mid-run cannot hold `src/**` for
+        ever. The sweep fails the orphaned row and clears its leases, so the
+        next task on those files starts instead of meeting a dead holder."""
+        from workspaces import leases as _leases
+        from workspaces.models import CodeLease, CodeProject
+
+        project = CodeProject.objects.create(
+            user=self.user, name='api', workspace_path='/home/user/projects/api')
+        _leases.acquire(project, self.log, ['src/api/**'],
+                        holder_label='Implementer #1', task_id='t1')
+        self.assertEqual(CodeLease.objects.filter(holder=self.log).count(), 1)
+
+        with patch('chat.turn.checkpoints.is_durable', return_value=False):
+            tally = async_to_sync(recovery.sweep_orphaned_runs)()
+
+        self.assertEqual(tally['failed'], 1)
+        self.assertEqual(CodeLease.objects.filter(holder=self.log).count(), 0)
+        self.log.refresh_from_db()
+        self.assertEqual(self.log.status, 'failed')
+        self.assertEqual(self.log.failure_category, 'interrupted')
         self.assertIsNotNone(self.log.completed_at)
 
     def test_a_durable_saver_with_no_state_still_fails_rather_than_resuming(self):

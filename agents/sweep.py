@@ -13,6 +13,7 @@ than invocation. A trigger here answers one question: should this agent run now.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import datetime
 
@@ -84,6 +85,23 @@ def _cancel_running(trigger) -> int:
     )
 
 
+def _next_slot(trigger, now: datetime):
+    """The next firing after `now`, by the same rule `_rearm` arms with.
+
+    One copy of the base rule (arm from the window start when it has not
+    opened yet): the slot claim in `prepare` must compute exactly what
+    `_rearm` would have written, or the two disagree about where the row
+    points after a firing.
+    """
+    # Arm from the start date, not from now, when the window has not opened:
+    # otherwise a schedule starting next month is re-armed to tomorrow, the
+    # sweep picks it up every day until then, and each pass writes a row it
+    # only has to write back again.
+    base = (trigger.starts_at
+            if trigger.starts_at and trigger.starts_at > now else now)
+    return next_run_after(trigger.cron, base, trigger.tz)
+
+
 def _rearm(trigger, now: datetime, outcome: str = '', error: str = '', *,
            fired: bool = False) -> str:
     """Point the trigger at its next slot and record how this one went.
@@ -96,13 +114,7 @@ def _rearm(trigger, now: datetime, outcome: str = '', error: str = '', *,
     `next_due_at`. A row that is enabled, has no next run, and says nothing
     about why looks exactly like a working one in every listing.
     """
-    # Arm from the start date, not from now, when the window has not opened:
-    # otherwise a schedule starting next month is re-armed to tomorrow, the
-    # sweep picks it up every day until then, and each pass writes a row it
-    # only has to write back again.
-    base = (trigger.starts_at
-            if trigger.starts_at and trigger.starts_at > now else now)
-    trigger.next_due_at = next_run_after(trigger.cron, base, trigger.tz)
+    trigger.next_due_at = _next_slot(trigger, now)
     trigger.last_outcome = outcome
     trigger.last_error = error
     fields = ['next_due_at', 'last_outcome', 'last_error', 'updated_at']
@@ -138,36 +150,57 @@ def _clear_queue(trigger) -> None:
         trigger.save(update_fields=['queued_for', 'updated_at'])
 
 
-def fire(trigger, now: datetime | None = None) -> str:
+@dataclasses.dataclass(frozen=True)
+class Launch:
+    """A firing the sweep decided to run: the instruction, nothing else.
+
+    `prepare` returns either this or an outcome word (`'late'`, `'busy'`,
+    `'paused'`, …). Splitting the decision from the run is what lets the
+    in-process scheduler start runs detached while the beat path still waits
+    — the callers differ in waiting, never in rules.
     """
-    Run one trigger's agent, and report what happened in a word.
+    goal: str
 
-    Returns one of `fired`, `queued`, `dropped`, `skipped`, `late`, `busy`,
-    `waiting`, `paused`, `expired`, `stopped`, `refused`, `failed` — the sweep counts
-    these, and a caller reading the counts can tell "nothing was due" apart
-    from "everything was refused", which a boolean cannot. The word is also
-    written to
-    `last_outcome` so the same distinction survives until someone looks at the
-    schedule, rather than living only in a log line nobody has access to.
 
-    Runs blocking, to completion: every caller here (the beat task, the
-    management command, the run-now button) is a sync context with no
-    persistent event loop, so a detached `start_agent_run` would die with the
-    temporary `async_to_sync` loop before doing any work. See
-    `runtime.start_agent_run_and_wait`.
+def prepare(trigger, now: datetime | None = None, *,
+            manual: bool = False) -> str | Launch:
     """
-    from agents.agent.runtime import AgentRunRefused, start_agent_run_and_wait
+    Decide whether this trigger should run, and claim its slot if so.
 
+    Returns an outcome word (`waiting`, `expired`, `paused`, `dropped`,
+    `late`, `queued`, `busy`, `skipped`, `stopped`) when nothing should run,
+    or `Launch(goal=...)` when a run should start. Every rule `fire` ever
+    applied — window, paused agent, owed queue, lateness, overlap, goal —
+    lives here unchanged, so the blocking sweep, the detached scheduler loop
+    and the run-now button gate identically.
+
+    Claiming (sweep path only) replaces the plain pre-run `_rearm` with a
+    conditional UPDATE on the `next_due_at` value this call read (plus
+    `queued_for` for an owed slot): if another sweep took the slot first, the
+    UPDATE hits nothing and this call reports `'busy'` instead of firing
+    twice. The in-memory row is moved to match, so `record_*` never writes
+    the stale value back.
+
+    `manual=True` is the run-now button: an extra firing, not the scheduled
+    slot, so it skips the claim, never re-arms, and ignores lateness and the
+    owed queue — but still applies the paused-agent, overlap and no-goal
+    rules, which is what makes the button test the real path.
+    """
     now = now or timezone.now()
+    agent = trigger.subagent
 
     # A schedule outside its own window is neither broken nor due. `pending`
     # re-arms and waits; `expired` closes the row, because the alternative is
     # an enabled schedule that will never fire again and does not say so.
     state = trigger.window_state(now)
     if state == 'pending':
+        if manual:
+            return 'waiting'
         return _rearm(trigger, now, 'waiting',
                       f'Starts {trigger.starts_at:%Y-%m-%d %H:%M} UTC.')
     if state == 'expired':
+        if manual:
+            return 'expired'
         trigger.enabled = False
         trigger.queued_for = None
         trigger.last_outcome = 'expired'
@@ -182,15 +215,17 @@ def fire(trigger, now: datetime | None = None) -> str:
     # for a week would switch every one of its schedules off for good, and
     # un-pausing it would not bring them back. Any owed firing is dropped too:
     # work deferred while paused is not work anyone asked for on resume.
-    if trigger.subagent.status in ('paused', 'archived'):
+    if agent.status in ('paused', 'archived'):
+        if manual:
+            return 'paused'
         _clear_queue(trigger)
         return _rearm(trigger, now, 'paused',
-                      f'The agent is {trigger.subagent.status}, so this firing '
+                      f'The agent is {agent.status}, so this firing '
                       f'was skipped.')
 
-    # A firing already owed from an earlier slot takes precedence over the
-    # upcoming one: it is the older debt, and running both would double up.
-    owed = trigger.queued_for
+    # A manual run is extra, not the next slot: it leaves the owed queue to
+    # the sweep rather than settling or disturbing it.
+    owed = None if manual else trigger.queued_for
     if owed and (now - owed).total_seconds() > QUEUE_TTL_SECONDS:
         logger.warning('[Sweep] Trigger %s dropped a queued firing from %s.',
                        trigger.id, owed)
@@ -210,9 +245,10 @@ def fire(trigger, now: datetime | None = None) -> str:
             return 'dropped'
 
     due = owed or trigger.next_due_at
-    if due and not owed and (now - due).total_seconds() > MAX_LATENESS_SECONDS:
+    if not manual and due and not owed and (now - due).total_seconds() > MAX_LATENESS_SECONDS:
         # Missed by more than the grace window — re-arm rather than run a
         # backlog. Firing every missed 9am after an outage is a stampede.
+        # (A manual run ignores lateness: the user explicitly asked for it.)
         logger.warning('[Sweep] Trigger %s is too late; skipping to next slot.',
                        trigger.id)
         return _rearm(trigger, now, 'late',
@@ -225,53 +261,90 @@ def fire(trigger, now: datetime | None = None) -> str:
             # the one thing all three policies agree must not happen.
             trigger.queued_for = due or now
             trigger.save(update_fields=['queued_for', 'updated_at'])
+            if manual:
+                # Owed, not re-armed: the sweep settles it on its next tick.
+                return 'queued'
             # `_rearm` may find there is no next slot at all and close the
             # row; its word wins over ours, or the outcome would claim a
             # firing is waiting on a schedule that just stopped.
             return _rearm(trigger, now, 'queued',
                           'A run was still going, so this firing is waiting '
                           'its turn.')
+        if manual:
+            return 'busy'
         return _rearm(trigger, now, 'busy',
                       'A previous run was still going and the overlap policy '
                       'is "skip".')
     if trigger.overlap == 'cancel':
         _cancel_running(trigger)
 
-    agent = trigger.subagent
     goal = (trigger.goal or agent.prompt or '').strip()
     if not goal:
         logger.warning('[Sweep] Trigger %s has nothing to ask the agent.', trigger.id)
+        if manual:
+            return 'skipped'
         _clear_queue(trigger)
         return _rearm(trigger, now, 'skipped',
                       'This trigger has no goal and its agent has no brief, so '
                       'there is no instruction to run.')
 
-    # Re-arm BEFORE the execution, not after: this runs blocking and a run may
-    # take minutes, so a second sweep tick during it must find nothing due
-    # rather than fire the same slot twice.
-    pre = _rearm(trigger, now)
-    if pre in ('stopped', 'expired'):
-        # No next slot — the row just closed itself; nothing to run.
-        return pre
+    if manual:
+        return Launch(goal=goal)
+
+    # Claim the slot: move `next_due_at` forward only if nobody moved it
+    # since this call read it. An owed slot pins `queued_for` too and clears
+    # it, so a second sweep cannot claim the same debt behind us.
+    from agents.models import Trigger
+
+    new_next = _next_slot(trigger, now)
+    if (new_next is None and trigger.enabled) or (
+            trigger.ends_at and new_next and new_next > trigger.ends_at):
+        # No next slot — fall through to `_rearm` as always, which takes the
+        # `stopped` / `expired` branch and closes the row.
+        return _rearm(trigger, now)
+    if owed is not None:
+        claimed = Trigger.objects.filter(
+            id=trigger.id, queued_for=trigger.queued_for,
+            next_due_at=trigger.next_due_at,
+        ).update(next_due_at=new_next, queued_for=None,
+                 last_outcome='', last_error='')
+    else:
+        claimed = Trigger.objects.filter(
+            id=trigger.id, next_due_at=trigger.next_due_at,
+        ).update(next_due_at=new_next, last_outcome='', last_error='')
+    if not claimed:
+        # Someone else took this slot between our read and now.
+        return 'busy'
+    trigger.next_due_at = new_next
+    trigger.queued_for = None
+    trigger.last_outcome = ''
+    trigger.last_error = ''
+    return Launch(goal=goal)
+
+
+def record_started(trigger, now: datetime, execution_id: str) -> None:
+    """Record that a firing's run has started.
+
+    The success block at the end of the old `fire`, plus the link Phase 2
+    renders. `next_due_at` is already where the slot claim put it, so it is
+    deliberately not in the write — recomputing it here would move a slot a
+    second sweep has since claimed.
+
+    The link is best-effort: `last_execution` is a real foreign key (to the
+    log's own id, not the execution UUID), so it is resolved, not assigned —
+    and a firing must not fail because its link did.
+    """
+    from django.core.exceptions import ValidationError
+
+    from logs.models import ExecutionLog
 
     try:
-        async_to_sync(start_agent_run_and_wait)(
-            agent, goal, user=agent.user, trigger_type='schedule',
-            caller='trigger',
-        )
-    except AgentRunRefused as exc:
-        # A guardrail said no — spend cap, or the agent was never cleared for
-        # unattended runs. Counted as a failure so a permanently refused
-        # trigger eventually disables itself instead of retrying hourly for
-        # ever.
-        logger.warning('[Sweep] Trigger %s refused: %s', trigger.id, exc)
-        _note_failure(trigger, now, 'refused', str(exc))
-        return 'refused'
-    except Exception as exc:  # noqa: BLE001
-        logger.exception('[Sweep] Trigger %s failed to start', trigger.id)
-        _note_failure(trigger, now, 'failed', f'{type(exc).__name__}: {exc}')
-        return 'failed'
-
+        trigger.last_execution = ExecutionLog.objects.filter(
+            execution_id=execution_id).only('id').first()
+    except (TypeError, ValueError, ValidationError):
+        # Not a real execution id (a test double's, say) — leave the link
+        # empty rather than failing the firing over a convenience.
+        trigger.last_execution = None
     trigger.consecutive_failures = 0
     trigger.queued_for = None
     trigger.last_outcome = 'fired'
@@ -279,13 +352,17 @@ def fire(trigger, now: datetime | None = None) -> str:
     trigger.last_fired_at = now
     trigger.save(update_fields=[
         'consecutive_failures', 'queued_for', 'last_outcome', 'last_error',
-        'last_fired_at', 'updated_at',
+        'last_fired_at', 'last_execution', 'updated_at',
     ])
-    return 'fired'
 
 
-def _note_failure(trigger, now: datetime, outcome: str = 'failed',
-                  error: str = '') -> None:
+def record_failure(trigger, now: datetime, outcome: str = 'failed',
+                   error: str = '') -> None:
+    """Count a refused or failed firing, and disable the trigger once it is
+    clearly never going to work. This is the old `_note_failure`, renamed:
+    the success path above is `record_started`, and the two read as the pair
+    they are.
+    """
     trigger.consecutive_failures += 1
     trigger.queued_for = None
     trigger.next_due_at = next_run_after(trigger.cron, now, trigger.tz)
@@ -307,6 +384,55 @@ def _note_failure(trigger, now: datetime, outcome: str = 'failed',
         )
 
     trigger.save(update_fields=fields)
+
+
+def fire(trigger, now: datetime | None = None) -> str:
+    """
+    Run one trigger's agent, and report what happened in a word.
+
+    Returns one of `fired`, `queued`, `dropped`, `skipped`, `late`, `busy`,
+    `waiting`, `paused`, `expired`, `stopped`, `refused`, `failed` — the sweep counts
+    these, and a caller reading the counts can tell "nothing was due" apart
+    from "everything was refused", which a boolean cannot. The word is also
+    written to
+    `last_outcome` so the same distinction survives until someone looks at the
+    schedule, rather than living only in a log line nobody has access to.
+
+    Gating lives in `prepare` (shared with the detached scheduler loop and
+    the run-now button); this keeps the blocking contract every sync caller
+    relies on — the beat task, the management command, the old run-now path:
+    `start_agent_run_and_wait` runs the detached start to completion on this
+    same loop. See `runtime.start_agent_run_and_wait` for why a detached
+    start cannot survive a sync context on its own.
+    """
+    from agents.agent.runtime import AgentRunRefused, start_agent_run_and_wait
+
+    now = now or timezone.now()
+    step = prepare(trigger, now)
+    if not isinstance(step, Launch):
+        return step
+
+    agent = trigger.subagent
+    try:
+        execution_id = async_to_sync(start_agent_run_and_wait)(
+            agent, step.goal, user=agent.user, trigger_type='schedule',
+            caller='trigger',
+        )
+    except AgentRunRefused as exc:
+        # A guardrail said no — spend cap, or the agent was never cleared for
+        # unattended runs. Counted as a failure so a permanently refused
+        # trigger eventually disables itself instead of retrying hourly for
+        # ever.
+        logger.warning('[Sweep] Trigger %s refused: %s', trigger.id, exc)
+        record_failure(trigger, now, 'refused', str(exc))
+        return 'refused'
+    except Exception as exc:  # noqa: BLE001
+        logger.exception('[Sweep] Trigger %s failed to start', trigger.id)
+        record_failure(trigger, now, 'failed', f'{type(exc).__name__}: {exc}')
+        return 'failed'
+
+    record_started(trigger, now, execution_id)
+    return 'fired'
 
 
 def due_triggers(now: datetime | None = None):
