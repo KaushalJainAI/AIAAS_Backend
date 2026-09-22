@@ -56,8 +56,12 @@ def ensure(user) -> object:
 
 
 async def exec(ws, cmd: str, *, cwd: str = '', env: dict | None = None,
-               timeout: int = 300) -> dict:
-    """Run one short command. Returns {exit_code, stdout, stderr}."""
+               timeout: int = 300, stdin: bytes | None = None) -> dict:
+    """Run one short command. Returns {exit_code, stdout, stderr}.
+
+    `stdin` is fed to the command's standard input where the engine supports
+    it (`ws_apply_patch` pipes the unified diff into `patch -p1`).
+    """
     raise WorkspaceError('No workspace engine is configured on this platform.')
 
 

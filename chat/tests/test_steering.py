@@ -248,3 +248,69 @@ class SteeringInATurnTests(TestCase):
         result = harness.run()
 
         self.assertFalse(result.awaiting_approval)
+
+
+class NoticeTests(TestCase):
+    """Change notices: information, not instruction.
+
+    A file changed under a run arrives at its next boundary as a `system`
+    context message — never as a user turn, which would read as the user
+    talking. The stale-write guard (not the notice) is what enforces; a test
+    that only posts and takes would pass with the pieces wired wrongly, so
+    these drive the real turn and assert on what the model actually saw.
+    """
+
+    def setUp(self):
+        steering.clear()
+        self.addCleanup(steering.clear)
+
+    def test_notices_are_delivered_once_and_capped(self):
+        steering.post_notice('run-1', 'src/a.ts changed (by Impl #1)')
+        steering.post_notice('run-1', 'src/b.ts changed (by Impl #1)')
+
+        delivered = steering.take_notices('run-1')
+
+        self.assertIn('src/a.ts', delivered)
+        self.assertIn('src/b.ts', delivered)
+        self.assertEqual(steering.take_notices('run-1'), '')
+
+    def test_three_edits_to_one_file_arrive_as_one_line(self):
+        """Coalesced per path: the run is told once, not three times."""
+        steering.post_notice('run-1', 'src/a.ts changed (by Impl #1)', path='src/a.ts')
+        steering.post_notice('run-1', 'src/a.ts changed (by Impl #2)', path='src/a.ts')
+        steering.post_notice('run-1', 'src/b.ts changed (by Impl #1)', path='src/b.ts')
+
+        delivered = steering.take_notices('run-1')
+
+        self.assertEqual(delivered.count('src/a.ts'), 1)
+        # The newest text wins: the run hears who changed it last.
+        self.assertIn('Impl #2', delivered)
+        self.assertIn('src/b.ts', delivered)
+
+    def test_a_notice_reaches_the_model_as_system_context(self):
+        harness = _Harness(_tool_turn(), Completion(content='ok'))
+        steering.post_notice(
+            harness.thread_id, 'src/a.ts changed (by Impl #1); re-read it.')
+
+        harness.run()
+
+        # Not the prompt (that is the standing continuation nudge) but system
+        # context in the history the model read.
+        self.assertNotIn('src/a.ts', harness.prompts[-1])
+        systems = [m.get('content', '') for m in harness.seen[-1]
+                   if m.get('role') == 'system']
+        self.assertTrue(any('src/a.ts' in s for s in systems), systems)
+
+    def test_a_steer_and_a_notice_keep_their_roles(self):
+        harness = _Harness(_tool_turn(), Completion(content='ok'))
+        steering.post_notice(harness.thread_id, 'src/a.ts changed (by Impl #1)')
+        steering.post(harness.thread_id, 'also check the changelog')
+
+        harness.run()
+
+        # The steer is still peeled as the trailing prompt; the notice rides
+        # alongside it as context, not as a second user turn.
+        self.assertEqual(harness.prompts[-1], 'also check the changelog')
+        users = [m.get('content', '') for m in harness.seen[-1]
+                 if m.get('role') == 'user']
+        self.assertFalse(any('src/a.ts' in u for u in users), users)

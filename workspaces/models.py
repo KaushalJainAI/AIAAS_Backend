@@ -110,6 +110,10 @@ class CodeProject(models.Model):
         help_text='Project root on the workspace disk, e.g. /home/user/projects/api',
     )
     github_secret_ref = models.CharField(max_length=200, blank=True, default='')
+    #: Resolved commands per class, e.g. `{"test": "pytest -q", "lint":
+    #: "ruff check ."}`. The scout's map fills this; `ws_run` accepts a class
+    #: name or a literal that prefix-matches one of these for an allowed class.
+    commands = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ['name']
@@ -141,3 +145,41 @@ class CodeChange(models.Model):
 
     def __str__(self):
         return f'{self.path} @ {self.run_id}'
+
+
+class CodeLease(models.Model):
+    """One file (or subtree) one run is writing, so no other run writes it.
+
+    Only writes lock — readers are never blocked. A lease is a normalised path
+    or a `dir/**` subtree pattern, held by the `ExecutionLog` that took it.
+    Enforced in code under `select_for_update` on the project row: the table
+    carries no DB-level exclusion because overlap is on glob prefixes, not on
+    equality.
+    """
+
+    project = models.ForeignKey(
+        CodeProject, on_delete=models.CASCADE, related_name='leases',
+    )
+    pattern = models.CharField(
+        max_length=500,
+        help_text='Normalised path or dir/** subtree, relative to the project root.',
+    )
+    holder = models.ForeignKey(
+        'logs.ExecutionLog', on_delete=models.CASCADE, related_name='code_leases',
+    )
+    holder_label = models.CharField(max_length=120, blank=True, default='')
+    mode = models.CharField(max_length=12, default='write')
+    task_id = models.CharField(max_length=64, blank=True, default='')
+    acquired_at = models.DateTimeField(auto_now_add=True)
+    heartbeat_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-acquired_at']
+        indexes = [
+            models.Index(fields=['project', 'expires_at']),
+            models.Index(fields=['holder', 'project']),
+        ]
+
+    def __str__(self):
+        return f'{self.pattern} <- run {self.holder_id} ({self.holder_label})'

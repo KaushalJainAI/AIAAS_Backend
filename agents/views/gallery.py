@@ -392,6 +392,9 @@ def template_install(request, slug: str):
             SharedAgent.objects.filter(pk=share.pk).update(
                 install_count=F('install_count') + 1
             )
+        if entry is not None and slug == 'coding-lead':
+            # A lone lead installed after its roster still gets its scope.
+            _wire_coding_lead(request.user)
 
     logger.info('Agent %s installed from %s by user %s',
                 agent.id, slug, request.user.id)
@@ -407,7 +410,10 @@ def template_install(request, slug: str):
     description='Install every template in a pack that needs no setup and is '
                 'not already installed. Body: {"pack": "office"}. Templates '
                 'with requirements are listed as needing setup rather than '
-                'installed. Idempotent: reinstalling skips what is already there.',
+                'installed. Idempotent: reinstalling skips what is already there. '
+                'Optional "overrides": {slug: AgentConfig-fragment} — per-template '
+                'tightening (autonomy, writePaths, commandScope, toolPermissions) '
+                'applied through the same serializer the builder saves through.',
 )
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -417,6 +423,11 @@ def template_install_pack(request):
     if not slugs:
         return Response({'error': f'No pack named "{pack}".'},
                         status=status.HTTP_404_NOT_FOUND)
+
+    overrides = request.data.get('overrides') or {}
+    if not isinstance(overrides, dict):
+        return Response({'error': '"overrides" is an object of {template slug: config}.'},
+                        status=status.HTTP_400_BAD_REQUEST)
 
     installed: list[dict] = []
     skipped: list[dict] = []
@@ -434,6 +445,17 @@ def template_install_pack(request):
             continue
 
         config = dict(entry['config'])
+        override = overrides.get(slug) or {}
+        if not isinstance(override, dict):
+            skipped.append({'slug': slug, 'reason': 'bad overrides'})
+            continue
+        # The pack matrix on the install screen: per-template tightening
+        # before the rows are written. Only keys the builder itself saves —
+        # anything else is refused by the serializer below rather than stored.
+        for key in ('autonomy', 'writePaths', 'commandScope', 'toolPermissions',
+                    'toolScope', 'spendCapRupees', 'playbooks'):
+            if key in override:
+                config[key] = override[key]
         serializer = AgentSerializer(data=config, context={'request': request})
         if not serializer.is_valid():
             skipped.append({'slug': slug, 'reason': 'invalid configuration'})
@@ -456,7 +478,35 @@ def template_install_pack(request):
             revisions.record(agent, user=request.user, source='create')
         installed.append({'slug': slug, 'id': agent.id, 'name': agent.name})
 
+    if pack == 'code':
+        _wire_coding_lead(request.user)
+
     return Response({'pack': pack, 'installed': installed, 'skipped': skipped})
+
+
+def _wire_coding_lead(user) -> None:
+    """Point the installed coding lead at its installed roster.
+
+    `coding-lead` gets `delegatesTo` set to the other code agents at install
+    time, through the existing delegation scope — so a lead cannot delegate
+    outside the roster. Templates travel without ids, so this cannot live in
+    `gallery.py`: it resolves slugs to the caller's own rows after install
+    (including rows from an earlier install — reinstalling only adds what is
+    missing, and the scope is recomputed over all of it).
+    """
+    roster = [s for s in (gallery.PACKS.get('code') or [])
+              if s not in ('coding-lead', 'repo-assistant')]
+    lead = SubAgent.objects.filter(user=user, template_slug='coding-lead').first()
+    if lead is None:
+        return
+    ids = list(SubAgent.objects.filter(
+        user=user, template_slug__in=roster).values_list('id', flat=True))
+    ids = sorted(i for i in ids if i != lead.id)
+    ctx = dict(lead.agent_context or {})
+    if ctx.get('delegatesTo') != ids:
+        ctx['delegatesTo'] = ids
+        lead.agent_context = ctx
+        lead.save(update_fields=['agent_context', 'updated_at'])
 
 
 # -------------------------------------------------------------------- publish

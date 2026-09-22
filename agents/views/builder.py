@@ -246,6 +246,53 @@ def _timezone(value, _cat):
     return value.strip()
 
 
+def _globs(value, _cat):
+    """A list of project-relative globs, e.g. ["src/api/**"]."""
+    if not isinstance(value, list) or any(not isinstance(t, str) for t in value):
+        raise Reject('expected a list of globs, e.g. ["src/api/**"]')
+    out = []
+    for raw in value:
+        pattern = str(raw or '').strip().lstrip('/')
+        if not pattern:
+            raise Reject('each glob is a path like "src/api/**", not blank')
+        if len(pattern) > 300:
+            raise Reject('each glob is at most 300 characters')
+        out.append(pattern)
+    return sorted(set(out))
+
+
+def _command_classes(value, _cat):
+    """Command classes for `commandScope`: test | lint | build | run | install | any."""
+    if not isinstance(value, list) or any(not isinstance(t, str) for t in value):
+        raise Reject('expected a list like ["test", "lint"]')
+    from agents.agent.runtime import CODE_COMMAND_CLASSES
+
+    cleaned = sorted({str(c or '').strip().lower() for c in value if str(c or '').strip()})
+    unknown = sorted(set(cleaned) - set(CODE_COMMAND_CLASSES))
+    if unknown:
+        raise Reject(f'unknown classes: {unknown}. Allowed: {list(CODE_COMMAND_CLASSES)}.')
+    return cleaned
+
+
+def _playbooks(value, _cat):
+    """Playbook slugs shipped as code under `agents/playbooks/code/`."""
+    if not isinstance(value, list) or any(not isinstance(t, str) for t in value):
+        raise Reject('expected a list of playbook slugs')
+    from agents.playbooks import PLAYBOOK_SLUGS
+
+    cleaned = [str(s or '').strip() for s in value if str(s or '').strip()]
+    unknown = sorted({s for s in cleaned if s not in PLAYBOOK_SLUGS})
+    if unknown:
+        raise Reject(f'unknown playbooks: {unknown}. Allowed: {sorted(PLAYBOOK_SLUGS)}.')
+    seen: set[str] = set()
+    out: list[str] = []
+    for slug in cleaned:
+        if slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+    return out
+
+
 #: One line per grant the runtime actually serves — `TOOL_KEYS` minus
 #: `runtime.UNSERVED_GRANTS`, asserted in the tests, so a tool added to the
 #: runtime cannot quietly go undescribed to the model that hands it out.
@@ -426,6 +473,28 @@ KNOBS: dict[str, Knob] = {
         'Tell it the current time and place. Needed by anything that reasons '
         'about "today", business hours, or a timezone.',
         _bool,
+    ),
+    'writePaths': Knob(
+        'Write paths',
+        'Glob list (relative to the project root) this coding agent may '
+        'write, e.g. ["src/api/**"]. Empty means unrestricted. Intersected '
+        'with the task\'s claims at dispatch, so an implementer writes only '
+        'what its task claimed even when its template allows more.',
+        _globs,
+    ),
+    'commandScope': Knob(
+        'Command scope',
+        'Which `ws_run` classes this coding agent may reach: test, lint, '
+        'build, run, install, any. Empty means unrestricted. A literal must '
+        'match the project\'s configured command for an allowed class.',
+        _command_classes,
+    ),
+    'playbooks': Knob(
+        'Playbooks',
+        'Static playbooks appended to the system prompt, shipped as code '
+        '(small-diffs, run-tests-before-claiming-done, read-before-edit, '
+        'python-testing, ts-react, git-hygiene).',
+        _playbooks,
     ),
     'schedule': Knob(
         'Schedule',

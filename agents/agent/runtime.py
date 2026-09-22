@@ -123,7 +123,9 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # fans out to other agents is one holding this grant, so composition is
     # checked by the same mechanism as every other capability instead of by a
     # second code path that could disagree with it.
-    'subAgents': ('invoke_subagent', 'search_agents'),
+    'subAgents': ('invoke_subagent', 'search_agents',
+                  'start_tasks', 'wait_tasks', 'task_status',
+                  'steer_task', 'stop_task', 'revert_task'),
     # MCP tools are resolved per-user at runtime rather than named here, so the
     # grant unlocks the whole user-configured set. Their names are namespaced by
     # `mcp_integration.tool_provider`, which is what keeps them from colliding
@@ -786,6 +788,111 @@ def delegation_scope_for(agent) -> tuple[int, ...] | None:
     return ids or None
 
 
+#: Command classes a coding agent's `ws_run` may reach. Closed on purpose:
+#: a free-form string would let a template invent a class nothing enforces.
+CODE_COMMAND_CLASSES = ('test', 'lint', 'build', 'run', 'install', 'any')
+
+
+def write_paths_for(agent) -> tuple[str, ...] | None:
+    """Glob list (relative to the project root) this agent may write, or None.
+
+    None means unrestricted — the field arrives after the agents that predate
+    it, and enforcing it must not silently strip every existing agent's writes.
+    Normalised (leading `/` stripped, `..` clamped) at check time, not here.
+    An explicitly empty intersection downstream is *not* None: it means the
+    parent and the worker restricted disjointly, so the worker may write
+    nothing — and the write check reads it that way.
+    """
+    raw = (agent.agent_context or {}).get('writePaths') or []
+    if not isinstance(raw, list):
+        return None
+    cleaned = tuple(sorted({str(p).strip() for p in raw if str(p).strip()}))
+    return cleaned or None
+
+
+def command_scope_for(agent) -> tuple[str, ...] | None:
+    """Command classes this agent's `ws_run` may reach, or None for any.
+
+    None means unrestricted, for the same reason as `write_paths_for`: agents
+    predate the field. Unknown classes are dropped here (the serializer refuses
+    them on save); a stale row can only ever run wider than intended if the
+    check trusted it, so the check treats unknown as absent.
+    """
+    raw = (agent.agent_context or {}).get('commandScope') or []
+    if not isinstance(raw, list):
+        return None
+    cleaned = tuple(sorted({
+        str(c).strip().lower() for c in raw
+        if str(c).strip().lower() in CODE_COMMAND_CLASSES
+    }))
+    return cleaned or None
+
+
+def intersect_write_paths(parent: tuple[str, ...] | None,
+                          worker: tuple[str, ...] | None,
+                          ) -> tuple[str, ...] | None:
+    """Most-restrictive-wins for `writePaths`, glob-aware.
+
+    None means unrestricted, so the intersection of "unrestricted" with
+    anything is that thing. Two restricted lists intersect by subsumption:
+    each side keeps the patterns the other side already covers
+    (`workspaces.leases.subsumes`), so a lead on `src/**` fielding a worker
+    on `src/api/**` yields `src/api/**` — the narrower — rather than nothing.
+    Disjoint restrictions yield `()`, which the write check reads as "may
+    write nothing", never as unrestricted.
+    """
+    from workspaces.leases import subsumes
+
+    if parent is None:
+        return worker
+    if worker is None:
+        return parent
+    kept: set[str] = set()
+    for w in worker:
+        if any(subsumes(p, w) for p in parent):
+            kept.add(w)
+    for p in parent:
+        if any(subsumes(w, p) for w in worker):
+            kept.add(p)
+    return tuple(sorted(kept))
+
+
+def intersect_command_scope(parent: tuple[str, ...] | None,
+                            worker: tuple[str, ...] | None,
+                            ) -> tuple[str, ...] | None:
+    """Most-restrictive-wins for `commandScope`, same None-means-unrestricted
+    rule as `intersect_write_paths`. `any` on either side means that side
+    imposes no class limit; the other side still narrows. Classes are a closed
+    set, so plain set intersection is exact here.
+    """
+    if parent is None:
+        return worker
+    if worker is None:
+        return parent
+    if 'any' in parent:
+        return worker
+    if 'any' in worker:
+        return parent
+    return tuple(sorted(set(parent) & set(worker)))
+
+
+def playbooks_for(agent) -> list[str]:
+    """Playbook slugs this agent carries, in order, de-duplicated."""
+    from agents.playbooks import PLAYBOOK_SLUGS
+
+    raw = (agent.agent_context or {}).get('playbooks') or []
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for entry in raw:
+        slug = str(entry or '').strip()
+        if slug in PLAYBOOK_SLUGS and slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+    return out
+
+
 def _denied(name: str, capability: str) -> str:
     return (
         f"Error: '{name}' is not available to this agent — {capability} was not "
@@ -986,6 +1093,77 @@ async def resolve_agent_model(agent, user) -> tuple[str, str]:
     return provider, model
 
 
+async def _resolve_run_model(agent, user) -> tuple[str, str, str]:
+    """(provider, model, fallback_from) this run will actually use.
+
+    `fallback_from` is the configured model value when `llm.fallback` had to
+    substitute the platform fallback (retired or unknown id), else ''. The
+    agent row is never rewritten here — the config stays what the owner
+    chose; the run record says what the run did about it.
+    """
+    provider, model = await resolve_agent_model(agent, user)
+    old_model = (model or '').strip()
+    try:
+        from llm import fallback as _fallback
+
+        provider, model, substituted, reason = await sync_to_async(
+            _fallback.resolve_with_fallback)(provider, model)
+    except Exception:  # noqa: BLE001
+        logger.warning('[AgentRuntime] Fallback resolve failed', exc_info=True)
+        return provider, model, ''
+    if substituted:
+        logger.info('[AgentRuntime] Agent %s: %s; using fallback %s/%s',
+                    getattr(agent, 'id', '?'), reason, provider, model)
+        return provider, model, old_model
+    return provider, model, ''
+
+
+def _record_model_fallback_notice(*, agent_id, agent_name, user_id,
+                                  old_value, new_provider, new_model,
+                                  execution_id) -> bool:
+    """Write-once notice that a run fell back, plus the owner's notification.
+
+    Returns True when this call notified. Never raises: telling the owner
+    must not fail the run that already has its answer.
+    """
+    try:
+        from django.contrib.auth import get_user_model
+
+        from llm.models import ModelFallbackNotice
+        from notifications.utils import create_notification
+
+        _, created = ModelFallbackNotice.objects.get_or_create(
+            subagent_id=agent_id, old_value=old_value)
+        if not created:
+            return False
+        owner = get_user_model().objects.filter(pk=user_id).first()
+        if owner is None:
+            return False
+        new_pair = f'{new_provider}/{new_model}'
+        create_notification(
+            owner, 'system',
+            f'"{agent_name}" ran on the fallback model',
+            f'Configured model `{old_value}` is retired or unknown, so this '
+            f'run executed on the platform fallback `{new_pair}` instead. '
+            "The agent's configuration was not changed — pick a replacement "
+            'in the builder when ready.',
+            data={
+                'kind': 'model_fallback',
+                'agent_id': agent_id,
+                'execution_id': str(execution_id or ''),
+                'old': old_value,
+                'new': new_pair,
+                'action_url': f'/agents/{agent_id}',
+            },
+            send_email=False,
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning('[AgentRuntime] Fallback notice failed for agent %s',
+                       agent_id, exc_info=True)
+        return False
+
+
 # ── The brief ────────────────────────────────────────────────────────────────
 
 @sync_to_async
@@ -1136,6 +1314,14 @@ def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
         # rewrite what the platform believes about someone, so the memory tools
         # are chat's alone.
         parts += ['', user_memory]
+
+    # Playbooks are static text, so they belong in the session-stable system
+    # prompt — the same bar the clock failed. Templates travel without ids, so
+    # these ship as code rather than as `Skill` rows.
+    for slug, body in __import__('agents.playbooks', fromlist=['load_many']).load_many(
+        playbooks_for(agent)
+    ):
+        parts += ['', f'PLAYBOOK — {slug}:', body]
 
     # Said to every agent, because an agent run is the case a plan is for: it
     # can go 40 iterations, its transcript gets curated, and the instruction it
@@ -1311,7 +1497,8 @@ class AgentRun:
 def _open_log(agent, user, goal: str, trigger_type: str, thread_id: str = '',
               *, caller: str = 'api', depth: int = 0,
               parent_step_id: int | None = None, delegation_task: str = '',
-              delegation_index: int = 0):
+              delegation_index: int = 0, model_used: str = '',
+              fallback_from: str = ''):
     from logs.models import ExecutionLog
     from logs import revisions
 
@@ -1350,6 +1537,10 @@ def _open_log(agent, user, goal: str, trigger_type: str, thread_id: str = '',
         thread_id=(thread_id or '')[:200],
         input_data={'goal': goal, 'thread_id': thread_id},
         started_at=timezone.now(),
+        # What actually served the run, when that differs from the config.
+        # Set by the caller, which resolved the fallback before opening.
+        model_used=(model_used or '')[:150],
+        fallback_from=(fallback_from or '')[:150],
     )
 
 
@@ -1358,6 +1549,23 @@ def _close_log(log, *, status: str, result: dict[str, Any], tokens: int,
                error: str = '', extra_cost_usd=None,
                extra_cost_source: str = '', exc=None) -> None:
     from logs import failures as _failures
+
+    # A finished run holds no locks: leases release on every terminal path
+    # (completed, failed, cancelled, timeout) — deliberately not on `paused`,
+    # where the run still owns its half-made change. Best-effort: freeing a
+    # lock must never fail a run that already has its answer.
+    try:
+        from workspaces.leases import release_holder as _release_holder
+
+        _release_holder(log.id)
+    except Exception:  # noqa: BLE001
+        logger.warning('[Leases] Release on close failed for run %s', log.id)
+    try:
+        from workspaces import reads as _reads
+
+        _reads.discard_thread((log.input_data or {}).get('thread_id') or '')
+    except Exception:  # noqa: BLE001
+        pass
 
     log.status = status
     log.output_data = result
@@ -1620,6 +1828,44 @@ async def cancel_agent_run(log) -> str:
     )
 
 
+async def _apply_run_fallback(log, agent, user, provider: str, model: str,
+                            fallback_from: str, sink) -> None:
+    """Record and announce a fallback substitution. Best-effort throughout.
+
+    The run already has its model pair; this writes `model_used` /
+    `fallback_from` onto the log (unless the opener already did), tells the
+    watching caller via STATUS, and notifies the owner exactly once per
+    (agent, retired model) through `ModelFallbackNotice`.
+    """
+    try:
+        from chat.turn.events import Event
+
+        if ((log.fallback_from or '') != fallback_from
+                or (log.model_used or '') != (model or '')):
+            log.model_used = (model or '')[:150]
+            log.fallback_from = (fallback_from or '')[:150]
+            await sync_to_async(log.save)(
+                update_fields=['model_used', 'fallback_from', 'updated_at'])
+        if sink is not None:
+            try:
+                await sink(Event.STATUS, {
+                    'phase': 'model_fallback',
+                    'message': (
+                        f'Configured model `{fallback_from}` is retired or '
+                        f'unknown — running on the platform fallback '
+                        f'`{provider}/{model}` instead.'),
+                })
+            except Exception:  # noqa: BLE001 — telling must not fail the run
+                pass
+        await sync_to_async(_record_model_fallback_notice)(
+            agent_id=agent.id, agent_name=agent.name, user_id=user.id,
+            old_value=fallback_from, new_provider=provider, new_model=model,
+            execution_id=log.execution_id)
+    except Exception:  # noqa: BLE001
+        logger.warning('[AgentRuntime] Fallback bookkeeping failed',
+                       exc_info=True)
+
+
 async def run_agent(agent, goal: str, *, user, sink=None,
                     thread_id: str | None = None,
                     trigger_type: str = 'manual', caller: str = 'api',
@@ -1630,7 +1876,10 @@ async def run_agent(agent, goal: str, *, user, sink=None,
                     deadline=None,
                     briefing: str = '',
                     parent_session_key: str = '',
-                    workspace=()) -> AgentRun:
+                    workspace=(),
+                    task_claims=(), task_id: str = '',
+                    worker_label: str = '',
+                    write_paths=None, command_scope=None) -> AgentRun:
     """Run `agent` against `goal` and record the run.
 
     `thread_id` keys the checkpointer, so passing the id of a paused run is how
@@ -1680,11 +1929,15 @@ async def run_agent(agent, goal: str, *, user, sink=None,
 
     # Every run streams to the execution channel, whether or not the caller
     # asked for a sink: that is what makes the run visible on the workflow
-    # canvas, and a run nobody watched still has to be replayable afterwards.
+    # canvas, and a run nobody watched still has to be replayed afterwards.
     stream = AgentRunStream(log)
     await stream.run_started(goal)
 
-    provider, model = await resolve_agent_model(agent, user)
+    # Resolved here — the one place every run passes — so the picker, the
+    # preflight and the turn cannot disagree. A retired or unknown model id
+    # is substituted with the platform fallback up front (recorded on the log
+    # and announced, never written back to the agent row).
+    provider, model, fallback_from = await _resolve_run_model(agent, user)
 
     try:
         # Repeated from `start_agent_run` for the callers that arrive here
@@ -1694,6 +1947,9 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         # the user can act on. Inside the try so it closes the log and tells the
         # channel by the same path every other failure takes.
         await llm.preflight(provider=provider, model=model, user_id=user.id)
+        if fallback_from:
+            await _apply_run_fallback(
+                log, agent, user, provider, model, fallback_from, sink)
 
         guards = agent.guardrails or {}
         autonomy = guards.get('autonomy', 'ask')
@@ -1810,6 +2066,18 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             # A worker may read what its parent archived, and nothing else.
             # Empty for every run a person started.
             archive_scopes=(parent_session_key,) if parent_session_key else (),
+            # Coding-team scopes (C1/C2): the agent's own limits, narrowed by
+            # the caller (parent → worker most-restrictive-wins, then the
+            # task's claims at dispatch). Explicit overrides win; otherwise the
+            # row's own selection stands.
+            write_paths=(tuple(write_paths) if write_paths is not None
+                         else write_paths_for(agent)),
+            command_scope=(tuple(command_scope) if command_scope is not None
+                           else command_scope_for(agent)),
+            task_claims=tuple(task_claims or ()),
+            task_id=task_id or '',
+            worker_label=worker_label or '',
+            execution_id=str(log.execution_id),
         )
 
         # The backstop under the soft stop. The loop checks the clock between
@@ -1864,6 +2132,26 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         logger.exception('[AgentRuntime] Agent %s failed', agent.id)
         from chat.turn.agent import forget_thread
         await forget_thread(thread_id)
+        # The catalogue said the model was live but the provider answered
+        # 410/404 anyway (stale catalogue between refreshes). The run fails
+        # visibly — mid-run model switches would silently change provenance —
+        # but the owner is still told once, through the same notice as a
+        # pre-resolved fallback, so the fix is one builder visit away.
+        try:
+            if isinstance(exc, llm.LLMModelUnavailable) and agent is not None:
+                from llm import fallback as _fallback_mod
+
+                fb_provider, fb_model = await sync_to_async(
+                    _fallback_mod.get_fallback)()
+                if (provider, model) != (fb_provider, fb_model):
+                    await sync_to_async(_record_model_fallback_notice)(
+                        agent_id=agent.id, agent_name=agent.name,
+                        user_id=user.id, old_value=model,
+                        new_provider=fb_provider, new_model=fb_model,
+                        execution_id=log.execution_id)
+        except Exception:  # noqa: BLE001
+            logger.warning('[AgentRuntime] Fallback race notice failed',
+                           exc_info=True)
         await _close_log(log, status='failed', result={}, tokens=0, error=str(exc))
         await stream.run_finished(
             status='failed', answer=str(exc),
@@ -1901,6 +2189,21 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         payload['todos'] = todos
     if files := (result.metadata or {}).get('files'):
         payload['files'] = files
+    # The lead's tasks, final state each — the panel redraws from this on
+    # `/runs` after the fact, the way it redraws todos and charts. Keyed by
+    # the run's own thread id, which is the bucket the dispatch tools filed
+    # under. Read, not popped: thread ids are unique per run, and a worker
+    # still going when its lead closes stays stoppable by handle until the
+    # TTL prunes it.
+    try:
+        from agents.agent import tasks as _code_tasks
+
+        bucket = _code_tasks._tasks.get(thread_id)
+        if bucket:
+            payload['tasks'] = [_code_tasks.task_frame(t) for t in bucket.values()]
+        _code_tasks.drop_sink(thread_id)
+    except Exception:  # noqa: BLE001
+        pass
     if structured is not None:
         payload['structured'] = structured
     if contract_error:
@@ -2016,7 +2319,7 @@ async def start_agent_run(agent, goal: str, *, user,
     # exists, it reaches the view as an error naming the provider — instead of
     # a 202 followed by a run that dies on its first model call, where the only
     # trace is a failed execution the user has to go and open.
-    provider, model = await resolve_agent_model(agent, user)
+    provider, model, fallback_from = await _resolve_run_model(agent, user)
     await llm.preflight(
         provider=provider,
         model=model,
@@ -2027,6 +2330,7 @@ async def start_agent_run(agent, goal: str, *, user,
         agent, user, goal, trigger_type, thread_id,
         caller=caller, parent_step_id=parent_step_id,
         delegation_task=delegation_task, delegation_index=delegation_index,
+        model_used=model, fallback_from=fallback_from,
     )
 
     async def _run() -> None:

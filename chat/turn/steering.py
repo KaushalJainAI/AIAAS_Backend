@@ -68,6 +68,12 @@ class _Slot:
     #: Steers discarded because the queue was full when they arrived.
     dropped: int = 0
     delivered: int = 0
+    #: Change notices (`kind='notice'`): information, not instruction. Drained
+    #: on the same edge but rendered as a `system` context message, never as a
+    #: `HumanMessage` — a notice is not the user talking.
+    notices: deque = field(default_factory=deque)
+    notices_dropped: int = 0
+    notices_delivered: int = 0
     extras: dict[str, Any] = field(default_factory=dict)
     #: An autonomy level the user chose *while the run was going*, or ''.
     #:
@@ -154,7 +160,84 @@ def take(key: str) -> str:
 
 def pending(key: str) -> bool:
     slot = _slots.get(key)
-    return bool(slot and slot.messages)
+    return bool(slot and (slot.messages or slot.notices))
+
+
+def post_notice(key: str, message: str, *, path: str = '') -> bool:
+    """Leave a change notice for run `key`, picked up at its next boundary.
+
+    A notice is information (a file changed under the run), not an instruction
+    from the user, so it is stored apart from steers and drained as a `system`
+    context message. Three edits to one file in a batch arrive as one line:
+    when `path` matches a queued notice's path, the queued one is replaced in
+    place rather than appended to — the newest text wins, and the run is told
+    once, not three times. Capped like steers, oldest dropped first, because a
+    notice rides the transcript and is re-billed every later turn of the run.
+    """
+    message = (message or '').strip()
+    if not message:
+        return False
+    if len(message) > MAX_STEER_CHARS:
+        message = message[:MAX_STEER_CHARS] + '\n[truncated]'
+
+    slot = _slots.get(key)
+    if slot is None:
+        slot = _slots[key] = _Slot()
+
+    if (path or '').strip():
+        for index, queued in enumerate(slot.notices):
+            if _notice_path(queued) == path.strip():
+                slot.notices[index] = message
+                return True
+
+    slot.notices.append(message)
+    while len(slot.notices) > MAX_QUEUED_STEERS:
+        slot.notices.popleft()
+        slot.notices_dropped += 1
+        logger.warning('[Steer] Notice queue full on %s; dropped the oldest', key)
+    return True
+
+
+def _notice_path(message: str) -> str:
+    """The file a change notice is about (`'<path> changed …'`), or ''."""
+    text = (message or '').strip()
+    if ' changed' in text:
+        return text.split(' changed', 1)[0].strip()
+    return ''
+
+
+def take_notices(key: str) -> str:
+    """Remove and return every pending notice for `key`, joined, or ''.
+
+    One string (not one message per notice) for the same reason `take` joins:
+    the caller turns this into a single `SystemMessage`, and several would
+    each be billed on every later turn while saying less together than one
+    coalesced line.
+    """
+    slot = _slots.get(key)
+    if slot is None or not slot.notices:
+        return ''
+
+    items = list(slot.notices)
+    slot.notices.clear()
+    slot.notices_delivered += len(items)
+
+    if len(items) == 1:
+        body = items[0]
+    else:
+        body = ('Files changed while you were working. Re-read these before '
+                'your next edit, or the stale-write guard will refuse it:\n' +
+                '\n'.join(f'- {text}' for text in items))
+
+    if len(body) > MAX_BATCH_CHARS:
+        body = '[earlier notices dropped to fit]\n' + body[-MAX_BATCH_CHARS:]
+    return body
+
+
+def has_notices(key: str) -> bool:
+    """Whether run `key` has an undelivered notice (for the panel)."""
+    slot = _slots.get(key)
+    return bool(slot and slot.notices)
 
 
 def queued(key: str) -> int:
@@ -242,6 +325,10 @@ def drain_messages(key: str) -> list[str]:
         return []
     items = list(slot.messages)
     slot.messages.clear()
+    # Notices are per-run context, not instructions: a finished run's "this
+    # file changed" is meaningless to hand back, so they are dropped here
+    # rather than returned with the steers.
+    slot.notices.clear()
     if not slot.autonomy and not slot.extras:
         _slots.pop(key, None)
     return items

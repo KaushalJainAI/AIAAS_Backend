@@ -66,6 +66,31 @@ def _truncate(value: Any) -> Any:
     return value
 
 
+def _worker_label(log) -> str:
+    """Who is asking, for an approval row — or '' for a run nobody dispatched.
+
+    A detached coding-task worker stamps its label, task id and title into
+    `input_data` at launch, so the Inbox reads "Implementer #2 (task t3: add
+    retry) wants to run …" rather than a bare tool call. Anything else (a
+    chat turn, a directly-run agent) keeps the unlabelled sentence it has
+    always had.
+    """
+    try:
+        data = log.input_data or {}
+        label = str(data.get('worker_label') or '').strip()
+        if not label:
+            return ''
+        task_id = str(data.get('task_id') or '').strip()
+        title = str(data.get('task_title') or '').strip()
+        if task_id and title:
+            return f'{label} (task {task_id}: {title[:80]})'
+        if task_id:
+            return f'{label} (task {task_id})'
+        return label
+    except Exception:  # noqa: BLE001
+        return ''
+
+
 def _clip(text: str, limit: int) -> tuple[str, bool]:
     """Bound one text field, reporting whether it was cut.
 
@@ -205,7 +230,8 @@ class AgentRunStream:
         # mcp__7__send_email_ab12cd34" asks someone to consent to a string.
         from chat.tools.describe import describe_call_async
 
-        detail = await describe_call_async(tool, args)
+        detail = await describe_call_async(
+            tool, args, label=_worker_label(self._log))
         message = f"{detail['sentence']} It will not run until you approve it."
 
         from .hitl import open_request

@@ -282,6 +282,26 @@ class AgentSerializer(serializers.Serializer):
     codeProjects = serializers.ListField(
         child=serializers.IntegerField(min_value=1), required=False, default=list, max_length=50,
     )
+    #: Glob list (relative to the project root) this agent may write, e.g.
+    #: `["src/api/**", "tests/**"]`. Empty means unrestricted — the field
+    #: arrives after the agents that predate it, and enforcing it must not
+    #: silently strip every existing agent's writes. Checked in
+    #: `ws_write/edit/apply_patch` before the lease is taken.
+    writePaths = serializers.ListField(
+        child=serializers.CharField(max_length=300), required=False, default=list, max_length=50,
+    )
+    #: Command classes `ws_run` may reach: test | lint | build | run |
+    #: install | any. Empty means unrestricted, for the same reason as
+    #: `writePaths`.
+    commandScope = serializers.ListField(
+        child=serializers.CharField(max_length=20), required=False, default=list, max_length=6,
+    )
+    #: Playbook slugs appended to the system prompt (`agents/playbooks/code/`).
+    #: Static text, so allowed in the cached prefix. Closed: a typo fails here
+    #: rather than silently dropping the playbook.
+    playbooks = serializers.ListField(
+        child=serializers.CharField(max_length=64), required=False, default=list, max_length=12,
+    )
     #: `useOrgContext` was removed from the wire (2026-09-03): it defaulted on,
     #: was stored on every agent, and no prompt builder ever read it. There is
     #: no workspace-level context to include or omit yet; it comes back with the
@@ -520,6 +540,67 @@ class AgentSerializer(serializers.Serializer):
             )
         return cleaned
 
+    def validate_writePaths(self, value):
+        """Glob list relative to the project root. Normalised on read, so this
+        only rejects blanks and absolute paths — an absolute path can never
+        match a project-relative write, so storing one is storing a dead rule.
+        """
+        out = []
+        for raw in value or []:
+            pattern = str(raw or '').strip().lstrip('/')
+            pattern = '/'.join(
+                seg for seg in pattern.split('/') if seg not in ('', '.'))
+            # Clamp `..` the way `vfs` does rather than refusing: models emit
+            # it constantly, and a clamp gives them the chroot they meant.
+            kept: list[str] = []
+            for seg in pattern.split('/'):
+                if seg == '..':
+                    if kept:
+                        kept.pop()
+                    continue
+                kept.append(seg)
+            cleaned = '/'.join(kept).strip()
+            if not cleaned:
+                raise serializers.ValidationError(
+                    'Each write path is a glob like "src/api/**", not blank.')
+            out.append(cleaned)
+        return sorted(set(out))
+
+    def validate_commandScope(self, value):
+        """Only the closed command classes. Unknown classes would sit in the
+        config implying a narrowed agent while `ws_run` ignored them.
+        """
+        from agents.agent.runtime import CODE_COMMAND_CLASSES
+
+        cleaned = sorted({str(c or '').strip().lower() for c in value or []
+                          if str(c or '').strip()})
+        unknown = sorted(set(cleaned) - set(CODE_COMMAND_CLASSES))
+        if unknown:
+            raise serializers.ValidationError(
+                f'Unknown command classes: {", ".join(unknown)}. '
+                f'Allowed: {", ".join(CODE_COMMAND_CLASSES)}.'
+            )
+        return cleaned
+
+    def validate_playbooks(self, value):
+        """Only playbook slugs that exist on disk."""
+        from agents.playbooks import PLAYBOOK_SLUGS
+
+        cleaned = [str(s or '').strip() for s in value or [] if str(s or '').strip()]
+        unknown = sorted({s for s in cleaned if s not in PLAYBOOK_SLUGS})
+        if unknown:
+            raise serializers.ValidationError(
+                f'Unknown playbooks: {", ".join(unknown)}. '
+                f'Allowed: {", ".join(sorted(PLAYBOOK_SLUGS))}.'
+            )
+        seen: set[str] = set()
+        out: list[str] = []
+        for slug in cleaned:
+            if slug not in seen:
+                seen.add(slug)
+                out.append(slug)
+        return out
+
     def validate_browserDomains(self, value):
         import re
 
@@ -576,7 +657,7 @@ class AgentSerializer(serializers.Serializer):
         return sorted(owned)
 
     def validate_dataConnections(self, value):
-        from data.models import DataConnection
+        from datasources.models import DataConnection
 
         return self._owned_data_ids(DataConnection, value, 'databases')
 
@@ -586,7 +667,7 @@ class AgentSerializer(serializers.Serializer):
         return self._owned_data_ids(CodeProject, value, 'projects')
 
     def validate_apiConnections(self, value):
-        from data.models import ApiConnection
+        from datasources.models import ApiConnection
 
         cleaned = []
         for entry in value or []:
@@ -783,6 +864,9 @@ class AgentSerializer(serializers.Serializer):
             'apiHosts': ctx.get('apiHosts', []),
             'workspaceEgress': ctx.get('workspaceEgress', []),
             'codeProjects': ctx.get('codeProjects', []),
+            'writePaths': ctx.get('writePaths', []),
+            'commandScope': ctx.get('commandScope', []),
+            'playbooks': ctx.get('playbooks', []),
             'toolScope': ctx.get('toolScope', []),
             'toolPermissions': ctx.get('toolPermissions', {}),
             'useEnvironment': ctx.get('useEnvironment', False),
@@ -874,6 +958,9 @@ class AgentSerializer(serializers.Serializer):
             'apiHosts': data.get('apiHosts', []),
             'workspaceEgress': data.get('workspaceEgress', []),
             'codeProjects': data.get('codeProjects', []),
+            'writePaths': data.get('writePaths', []),
+            'commandScope': data.get('commandScope', []),
+            'playbooks': data.get('playbooks', []),
             'toolScope': data.get('toolScope', []),
             # Stored as sent, even naming a tool whose grant is currently
             # off: the grant decides reachability and wins, so a stale entry
@@ -940,6 +1027,13 @@ class AgentSerializer(serializers.Serializer):
         """
         from agents.models import Trigger
 
+        if 'schedule' not in data:
+            # Absent is not blank. The agent builder no longer sends this
+            # field at all — schedules are managed on the Schedules page —
+            # and reading a missing key as "clear it" would delete the row on
+            # every builder save. Blank still removes (templates clearing a
+            # schedule they once set); absent leaves it alone.
+            return
         cron = (data.get('schedule') or '').strip()
         tz = (data.get('scheduleTimezone') or 'UTC').strip() or 'UTC'
         existing = agent.triggers.filter(mode='schedule', origin='builder').first()

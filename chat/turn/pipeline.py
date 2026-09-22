@@ -767,6 +767,32 @@ async def run_chat_turn(
             pass
     provider = request.provider or session.llm_provider
     model = request.model or session.llm_model
+
+    # A retired or unknown model id falls back before preflight — the same
+    # rule agent runs apply in `run_agent`. The session heals itself:
+    # `_sync_model_choice` below persists whatever the turn used, so the next
+    # turn starts clean. The swap is announced on the stream, because a silent
+    # model change is a provenance lie.
+    from llm import fallback as _model_fallback
+
+    _fb_provider, _fb_model, _fb_sub, _fb_reason = await sync_to_async(
+        _model_fallback.resolve_with_fallback)(provider, model)
+    if _fb_sub:
+        provider, model = _fb_provider, _fb_model
+        await sink(Event.STATUS, {
+            'phase': 'model_fallback',
+            'message': (
+                f'{_fb_reason} — answering on the platform fallback '
+                f'`{provider}/{model}` instead.'),
+        })
+        if not request.model and not request.provider:
+            # The dead id lives in the session default (an explicit override
+            # would already be persisted by `_sync_model_choice` below), so
+            # heal it here — otherwise every turn substitutes and announces
+            # again for a choice the user made once, long ago.
+            session.llm_provider, session.llm_model = provider, model
+            await session.asave(
+                update_fields=['llm_provider', 'llm_model'])
     # `or` rather than a None check on purpose: the client sends "" to mean
     # "back to the model's default", and that has to be able to clear a stored
     # level rather than being read as "said nothing".

@@ -348,6 +348,36 @@ class TurnContext:
     #: nobody is watching.
     caller: str = 'chat'
 
+    #: Glob list (relative to the project root) this run may write, or None for
+    #: unrestricted. Intersected parent → worker most-restrictive-wins, then
+    #: with the task's claims at dispatch. Read by `ws_write/edit/apply_patch`
+    #: before the lease is taken. None (not `()`) is unrestricted: `()` is what
+    #: disjoint restrictions intersect to, and it means the worker may write
+    #: nothing — reading it as unrestricted would widen exactly the runs the
+    #: intersection refused to.
+    write_paths: tuple[str, ...] | None = None
+
+    #: Command classes `ws_run` may reach, or None for any. Same
+    #: None-means-unrestricted rule as every other scope here.
+    command_scope: tuple[str, ...] | None = None
+
+    #: The task's file claims for this run (globs), or `()` when the run is
+    #: not a dispatched coding task. A write must fall inside these when they
+    #: are non-empty — the template's `writePaths` says where the role may
+    #: ever write, the claims say where this task does.
+    task_claims: tuple[str, ...] = ()
+
+    #: Task id (`code_plan` task id) for lease labels and the panel, or ''.
+    task_id: str = ''
+
+    #: Human label for lease conflicts and approvals ("Implementer #2"), or ''.
+    worker_label: str = ''
+
+    #: This run's `ExecutionLog.execution_id`, or '' in chat. Carried so tools
+    #: can attribute side effects (CodeChange, leases) to the run that made
+    #: them — without it a write succeeds but leaves no record.
+    execution_id: str = ''
+
     @property
     def max_tokens(self) -> int:
         return _MAX_TOKENS_BY_INTENT.get(self.intent, _DEFAULT_MAX_TOKENS)
@@ -1201,6 +1231,26 @@ async def _on_generated(
         })
 
 
+async def _on_ws_read(
+    parsed: dict, args: dict, meta: dict, sink: EventSink
+) -> None:
+    """Mirror a workspace read into `meta['reads']` for the run's record.
+
+    Enforcement lives in `workspaces/reads.py` (written by the tool itself, so
+    curation can never lift the guard); this is the copy the run view and the
+    side panel read. Cheap — one short hash per path — and it survives
+    curation because curation only ever rewrites `messages`.
+    """
+    if parsed.get('error'):
+        return
+    path = str(parsed.get('path') or args.get('path') or '').strip().lstrip('/')
+    digest = str(parsed.get('sha256') or '')
+    if not path or not digest:
+        return
+    reads = meta.setdefault('reads', {})
+    reads[path] = digest
+
+
 #: tool name → side effect applied to metadata / streamed to the client.
 #: The model always gets the raw tool output regardless; these only drive the UI.
 _SIDE_EFFECTS = {
@@ -1220,6 +1270,7 @@ _SIDE_EFFECTS = {
     "render_workbook": _on_file,
     "render_document": _on_file,
     "generate_image": _on_generated,
+    "ws_read": _on_ws_read,
 }
 
 
@@ -1370,6 +1421,18 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # Who started the run. `publish_page` refuses above-`link`
         # visibilities from unattended callers.
         "caller": turn.caller,
+        # Coding-team scopes (C1/C2). None means unrestricted, as everywhere
+        # else — a run that predates the field keeps today's behaviour.
+        "write_paths": turn.write_paths,
+        "command_scope": turn.command_scope,
+        "task_claims": tuple(turn.task_claims or ()),
+        "task_id": turn.task_id,
+        "worker_label": turn.worker_label,
+        "execution_id": turn.execution_id,
+        # The lead's live sink, so detached workers can publish plan-panel
+        # frames (task/lease/change updates) to whoever is watching the lead.
+        # None in unit tests that build a bare TurnContext.
+        "sink": turn.sink,
     }
     # Per-call, filled in just before dispatch below. A tool that starts other
     # runs (`invoke_subagent`, `run_agent`) needs to name the step that invoked
@@ -1648,7 +1711,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
 
 
 async def steering_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Pick up anything the user said while the run was working.
+    """Pick up anything the user said — and anything that changed — while the run worked.
 
     A plain node, deliberately. `interrupt()` exists to stop and wait for an
     actor outside the graph; a steer is already in the mailbox by the time this
@@ -1656,7 +1719,12 @@ async def steering_node(state: AgentState, config: RunnableConfig) -> dict[str, 
     give `run_turn`'s pause detection a second reason to fire that it would
     then have to tell apart from an approval.
 
-    Costs one dict lookup per tool round when nobody is steering.
+    Costs two dict lookups per tool round when nobody is steering.
+
+    Steers drain as a `HumanMessage` (the user talking); change notices drain
+    as a `system` context message (information, not instruction). The notice
+    goes first so a trailing steer is still peeled as the turn's prompt by
+    `_split_transcript` — a notice must never read as a user turn.
 
     Returns nothing (not even passthrough state): like `curate_node`, it
     rewrites `messages` and nothing else, so the plan parked in `metadata`
@@ -1666,17 +1734,24 @@ async def steering_node(state: AgentState, config: RunnableConfig) -> dict[str, 
 
     turn = _context(config)
     message = steering.take(turn.session_id)
-    if not message:
+    notices = steering.take_notices(turn.session_id)
+    if not message and not notices:
         return {}
 
-    logger.info("[Steer] Delivering a steer into %s", turn.session_id)
-    await turn.sink(Event.STATUS, {
-        "phase": "steered",
-        "message": "Picking up your message...",
-    })
-    # A user message, not a system one: it is the user talking, and the model
-    # already knows how to weigh a later instruction against an earlier one.
-    return {"messages": [HumanMessage(content=message)]}
+    out_messages: list = []
+    if notices:
+        logger.info("[Steer] Delivering %s into %s", 'a change notice', turn.session_id)
+        out_messages.append(SystemMessage(content=notices))
+    if message:
+        logger.info("[Steer] Delivering a steer into %s", turn.session_id)
+        await turn.sink(Event.STATUS, {
+            "phase": "steered",
+            "message": "Picking up your message...",
+        })
+        # A user message, not a system one: it is the user talking, and the model
+        # already knows how to weigh a later instruction against an earlier one.
+        out_messages.append(HumanMessage(content=message))
+    return {"messages": out_messages}
 
 
 # ── Curation node ────────────────────────────────────────────────────────────

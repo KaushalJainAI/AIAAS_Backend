@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 
 from adrf.decorators import api_view as async_api_view
 from django.shortcuts import get_object_or_404
@@ -43,7 +44,6 @@ logger = logging.getLogger(__name__)
 #: Inbound webhook bodies larger than this are refused. The body becomes model
 #: context, so it is charged for by the token.
 MAX_WEBHOOK_BODY_BYTES = 64 * 1024
-
 #: How many upcoming firings a trigger carries in its own representation, and
 #: the ceiling on what `/preview/` will compute. Small on purpose: the list is
 #: there to confirm the user read the schedule the way the server does, and
@@ -55,6 +55,70 @@ MAX_PREVIEW_RUNS = 10
 #: hundred agents would otherwise serialize the lot, each with its own cron
 #: walk. The body says when it has been cut.
 TRIGGER_LIST_LIMIT = 200
+
+
+def _relative_ago(moment, now) -> str:
+    """`next_due_at` as a person would say it: 5m ago, 3h ago, 19d ago."""
+    mins = max(0, int((now - moment).total_seconds() // 60))
+    if mins < 60:
+        return f'{mins}m ago'
+    if mins < 1440:
+        return f'{mins // 60}h ago'
+    return f'{mins // 1440}d ago'
+
+
+def trigger_status(trigger, now, scheduler_running: bool) -> tuple:
+    """One status per trigger, first match wins.
+
+    The card used to assemble this from five separate warning boxes, and every
+    new failure mode meant a sixth. One computed pair — a machine word plus
+    one human sentence with its fix — keeps "is this working?" to one line.
+    """
+    from agents.sweep import MAX_CONSECUTIVE_FAILURES
+
+    agent = trigger.subagent
+    if (trigger.mode == 'schedule' and trigger.enabled
+            and not scheduler_running):
+        return ('scheduler_down',
+                "The scheduler isn't running, so this won't fire. "
+                'It restarts with the backend.')
+    if not agent.allow_unattended:
+        return ('needs_permission',
+                f'"{agent.name}" isn\'t allowed to run on its own yet.')
+    if agent.status in ('paused', 'archived'):
+        return ('agent_paused',
+                f'"{agent.name}" is {agent.status}, so this is skipped '
+                'until you resume it.')
+    if not trigger.enabled and (
+            trigger.consecutive_failures >= MAX_CONSECUTIVE_FAILURES):
+        return ('self_disabled',
+                f'Turned itself off after {MAX_CONSECUTIVE_FAILURES} '
+                f'failures in a row. Last error: {trigger.last_error}')
+    if not trigger.enabled and trigger.last_outcome in ('expired', 'stopped'):
+        return ('ended', 'This schedule has ended.')
+    if not trigger.enabled:
+        return ('paused', 'Paused.')
+    if trigger.window_state(now) == 'pending':
+        try:
+            from zoneinfo import ZoneInfo
+
+            local = trigger.starts_at.astimezone(ZoneInfo(trigger.tz))
+        except Exception:  # noqa: BLE001 — a bad zone must not break a listing
+            local = trigger.starts_at
+        return ('not_started',
+                f'Starts {local:%b %d, %H:%M} ({trigger.tz}).')
+    if (trigger.next_due_at is not None
+            and trigger.next_due_at < now - timedelta(minutes=2)):
+        return ('overdue',
+                f'Overdue: it should have run '
+                f'{_relative_ago(trigger.next_due_at, now)}. '
+                'If this stays, the scheduler is behind.')
+    if trigger.consecutive_failures > 0:
+        return ('failing',
+                f'Last try failed ({trigger.consecutive_failures} in a row, '
+                f'turns off at {MAX_CONSECUTIVE_FAILURES}): '
+                f'{trigger.last_error}')
+    return ('ok', '')
 
 
 class TriggerSerializer(serializers.ModelSerializer):
@@ -85,6 +149,13 @@ class TriggerSerializer(serializers.ModelSerializer):
     agent_has_prompt = serializers.SerializerMethodField()
     description = serializers.SerializerMethodField()
     upcoming = serializers.SerializerMethodField()
+    #: One status per trigger, computed on the server — the card renders this
+    #: instead of assembling five warning boxes. See `trigger_status`.
+    status = serializers.SerializerMethodField()
+    status_message = serializers.SerializerMethodField()
+    #: The run the last firing started, as the id the Runs page links by
+    #: (`/runs?run=<uuid>`). Null when nothing has fired yet.
+    last_run_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Trigger
@@ -95,6 +166,7 @@ class TriggerSerializer(serializers.ModelSerializer):
             'enabled', 'overlap', 'origin', 'starts_at', 'ends_at',
             'last_fired_at', 'next_due_at', 'queued_for', 'consecutive_failures',
             'last_outcome', 'last_error', 'description', 'upcoming',
+            'status', 'status_message', 'last_run_id',
             'webhook_url', 'created_at', 'updated_at',
         )
         read_only_fields = (
@@ -105,6 +177,27 @@ class TriggerSerializer(serializers.ModelSerializer):
 
     def get_agent_has_prompt(self, obj) -> bool:
         return bool((obj.subagent.prompt or '').strip())
+
+    def _scheduler_running(self) -> bool:
+        """The list view computes health once for all rows and passes it in
+        context; single-row responses fall back to one lease query."""
+        if 'scheduler_running' in self.context:
+            return self.context['scheduler_running']
+        from agents.scheduler import lease_status
+
+        return lease_status()['running']
+
+    def get_status(self, obj) -> str:
+        return trigger_status(
+            obj, timezone.now(), self._scheduler_running())[0]
+
+    def get_status_message(self, obj) -> str:
+        return trigger_status(
+            obj, timezone.now(), self._scheduler_running())[1]
+
+    def get_last_run_id(self, obj) -> str | None:
+        log = obj.last_execution
+        return str(log.execution_id) if log is not None else None
 
     def get_webhook_url(self, obj) -> str | None:
         """The secret is only ever shown through this field, to the owner."""
@@ -241,10 +334,12 @@ def _arm(trigger: Trigger) -> None:
 def trigger_list(request):
     """List or create the caller's triggers."""
     if request.method == 'GET':
+        from agents.scheduler import lease_status
+
         rows = (
             Trigger.objects
             .filter(subagent__user=request.user)
-            .select_related('subagent')
+            .select_related('subagent', 'last_execution')
             .order_by('-updated_at')
         )
         # ?agent=<id> so the builder can show one agent's schedules without
@@ -253,9 +348,15 @@ def trigger_list(request):
         if agent_id:
             rows = rows.filter(subagent_id=agent_id)
 
+        # Health once for the whole listing, not once per row: the status of
+        # every schedule consults it, and a lease query per card is a
+        # listing that gets slower the more schedules you own.
+        context = {'request': request,
+                   'scheduler_running': lease_status()['running']}
         page = list(rows[:TRIGGER_LIST_LIMIT + 1])
         truncated = len(page) > TRIGGER_LIST_LIMIT
-        data = TriggerSerializer(page[:TRIGGER_LIST_LIMIT], many=True).data
+        data = TriggerSerializer(
+            page[:TRIGGER_LIST_LIMIT], many=True, context=context).data
         if truncated:
             # A capped list and a complete one must not look alike.
             return Response({'results': data, 'truncated': True,
@@ -392,29 +493,59 @@ def schedule_preview(request):
 
 @extend_schema(
     methods=['POST'],
-    responses={200: OpenApiResponse(description='Outcome of the firing')},
-    description='Fire a schedule trigger now, through the same path the sweep uses.',
+    responses={200: OpenApiResponse(description='Outcome of the firing'),
+               202: OpenApiResponse(description='Run started')},
+    description='Fire a schedule trigger now, without waiting for the run.',
 )
-@api_view(['POST'])
+@extend_schema(
+    methods=['GET'],
+    responses={200: OpenApiResponse(description='Scheduler liveness')},
+    description='Whether the in-process trigger scheduler is checking in.',
+)
+@api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def trigger_run_now(request, trigger_id: int):
+def trigger_health(request):
+    """Is anything running the sweep, and when did it last tick?
+
+    The Schedules page reads this to say "the scheduler is not running"
+    instead of showing cards that look healthy while nothing fires — the
+    failure mode a host crontab nobody installed produced. `last_tick_at`
+    is null when no process has ever held the lease.
+    """
+    from agents.scheduler import lease_status
+
+    return Response(lease_status())
+
+
+@async_api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def trigger_run_now(request, trigger_id: int):
     """Fire this trigger immediately, and report what happened.
 
-    Deliberately `sweep.fire`, not a direct `start_agent_run`: a "test" button
-    that took a shortcut past the overlap policy, the unattended gate and the
-    failure counter would prove the button works and nothing else. The whole
-    question a user has before trusting a schedule is whether *the scheduled
-    path* runs, so this exercises exactly that path and hands back the same
-    one-word outcome the sweep counts.
+    A manual firing is extra, not the next scheduled slot: it goes through
+    `sweep.prepare(manual=True)` — the same paused-agent, overlap and no-goal
+    gates the sweep applies, but no slot claim and no re-arm, so `next_due_at`
+    does not move. The whole question a user has before trusting a schedule
+    is whether *the scheduled path* runs, so this exercises exactly that path.
+
+    Answers 202 with the execution id as soon as the run has *started*. The
+    old version waited for the whole agent run inside the request, which took
+    minutes and held a server thread — and timed out behind any proxy.
+    Anything else (a gate word, a refusal, a start failure) answers 200 with
+    the same one-word outcome the sweep counts.
 
     Schedules only. A webhook trigger is already fireable by POSTing its URL,
     and an event trigger has no runtime yet; both are refused by name rather
     than silently doing nothing.
     """
-    from agents.sweep import fire
+    from asgiref.sync import sync_to_async
 
-    trigger = get_object_or_404(
-        Trigger, id=trigger_id, subagent__user=request.user,
+    from agents.agent.runtime import AgentRunRefused, start_agent_run
+    from agents.sweep import Launch, prepare, record_failure, record_started
+
+    trigger = await sync_to_async(get_object_or_404)(
+        Trigger.objects.select_related('subagent', 'subagent__user'),
+        id=trigger_id, subagent__user=request.user,
     )
     if trigger.mode != 'schedule':
         return Response(
@@ -429,12 +560,40 @@ def trigger_run_now(request, trigger_id: int):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    outcome = fire(trigger)
-    trigger.refresh_from_db()
-    return Response({
-        'outcome': outcome,
-        'trigger': TriggerSerializer(trigger).data,
-    })
+    now = timezone.now()
+    step = await sync_to_async(prepare)(trigger, now, manual=True)
+    if not isinstance(step, Launch):
+        await sync_to_async(trigger.refresh_from_db)()
+        data = await sync_to_async(lambda: TriggerSerializer(trigger).data)()
+        return Response({'outcome': step, 'trigger': data})
+
+    agent = trigger.subagent
+    try:
+        execution_id = await start_agent_run(
+            agent, step.goal, user=agent.user, trigger_type='schedule',
+            caller='trigger',
+        )
+    except AgentRunRefused as exc:
+        logger.warning('[RunNow] Trigger %s refused: %s', trigger.id, exc)
+        await sync_to_async(record_failure)(trigger, now, 'refused', str(exc))
+        await sync_to_async(trigger.refresh_from_db)()
+        data = await sync_to_async(lambda: TriggerSerializer(trigger).data)()
+        return Response({'outcome': 'refused', 'trigger': data})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception('[RunNow] Trigger %s failed to start', trigger.id)
+        await sync_to_async(record_failure)(
+            trigger, now, 'failed', f'{type(exc).__name__}: {exc}')
+        await sync_to_async(trigger.refresh_from_db)()
+        data = await sync_to_async(lambda: TriggerSerializer(trigger).data)()
+        return Response({'outcome': 'failed', 'trigger': data})
+
+    await sync_to_async(record_started)(trigger, now, execution_id)
+    await sync_to_async(trigger.refresh_from_db)()
+    data = await sync_to_async(lambda: TriggerSerializer(trigger).data)()
+    return Response(
+        {'outcome': 'fired', 'execution_id': execution_id, 'trigger': data},
+        status=status.HTTP_202_ACCEPTED,
+    )
 
 
 @extend_schema(

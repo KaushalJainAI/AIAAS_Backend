@@ -174,11 +174,12 @@ class RagGrantTests(SimpleTestCase):
 
         `extract_data` joined them on 2026-09-20: it reads the user's documents
         through the same corpus, so it belongs to the grant that says an agent
-        may read them."""
+        may read them. `ocr_document` joined the same way with the voice/OCR
+        work: a scan is a document that happens to be a photo."""
         self.assertEqual(
             set(GRANT_TOOLS["rag"]),
             {"list_knowledge_bases", "knowledge_base_search", "keyword_search",
-             "list_documents", "read_document", "extract_data"},
+             "list_documents", "read_document", "extract_data", "ocr_document"},
         )
 
 

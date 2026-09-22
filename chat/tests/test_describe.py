@@ -156,3 +156,30 @@ class ServerLookupTests(TestCase):
         detail = async_to_sync(describe_call_async)('write_file', {'path': '/a'})
         self.assertEqual(detail['server'], '')
         self.assertEqual(detail['title'], 'Save a file')
+
+
+class WorkerLabelTests(SimpleTestCase):
+    """Approvals opened by a worker name the worker — passed in, never looked up."""
+
+    def test_a_labelled_call_names_the_worker_and_the_task(self):
+        from chat.tools.describe import describe_call
+
+        detail = describe_call(
+            'ws_run', {'cmd': 'pytest -q'},
+            label='Implementer #2 (task t3: add retry)')
+        self.assertIn('Implementer #2', detail['title'])
+        self.assertIn('t3', detail['title'])
+        self.assertIn('Implementer #2', detail['sentence'])
+        self.assertIn('wants to', detail['sentence'])
+        # The raw pair still ships behind the disclosure for the engineer.
+        self.assertEqual(detail['fields'][0]['value'], 'pytest -q')
+
+    def test_an_unlabelled_call_reads_exactly_as_before(self):
+        from chat.tools.describe import describe_call
+
+        plain = describe_call('ws_run', {'cmd': 'pytest -q'})
+        labelled = describe_call(
+            'ws_run', {'cmd': 'pytest -q'}, label='Implementer #2')
+        self.assertNotIn('#', plain['title'])
+        self.assertEqual(labelled['fields'], plain['fields'])
+        self.assertIn(plain['tool'], labelled['tool'])

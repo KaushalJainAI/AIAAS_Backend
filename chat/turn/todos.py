@@ -80,6 +80,11 @@ def normalize(raw: Any) -> list[dict[str, str]]:
     a status has said something this system cannot act on, and quietly keeping
     it would let an item sit in a state nothing counts as either finished or
     outstanding.
+
+    `owner` and `task_id` ride along untouched when present (the coding lead
+    mirrors its plan this way: one todo per task). They are metadata for the
+    panel, never rendered back into the model's context — `render` ignores
+    them, so a chat without delegation reads exactly as before.
     """
     if not isinstance(raw, list):
         return []
@@ -88,9 +93,12 @@ def normalize(raw: Any) -> list[dict[str, str]]:
     for entry in raw:
         if isinstance(entry, str):
             text, status = entry, OPEN
+            owner, task_id = '', ''
         elif isinstance(entry, dict):
             text = entry.get('text') or entry.get('task') or entry.get('title') or ''
             status = (entry.get('status') or OPEN)
+            owner = str(entry.get('owner') or '')[:80]
+            task_id = str(entry.get('task_id') or entry.get('taskId') or '')[:64]
         else:
             continue
 
@@ -101,7 +109,12 @@ def normalize(raw: Any) -> list[dict[str, str]]:
         status = str(status).strip().lower()
         if status not in STATUSES:
             status = OPEN
-        out.append({'text': text, 'status': status})
+        item: dict[str, str] = {'text': text, 'status': status}
+        if owner:
+            item['owner'] = owner
+        if task_id:
+            item['task_id'] = task_id
+        out.append(item)
 
         if len(out) >= MAX_TODOS:
             break

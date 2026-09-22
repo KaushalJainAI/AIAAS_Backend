@@ -60,6 +60,19 @@ class Event(StrEnum):
     #: the client can put them back in front of the user. Before this, they sat in
     #: the mailbox and landed mid-way through the session's *next* turn.
     STEERS_RETURNED = "steers_returned"
+    #: One coding-task worker's state, for the plan panel. Published to the
+    #: lead's sink (chat SSE) and onto the parent execution's channel (runs):
+    #: `{task_id, handle, label, agent, status, title, spend}`. Throttled to at
+    #: most 1 per second per task — elapsed timers live in a leaf component so
+    #: these frames never re-render the transcript.
+    TASK_UPDATE = "task_update"
+    #: Files currently leased on a project, for the panel's lock list:
+    #: `{project, leases: [{pattern, holder_label, task_id}]}`.
+    LEASE_UPDATE = "lease_update"
+    #: One file a worker wrote, flashing in the panel's change list:
+    #: `{path, change_id, by_label}`. The same event the C3 bus carries — one
+    #: copy, consumed twice.
+    CODE_CHANGE = "code_change"
 
 
 class EventSink(Protocol):

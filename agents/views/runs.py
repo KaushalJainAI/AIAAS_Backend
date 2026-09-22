@@ -443,5 +443,139 @@ async def run_cancel(request, execution_id: str):
     try:
         final = await cancel_agent_run(log)
     except CannotCancel as exc:
-        return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        # A detached code worker runs in its own spawned task while the lead
+        # waits in `wait_tasks` — stopping it alone is safe, unlike stopping a
+        # fan-out worker that runs inside its parent. Same shape, same record
+        # update, without the delegation guard.
+        try:
+            final = await _cancel_code_task(log)
+        except CannotCancel:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
     return Response({'execution_id': str(log.execution_id), 'status': final})
+
+
+async def _cancel_code_task(log) -> str:
+    """Stop a detached coding-task worker. Raises `CannotCancel` when this is
+    not one — the caller answers the original 409."""
+    from agents.agent import tasks as _code_tasks
+    from agents.agent.runtime import CannotCancel
+    from chat.tools.tasks import _cancel_detached
+
+    if _code_tasks.parent_of_execution(str(log.execution_id)) is None:
+        raise CannotCancel(
+            'This run was started by another agent and runs inside it. Stop '
+            'the run that delegated it.'
+        )
+    try:
+        final = await _cancel_detached(log)
+    except CannotCancel:
+        raise
+    except Exception as exc:  # noqa: BLE001 — no live task, already gone
+        raise CannotCancel(
+            'This worker is not running in this server process. If it has '
+            'stopped responding it will be closed automatically.'
+        ) from exc
+    _code_tasks.finish_execution(str(log.execution_id), status='cancelled',
+                                 error='Stopped.')
+    return final
+
+
+class RunSteerSerializer(serializers.Serializer):
+    message = serializers.CharField(max_length=4000)
+
+    def validate_message(self, value):
+        message = (value or '').strip()
+        if not message:
+            raise serializers.ValidationError('Say something to steer with.')
+        return message
+
+
+def _worker_log_or_404(execution_id, user):
+    """One worker's run, owned by the caller — 404s alike for bad ids and
+    foreign rows, so neither enumerates the other's runs."""
+    import uuid as _uuid
+
+    try:
+        _uuid.UUID(str(execution_id))
+    except ValueError:
+        return None
+
+    from logs.models import ExecutionLog
+
+    return ExecutionLog.objects.filter(
+        execution_id=execution_id, user=user).first()
+
+
+@extend_schema(
+    methods=['POST'],
+    request=RunSteerSerializer,
+    responses={200: OpenApiResponse(description='Steer delivered to the worker')},
+    description='Send a mid-run instruction to one coding-task worker, by execution.',
+)
+@async_api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def run_steer(request, execution_id: str):
+    """Steer a worker from the plan panel, without knowing its thread id.
+
+    `agent_steer` addresses the latest running run of an *agent* — wrong when
+    one implementer has two workers going. This addresses the *execution* the
+    panel's lane already shows, and looks up the thread the same way the run
+    itself does (`input_data.thread_id`).
+    """
+    from chat.turn import steering
+
+    from asgiref.sync import sync_to_async
+
+    log = await sync_to_async(_worker_log_or_404)(execution_id, request.user)
+    if log is None:
+        return Response({'error': 'Run not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    serializer = RunSteerSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    thread_id = (log.input_data or {}).get('thread_id') or ''
+    if not thread_id or log.status not in ('running', 'paused'):
+        return Response({'error': 'That worker is not running.'},
+                        status=status.HTTP_409_CONFLICT)
+
+    steering.post(thread_id, serializer.validated_data['message'])
+    return Response({'steered': True, 'execution_id': str(log.execution_id),
+                     **steering.stats(thread_id)})
+
+
+@extend_schema(
+    methods=['POST'],
+    request=AgentAutonomySerializer,
+    responses={200: OpenApiResponse(description='Autonomy changed for the worker')},
+    description='Change one coding-task worker\'s autonomy mid-run, by execution.',
+)
+@async_api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def run_autonomy(request, execution_id: str):
+    """The per-worker autonomy switch, addressed the way `run_steer` is.
+
+    Not retroactive, like `agent_autonomy`: a call already paused still needs
+    an answer, because the looser setting arrived after the question.
+    """
+    from chat.turn import steering
+
+    from asgiref.sync import sync_to_async
+
+    log = await sync_to_async(_worker_log_or_404)(execution_id, request.user)
+    if log is None:
+        return Response({'error': 'Run not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    serializer = AgentAutonomySerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    thread_id = (log.input_data or {}).get('thread_id') or ''
+    if not thread_id or log.status not in ('running', 'paused'):
+        return Response({'error': 'That worker is not running.'},
+                        status=status.HTTP_409_CONFLICT)
+
+    level = serializer.validated_data['level']
+    if not steering.set_autonomy(thread_id, level):
+        return Response({'error': f'{level} cannot be set on a running worker.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({'autonomy': level, 'execution_id': str(log.execution_id)})

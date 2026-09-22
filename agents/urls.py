@@ -43,6 +43,12 @@ urlpatterns = [
     # Stop one run. By execution, not by agent: an agent may have several
     # runs going, and "stop the agent" would not say which.
     path('runs/<str:execution_id>/cancel/', runs.run_cancel, name='run_cancel'),
+    # One coding-task worker, by execution: steer it, tighten/loosen it, from
+    # the plan panel lane that already shows its execution id. `agent_steer`
+    # addresses the latest run of an agent, which is the wrong worker when one
+    # implementer has two going.
+    path('runs/<str:execution_id>/steer/', runs.run_steer, name='run_steer'),
+    path('runs/<str:execution_id>/autonomy/', runs.run_autonomy, name='run_autonomy'),
 
     # Explore — everything installable, from two sources: the curated
     # catalogue (code, `agents/gallery.py`) and agents users have published
@@ -79,6 +85,10 @@ urlpatterns = [
     # not match 'preview' anyway.
     path('triggers/preview/', triggers.schedule_preview,
          name='schedule_preview'),
+    # Scheduler liveness for the Schedules page banner. Sits with `preview`:
+    # neither matches `<int:trigger_id>`, but adjacency says what it belongs to.
+    path('triggers/health/', triggers.trigger_health,
+         name='trigger_health'),
     path('triggers/<int:trigger_id>/', triggers.trigger_detail, name='trigger_detail'),
     # Fire a schedule now, through the sweep's own path — the only way to find
     # out whether a schedule works without waiting for its next slot.

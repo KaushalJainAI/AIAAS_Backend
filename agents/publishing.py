@@ -54,6 +54,7 @@ SHAREABLE_KEYS: frozenset[str] = frozenset({
     'fileAccess',
     'tools',
     'useEnvironment', 'browserDomains', 'toolScope', 'toolPermissions',
+    'writePaths', 'commandScope', 'playbooks',
     'outputContract', 'fanoutParallel',
     'schedule', 'allowUnattended',
     'autonomy', 'notifyOnHitl', 'spendCapRupees',

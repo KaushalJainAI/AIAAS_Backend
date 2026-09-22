@@ -161,8 +161,124 @@ FINDINGS = Contract(
     repair=_repair_findings,
 )
 
+def _repair_code_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept the near-misses a model produces for a task plan."""
+    tasks = payload.get('tasks')
+    if isinstance(tasks, dict):
+        payload['tasks'] = [tasks]
+    items = payload.get('tasks')
+    if isinstance(items, list):
+        cleaned = []
+        for i, item in enumerate(items):
+            if isinstance(item, str):
+                cleaned.append({
+                    'id': f't{i + 1}', 'title': item[:200], 'agent': '',
+                    'instructions': item, 'claims': [], 'reads': [],
+                    'depends_on': [], 'acceptance': '',
+                })
+            elif isinstance(item, dict):
+                item = dict(item)
+                item.setdefault('id', f't{i + 1}')
+                item.setdefault('title', str(item.get('instructions') or '')[:200])
+                item.setdefault('agent', '')
+                item.setdefault('instructions', item.get('title', ''))
+                claims = item.get('claims') or []
+                if isinstance(claims, str):
+                    claims = [claims]
+                item['claims'] = list(claims)
+                reads = item.get('reads') or []
+                if isinstance(reads, str):
+                    reads = [reads]
+                item['reads'] = list(reads)
+                deps = item.get('depends_on') or item.get('dependsOn') or []
+                if isinstance(deps, str):
+                    deps = [deps]
+                deps = [str(d) for d in deps if str(d) != str(item.get('id'))]
+                item['depends_on'] = deps
+                # Refuse cycles by dropping edges that close one; the serializer
+                # names the cycle in its own refusal for the lead to fix.
+                item.setdefault('acceptance', '')
+                cleaned.append(item)
+        payload['tasks'] = cleaned
+    # Drop self-dependencies that slipped past item-level repair.
+    ids = {str(t.get('id')) for t in payload.get('tasks', []) if isinstance(t, dict)}
+    for t in payload.get('tasks', []):
+        if isinstance(t, dict):
+            t['depends_on'] = [d for d in t.get('depends_on', []) if d in ids and d != t.get('id')]
+    return payload
+
+
+def _repair_patch(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept the near-misses a model produces for a patch report."""
+    if 'summary' not in payload:
+        for alias in ('text', 'content', 'answer'):
+            if alias in payload:
+                payload['summary'] = payload.pop(alias)
+                break
+    changes = payload.get('changes')
+    if isinstance(changes, dict):
+        payload['changes'] = [changes]
+    if isinstance(payload.get('changes'), list):
+        cleaned = []
+        for item in payload['changes']:
+            if isinstance(item, str):
+                cleaned.append({'path': item, 'kind': 'edit', 'change_id': None})
+            elif isinstance(item, dict):
+                item = dict(item)
+                item.setdefault('kind', 'edit')
+                item.setdefault('change_id', None)
+                cleaned.append(item)
+        payload['changes'] = cleaned
+    tests = payload.get('tests')
+    if isinstance(tests, str):
+        payload['tests'] = {'command': '', 'passed': False, 'output_tail': tests[-2000:]}
+    elif isinstance(tests, dict):
+        tests = dict(tests)
+        tests.setdefault('command', '')
+        tests.setdefault('passed', False)
+        tests.setdefault('output_tail', '')
+        payload['tests'] = tests
+    return payload
+
+
+CODE_PLAN = Contract(
+    name='code_plan',
+    instruction=(
+        'Return your final answer as a single JSON object and nothing else, '
+        'with these keys:\n'
+        '  "goal"  — the goal in one sentence\n'
+        '  "tasks" — the plan, as a list of {"id", "title", "agent", '
+        '"instructions", "claims", "reads", "depends_on", "acceptance"}. '
+        '"claims" lists the file globs the task will write and is required '
+        'and non-empty for any task whose agent can write. "reads" lists '
+        'what it will read. "depends_on" names earlier task ids.\n'
+        '  "risks" — what could go wrong, as a list of strings\n'
+        'Do not wrap it in a code fence. Do not add commentary around it.'
+    ),
+    required=('goal', 'tasks'),
+    optional={'risks': [], 'type': 'code_plan'},
+    repair=_repair_code_plan,
+)
+
+PATCH = Contract(
+    name='patch',
+    instruction=(
+        'Return your final answer as a single JSON object and nothing else, '
+        'with these keys:\n'
+        '  "summary" — what you changed, in two or three sentences\n'
+        '  "changes" — the files you touched, as a list of {"path", "kind", '
+        '"change_id"} where change_id points at the recorded CodeChange\n'
+        '  "tests"   — {"command", "passed", "output_tail"}\n'
+        '  "followups" — anything left for someone else, as a list\n'
+        'Do not wrap it in a code fence. Do not paste file contents back.'
+    ),
+    required=('summary', 'changes'),
+    optional={'tests': {}, 'followups': [], 'type': 'patch'},
+    repair=_repair_patch,
+)
+
 #: Name -> contract. Closed on purpose; see the module docstring.
-CONTRACTS: dict[str, Contract] = {c.name: c for c in (RESEARCH, EXTRACTION, FILES, FINDINGS)}
+CONTRACTS: dict[str, Contract] = {c.name: c for c in (RESEARCH, EXTRACTION, FILES, FINDINGS, CODE_PLAN, PATCH)}
 
 
 def get(name: str) -> Contract | None:

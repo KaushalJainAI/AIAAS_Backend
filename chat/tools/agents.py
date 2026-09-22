@@ -552,6 +552,14 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
         return json.dumps({"error": "User not found."})
 
     worker_agent = None
+    # The parent's file/command limits, intersected with the worker's own
+    # below and handed to `run_agent` explicitly. Passed as kwargs rather than
+    # read back off the mutated row because the "may write nothing" state
+    # (`()` from disjoint restrictions) cannot survive a store-and-read cycle:
+    # at rest `[]` means unrestricted, so reading it back would widen exactly
+    # the workers the intersection refused.
+    narrowed_paths: tuple[str, ...] | None = None
+    narrowed_commands: tuple[str, ...] | None = None
     if args.get("agent_id") is not None:
         try:
             agent_id = int(args["agent_id"])
@@ -590,6 +598,28 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
             if merged != tool_permissions_for(worker_agent):
                 worker_agent.agent_context = dict(
                     worker_agent.agent_context or {}, toolPermissions=merged)
+        # Nor its file or command limits. A worker never holds wider
+        # `writePaths`/`commandScope` than whoever started it: the parent's
+        # lists intersect the worker's own, most-restrictive-wins, so a lead
+        # confined to `src/api/**` cannot field an implementer that writes
+        # anywhere. Empty means unrestricted on the way in.
+        from agents.agent.runtime import (
+            command_scope_for,
+            intersect_command_scope,
+            intersect_write_paths,
+            write_paths_for,
+        )
+        parent_paths = context.get("write_paths")
+        parent_commands = context.get("command_scope")
+        if parent_paths is not None or parent_commands is not None:
+            narrowed_paths = intersect_write_paths(parent_paths, write_paths_for(worker_agent))
+            narrowed_commands = intersect_command_scope(parent_commands, command_scope_for(worker_agent))
+            ctx = dict(worker_agent.agent_context or {})
+            if narrowed_paths != write_paths_for(worker_agent):
+                ctx['writePaths'] = list(narrowed_paths or ())
+            if narrowed_commands != command_scope_for(worker_agent):
+                ctx['commandScope'] = list(narrowed_commands or ())
+            worker_agent.agent_context = ctx
 
     if worker_agent is None:
         return json.dumps({
@@ -668,6 +698,12 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
             # Write access to the parent's own folder, so a worker can leave a
             # report there and answer with its path instead of its contents.
             workspace=workspace,
+            # The intersected file/command limits, enforced rather than
+            # re-derived: `run_agent` falls back to the row's own when these
+            # are None, which is the same answer — except for the disjoint
+            # `()` case, which the row cannot represent (see above).
+            write_paths=narrowed_paths,
+            command_scope=narrowed_commands,
         )
         return WorkerResult(
             index=index, task=task, answer=run.answer or "",

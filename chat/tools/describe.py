@@ -189,6 +189,7 @@ def _fields(args: Mapping[str, Any] | None) -> list[dict[str, str]]:
 
 def describe_call(
     name: str, args: Mapping[str, Any] | None = None, *, server: str = '',
+    label: str = '',
 ) -> dict[str, Any]:
     """
     Render one tool call for a human.
@@ -198,6 +199,10 @@ def describe_call(
     the description still works and simply does not name the connection, which
     is the right degradation: a description that fails because a row could not
     be read would take the approval screen down with it.
+
+    `label` names the worker asking ("Implementer #2 (task t3: add retry)"),
+    passed in by the caller — this function does no lookup of its own. Empty
+    for every non-worker call, where the sentence reads exactly as before.
 
     Never raises. Every caller is on a path where a run has already stopped and
     asked, and a formatting error must not be what fails it.
@@ -228,6 +233,12 @@ def describe_call(
         title = phrase
         sentence = f'{phrase}.'
 
+    if (label or '').strip():
+        who = label.strip()
+        title = f'{who} · {title}'
+        first = sentence[:1].lower() + sentence[1:] if sentence else sentence
+        sentence = f'{who} wants to {first}'
+
     return {
         'title': title,
         'sentence': sentence,
@@ -238,7 +249,7 @@ def describe_call(
 
 
 async def describe_call_async(
-    name: str, args: Mapping[str, Any] | None = None,
+    name: str, args: Mapping[str, Any] | None = None, *, label: str = '',
 ) -> dict[str, Any]:
     """
     `describe_call`, plus the connection's display name.
@@ -258,4 +269,4 @@ async def describe_call_async(
     except Exception:  # noqa: BLE001
         logger.warning('[Describe] Could not name the connection behind %s', name)
 
-    return describe_call(name, args, server=server)
+    return describe_call(name, args, server=server, label=label)
