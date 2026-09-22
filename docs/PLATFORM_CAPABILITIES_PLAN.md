@@ -37,7 +37,7 @@ and is not touched** (see CLAUDE.md).
 | P1 | `talk`: Slack, WhatsApp, Teams, SMS | L | P0 | briefs, follow-ups, reminders | **Done in tree, uncommitted.** `messaging/` app (`MessagingAccount`, `OutboundMessage`, `InboundMessage`, webhooks, retention sweep, beat task + `purge_inbound` command); `chat/tools/talk.py` + `chat/tools/messaging/{common,slack,whatsapp,teams,sms}.py` (`message_channels/search/read/draft/send`, 20/run + 5/recipient caps, unattended `recipients` gate, ledger cost for WhatsApp/SMS); 16 tests (`messaging/tests/test_messaging.py`). |
 | P2 | Browser Pro: sessions, vault logins, downloads, live view | M | P0 | portal work (GST, courier, bank, vendors) | **Done in tree, uncommitted.** `browsing/models.py::BrowserSession` (+migration, sweep command + beat task), session-scoped `browser_act` with `session`/`trace`, `fill_secret` via P0 refs against `browserLogins`, `ask_user` OTP/CAPTCHA pause, downloads → VFS, submit gate feeding P3 reviewer, per-minute ledger; new step verbs (`scroll`, `download`, `extract`); tests (`browsing/tests/test_sessions.py`). Uploads still refused by design. |
 | P3 | Auto mode: chat autonomy, account default, action reviewer | M | — | using the platform without clicking all day | **Done, committed** (P0/P3 commit `94a9292` + docs `2b7d907`; 24 backend + 2 frontend tests). |
-| P4 | `data`: SQL + generic API caller | L | P0 | CRM/DB work without a connector per system | **Done in tree, uncommitted.** `data/` app (`DataConnection`, `ApiConnection`, one migration); `data/drivers.py` + `data/sqlcheck.py` (parsed reads, read-only txn, 30 s timeout, 1,000 inline rows → CSV spill, max 50k spill rows); `chat/tools/data.py` (`list_data_connections`, `describe_schema`, `query_sql`, `execute_sql`) + `chat/tools/apicaller.py` (`list_api_operations`, `call_api`); `dataConnections`/`apiConnections`/`dbHosts`/`apiHosts` scopes, both doors; 18 tests (`data/tests/test_data.py`). |
+| P4 | `datasources`: SQL + generic API caller | L | P0 | CRM/DB work without a connector per system | **Done in tree, uncommitted.** `datasources/` app (`DataConnection`, `ApiConnection`, one migration); `datasources/drivers.py` + `datasources/sqlcheck.py` (parsed reads, read-only txn, 30 s timeout, 1,000 inline rows → CSV spill, max 50k spill rows); `chat/tools/data.py` (`list_data_connections`, `describe_schema`, `query_sql`, `execute_sql`) + `chat/tools/apicaller.py` (`list_api_operations`, `call_api`); `dataConnections`/`apiConnections`/`dbHosts`/`apiHosts` scopes, both doors; 18 tests (`datasources/tests/test_data.py`). |
 | P5 | Compute plane + `run_code` Pro (pip, internet, long jobs) | L | P0 | real pipelines, scheduled jobs | **Done in tree, uncommitted.** `workspaces/` app (models + `0001_initial` + `engine.py` one-door `none/docker/<provider>`, `ensure/exec/read/write/listdir/hibernate/destroy`, views + `hooks/<secret>/` → `job.finished` event, sweep + `sweep_workspaces` command + beat task, `WORKSPACE_ENGINE/WORKSPACE_IDLE_SECONDS` + quotas); `chat/tools/compute.py` (`workspace_exec`, `start_job`, `job_status`, `job_logs`, `cancel_job`, `sync_files`, `requires='workspace'`); `compute` grant end-to-end (runtime, TOOL_KEYS, builder help, capabilities scope map + engine gate, frontend labels, tools library). Tests: `chat/tests/test_phases_p5_p8.py`. |
 | P6 | Code tab (serves the `shell` grant) | XL | P5, P3 | coding agent, sandboxed per user | **Done in tree, uncommitted (backend + tools; `/code` page not built).** `shell` served: `GRANT_TOOLS['shell']` (12 `ws_*`/`git_*` tools in `chat/tools/code.py`), `UNSERVED_GRANTS` empty, `codeProjects` scope both doors, `CodeProject` + `CodeChange` (+migration `0002`), tools library `shell` category real, builder `TOOL_HELP` + toggles + types. Frontend `/code` page (Monaco/xterm/diff review) not built. |
 | P7 | Long-horizon missions | L | P3 (P5 optional) | multi-day goals | **Done in tree, uncommitted (backend; `/missions` board not built).** `missions/` app (model + `0001_initial`, `service.after_run`, sweep + `run_missions` command + beat task), `caller='mission'` (+ `UNATTENDED_CALLERS`, `ExecutionLog.mission` + migration), mission tools (`chat/tools/missions.py`: `mission_status`, `wait_for`, `complete_mission`, `report_progress`, `start_mission`). Frontend `/missions` board not built. |
@@ -529,6 +529,13 @@ Every file change is a **change set** (`CodeChange(run, path, before_hash,
 after_hash, diff)`) so the UI can show and revert per file. This is the file-card
 rule applied to code.
 
+> Cross-reference (2026-09-22): the team built on these tools lives in
+> `Backend/docs/CODING_AGENTS_PLAN.md` (built, same date) — a coding roster
+> (scout, architect, implementer, test-writer, debugger, reviewer, integrator +
+> coding lead), detached `start_tasks`/`wait_tasks` dispatch, file leases with
+> a stale-write guard, change notices, and the plan panel. The `/code` page
+> itself (§9.2) is still not built; the panel ships in chat and `/runs`.
+
 ### 9.2 The page
 
 - **Layout:** file tree | editor (Monaco, lazy chunk) | agent panel (existing
@@ -839,8 +846,8 @@ tree.
   `browser_act` `session`/`trace`/`fill_secret`/`ask_user`/submit-gate/CostEntry,
   `browserLogins` scope wiring, reviewer submit rules, sweep + beat task,
   settings (`BROWSER_SESSION_*`). Tests passing.
-- P4 §7 in full: `data/` app + migration, `data/drivers.py`,
-  `data/sqlcheck.py`, `chat/tools/data.py`, `chat/tools/apicaller.py`,
+- P4 §7 in full: `datasources/` app + migration, `datasources/drivers.py`,
+  `datasources/sqlcheck.py`, `chat/tools/data.py`, `chat/tools/apicaller.py`,
   `dataConnections`/`apiConnections`/`dbHosts`/`apiHosts` scopes both doors
   (runtime + serializer + `TurnContext`), `data` + `api` grants end-to-end,
   `DATA_ALLOW_PRIVATE_HOSTS`. 18 tests passing.

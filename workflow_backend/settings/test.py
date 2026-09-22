@@ -80,3 +80,7 @@ REST_FRAMEWORK = {
 # depends on execution order. Durability is what `chat/tests/test_checkpoints.py`
 # and `logs/tests/test_checkpoints.py` assert *about*, not something they need.
 AGENT_CHECKPOINTER = 'memory'
+
+# The trigger scheduler must never start a background loop in tests. Apart
+# from leaking tasks across cases, a loop would fire real schedules mid-suite.
+SCHEDULER_ENABLED = False

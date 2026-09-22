@@ -25,6 +25,23 @@ django_asgi_app = get_asgi_application()
 from streaming.routing import websocket_urlpatterns
 from core.realtime.channels_middleware import JWTAuthMiddleware
 
+
+class _StartScheduler:
+    """Start the in-process trigger scheduler on the first HTTP request.
+
+    A thin wrapper, not middleware: it calls `ensure_started()` (idempotent —
+    one flag, one setting check) and passes the scope through untouched.
+    `background.spawn` needs a running loop, which is why this lives on the
+    request path rather than at import time.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        from agents.scheduler import ensure_started
+        ensure_started()
+        return await self.app(scope, receive, send)
 # NOTE: nothing here validates the WebSocket Origin header. channels ships
 # AllowedHostsOriginValidator for this and it was imported here at one point,
 # but never wrapped around the route, so any page on any origin can open a
@@ -37,8 +54,11 @@ from core.realtime.channels_middleware import JWTAuthMiddleware
 # off both the Vite dev server and production, so it needs a deliberate check
 # against the deployed origins rather than a drive-by change.
 application = ProtocolTypeRouter({
-    # HTTP requests handled by Django
-    "http": django_asgi_app,
+    # HTTP requests handled by Django. Daphne sends no ASGI `lifespan`
+    # events, so the in-process trigger scheduler starts on the first
+    # request instead — the Docker healthcheck hits `/api/health/` within
+    # seconds of boot, and `ensure_started` is idempotent after that.
+    "http": _StartScheduler(django_asgi_app),
 
     # WebSocket connections with authentication
     "websocket": JWTAuthMiddleware(

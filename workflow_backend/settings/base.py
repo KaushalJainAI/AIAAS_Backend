@@ -201,7 +201,7 @@ INSTALLED_APPS = [
     'browsing',
     'esign',
     'messaging',
-    'data',
+    'datasources',
     'django_celery_beat',
     'notifications',
     'imagine',
@@ -668,6 +668,12 @@ HITL_DIGEST_DEFAULT_TIME = os.environ.get('HITL_DIGEST_DEFAULT_TIME', '09:00')
 HITL_ABANDON_AFTER_DAYS = int(os.environ.get('HITL_ABANDON_AFTER_DAYS', '7'))
 
 RUN_WORKFLOWS_ASYNC = os.environ.get('RUN_WORKFLOWS_ASYNC', 'False') == 'True'
+
+# The in-process trigger scheduler (`agents/scheduler.py`) runs the sweep on a
+# loop inside the backend process, so schedules fire with no crontab and no
+# broker. Off in tests (a background loop must never start there); kill it in
+# production only to prove the UI reports a stopped scheduler.
+SCHEDULER_ENABLED = os.environ.get('SCHEDULER_ENABLED', 'True') == 'True'
 
 CREDENTIAL_ENCRYPTION_KEY = os.environ.get('CREDENTIAL_ENCRYPTION_KEY')
 if not CREDENTIAL_ENCRYPTION_KEY:
