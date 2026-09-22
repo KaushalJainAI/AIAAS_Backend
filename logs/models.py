@@ -311,6 +311,24 @@ class ExecutionLog(models.Model):
     supervision_level = models.CharField(
         max_length=20, blank=True, help_text='Level of supervision used for this run'
     )
+    #: The model value that actually served this run, e.g.
+    #: `deepseek/deepseek-v4.1-flash`. Recorded per run rather than per turn
+    #: (turns carry their own `model_id`): a run whose configured model was
+    #: retired executes on the platform fallback, and "what did it run on" is
+    #: the first question when such an answer is wrong. Blank on rows that
+    #: predate fallback tracking.
+    model_used = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text='Model value that served this run',
+    )
+    #: The configured model value this run fell back *from*, e.g.
+    #: `qwen/qwen3.8-max`. Blank when no substitution happened. The agent's
+    #: own `llm_model` is deliberately left untouched — the config stays what
+    #: the owner chose, while this column says what the run did about it.
+    fallback_from = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text='Configured model value substituted away from, if any',
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -10,7 +10,7 @@ routed and offered in the UI with no handler behind them, so choosing either
 raised `LLMUnavailable` at request time, and `cohere`/`groq`/`mistral` had
 credential types nobody could spend.
 
-Four providers cover essentially every user, because they are chosen for
+Five providers cover essentially every user, because they are chosen for
 non-overlapping reasons rather than for breadth:
 
   openrouter  the default — one key reaching 400+ models across 70+ upstream
@@ -20,6 +20,8 @@ non-overlapping reasons rather than for breadth:
               user has configured anything
   openai      the API key a user is most likely to already hold
   ollama      local inference, for offline and air-gapped use
+  opencode    free models on the user's own OpenCode Zen account — bring your
+              own key; never a platform key (ToS: own use only)
 
 Adding a fifth is deliberately a small change — a slug here, a subclass in
 `llm_providers.py` — but it should answer a need the four above cannot, not
@@ -38,6 +40,9 @@ SUPPORTED_PROVIDERS: tuple[str, ...] = (
     'nvidia',
     'openai',
     'ollama',
+    # Last on purpose: the first entry is the default, and a bring-your-own-
+    # key provider can never be a default — a new user has no key.
+    'opencode',
 )
 
 #: Providers that were offered previously, mapped to the OpenRouter namespace
@@ -64,6 +69,7 @@ PROVIDER_LABELS: dict[str, str] = {
     'nvidia': 'NVIDIA NIM',
     'openai': 'OpenAI',
     'ollama': 'Ollama (Local)',
+    'opencode': 'OpenCode Zen (free models, your key)',
 }
 
 

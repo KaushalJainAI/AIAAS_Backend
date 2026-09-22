@@ -93,6 +93,11 @@ class GradeContext:
     #: the real readers, because "has a chart" or "this cell is a formula that
     #: sums to 4.2" is not in any text extract.
     binaries: dict[str, bytes] = field(default_factory=dict)
+    #: Project-relative paths this run changed (`CodeChange` rows), for the
+    #: claims check. Populated by the runner from the execution; empty for a
+    #: run that changed nothing — and a run that changed nothing passes this
+    #: grader, because "did work" is the file graders' burden, not this one's.
+    code_changes: tuple[str, ...] = ()
 
     @property
     def tools_used(self) -> set[str]:
@@ -472,6 +477,35 @@ def _csv_rows(spec, ctx):
     rows = [r for r in csv.DictReader(io.StringIO(text.strip())) if any((v or '').strip() for v in r.values())]
     ok = len(rows) == int(spec['equals'])
     return _grade(spec, 'csv_rows', ok, '' if ok else f"{len(rows)} rows, expected {spec['equals']}")
+
+
+# -------------------------------------------------------------- code graders
+#
+# What a coding run changed, not what it said: these read the run's
+# `CodeChange` rows (via `GradeContext.code_changes`, populated by the runner
+# from the execution), the way the file graders read the workspace it left.
+
+@grader('code_changes_within', params=('claims',), required=('claims',),
+        description="Every file the run changed falls inside the task's claims")
+def _code_changes_within(spec, ctx):
+    from workspaces.leases import covers, normalize_pattern
+
+    claims = spec.get('claims') or []
+    if isinstance(claims, str):
+        claims = [claims]
+    claims = [normalize_pattern(c) for c in claims if str(c).strip()]
+    if not claims:
+        return _grade(spec, 'code_changes_within', False,
+                      'no claims to check against')
+    changed = [str(p or '').strip().lstrip('/') for p in (ctx.code_changes or [])
+               if str(p or '').strip() and str(p).strip() != '(patch)']
+    outside = [p for p in changed
+               if not any(covers(c, p) for c in claims)]
+    if outside:
+        return _grade(spec, 'code_changes_within', False,
+                      f'changed outside its claims: {", ".join(outside[:5])}')
+    return _grade(spec, 'code_changes_within', True,
+                  '' if changed else 'no changes recorded')
 
 
 # -------------------------------------------------------------- office graders

@@ -273,6 +273,7 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
     ctx = graders.GradeContext(
         files=files,
         binaries=binaries,
+        code_changes=await _code_changes_for(agent_run.execution_id),
         answer=answer,
         structured=agent_run.structured,
         contract_error=agent_run.contract_error,
@@ -335,6 +336,21 @@ def _execution_for(execution_id: str):
     from logs.models import ExecutionLog
 
     return ExecutionLog.objects.filter(execution_id=execution_id).first()
+
+
+@sync_to_async
+def _code_changes_for(execution_id: str) -> tuple[str, ...]:
+    """Project-relative paths one run changed, for the claims grader.
+
+    Read from the `CodeChange` rows the `shell` tools wrote — the same record
+    the UI shows and `revert_task` reverts — so a run graded as "within its
+    claims" is one whose real diff was, not one that said so.
+    """
+    from workspaces.models import CodeChange
+
+    return tuple(CodeChange.objects.filter(
+        run__execution_id=execution_id
+    ).values_list('path', flat=True))
 
 
 async def sweep(run, suite, agent, user, *, case_ids: list[int] | None = None,

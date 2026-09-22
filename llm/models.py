@@ -102,6 +102,36 @@ class AIModel(models.Model):
         default=0, help_text="Max context tokens (0 = unknown/variable)",
     )
 
+    #: Where the row came from. `curated` rows are written by
+    #: `populate_models.py`; `live` rows were discovered by a catalogue refresh
+    #: (`llm/catalog_refresh.py`) against a provider's live /models endpoint;
+    #: `hand` rows were added by a person in Django admin. The distinction is
+    #: load-bearing: the seed's prune step and the live refresh only ever touch
+    #: `curated` and `live` rows, so a hand-added row survives both.
+    SOURCE_CHOICES = [
+        ('curated', 'Curated seed'),
+        ('live', 'Live catalogue refresh'),
+        ('hand', 'Hand-added'),
+    ]
+    source = models.CharField(
+        max_length=12, choices=SOURCE_CHOICES, default='curated',
+        help_text='Which writer owns this row',
+    )
+    #: Last time a live refresh saw this id upstream. NULL means never seen
+    #: live (a curated row predating refresh, or a hand-added one).
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    #: When the row was retired. Set rather than deleted: a saved run or agent
+    #: may still reference the id, and a disabled row explains itself better
+    #: than a missing one.
+    retired_at = models.DateTimeField(null=True, blank=True)
+    #: Suggested successor when retired, as a model value (e.g.
+    #: `qwen/qwen3.8-max` → `qwen/qwen3.8-max-0902`). A hint for staff and for
+    #: the refresh report — never applied automatically.
+    replaced_by = models.CharField(
+        max_length=150, blank=True, default='',
+        help_text='Model value to suggest when this one is retired',
+    )
+
     #: Which effort rungs this model actually offers, from `llm.effort.LADDER`.
     #: An empty list is a claim, not an absence: it says this model has no
     #: reasoning-effort control, which is why `llm.effort.resolve` returns None
@@ -136,3 +166,59 @@ class AIModel(models.Model):
 
     def __str__(self):
         return f"{self.provider.name} - {self.name}"
+
+
+class ModelFallback(models.Model):
+    """The platform-wide fallback model.
+
+    One row (pk=1), edited by staff through `/api/llm/fallback/` or Django
+    admin — deliberately a row and not an env var, so changing it needs
+    neither an image rebuild nor a container restart. Read through
+    `llm/fallback.py::get_fallback` (60s TTL cache), never directly, so an
+    edit takes effect without a restart.
+
+    Used when an agent or chat session names a model that is retired or
+    unknown: the run executes on the fallback and the owner is notified, while
+    the stored configuration is left untouched.
+    """
+
+    provider = models.CharField(max_length=30, default='openrouter')
+    model = models.CharField(max_length=150, default='openrouter/free')
+    updated_by = models.ForeignKey(
+        'auth.User', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='model_fallback_edits',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Model fallback'
+        verbose_name_plural = 'Model fallback'
+
+    def __str__(self):
+        return f"{self.provider}/{self.model}"
+
+
+class ModelFallbackNotice(models.Model):
+    """One notified (agent, retired model) pair.
+
+    A scheduled agent would otherwise ping its owner on every run after its
+    model died. The unique pair is the whole rate limit: the first
+    substitution (or refresh) writes the row and notifies; later runs find it
+    and stay quiet.
+    """
+
+    subagent = models.ForeignKey(
+        'orchestrator.SubAgent', on_delete=models.CASCADE,
+        related_name='fallback_notices',
+    )
+    old_value = models.CharField(
+        max_length=150,
+        help_text='The retired llm_model value the owner was told about',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['subagent', 'old_value']
+
+    def __str__(self):
+        return f'{self.subagent_id}: {self.old_value}'

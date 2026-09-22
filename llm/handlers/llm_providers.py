@@ -120,3 +120,38 @@ class NvidiaNode(OpenAICompatibleLLMNode):
     #: never causes one to be sent.
     effort_field = "reasoning_effort"
 
+
+class OpenCodeZenNode(OpenAICompatibleLLMNode):
+    """OpenCode Zen — free models on the user's own Zen account.
+
+    Bring-your-own-key only. Zen's ToS limits the service to the key
+    holder's own use, so there is deliberately no platform key for this
+    provider (see `credentials.resolution.PLATFORM_ENV_KEYS`, where
+    `opencode` is absent on purpose).
+    """
+
+    node_type = "opencode"
+    name = "OpenCode Zen"
+    description = "Free models through your own OpenCode Zen key"
+
+    provider_slug = "opencode"
+    api_label = "OpenCode Zen"
+    base_url = "https://opencode.ai/zen/v1"
+    default_model = "opencode/big-pickle"
+    #: Zen serves text models only.
+    image_endpoint = None
+
+    #: Catalogue values are stored as `opencode/<zen id>` because
+    #: `AIModel.value` is globally unique and bare Zen ids (`gpt-5`, …) would
+    #: collide with other providers' rows. Zen wants the bare id on the wire,
+    #: so the prefix is stripped in `chat_payload` — the one place the wire
+    #: model is set (`execute` and `stream_execute` both build their bodies
+    #: through it; verified by `test_prefix_is_stripped_on_the_wire`).
+    MODEL_PREFIX = "opencode/"
+
+    def chat_payload(self, *, model, messages, config, stream):
+        return super().chat_payload(
+            model=model.removeprefix(self.MODEL_PREFIX),
+            messages=messages, config=config, stream=stream,
+        )
+

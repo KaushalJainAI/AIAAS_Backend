@@ -228,3 +228,36 @@ class JudgeTests(SimpleTestCase):
         self.assertFalse(strict)
         self.assertTrue(lenient)
         self.assertAlmostEqual(score, 0.8)
+
+
+class CodeChangesWithinTests(SimpleTestCase):
+    """The claims check the coding-team benchmark grades on: every file the
+    run changed falls inside its task's claims."""
+
+    def _grade(self, changes, claims):
+        grades, _, passed = grade(
+            [{'type': 'code_changes_within', 'claims': claims}],
+            code_changes=tuple(changes))
+        return passed, grades[0].detail
+
+    def test_changes_inside_the_claims_pass(self):
+        passed, _ = self._grade(
+            ['src/api/client.ts'], ['src/api/**'])
+        self.assertTrue(passed)
+
+    def test_a_change_outside_the_claims_fails_naming_it(self):
+        passed, detail = self._grade(
+            ['src/api/client.ts', 'src/web/app.ts'], ['src/api/**'])
+        self.assertFalse(passed)
+        self.assertIn('src/web/app.ts', detail)
+
+    def test_a_run_that_changed_nothing_passes_this_grader(self):
+        # "Did work" is the file graders' burden; this one only checks that
+        # what changed stayed inside.
+        passed, _ = self._grade([], ['src/api/**'])
+        self.assertTrue(passed)
+
+    def test_no_claims_is_a_broken_case_not_a_pass(self):
+        passed, detail = self._grade(['src/a.ts'], [])
+        self.assertFalse(passed)
+        self.assertIn('no claims', detail)

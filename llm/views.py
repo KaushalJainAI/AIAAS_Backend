@@ -15,6 +15,9 @@ from rest_framework.views import APIView
 from credentials.models import Credential
 from credentials.resolution import KEYLESS_PROVIDERS, platform_api_key, slugs_for
 
+from . import fallback as _fallback
+from .catalog_refresh import REFRESH_STATUS_KEY
+from django.core.cache import cache
 from .effort import clean_levels, normalize as normalize_effort
 from .models import AIProvider
 from .providers import SUPPORTED_PROVIDERS
@@ -94,15 +97,22 @@ class AIModelListView(APIView):
             model_data = []
             for m in provider.models.filter(is_active=True):
                 # Model is available if its provider is fully available, or if
-                # the model is free and the provider isn't local: free cloud
-                # models route through the platform key, paid ones need the
-                # user's own verified credential.
+                # the model is free and a platform key can actually pay for it.
+                # The old rule (`provider_slug != 'ollama'`) treated every free
+                # cloud model as runnable without a key — so a free Zen model
+                # (no platform key by design, ToS) showed as available and then
+                # failed at preflight: offered but unrunnable. A platform key
+                # existing is what makes a free model runnable without the
+                # user's own credential; Ollama needs nothing either way
+                # because its provider is already available as keyless.
                 payload = {
                     'name': m.name,
                     'value': m.value,
                     'is_free': m.is_free,
                     'description': m.description,
-                    'available': provider_available or (m.is_free and provider_slug != 'ollama'),
+                    'available': provider_available or (
+                        m.is_free and platform_api_key(provider_slug) is not None
+                    ),
                     'input_price_per_million': str(m.input_price_per_million),
                     'output_price_per_million': str(m.output_price_per_million),
                     'cached_input_price_per_million': str(m.cached_input_price_per_million) if m.cached_input_price_per_million is not None else None,
@@ -134,4 +144,108 @@ class AIModelListView(APIView):
                 'models': model_data,
             })
 
-        return Response({'providers': data})
+        # `meta` rides alongside, never inside, `providers`: old bundles read
+        # the key they know and ignore the rest, so backend-only deploys keep
+        # working. `last_refresh` is None until the first refresh runs.
+        fallback_provider, fallback_model = _fallback.get_fallback()
+        try:
+            last_refresh = cache.get(REFRESH_STATUS_KEY)
+        except Exception:  # noqa: BLE001 — meta must not fail the picker
+            last_refresh = None
+        return Response({
+            'providers': data,
+            'meta': {
+                'last_refresh': last_refresh,
+                'fallback': {
+                    'provider': fallback_provider,
+                    'model': fallback_model,
+                },
+            },
+        })
+
+
+class ModelRefreshView(APIView):
+    """Re-diff the live OpenRouter catalogue against the held rows.
+
+    Staff-only: the catalogue is global, and a refresh writes rows every
+    account reads. Same service host cron drives
+    (`manage.py refresh_models`); see `llm/catalog_refresh.py`.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from rest_framework.permissions import IsAdminUser
+
+        if not IsAdminUser().has_permission(request, self):
+            return Response(
+                {'detail': 'Refreshing the model catalogue is staff-only.'},
+                status=403,
+            )
+        from .catalog_refresh import (
+            RefreshError,
+            RefreshInProgress,
+            refresh_catalog,
+        )
+
+        try:
+            summary = refresh_catalog(user=request.user)
+        except RefreshInProgress:
+            return Response(
+                {'detail': 'A catalogue refresh is already running.',
+                 'code': 'refresh_in_progress'},
+                status=409,
+            )
+        except RefreshError as exc:
+            return Response(
+                {'detail': str(exc), 'code': 'refresh_refused'},
+                status=400,
+            )
+        summary = dict(summary)
+        summary.pop('retired_values', None)
+        return Response(summary)
+
+
+class ModelFallbackView(APIView):
+    """Read (everyone) and change (staff) the platform fallback model."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        provider, model = _fallback.get_fallback()
+        return Response({'provider': provider, 'model': model})
+
+    def patch(self, request):
+        if not request.user.is_staff:
+            return Response(
+                {'detail': 'Changing the fallback model is staff-only.'},
+                status=403,
+            )
+        from .models import AIModel
+        from .providers import is_supported
+
+        provider = (request.data.get('provider') or '').strip() or 'openrouter'
+        model = (request.data.get('model') or '').strip()
+        if not model:
+            return Response(
+                {'detail': 'model is required.'}, status=400)
+        if not is_supported(provider):
+            return Response(
+                {'detail': f'Unknown provider "{provider}".'}, status=400)
+        # A typo against a held catalogue is refused; an empty catalogue
+        # (fresh install) is not — the same rule `AgentSerializer` applies,
+        # or the fallback could never be set before the first seed.
+        held = AIModel.objects.filter(provider__slug=provider)
+        if held.exists() and not held.filter(value=model).exists():
+            elsewhere = (AIModel.objects.filter(value=model)
+                         .values_list('provider__slug', flat=True).first())
+            hint = (f' "{model}" is a {elsewhere} model, not a {provider} one.'
+                    if elsewhere else '')
+            return Response(
+                {'detail': f'"{model}" is not a {provider} model we hold.{hint}'},
+                status=400,
+            )
+        row, warning = _fallback.set_fallback(
+            provider, model, updated_by=request.user)
+        payload = {'provider': row.provider, 'model': row.model}
+        if warning:
+            payload['warning'] = warning
+        return Response(payload)

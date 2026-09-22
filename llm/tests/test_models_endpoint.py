@@ -46,6 +46,15 @@ class LegacyAliasRoutingTests(TestCase):
 
 class ModelListPayloadTests(TestCase):
     def setUp(self):
+        import os
+        from unittest.mock import patch
+
+        # `available` for a free model means "a platform key can actually pay
+        # for it" — so pin the key instead of inheriting whatever the machine
+        # running the suite happens to have in its environment.
+        env = patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'})
+        env.start()
+        self.addCleanup(env.stop)
         self.user = get_user_model().objects.create_user(
             username='picker', email='picker@example.com', password='pw',
         )
@@ -145,3 +154,120 @@ class ModelListPayloadTests(TestCase):
     def test_requires_authentication(self):
         self.client.force_authenticate(user=None)
         self.assertEqual(self.client.get(reverse('ai-models')).status_code, 401)
+
+    def test_meta_carries_fallback_and_last_refresh(self):
+        payload = self.client.get(reverse('ai-models')).json()
+        self.assertIn('meta', payload)
+        self.assertEqual(
+            payload['meta']['fallback'],
+            {'provider': 'openrouter', 'model': 'openrouter/free'})
+        # No refresh has ever run in this database.
+        self.assertIsNone(payload['meta']['last_refresh'])
+        # And the old shape still reads: backend-only deploys keep working.
+        self.assertIn('providers', payload)
+
+
+class ModelRefreshEndpointTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='refreshfan', password='pw')
+        self.staff = User.objects.create_user(
+            username='refreshstaff', password='pw', is_staff=True)
+        self.client = APIClient()
+
+    def test_non_staff_is_refused(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(reverse('ai-models-refresh'))
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_triggers_a_refresh(self):
+        from unittest.mock import patch
+
+        self.client.force_authenticate(user=self.staff)
+        summary = {'added': 1, 'updated': 2, 'retired': [],
+                   'new_upstream': ['x/y'], 'affected_agents': [],
+                   'retired_values': ['z/z']}
+        with patch('llm.catalog_refresh.refresh_catalog',
+                   return_value=summary):
+            response = self.client.post(reverse('ai-models-refresh'))
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['added'], 1)
+        # Internal bookkeeping never reaches the client.
+        self.assertNotIn('retired_values', payload)
+
+    def test_lock_contention_is_409_and_refusal_is_400(self):
+        from unittest.mock import patch
+
+        from llm.catalog_refresh import RefreshError, RefreshInProgress
+
+        self.client.force_authenticate(user=self.staff)
+        with patch('llm.catalog_refresh.refresh_catalog',
+                   side_effect=RefreshInProgress('busy')):
+            response = self.client.post(reverse('ai-models-refresh'))
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['code'], 'refresh_in_progress')
+        with patch('llm.catalog_refresh.refresh_catalog',
+                   side_effect=RefreshError('no key')):
+            response = self.client.post(reverse('ai-models-refresh'))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['code'], 'refresh_refused')
+
+
+class ModelFallbackEndpointTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='fallbackfan', password='pw')
+        self.staff = User.objects.create_user(
+            username='fallbackstaff', password='pw', is_staff=True)
+        self.client = APIClient()
+        self.provider, _ = AIProvider.objects.update_or_create(
+            slug='openrouter', defaults={'name': 'OpenRouter', 'is_active': True},
+        )
+        AIModel.objects.update_or_create(
+            value='new/shiny',
+            defaults={'provider': self.provider, 'name': 'Shiny',
+                      'is_active': True},
+        )
+
+    def test_anyone_reads_the_fallback(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(reverse('model-fallback'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {'provider': 'openrouter', 'model': 'openrouter/free'})
+
+    def test_non_staff_cannot_change_it(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(
+            reverse('model-fallback'),
+            {'provider': 'openrouter', 'model': 'new/shiny'}, format='json')
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_sets_it_and_a_typo_is_refused(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.patch(
+            reverse('model-fallback'),
+            {'provider': 'openrouter', 'model': 'typo/model'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        response = self.client.patch(
+            reverse('model-fallback'),
+            {'provider': 'openrouter', 'model': 'new/shiny'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.client.get(reverse('model-fallback')).json(),
+            {'provider': 'openrouter', 'model': 'new/shiny'})
+
+    def test_blank_model_and_unknown_provider_are_400(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.patch(
+            reverse('model-fallback'),
+            {'provider': 'openrouter', 'model': ''}, format='json')
+        self.assertEqual(response.status_code, 400)
+        response = self.client.patch(
+            reverse('model-fallback'),
+            {'provider': 'nope', 'model': 'new/shiny'}, format='json')
+        self.assertEqual(response.status_code, 400)

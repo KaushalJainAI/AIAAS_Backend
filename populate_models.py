@@ -7,6 +7,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "workflow_backend.settings.local
 django.setup()
 
 from django.db import transaction
+from django.utils import timezone
 from llm.models import AIProvider, AIModel
 from llm.providers import SUPPORTED_PROVIDERS
 from llm.effort import (
@@ -137,7 +138,8 @@ RETIRED_MODEL_VALUES = [
 
 
 def m(name, value, is_free=False, caps=None, input_price="0.0000", output_price="0.0000",
-      cached_price=None, context=0, cache_write_price=None, effort=(), default_effort=""):
+      cached_price=None, context=0, cache_write_price=None, effort=(), default_effort="",
+      description=""):
     """
     Helper: caps is capability dict, pricing is USD per 1M tokens as strings
     (kept as string to avoid binary float). cached_price None means no cache tier.
@@ -168,6 +170,7 @@ def m(name, value, is_free=False, caps=None, input_price="0.0000", output_price=
         "value": value,
         "is_free": is_free,
         "caps": caps or {},
+        "description": description,
         "input_price_per_million": input_price,
         "output_price_per_million": output_price,
         "cached_input_price_per_million": cached_price,
@@ -202,6 +205,12 @@ def build_model_defaults(item):
 
     for cap_key, field_name in CAPABILITY_FIELD_MAP.items():
         defaults[field_name] = caps[cap_key]
+
+    # Only when the seed names one: an unconditional write would wipe a
+    # description someone customised in admin on every boot (this script runs
+    # at every backend boot).
+    if item.get("description"):
+        defaults["description"] = item["description"]
 
     return defaults
 
@@ -438,6 +447,48 @@ def populate():
             ],
         },
         {
+            "name": "OpenCode Zen",
+            "slug": "opencode",
+            "description": "Free models on your own OpenCode Zen account (bring your own key). Free models may be used for training.",
+            "icon": "OC",
+            "models": [
+                # Ids verified live 2026-09-22 against keyless
+                # GET https://opencode.ai/zen/v1/models (all present), then
+                # checked against the endpoint table in
+                # https://opencode.ai/docs/zen (2026-09-22): six of these are
+                # documented `chat/completions` models; `deepseek-v4-flash-free`
+                # is absent from that table but its paid sibling
+                # (`deepseek-v4-flash`) is chat/completions, so it stays
+                # pending the first keyed call. `muse-spark-1.3-contributor-free`
+                # is deliberately NOT seeded: the docs map it to the `/responses`
+                # endpoint (Responses API, a different protocol), which this
+                # provider does not speak — offering it would be offering a
+                # model every call fails on.
+                # NOT yet verified — needs a Zen key (see
+                # docs/OPENCODE_ZEN_PLAN.md §8): chat-completions answers,
+                # streaming, `tool_calls`, and `reasoning_effort` acceptance.
+                # Until then: CHAT_CAPS claims tool calling because these are
+                # agentic-coding models on a chat-completions endpoint (a wrong
+                # claim degrades to the model ignoring tools, while a missing
+                # one withholds the toolbox entirely); effort stays empty, the
+                # safe default; context is 0 (the listing carries none).
+                m("Big Pickle (Free)", "opencode/big-pickle", True, CHAT_CAPS,
+                  description="Stealth model, free on your OpenCode Zen account — prompts may be used for training. Avoid private data."),
+                m("DeepSeek V4 Flash (Free)", "opencode/deepseek-v4-flash-free", True, CHAT_CAPS,
+                  description="DeepSeek V4 (not V4.1), free on your OpenCode Zen account — prompts may be used for training. Avoid private data."),
+                m("Mimo v2.6 Flash (Free)", "opencode/mimo-v2.6-flash-free", True, CHAT_CAPS,
+                  description="Limited-time free on your OpenCode Zen account — prompts may be used for training. Avoid private data."),
+                m("Mimo v2.5 (Free)", "opencode/mimo-v2.5-free", True, CHAT_CAPS,
+                  description="Limited-time free on your OpenCode Zen account — prompts may be used for training. Avoid private data."),
+                m("Ling 3.0 Flash (Free)", "opencode/ling-3.0-flash-fin-free", True, CHAT_CAPS,
+                  description="Limited-time free on your OpenCode Zen account — prompts may be used for training. Avoid private data."),
+                m("Nemotron 3 Ultra (Free)", "opencode/nemotron-3-ultra-free", True, CHAT_CAPS,
+                  description="NVIDIA trial — do not submit personal or confidential data."),
+                m("Nemotron 3.5 Lightning (Free)", "opencode/nemotron-3.5-lightning-free", True, CHAT_CAPS,
+                  description="NVIDIA trial — do not submit personal or confidential data."),
+            ],
+        },
+        {
             "name": "OpenAI",
             "slug": "openai",
             "description": "Direct connection to the OpenAI API.",
@@ -528,7 +579,14 @@ def populate():
             print()
 
         # Keep manually-added and older rows. This seed script only upserts.
-        AIModel.objects.filter(value__in=synced_model_values).update(is_active=True)
+        # Rows deliberately retired (`retired_at` set — by a refresh holding
+        # live evidence, or by the force list below) are NOT resurrected here:
+        # without this guard every backend boot would undo the refresh. A row
+        # that is genuinely back upstream is re-listed by the refresh itself
+        # on sight, or by staff in admin.
+        AIModel.objects.filter(
+            value__in=synced_model_values, retired_at__isnull=True,
+        ).update(is_active=True)
 
         # ...except ids confirmed dead against the providers' live /models
         # endpoints. Retiring only this explicit list, rather than everything
@@ -540,14 +598,19 @@ def populate():
             print("Retiring models that no longer exist upstream:")
             for value in sorted(retired.values_list("value", flat=True)):
                 print(f"   - {value}")
-            retired.update(is_active=False)
+            retired.update(is_active=False, retired_at=timezone.now())
             print()
 
         # Prune Gemma and weaker irrelevant older models (2026-09-02)
         # Any active model not in the curated synced list is stale.
         # This removes Gemma family and $0 placeholder older models (qwen3-14b, gemini-2.5, gpt-5.2 etc.)
         # not cost-efficient / fast / intelligent vs current Qwen3.8/DeepSeek/NVIDIA wave.
-        stale = AIModel.objects.filter(is_active=True).exclude(value__in=synced_model_values)
+        #
+        # Only `curated` rows: `live` rows belong to the catalogue refresh
+        # (`llm/catalog_refresh.py`) and `hand` rows to whoever added them in
+        # admin. Pruning those here would undo a refresh (or a person) on
+        # every backend boot, since this seed runs at every boot.
+        stale = AIModel.objects.filter(is_active=True, source='curated').exclude(value__in=synced_model_values)
         if stale.exists():
             print(f"Pruning {stale.count()} stale/weak models not in curated list (Gemma + older):")
             for v in sorted(stale.values_list("value", flat=True)):

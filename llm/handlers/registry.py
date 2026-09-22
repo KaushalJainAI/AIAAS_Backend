@@ -6,8 +6,9 @@ The registry maps a provider slug to its handler class — the single route from
 the agent hot path: `llm.access` checks `has_handler()` on every LLM call and
 executes the model through the handler `get_handler()` returns.
 
-What is registered here is now only the four LLM providers
-(`llm.providers.SUPPORTED_PROVIDERS`): OpenRouter, NVIDIA, OpenAI and Ollama.
+What is registered here is now only the five LLM providers
+(`llm.providers.SUPPORTED_PROVIDERS`): OpenRouter, NVIDIA, OpenAI, Ollama and
+OpenCode Zen.
 The registry used to hold every node in the workflow canvas — structural
 handlers (core Code/Set, logic If/Loop/SplitInBatches/Stop, utility
 notifications, subworkflow, every trigger) and tool-shaped ones (search,
@@ -102,17 +103,23 @@ def get_registry() -> ProviderRegistry:
     registry = ProviderRegistry.get_instance()
 
     # Use absolute imports to avoid circular/ambiguous import issues in Django.
-    # The supported provider set is `llm.providers.SUPPORTED_PROVIDERS`. Three of
-    # the four speak the OpenAI chat-completions protocol and are declared on a
+    # The supported provider set is `llm.providers.SUPPORTED_PROVIDERS`. Four of
+    # the five speak the OpenAI chat-completions protocol and are declared on a
     # shared base in llm/handlers/llm_providers.py; Ollama keeps its own
     # transport because it posts to /api/chat rather than /v1/chat/completions.
     from llm.handlers.llm_nodes import OllamaNode
-    from llm.handlers.llm_providers import NvidiaNode, OpenAINode, OpenRouterNode
+    from llm.handlers.llm_providers import (
+        NvidiaNode,
+        OpenAINode,
+        OpenCodeZenNode,
+        OpenRouterNode,
+    )
 
     if not registry.has_handler('openrouter'):
         registry.register(OpenRouterNode)
         registry.register(NvidiaNode)
         registry.register(OpenAINode)
+        registry.register(OpenCodeZenNode)
         registry.register(OllamaNode)
 
     return registry

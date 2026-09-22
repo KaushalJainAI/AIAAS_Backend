@@ -256,6 +256,62 @@ AGENTS: dict[str, dict[str, Any]] = {
         'spendCapRupees': 3000,
         'tags': ['benchmark', 'work'],
     },
+    # ── Coding team (the "code-*" suites) ─────────────────────────────────
+    #
+    # The guard-code-coordination suite measures enforcement, not skill: the
+    # goals tell the lead to *attempt* the forbidden thing (two overlapping
+    # claims, a write outside the claims, a command outside the scope), and the
+    # cases pass on the refusal naming the holder and the fix. A polite model
+    # that declines up front proves nothing; what matters is the refusal a
+    # model that tries receives. The work-code-team suite measures the team
+    # against repo-assistant alone on the same fixture repo.
+    'code_implementer': {
+        'name': PREFIX + 'Code implementer',
+        'description': 'Makes one task change in a code project and runs the tests.',
+        'brief': (
+            'You make one task\'s change in the code project you are given. Read '
+            'every file before touching it. Keep the diff inside your task\'s '
+            'claims. Run the relevant tests with ws_run and report the command '
+            'and whether it passed.'
+        ),
+        'temperature': 0.0,
+        'tools': {'shell': True},
+        'toolScope': ['ws_list', 'ws_read', 'ws_search', 'ws_edit',
+                      'ws_apply_patch', 'ws_write', 'ws_run',
+                      'git_status', 'git_diff'],
+        'fileAccess': 'scoped',
+        'autonomy': 'auto',
+        # Detached runs are `caller='orchestrator'`, which requires this.
+        'allowUnattended': True,
+        'commandScope': ['test', 'lint', 'build'],
+        'outputContract': 'patch',
+        'spendCapRupees': 2000,
+        'tags': ['benchmark', 'work', 'code'],
+    },
+    'code_lead': {
+        'name': PREFIX + 'Code lead',
+        'description': 'Dispatches coding tasks to implementers without waiting, then assembles.',
+        'brief': (
+            'You orchestrate coding work. Mirror the plan into update_todos, '
+            'start ready tasks with start_tasks, loop wait_tasks, and report '
+            'what each worker did. Tasks whose claims overlap cannot run '
+            'together — sequence them through depends_on.'
+        ),
+        'temperature': 0.0,
+        'tools': {'subAgents': True, 'shell': True},
+        'toolScope': ['ws_list', 'ws_read', 'ws_search', 'git_status', 'git_diff',
+                      'search_agents', 'invoke_subagent',
+                      'start_tasks', 'wait_tasks', 'task_status',
+                      'steer_task', 'stop_task', 'revert_task'],
+        'fileAccess': 'scoped',
+        # Symbolic: install.py resolves to this account's implementer row.
+        'delegatesTo': ['code_implementer'],
+        'autonomy': 'full',
+        'allowUnattended': True,
+        'outputContract': 'patch',
+        'spendCapRupees': 3000,
+        'tags': ['benchmark', 'work', 'code'],
+    },
     'deep_researcher': {
         'name': PREFIX + 'Deep researcher',
         'description': 'Multi-hop web research with a calculator.',
