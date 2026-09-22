@@ -23,9 +23,9 @@ from django.core.files.base import ContentFile
 from django.test import TestCase, override_settings
 
 from chat.tools import execute_tool
-from data import drivers
-from data.models import ApiConnection, DataConnection
-from data.sqlcheck import SqlRefused, check
+from datasources import drivers
+from datasources.models import ApiConnection, DataConnection
+from datasources.sqlcheck import SqlRefused, check
 from inference import vfs
 from inference.models import Document
 
