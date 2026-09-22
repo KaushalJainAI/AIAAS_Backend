@@ -33,7 +33,10 @@ class Command(BaseCommand):
             'durable' if checkpoints.is_durable() else
             'NOT durable - interrupted runs can only be closed, not resumed'
         )
-        self.stdout.write(f'Checkpointer: {checkpoints.active_backend} ({durability})')
+        # `_configured()`, not `active_backend`: this process never builds the
+        # graph, so `active_backend` is still its initial 'memory' here even
+        # on a sqlite deployment. Report what was asked for.
+        self.stdout.write(f'Checkpointer: {checkpoints._configured()} ({durability})')
 
         if options['dry_run']:
             # The sweep's own predicate, not a second copy of it: a dry run

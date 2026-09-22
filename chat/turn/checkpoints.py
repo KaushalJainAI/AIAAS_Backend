@@ -153,8 +153,15 @@ def is_durable() -> bool:
     Asked rather than assumed by anything that promises persistence — the
     resume sweep above all, which must say "I cannot resume these" rather than
     look for state that was never written.
+
+    This is a question about *configuration*, answered from what was asked
+    for rather than from `active_backend`: the sweep and the management
+    command check durability *before* anything builds the graph, and in
+    their process `active_backend` is still its initial `'memory'` — so
+    reading it here reported a sqlite deployment as non-durable and had
+    the sweep close runs it could have resumed.
     """
-    return active_backend != 'memory'
+    return _configured() != 'memory'
 
 
 async def setup(saver) -> None:
