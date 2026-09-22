@@ -596,3 +596,34 @@ class BuilderScheduleOwnershipTests(APITestCase):
         trigger.refresh_from_db()
         self.assertEqual(trigger.cron, '0 10 * * *')
         self.assertGreater(trigger.next_due_at, timezone.now())
+
+    def test_omitting_the_schedule_leaves_the_builder_row_alone(self):
+        """The builder no longer sends `schedule` at all — schedules live on
+        the Schedules page now. An absent key must not read as "clear it", or
+        every builder save deletes the row the editor owns."""
+        from agents.views.agents import AgentSerializer
+
+        self._save_agent(schedule='0 9 * * *', scheduleTimezone='UTC')
+        trigger = Trigger.objects.get(
+            subagent=self.agent, mode='schedule', origin='builder')
+
+        AgentSerializer.sync_schedule(self.agent, {'name': self.agent.name})
+
+        trigger.refresh_from_db()
+        self.assertEqual(trigger.cron, '0 9 * * *')
+
+    def test_patch_without_schedule_keeps_the_row(self):
+        """The real builder flow: PATCH merges the stored config (which still
+        carries the schedule) under the incoming data, so a save that says
+        nothing about the schedule changes nothing about it."""
+        from django.urls import reverse
+
+        self._save_agent(schedule='0 9 * * *', scheduleTimezone='UTC')
+        response = self.client.patch(
+            reverse('orchestrator:agent_detail', args=[self.agent.id]),
+            {'name': 'Builder renamed'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        trigger = Trigger.objects.get(
+            subagent=self.agent, mode='schedule', origin='builder')
+        self.assertEqual(trigger.cron, '0 9 * * *')

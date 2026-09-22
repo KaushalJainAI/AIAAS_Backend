@@ -556,8 +556,9 @@ class RunNowTests(APITestCase):
         """The whole point: not waiting five hours to find out."""
         response, started = self._post()
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         self.assertEqual(response.data['outcome'], 'fired')
+        self.assertEqual(response.data['execution_id'], 'exec-1')
         self.assertEqual(len(started), 1)
 
     def test_it_runs_as_the_trigger_caller(self):
