@@ -2,13 +2,18 @@
 Tier-3 commands: shortcuts to pages that exist or are being built (§18.6).
 
 `/code <project>` (open the Code tab on a project), `/browse <url>` (a
-browser-pinned turn with the live view open), `/sql <connection> <question>`,
-`/connect <service>` (open that Connections card), `/approvals` (open the
-Inbox), `/publish` (publish the last artifact through the page visibility
-sheet).
+browser-pinned turn with the live view open), `/sql <connection> <question>`
+(and `/api` the same shape for HTTP APIs), `/connect <service>` (open that
+Connections card), `/approvals` (open the Inbox), `/publish` (publish the
+last artifact through the page visibility sheet), `/message` (reach a
+channel), `/sign` (send a document for signature), `/run` (Python, computed
+not guessed).
 
 Client commands open something; turn commands pin the toolbox for one turn.
 None invents a capability — each reaches something the platform already has.
+Outward turns (`/message`, `/sign`) carry no confirm sheet: the turn itself
+is side-effect free, and the send still gates at dispatch through the usual
+approval card, with the model having prepared it.
 """
 from __future__ import annotations
 
@@ -84,6 +89,102 @@ async def sql_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
               "question": question},
         context_block=context_block,
         tool_pin=("list_data_connections", "describe_schema", "query_sql"),
+    )
+
+
+@command(
+    name="api",
+    summary="Call one of my HTTP APIs",
+    args=[
+        Arg("connection", kind="connection", required=False,
+            hint="Which API."),
+        Arg("text", kind="text", required=False, hint="What to do."),
+    ],
+    kind="turn", group="data",
+)
+async def api_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
+    connection = call.args.get("connection")
+    goal = str(call.args.get("text") or call.text or "").strip()
+    if connection is None and not goal:
+        return CommandResult(status="ok", card={"type": "api_pick"})
+    context_block = (
+        "[COMMAND /api]\nReach the user's HTTP APIs with "
+        "list_api_operations and call_api"
+        + (f" (connection {connection})" if connection is not None else "")
+        + (f". Goal: {goal}" if goal else ".")
+        + " Reads first — a call with side effects pauses for approval, and "
+          "secret values travel as references, never inline."
+    )
+    return CommandResult(
+        status="ok",
+        args={**({"connection": connection} if connection is not None else {}),
+              "goal": goal},
+        context_block=context_block,
+        tool_pin=("list_api_operations", "call_api"),
+    )
+
+
+@command(
+    name="message",
+    summary="Reach a channel — draft, then send on approval",
+    args=[Arg("text", kind="text", required=False, hint="Who and what.")],
+    kind="turn", group="talk",
+)
+async def message_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
+    text = str(call.args.get("text") or call.text or "").strip()
+    return CommandResult(
+        status="ok", args={"text": text},
+        context_block=(
+            "[COMMAND /message]\nReach the user's messaging channels with "
+            "message_channels, message_search, message_read, message_draft "
+            "and message_send"
+            + (f": {text}" if text else "")
+            + ". Draft first and read it back; the send itself pauses for "
+              "approval — an unseen recipient list is never a guess."
+        ),
+        tool_pin=("message_channels", "message_search", "message_read",
+                  "message_draft", "message_send"),
+    )
+
+
+@command(
+    name="sign",
+    summary="Send a document out for signature",
+    args=[Arg("text", kind="text", required=False, hint="Which document, to whom.")],
+    kind="turn", group="office", requires="esign",
+)
+async def sign_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
+    text = str(call.args.get("text") or call.text or "").strip()
+    return CommandResult(
+        status="ok", args={"text": text},
+        context_block=(
+            "[COMMAND /sign]\nSend a document for e-signature with "
+            "request_signature (track it with signature_status)"
+            + (f": {text}" if text else "")
+            + ". Outward-facing: confirm the document and the signer aloud "
+              "before calling, and the send pauses for approval."
+        ),
+        tool_pin=("request_signature", "signature_status"),
+    )
+
+
+@command(
+    name="run",
+    summary="Run Python for this — compute, don't guess",
+    args=[Arg("text", kind="text", required=False, hint="What to compute.")],
+    kind="turn", group="code",
+)
+async def run_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
+    task = str(call.args.get("text") or call.text or "").strip()
+    return CommandResult(
+        status="ok", args={"task": task},
+        context_block=(
+            "[COMMAND /run]\nCompute with execute_python in the sandbox"
+            + (f": {task}" if task else "")
+            + ". Numbers a turn needs come from running code, not from "
+              "memory — and the answer quotes the result, not the script."
+        ),
+        tool_pin=("execute_python",),
     )
 
 

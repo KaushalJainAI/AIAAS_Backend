@@ -10,5 +10,6 @@ user's switch decide whether the tools are offered.
   gmail      mailbox search, read, draft, send, labels, trash
   drive      Drive files (search, read, create) and Sheets values
   calendar   calendars, events, free/busy, invitations
+  docs       Docs documents: structural read, create, append
 """
-from . import calendar, drive, gmail  # noqa: F401 — imported for registration
+from . import calendar, docs, drive, gmail  # noqa: F401 — imported for registration

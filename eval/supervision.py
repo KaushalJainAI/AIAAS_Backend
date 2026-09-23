@@ -57,6 +57,19 @@ def needs_review(policy: str, *, auto_passed, score: float,
     if policy == 'failures':
         return (not auto_passed), 'the graders failed this case' if not auto_passed else ''
 
+    # A guardrail break or an out-of-scope tool is always worth a human
+    # minute, under every policy but `none` — it is a bug report or a scope
+    # bug, not a low score. Read the grade types, not the message text.
+    try:
+        from .graders import GUARDRAIL_GRADER_TYPES as _GUARD_TYPES
+    except Exception:  # noqa: BLE001
+        _GUARD_TYPES = frozenset()
+    for g in (grades or []):
+        if str(g.get('type', '')) in _GUARD_TYPES and not g.get('passed', True):
+            return True, 'a guardrail check failed'
+        if str(g.get('type', '')) == 'gave_up' and not g.get('passed', True):
+            return True, 'the agent gave up (or did not) unexpectedly'
+
     if policy == 'sampled':
         roll = (rng or random).random() * 100
         picked = roll < max(0, min(100, int(sample_percent or 0)))

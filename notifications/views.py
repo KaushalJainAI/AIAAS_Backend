@@ -2,12 +2,16 @@ from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from .models import HITLReminderSchedule, Notification, NotificationPreference, PushSubscription
+from .models import (
+    HITLReminderSchedule, Notification, NotificationPreference,
+    PushSubscription, ScheduledNotification,
+)
 from .serializers import (
     HITLReminderScheduleSerializer,
     NotificationPreferenceSerializer,
     NotificationSerializer,
     PushSubscriptionSerializer,
+    ScheduledNotificationSerializer,
 )
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -62,6 +66,39 @@ class HITLReminderScheduleListView(generics.ListAPIView):
             .filter(user=self.request.user)
             .order_by('next_due_at')
         )
+
+
+class ScheduledNotificationListView(generics.ListAPIView):
+    """The caller's live reminders. Creation stays in chat (the tool quotes
+    the user's own timing); this is the management surface for the UI."""
+
+    serializer_class = ScheduledNotificationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            ScheduledNotification.objects
+            .filter(user=self.request.user, active=True,
+                    next_run_at__isnull=False)
+            .order_by('next_run_at')
+            [:ScheduledNotification.MAX_ACTIVE_PER_USER]
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def cancel_scheduled_notification(request, pk: int):
+    """Cancel one live reminder. Idempotent 204; a foreign id is 404, never
+    a 403 — cancelling must not oracle other users' reminders."""
+    row = (ScheduledNotification.objects
+           .filter(id=pk, user=request.user,
+                   active=True, next_run_at__isnull=False)
+           .first())
+    if row is None:
+        return Response({'error': 'No live reminder with that id.'},
+                        status=status.HTTP_404_NOT_FOUND)
+    row.cancel()
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(['GET'])

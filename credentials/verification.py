@@ -85,6 +85,53 @@ class CredentialVerifier:
             except Exception as e:
                 return False, f"Network error: {str(e)}"
 
+        if slug == 'opencode':
+            api_key = data.get('apiKey') or data.get('api_key')
+            if not api_key:
+                return False, "Missing apiKey field"
+            # Pasted keys routinely carry a trailing newline/space. The
+            # runtime lookup (`resolution.extract_api_key`) strips, so a chat
+            # would work while this probe — sending the raw paste — 401s and
+            # reports a good key as bad. Strip here too.
+
+            # Live check, not a format check. The generic fallback below marks
+            # any pasted string valid, so a typo'd key verified True and then
+            # failed at the first real call with a 401 the user reads as
+            # "rejected". A bad key must fail here, at verify time, with the
+            # reason. `big-pickle` is the cheapest chat-completions probe; the
+            # payload is tiny and non-streamed.
+            api_key = api_key.strip()
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        "https://opencode.ai/zen/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}",
+                                 "Content-Type": "application/json"},
+                        json={"model": "big-pickle",
+                              "messages": [{"role": "user",
+                                            "content": "Reply with OK"}],
+                              "max_tokens": 16, "stream": False},
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        if response.status == 200:
+                            return True, "Successfully connected to OpenCode Zen"
+                        elif response.status in (401, 403):
+                            return False, (
+                                "Invalid API Key (OpenCode Zen rejected it — "
+                                "re-copy from opencode.ai/auth)"
+                            )
+                        elif response.status == 402:
+                            return True, (
+                                "Key is valid but the account needs "
+                                "billing/credit — calls may fail until topped up"
+                            )
+                        else:
+                            return False, (
+                                f"OpenCode Zen returned status {response.status}"
+                            )
+            except Exception as e:
+                return False, f"Network error: {str(e)}"
+
         # 2. Generic Fallback: Check if required fields exist
         schema = credential.credential_type.fields_schema
         missing = []

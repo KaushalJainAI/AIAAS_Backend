@@ -256,3 +256,69 @@ class InstallTests(APITestCase):
         self.assertEqual(self.install('no-such-thing').status_code,
                          status.HTTP_404_NOT_FOUND)
         self.assertFalse(SubAgent.objects.filter(user=self.user).exists())
+
+
+class ExploreGroupingTests(APITestCase):
+    """What the Explore page groups by and joins on.
+
+    The page renders curated entries in pack sections (`pack` on each entry,
+    computed from `PACKS` so the catalogue cannot disagree with the pack) and
+    marks what is already installed by joining the agent list on
+    `template_slug` — which is why both have to be on the wire.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user('explorer', 'e@example.com', 'pw')
+        self.client.force_authenticate(user=self.user)
+
+    def test_every_pack_member_names_its_pack(self):
+        response = self.client.get(reverse('orchestrator:template_list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_slug = {t['slug']: t for t in response.data}
+        for pack, slugs in gallery.PACKS.items():
+            for slug in slugs:
+                self.assertEqual(by_slug[slug]['pack'], pack,
+                                 f'{slug} should name pack {pack}')
+
+    def test_a_template_in_no_pack_names_none(self):
+        response = self.client.get(
+            reverse('orchestrator:template_detail', args=['inbox-triage'])
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['pack'])
+
+    def test_the_agent_list_carries_which_template_each_agent_came_from(self):
+        self.client.post(
+            reverse('orchestrator:template_install', args=['deep-research']),
+            {}, format='json',
+        )
+        response = self.client.get(reverse('orchestrator:agent_list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['template_slug'], 'deep-research')
+
+    def test_a_handbuilt_agent_names_no_template(self):
+        self.client.post(
+            reverse('orchestrator:agent_list'),
+            {'name': 'Handbuilt'}, format='json',
+        )
+        response = self.client.get(reverse('orchestrator:agent_list'))
+        self.assertIsNone(response.data[0]['template_slug'])
+
+    def test_uninstalling_is_deleting_the_installed_agent(self):
+        """The Explore page's uninstall is the agent's own DELETE.
+
+        No second endpoint: a second way to remove an agent is a second place
+        for the ownership check to be forgotten.
+        """
+        installed = self.client.post(
+            reverse('orchestrator:template_install', args=['deep-research']),
+            {}, format='json',
+        )
+        agent_id = installed.data['id']
+        response = self.client.delete(
+            reverse('orchestrator:agent_detail', args=[agent_id])
+        )
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SubAgent.objects.filter(user=self.user).exists())
+        listed = self.client.get(reverse('orchestrator:agent_list'))
+        self.assertEqual(listed.data, [])

@@ -70,6 +70,63 @@ suite_health = queries.suite_health
 baseline_for = queries.baseline_for
 
 
+def starter_kit_list() -> list[dict]:
+    """Starter kit cards for a picker. Pure; no rows."""
+    from . import starter_kits as _kits
+    return [
+        {'slug': slug, 'name': kit['name'],
+         'description': kit.get('description', ''),
+         'case_count': len(kit.get('cases', []))}
+        for slug, kit in _kits.STARTER_KITS.items()
+    ]
+
+
+def recommended_kits_for(tool_grants: dict | None) -> list[str]:
+    """Which starter kits fit an agent's grants. Pure."""
+    from . import starter_kits as _kits
+    return _kits.recommended_kits(tool_grants or {})
+
+
+def clone_starter_kit(*, user, template: str, name: str = '',
+                      agent=None):
+    """Clone a starter kit into a suite + cases owned by `user`. Sync ORM.
+
+    Used by the from-template view and by the orchestrator tools. Raises
+    `GraderError` if a kit case drifted from the registry instead of
+    installing a suite that can never pass.
+    """
+    from asgiref.sync import sync_to_async  # noqa: F401  (kept local on purpose)
+
+    from . import starter_kits as _kits
+    from .models import EvalCase, EvalSuite
+
+    kit = _kits.get_kit(template)
+    if kit is None:
+        raise GraderError(f'No such starter kit {template!r}.')
+    suite = EvalSuite.objects.create(
+        user=user,
+        name=(name or kit['name'])[:200],
+        description=kit.get('description', ''),
+        subagent=agent,
+        supervision='disagreement',
+        template_slug=str(template).strip().lower(),
+    )
+    rows = []
+    for i, case_def in enumerate(kit['cases']):
+        validated = graders.validate_case_graders(case_def.get('graders', []))
+        rows.append(EvalCase(
+            suite=suite, order=i,
+            name=str(case_def.get('name', f'Case {i + 1}'))[:200],
+            goal=str(case_def.get('goal', '')),
+            input_data=dict(case_def.get('input_data', {}) or {}),
+            reference=str(case_def.get('reference', '')),
+            graders=validated,
+            tags=['starter', str(template).strip().lower()],
+        ))
+    EvalCase.objects.bulk_create(rows)
+    return suite
+
+
 def list_graders() -> list[dict[str, Any]]:
     """Every grader a case may use. Pure; safe to call at import-time in a view."""
     return graders.catalog()
@@ -159,4 +216,6 @@ __all__ = [
     # reads
     'agent_scorecard', 'review_queue', 'reviewable_result', 'run_page',
     'run_with_results', 'suite_health', 'baseline_for',
+    # starter kits (user datasets + orchestrator)
+    'starter_kit_list', 'recommended_kits_for', 'clone_starter_kit',
 ]

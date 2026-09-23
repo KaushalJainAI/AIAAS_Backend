@@ -163,6 +163,17 @@ class AgentSerializer(serializers.Serializer):
 
     id = serializers.IntegerField(read_only=True)
 
+    #: Which catalogue entry this was installed from, if any. Read-only and
+    #: observed, never configured: it is written by `template_install` /
+    #: `template_install_pack` and by nothing else, so it is attached in
+    #: `_with_stats` rather than read out of `to_config` — that dict is also
+    #: the revision snapshot, and where an agent came from is not a
+    #: configuration change the owner made. What the Explore page joins on to
+    #: show "installed" and to offer uninstall.
+    template_slug = serializers.CharField(
+        read_only=True, allow_null=True, required=False,
+    )
+
     # Identity
     name = serializers.CharField(max_length=200)
     brief = serializers.CharField(required=False, allow_blank=True, default='')
@@ -1129,6 +1140,7 @@ def _with_stats(configs, workflows, user):
     }
 
     by_id = {r['subagent_id']: r for r in rows}
+    by_workflow = {w.id: w for w in workflows}
     status_of = _model_statuses(configs)
     for cfg in configs:
         r = by_id.get(cfg['id'], {})
@@ -1136,6 +1148,9 @@ def _with_stats(configs, workflows, user):
         cfg['unattended'] = r.get('unattended', 0)
         cfg['spend'] = spend_by_id.get(cfg['id'], 0)
         cfg['model_status'] = status_of.get(cfg.get('model') or '', 'ok')
+        # Observed, not configured — see the field note on `template_slug`.
+        workflow = by_workflow.get(cfg['id'])
+        cfg['template_slug'] = workflow.template_slug if workflow else None
     return configs
 
 

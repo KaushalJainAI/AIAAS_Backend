@@ -20,6 +20,11 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from messaging.channels import CHANNELS, TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -187,3 +192,170 @@ def _parse(channel: str, body: dict) -> dict | None:
                 'thread': str(chat.get('id') or ''),
                 'body': text}
     return None
+
+
+def _public_base() -> str:
+    import os
+
+    return (os.environ.get('PUBLIC_URL') or '').rstrip('/')
+
+
+def _webhook_url(channel: str, secret: str) -> str | None:
+    from django.urls import reverse
+
+    base = _public_base()
+    if not base:
+        return None
+    return f"{base}{reverse('messaging:message_hook', args=[channel, secret])}"
+
+
+def _credential_state(user, slug: str) -> dict:
+    """Whether the caller holds this credential type, and its fields."""
+    from credentials.manager import CredentialManager
+    from credentials.models import CredentialType
+
+    try:
+        cred_type = CredentialType.objects.filter(slug=slug).first()
+    except Exception:  # noqa: BLE001
+        cred_type = None
+    fields = []
+    if cred_type is not None:
+        for field in cred_type.fields_schema or []:
+            if isinstance(field, dict):
+                fields.append({
+                    'name': field.get('name', ''),
+                    'label': field.get('label') or field.get('name', ''),
+                    'secret': bool(field.get('type') == 'password'),
+                    'required': bool(field.get('required', True)),
+                })
+    try:
+        stored = CredentialManager.lookup_by_slug_sync(slug, user.id) is not None
+    except Exception:  # noqa: BLE001
+        stored = False
+    return {
+        'slug': slug,
+        'name': cred_type.name if cred_type is not None else slug,
+        'fields': fields,
+        'stored': stored,
+    }
+
+
+def _channel_status(channel: str, meta: dict, account, cred: dict) -> tuple[str, str]:
+    """A status the UI can render, and the reason in one line."""
+    if channel == 'teams':
+        return 'gated', ('Needs an Azure AD admin to consent Chat.ReadWrite and '
+                         'ChannelMessage.Send for this tenant.')
+    if channel == 'sms':
+        engine = (getattr(settings, 'SMS_ENGINE', 'none') or 'none').strip().lower()
+        if engine == 'none':
+            return 'gated', 'Switched off on this platform (SMS_ENGINE=none).'
+    if not cred['stored']:
+        return 'needs_key', f"Store a {meta['label']} credential to switch this on."
+    if channel == 'telegram' and (account is None or not account.verified):
+        return 'needs_account', ('Credential stored. Create the account and register '
+                                 'the webhook so replies arrive.')
+    return 'ready', ''
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def channel_list(request):
+    """Every messaging channel, with this caller's setup state.
+
+    The answer to "what can I connect and what does it need": the vault
+    credential (and whether one is stored), the tools each channel serves,
+    what it costs, and the setup steps in order.
+    """
+    from messaging.models import MessagingAccount
+
+    accounts = {
+        a.channel: a
+        for a in MessagingAccount.objects.filter(user=request.user)
+    }
+    out = []
+    for channel, meta in CHANNELS.items():
+        cred = _credential_state(request.user, meta['credential_slug'])
+        account = accounts.get(channel)
+        status, reason = _channel_status(channel, meta, account, cred)
+        out.append({
+            'id': channel,
+            'label': meta['label'],
+            'blurb': meta['blurb'],
+            'tools': list(TOOLS),
+            'cost': meta['cost'],
+            'credential': cred,
+            'account': (
+                {'id': account.id, 'label': account.label,
+                 'verified': account.verified}
+                if account is not None else None
+            ),
+            'webhook_url': (
+                _webhook_url(channel, account.secret)
+                if account is not None else None
+            ),
+            'status': status,
+            **({'status_reason': reason} if reason else {}),
+            'setup': list(meta['setup']),
+            'inbound': meta['inbound'],
+        })
+    return Response({'channels': out})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def account_create(request):
+    """Create the caller's messaging account on a channel.
+
+    The row attributes inbound traffic to its owner and carries the webhook
+    secret; idempotent on (channel, label).
+    """
+    from messaging.models import MessagingAccount
+
+    channel = str((request.data or {}).get('channel') or '').strip().lower()
+    if channel not in CHANNELS:
+        return Response(
+            {'error': f'Unknown channel. Choose one of {", ".join(CHANNELS)}.'},
+            status=400)
+    label = str((request.data or {}).get('label') or '').strip()[:120]
+    account, created = MessagingAccount.objects.get_or_create(
+        user=request.user, channel=channel, label=label)
+    return Response({
+        'id': account.id, 'channel': channel, 'label': account.label,
+        'verified': account.verified, 'created': created,
+        'webhook_url': _webhook_url(channel, account.secret),
+    }, status=201 if created else 200)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def account_register(request, account_id: int):
+    """Register the platform webhook with the provider (Telegram only).
+
+    Other channels register from their own dashboards; Telegram has no
+    dashboard, so registration is an API call this endpoint performs.
+    """
+    from messaging.models import MessagingAccount
+
+    try:
+        account = MessagingAccount.objects.get(id=account_id, user=request.user)
+    except MessagingAccount.DoesNotExist:
+        return Response({'error': 'Not found.'}, status=404)
+    if account.channel != 'telegram':
+        return Response(
+            {'error': 'Only Telegram registers from here; other channels '
+                      'register from their own dashboards.'},
+            status=400)
+    from chat.tools.messaging.telegram import register_webhook
+    from chat.tools.messaging.common import Unsupported
+
+    try:
+        url = register_webhook(request.user.id, account, _public_base())
+    except Unsupported as exc:
+        return Response({'error': str(exc)}, status=400)
+    except Exception:  # noqa: BLE001
+        logger.exception('[Messaging] Telegram webhook registration failed')
+        return Response({'error': 'Registration failed. Try again shortly.'},
+                        status=502)
+    account.refresh_from_db()
+    return Response({'id': account.id, 'verified': account.verified,
+                     'webhook_url': url})

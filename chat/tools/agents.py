@@ -407,7 +407,7 @@ async def run_agent(args: Dict, context: Dict) -> str:
         "type": "function",
         "function": {
             "name": "get_agent_run",
-            "description": "Check an agent run that had not finished when `run_agent` returned. Reports its status and, once it is done, the agent's answer. A run that is still going is not stuck — say so and offer to check again rather than calling this repeatedly.",
+            "description": "Check an agent run that had not finished when `run_agent` returned. Reports its status, what it was asked to do, todo/task progress so far and, once it is done, the agent's answer. A run that is still going is not stuck — say so and offer to check again rather than calling this repeatedly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -426,7 +426,10 @@ async def run_agent(args: Dict, context: Dict) -> str:
 async def get_agent_run(args: Dict, context: Dict) -> str:
     """Report where an agent run got to, for a run that outlived its call."""
     from asgiref.sync import sync_to_async
-    from logs.models import ExecutionLog
+    from agents.models import HITLRequest
+    from logs.models import AgentStep, AgentTurn, ExecutionLog
+
+    from .runs import progress_for
 
     user_id = context.get("user_id")
     execution_id = (args.get("execution_id") or "").strip()
@@ -434,21 +437,58 @@ async def get_agent_run(args: Dict, context: Dict) -> str:
         return "Error: 'execution_id' is required."
 
     @sync_to_async
-    def _owned() -> bool:
-        return ExecutionLog.objects.filter(
-            execution_id=execution_id, user_id=user_id
-        ).exists()
+    def _read():
+        try:
+            log = (
+                ExecutionLog.objects
+                .select_related('subagent')
+                .filter(execution_id=execution_id, user_id=user_id)
+                .first()
+            )
+        except (ValueError, ValidationError):
+            return None
+        if log is None:
+            return None
+        last = (AgentTurn.objects
+                .filter(execution=log).order_by('-index')
+                .values_list('reasoning', flat=True).first() or '')
+        approval = HITLRequest.objects.filter(
+            execution_id=log.id, status='pending').exists()
+        # Counts are read here, inside the sync thread: touching relations
+        # from the async caller raises SynchronousOnlyOperation. The row
+        # itself (for the checkpointer read below) is safe to carry out —
+        # only lazy relations are forbidden across the boundary.
+        return (log,
+                AgentTurn.objects.filter(execution=log).count(),
+                AgentStep.objects.filter(execution=log).count(),
+                last, approval)
 
     try:
         # Ownership before status: an execution id is a UUID, but "hard to
         # guess" is not access control, and the answer body is user data.
-        if not user_id or not await _owned():
+        if not user_id:
+            return json.dumps({"error": "No such run for this user."})
+        read = await _read()
+        if read is None:
             return json.dumps({"error": "No such run for this user."})
     except (ValueError, ValidationError):
         return json.dumps({"error": "That is not a valid execution_id."})
 
+    log, turns, steps, last_reasoning, needs_approval = read
     outcome = await _await_agent_run(execution_id, 0)
-    return json.dumps({"type": "agent_run", "execution_id": execution_id, **outcome})
+    live = None
+    if log.status in ('running', 'paused') and log.thread_id:
+        from .runs import live_todos
+
+        live = await live_todos(log.thread_id)
+    progress = progress_for(log, turns=turns, steps=steps,
+                            last_reasoning=last_reasoning,
+                            live_todos=live)
+    progress['agent'] = (
+        log.subagent.name if log.subagent_id and log.subagent else None)
+    progress['needs_approval'] = needs_approval
+    return json.dumps({"type": "agent_run", "execution_id": execution_id,
+                       **outcome, "progress": progress})
 
 
 @tool({

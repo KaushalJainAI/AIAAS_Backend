@@ -385,8 +385,9 @@ one is a regression), `npx vitest run`, and `tsc -b --force` (plain
 
 Keyless `GET https://opencode.ai/zen/v1/models` answers (verified 2026-09-22,
 no key needed): every id below is present, plus `muse-spark-1.2-contributor-free`
-(not seeded — not in this table). The listing carries no context windows, so all
-rows seed `context=0`. Everything else in this table still needs a Zen key.
+and `jev-1.13-free` (both live, neither seeded — see table). The listing carries
+no context windows, so all rows seed `context=0`. Everything else in this table
+still needs a Zen key.
 
 | Zen id | Answers | Streams | tool_calls | reasoning_effort OK | Context | Seeded? |
 |---|---|---|---|---|---|---|
@@ -398,6 +399,8 @@ rows seed `context=0`. Everything else in this table still needs a Zen key.
 | nemotron-3-ultra-free | | | | | 0 (unknown) | yes (`chat/completions` per docs) |
 | nemotron-3.5-lightning-free | | | | | 0 (unknown) | yes (`chat/completions` per docs) |
 | muse-spark-1.3-contributor-free | — | — | — | — | — | **no**: docs map it to `/responses` (Responses API), which this provider does not speak. Needs its own transport before it can be offered. |
+| muse-spark-1.2-contributor-free | — | — | — | — | — | **no**: same as above — live on `/models` (confirmed 2026-09-22), docs map the Muse Spark family to `/responses`. Needs the same transport before it can be offered. |
+| jev-1.13-free | — | — | — | — | — | **no**: `/systemone` endpoint, out of scope (§7). |
 
 ---
 

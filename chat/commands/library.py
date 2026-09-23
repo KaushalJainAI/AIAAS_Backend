@@ -1,6 +1,7 @@
 """
 Tier-2 commands: `/schedule`, `/file`, `/cost`, `/summarize`, `/export`,
-`/deck`, `/doc`, `/sheet`, `/dashboard`, `/eval` (§18.6).
+`/deck`, `/doc`, `/sheet`, `/chart`, `/diagram`, `/pdf`, `/dashboard`,
+`/eval` (§18.6).
 
 All built on things that already exist: the trigger preview endpoint's
 sentence before saving, VFS completion, `CostEntry` sums, the office
@@ -353,6 +354,69 @@ async def dashboard_command(call: CommandCall, ctx: CommandContext) -> CommandRe
               "exactly render_chart's spec. Never write HTML for a dashboard."
         ),
         tool_pin=("render_dashboard",),
+    )
+
+
+@command(
+    name="chart",
+    summary="Draw a chart about this",
+    args=[Arg("text", kind="text", required=False, hint="What the chart shows.")],
+    kind="turn", group="office",
+)
+async def chart_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
+    topic = str(call.args.get("text") or call.text or "").strip()
+    return CommandResult(
+        status="ok", args={"topic": topic},
+        context_block=(
+            "[COMMAND /chart]\nDraw a chart with render_chart"
+            + (f" about: {topic}" if topic else "")
+            + " — {kind, title, series} as data, at most eight series (fold "
+              "the tail into Other), gaps stay gaps, never zeros. Numbers "
+              "first: compute in execute_python where they need computing, "
+              "then chart them."
+        ),
+        tool_pin=("render_chart",),
+    )
+
+
+@command(
+    name="diagram",
+    summary="Draw boxes-and-arrows about this",
+    args=[Arg("text", kind="text", required=False, hint="What the diagram shows.")],
+    kind="turn", group="office",
+)
+async def diagram_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
+    topic = str(call.args.get("text") or call.text or "").strip()
+    return CommandResult(
+        status="ok", args={"topic": topic},
+        context_block=(
+            "[COMMAND /diagram]\nDraw a boxes-and-arrows diagram with "
+            "render_diagram"
+            + (f" about: {topic}" if topic else "")
+            + ". Nodes and edges as data — the renderer owns the layout, so "
+              "never hand-author SVG for this. Reply with the path."
+        ),
+        tool_pin=("render_diagram",),
+    )
+
+
+@command(
+    name="pdf",
+    summary="Render this as a PDF to send",
+    args=[Arg("text", kind="text", required=False, hint="What the PDF holds.")],
+    kind="turn", group="office",
+)
+async def pdf_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
+    topic = str(call.args.get("text") or call.text or "").strip()
+    return CommandResult(
+        status="ok", args={"topic": topic},
+        context_block=(
+            "[COMMAND /pdf]\nRender a PDF with render_pdf"
+            + (f" about: {topic}" if topic else "")
+            + " — the same blocks render_document takes (a .docx is what you "
+              "edit, a .pdf is what you send). Reply with the path."
+        ),
+        tool_pin=("render_pdf",),
     )
 
 

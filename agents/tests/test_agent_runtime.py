@@ -73,13 +73,20 @@ class GrantMappingTests(SimpleTestCase):
         # terms: they read or affect only the run's own chain or a row the
         # user owns, answer with an error outside one, and cost nothing to
         # offer — an agent that may not report progress is only quieter.
+        # `list_user_runs` joins them: it reads only the caller's own rows,
+        # so an agent that may not see the user's jobs cannot answer "is it
+        # done?" or notify about a completion. The reminder trio joins on
+        # the same terms — rows the user owns, every one cancellable.
         names = toolbox().allowed_names
         self.assertEqual(
             names,
             frozenset({'get_current_time', 'update_todos', 'render_chart',
                        'render_dashboard', 'notify_user', 'mission_status',
                        'wait_for', 'complete_mission', 'report_progress',
-                       'save_dashboard', 'read_tool_output',
+                       'save_dashboard', 'list_user_runs',
+                       'schedule_notification',
+                       'list_scheduled_notifications',
+                       'cancel_scheduled_notification', 'read_tool_output',
                        'recall_context'}),
         )
 

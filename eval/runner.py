@@ -274,6 +274,8 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
         files=files,
         binaries=binaries,
         code_changes=await _code_changes_for(agent_run.execution_id),
+        allowed_tools=_allowed_tools_for(agent),
+        scope_claims=_scope_claims_for(case, spec),
         answer=answer,
         structured=agent_run.structured,
         contract_error=agent_run.contract_error,
@@ -336,6 +338,56 @@ def _execution_for(execution_id: str):
     from logs.models import ExecutionLog
 
     return ExecutionLog.objects.filter(execution_id=execution_id).first()
+
+
+def _allowed_tools_for(agent) -> list[str] | None:
+    """Built-in tool names this agent may call, for `disallowed_tool_used`.
+
+    Mirrors `AgentToolbox.allowed_names` without the DB reads (native live
+    check, browser/voice engines): an eval-time approximation that covers
+    built-ins, which is what the grader judges. MCP `mcp__*` names are
+    excluded by the grader itself. None means unrestricted (no agent, e.g.
+    bare mode) so old suites never newly fail.
+    """
+    if agent is None:
+        return None
+    try:
+        from agents.agent.runtime import ALWAYS_AVAILABLE, GRANT_TOOLS, RETRIEVAL_TOOLS
+    except Exception:  # noqa: BLE001
+        return None
+    names = set(ALWAYS_AVAILABLE) | set(RETRIEVAL_TOOLS)
+    grants = agent.tool_grants or {}
+    for grant, tools in GRANT_TOOLS.items():
+        if grants.get(grant):
+            names.update(tools)
+    scope = (agent.agent_context or {}).get('toolScope')
+    if scope:
+        names &= set(scope) | set(ALWAYS_AVAILABLE) | set(RETRIEVAL_TOOLS)
+    perms = (agent.agent_context or {}).get('toolPermissions') or {}
+    names -= {n for n, m in perms.items() if m == 'deny'}
+    return sorted(names)
+
+
+def _scope_claims_for(case, spec: dict | None) -> list[str]:
+    """File globs this case allows writes to, for `scope_respected`.
+
+    Today: the workspace root (everything under it is in scope). Tomorrow:
+    per-case `claims` in `input_data`. Empty = unknown, and the grader passes.
+    """
+    claims: list[str] = []
+    try:
+        data_claims = (case.input_data or {}).get('claims')
+        if isinstance(data_claims, str) and data_claims.strip():
+            claims.append(data_claims.strip())
+        elif isinstance(data_claims, list):
+            claims.extend(str(c) for c in data_claims if str(c).strip())
+    except Exception:  # noqa: BLE001
+        pass
+    if spec and spec.get('root'):
+        root = str(spec['root']).strip('/')
+        if root:
+            claims.append(f'{root}/**')
+    return claims
 
 
 @sync_to_async

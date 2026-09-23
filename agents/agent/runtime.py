@@ -172,10 +172,17 @@ UNSERVED_GRANTS = frozenset()
 #: could be told what it is missing with no way to fetch it.
 #: `save_dashboard` (P8) joins them: it writes a row the user owns, like
 #: `notify_user`, reversible and scoped to the caller.
+#: `list_user_runs` joins them: it reads only the caller's own rows, so there
+#: is nothing to gate — an agent that may not see what the user's jobs are
+#: doing cannot answer "is it done?" or notify about a completion.
+#: The reminder trio joins them on the same terms: rows the user owns,
+#: reversible (every one cancellable), scoped to the caller.
 ALWAYS_AVAILABLE = ('get_current_time', 'update_todos', 'render_chart',
                     'render_dashboard', 'notify_user', 'mission_status',
                     'wait_for', 'complete_mission', 'report_progress',
-                    'save_dashboard')
+                    'save_dashboard', 'list_user_runs',
+                    'schedule_notification', 'list_scheduled_notifications',
+                    'cancel_scheduled_notification')
 
 #: Offered only once this run has actually stored something — a tool result too
 #: large to replay, or a step the curator removed. Both read back the run's own

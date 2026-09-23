@@ -101,10 +101,88 @@ class CredentialVerifierTests(TestCase):
         type_bad = CredentialType.objects.create(name='Bad OAuth', slug='bad', auth_method='oauth2')
         cred = Credential(user=self.user, credential_type=type_bad, name="Bad OAuth")
         cred.get_credential_data = MagicMock(return_value={})
-        
+
         valid, msg = async_to_sync(CredentialVerifier.verify)(cred)
         self.assertFalse(valid)
         self.assertIn("Invalid Configuration", msg)
+
+    # ── OpenCode Zen: a bad key must fail at verify time ───────────────────
+    # Before the live handler, any pasted string passed verification on format
+    # alone and then failed at the first real call with a 401 the user reads
+    # as "rejected". These pin the live check (aiohttp is mocked — no network).
+    def _zen_cred(self, key='zen-test'):
+        zen_type, _ = CredentialType.objects.update_or_create(
+            slug='opencode',
+            defaults={'name': 'OpenCode Zen', 'auth_method': 'api_key',
+                      'fields_schema': [{'name': 'apiKey', 'required': True}]},
+        )
+        cred = Credential(
+            user=self.user, credential_type=zen_type, name='Zen')
+        cred.get_credential_data = MagicMock(
+            return_value={'apiKey': key} if key else {})
+        return cred
+
+    @staticmethod
+    def _zen_session(status):
+        response = AsyncMock()
+        response.status = status
+        post_cm = MagicMock()
+        post_cm.__aenter__ = AsyncMock(return_value=response)
+        post_cm.__aexit__ = AsyncMock(return_value=False)
+        # Plain MagicMock: `session.post(...)` must hand back the context
+        # manager itself, not a coroutine resolving to it (AsyncMock would).
+        session = MagicMock()
+        session.post.return_value = post_cm
+        session_cm = MagicMock()
+        session_cm.__aenter__ = AsyncMock(return_value=session)
+        session_cm.__aexit__ = AsyncMock(return_value=False)
+        return session_cm
+
+    def test_verify_opencode_success(self):
+        with patch('credentials.verification.aiohttp.ClientSession',
+                   return_value=self._zen_session(200)):
+            valid, msg = async_to_sync(CredentialVerifier.verify)(
+                self._zen_cred())
+        self.assertTrue(valid)
+        self.assertIn("Successfully connected to OpenCode Zen", msg)
+
+    def test_verify_opencode_bad_key_fails_at_verify_time(self):
+        with patch('credentials.verification.aiohttp.ClientSession',
+                   return_value=self._zen_session(401)):
+            valid, msg = async_to_sync(CredentialVerifier.verify)(
+                self._zen_cred(key='zen-bad'))
+        self.assertFalse(valid)
+        self.assertIn("Invalid API Key", msg)
+
+    def test_verify_opencode_needs_billing_stays_usable(self):
+        # 402 means the key is good but the account needs credit. Marking it
+        # invalid would convert a quota problem into "no credential" and hide
+        # the real fix (top up) behind the wrong screen.
+        with patch('credentials.verification.aiohttp.ClientSession',
+                   return_value=self._zen_session(402)):
+            valid, msg = async_to_sync(CredentialVerifier.verify)(
+                self._zen_cred())
+        self.assertTrue(valid)
+        self.assertIn("billing/credit", msg)
+
+    def test_verify_opencode_missing_key(self):
+        valid, msg = async_to_sync(CredentialVerifier.verify)(
+            self._zen_cred(key=''))
+        self.assertFalse(valid)
+        self.assertIn("Missing apiKey", msg)
+
+    def test_verify_opencode_strips_pasted_whitespace(self):
+        # Copy-paste routinely appends a newline. The runtime lookup strips,
+        # so without this the probe 401s on a good key while chats succeed.
+        session_cm = self._zen_session(200)
+        with patch('credentials.verification.aiohttp.ClientSession',
+                   return_value=session_cm):
+            valid, _ = async_to_sync(CredentialVerifier.verify)(
+                self._zen_cred(key='zen-test\n'))
+        self.assertTrue(valid)
+        session = session_cm.__aenter__.return_value
+        headers = session.post.call_args.kwargs['headers']
+        self.assertEqual(headers['Authorization'], 'Bearer zen-test')
 
     @patch('credentials.models.Credential.get_valid_access_token')
     @patch('requests.get')

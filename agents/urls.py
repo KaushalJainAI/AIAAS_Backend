@@ -15,6 +15,7 @@ from .views import (
     hitl,
     runs,
     triggers,
+    wizard,
 )
 
 app_name = 'orchestrator'
@@ -101,6 +102,10 @@ urlpatterns = [
     # The one unauthenticated route. The secret in the path is the credential;
     # see agents/views/triggers.py for why it answers 404 for every refusal.
     path('hooks/<str:secret>/', triggers.webhook_receive, name='webhook_receive'),
+
+    # Creation wizard (orchestrator-driven, read-only: propose, never save)
+    path('agents/wizard/questions/', wizard.wizard_questions, name='wizard_questions'),
+    path('agents/wizard/propose/', wizard.wizard_propose, name='wizard_propose'),
 
     # HITL
     path('hitl/pending/', hitl.pending_hitl_requests, name='pending_hitl'),

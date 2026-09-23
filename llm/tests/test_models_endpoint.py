@@ -1,14 +1,9 @@
 """
 Tests for the AI model registry endpoint.
 
-`/api/nodes/models/` is kept as an alias for BrowserOS, which ships its own
-build and cannot be redeployed in lockstep with the frontend.
-
-That alias used to be fragile: `nodes.urls` ended in a `nodes/<str:node_type>/`
-catch-all, and `models` is a valid `str`, so an include reordering silently sent
-the alias to the node-schema view — a dead model picker with nothing in the logs
-to explain it. The node-schema routes were deleted with the workflow product, so
-the hazard is gone; the tests below pin the alias itself, and that no catch-all
+The `/api/nodes/models/` legacy alias was removed with BrowserOS
+(PRODUCTIVITY_SUITE_PLAN.md P0). Only the canonical `/api/llm/models/`
+remains; the tests below pin that the alias is gone and that no catch-all
 has reappeared above it.
 """
 from __future__ import annotations
@@ -24,18 +19,16 @@ from llm.views import AIModelListView
 
 
 class LegacyAliasRoutingTests(TestCase):
-    """Both paths must reach the same view, whatever the include order is."""
+    """Canonical path resolves; legacy alias is retired."""
 
     def test_canonical_route_resolves(self):
         match = resolve('/api/llm/models/')
         self.assertIs(match.func.view_class, AIModelListView)
 
-    def test_legacy_alias_is_not_captured_by_the_node_detail_route(self):
-        match = resolve('/api/nodes/models/')
-        self.assertIs(
-            match.func.view_class, AIModelListView,
-            'the /api/nodes/models/ alias must keep resolving for BrowserOS',
-        )
+    def test_legacy_alias_is_retired(self):
+        from django.urls.exceptions import Resolver404
+        with self.assertRaises(Resolver404):
+            resolve('/api/nodes/models/')
 
     def test_no_catchall_shadows_the_alias(self):
         """A `nodes/<str:...>/` route must never reappear above the alias."""
@@ -48,6 +41,12 @@ class ModelListPayloadTests(TestCase):
     def setUp(self):
         import os
         from unittest.mock import patch
+
+        from django.core.cache import cache
+        # `get_fallback` caches for 60s with no invalidation hook, so a
+        # fallback edited by another test class in the same process leaks
+        # here. Clear it, per the witness-cached convention.
+        cache.clear()
 
         # `available` for a free model means "a platform key can actually pay
         # for it" — so pin the key instead of inheriting whatever the machine

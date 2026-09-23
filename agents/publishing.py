@@ -81,8 +81,38 @@ class PublishError(Exception):
     """The agent cannot be published as it stands, and the author can fix it."""
 
 
-def _requirement_for(kind: str, row, index: int) -> dict[str, Any]:
-    """One id, as the portable thing that replaces it."""
+def _requirement_for(kind: str, row, index: int,
+                     snapshot: dict[str, Any] | None = None,
+                     mode: str = 'all') -> dict[str, Any]:
+    """One id, as the portable thing that replaces it.
+
+    Custom tools (`api_tool` / `data_tool`) also embed the frozen snapshot:
+    installing the agent installs the tool automatically, so the installer is
+    never left with an agent pointing at nothing. Credentials are not part of
+    the snapshot — see `datasources/sharing.py`.
+    """
+    if kind == 'api_tool':
+        return {
+            'key': f'api_tool_{index}',
+            'type': 'api_tool',
+            'label': row.name,
+            'why': (f'The agent calls the "{row.name}" API. Install the '
+                    f'author\u2019s copy or point it at one of your own.'),
+            'optional': False,
+            'mode': mode,
+            'snapshot': snapshot or {},
+        }
+    if kind == 'data_tool':
+        return {
+            'key': f'data_tool_{index}',
+            'type': 'data_tool',
+            'label': row.name,
+            'why': (f'The agent queries the "{row.name}" database. Install '
+                    f'the author\u2019s copy or point it at one of your own.'),
+            'optional': False,
+            'mode': mode,
+            'snapshot': snapshot or {},
+        }
     if kind == 'connector':
         return {
             'key': f'connector_{index}',
@@ -165,6 +195,57 @@ def to_shareable(agent) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                     f'Remove it in the builder, then publish.'
                 )
             requirements.append(_requirement_for('skill', row, index))
+
+    # Custom tools travel with the agent: each id becomes a requirement
+    # carrying the frozen snapshot, so installing the agent installs the
+    # tool. Entries may be bare ids or `{id, mode}` (API read mode).
+    from datasources import sharing as _tool_sharing
+    from datasources.models import ApiConnection, DataConnection
+
+    def _split(entries):
+        out = []
+        for entry in entries or []:
+            if isinstance(entry, dict):
+                out.append((entry.get('id'), str(entry.get('mode') or 'all')))
+            else:
+                out.append((entry, 'all'))
+        return out
+
+    api_entries = _split(full.get('apiConnections'))
+    if api_entries:
+        by_id = {r.id: r for r in ApiConnection.objects.filter(
+            user_id=agent.user_id,
+            id__in=[e[0] for e in api_entries if e[0] is not None])}
+        for index, (cid, mode) in enumerate(api_entries, start=1):
+            row = by_id.get(cid)
+            if row is None:
+                raise PublishError(
+                    f'This agent uses an API tool (id {cid}) that no longer '
+                    f'exists. Remove it in the builder, then publish.'
+                )
+            config, shape = _tool_sharing.snapshot_api(row)
+            requirements.append(_requirement_for(
+                'api_tool', row, index,
+                snapshot={'tool_kind': 'api', 'config': config,
+                          'auth_shape': shape},
+                mode=mode if mode in ('read', 'all') else 'all'))
+
+    data_ids = [e[0] for e in _split(full.get('dataConnections'))]
+    if data_ids:
+        by_id = {r.id: r for r in DataConnection.objects.filter(
+            user_id=agent.user_id, id__in=data_ids)}
+        for index, cid in enumerate(data_ids, start=1):
+            row = by_id.get(cid)
+            if row is None:
+                raise PublishError(
+                    f'This agent uses a database tool (id {cid}) that no '
+                    f'longer exists. Remove it in the builder, then publish.'
+                )
+            config, shape = _tool_sharing.snapshot_data(row)
+            requirements.append(_requirement_for(
+                'data_tool', row, index,
+                snapshot={'tool_kind': 'data', 'config': config,
+                          'auth_shape': shape}))
 
     # The invariant the whole design rests on, asserted rather than assumed:
     # a config that still holds one of these lists would install by silently

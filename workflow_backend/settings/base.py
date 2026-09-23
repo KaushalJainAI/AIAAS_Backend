@@ -610,12 +610,19 @@ CELERY_RESULT_SERIALIZER = 'json'
 # `manage.py send_hitl_reminders`, which is how local dev and cron-only
 # deployments drive it — see notifications/reminders.py.
 HITL_REMINDER_SWEEP_SECONDS = int(os.environ.get('HITL_REMINDER_SWEEP_SECONDS', '300'))
+# User-asked reminders want minute resolution: a 9:00 reminder firing at 9:05
+# reads as broken. Also runnable as `manage.py send_scheduled_notifications`.
+SCHEDULED_SWEEP_SECONDS = int(os.environ.get('SCHEDULED_SWEEP_SECONDS', '60'))
 TRIGGER_SWEEP_SECONDS = int(os.environ.get('TRIGGER_SWEEP_SECONDS', '60'))
 RECYCLE_SWEEP_SECONDS = int(os.environ.get('RECYCLE_SWEEP_SECONDS', '3600'))
 CELERY_BEAT_SCHEDULE = {
     'sweep-hitl-reminders': {
         'task': 'notifications.sweep_hitl_reminders',
         'schedule': HITL_REMINDER_SWEEP_SECONDS,
+    },
+    'sweep-scheduled-notifications': {
+        'task': 'notifications.sweep_scheduled',
+        'schedule': SCHEDULED_SWEEP_SECONDS,
     },
     # Every minute: cron's own resolution is one minute, so a slower sweep
     # would make `next_due_at` a suggestion rather than a schedule. Also
@@ -783,7 +790,7 @@ CANVAS_AGENT_MODEL = os.environ.get('CANVAS_AGENT_MODEL', 'nvidia/nemotron-3-sup
 
 # NOTE: OpenRouter API keys are loaded per-user from the encrypted `credentials`
 # vault (slug 'openrouter'). Do not reintroduce an OPEN_ROUTER_KEY setting.
-IMAGINE_AGENT_MODEL = os.environ.get('IMAGINE_AGENT_MODEL', 'openrouter/openai/gpt-4o-mini')
+IMAGINE_AGENT_MODEL = os.environ.get('IMAGINE_AGENT_MODEL', 'openrouter/openai/gpt-5.6-luna')
 IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD', '0.10'))
 
 

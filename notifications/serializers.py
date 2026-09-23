@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import HITLReminderSchedule, Notification, NotificationPreference, PushSubscription
+from .models import (
+    HITLReminderSchedule, Notification, NotificationPreference,
+    PushSubscription, ScheduledNotification,
+)
 
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -45,6 +48,18 @@ class NotificationPreferenceSerializer(serializers.ModelSerializer):
         except Exception:
             raise serializers.ValidationError(f"Unknown timezone: {value!r}")
         return value
+
+
+class ScheduledNotificationSerializer(serializers.ModelSerializer):
+    """The caller's live reminders. Read + cancel only — creation is the
+    `schedule_notification` tool's job (timing is quoted from the user, and a
+    second write path is a second place to forget that rule)."""
+
+    class Meta:
+        model = ScheduledNotification
+        fields = ['id', 'title', 'message', 'repeat', 'send_email',
+                  'next_run_at', 'last_sent_at', 'times_sent', 'created_at']
+        read_only_fields = fields
 
 
 class HITLReminderScheduleSerializer(serializers.ModelSerializer):

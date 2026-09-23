@@ -271,6 +271,62 @@ async def document_detail(request, document_id: int):
     return Response(result, status=200)
 
 
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+async def document_content(request, document_id: int):
+    """Replace a text document's contents in-browser.
+
+    Body: `{content: str, expected_updated_at?: str}`. `If-Match` header (or
+    `expected_updated_at`) must equal the `updated_at` the detail view
+    returned, else 412 — so an AI draft saved after the human opened it does
+    not silently clobber the human's read. Text types only (`txt | md | csv |
+    json | html`); a binary (`docx | xlsx | pptx | pdf | image | …` with bytes)
+    is 400 — re-render it through the office tools instead of editing an
+    extract that is not the file.
+    """
+    from .utils import TEXT_FILE_TYPES
+    from workflow_backend.thresholds import AGENT_FILE_WRITE_CHARS
+
+    doc = await sync_to_async(
+        lambda: get_object_or_404(
+            Document.objects.select_related('user', 'knowledge_base'),
+            id=document_id, user=request.user,
+        )
+    )()
+
+    if doc.file_type not in TEXT_FILE_TYPES or (doc.file and doc.file_type not in TEXT_FILE_TYPES):
+        return Response(
+            {'error': f'This is a {doc.file_type} file; its text is an extract, not the file. Re-render it instead of editing the extract.'},
+            status=400,
+        )
+
+    content = request.data.get('content')
+    if not isinstance(content, str):
+        return Response({'error': 'Give `content` as a string.'}, status=400)
+    if len(content) > AGENT_FILE_WRITE_CHARS:
+        return Response(
+            {'error': f'That is {len(content):,} characters; the limit for one save is {AGENT_FILE_WRITE_CHARS:,}.'},
+            status=400,
+        )
+
+    expected = request.headers.get('If-Match') or request.data.get('expected_updated_at')
+    if expected and doc.updated_at.isoformat() != expected:
+        return Response(
+            {'error': 'This file changed since you opened it. Re-open it and re-apply your change.',
+             'updated_at': doc.updated_at.isoformat()},
+            status=412,
+        )
+
+    def _save():
+        doc.content_text = content
+        doc.file_size = len(content.encode('utf-8'))
+        doc.status = 'stored'
+        doc.save(update_fields=['content_text', 'file_size', 'status', 'updated_at'])
+        return DocumentSerializer(doc).data
+
+    return Response(await sync_to_async(_save)())
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 async def document_share(request, document_id: int):
@@ -431,11 +487,16 @@ def _servable(doc) -> bool:
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 async def document_download(request, document_id: int):
+    # `?inline=1` serves bytes for in-browser preview (`Content-Disposition:
+    # inline` + range-friendly FileResponse); default stays `as_attachment`
+    # so existing Export flows keep forcing a save. Ownership is checked by
+    # the `user=` lookup either way.
+    inline = request.query_params.get('inline') == '1'
     doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user)
     if doc.file and await sync_to_async(_servable)(doc):
         try:
-            return FileResponse(doc.file.open('rb'), as_attachment=True, filename=doc.name)
+            return FileResponse(doc.file.open('rb'), as_attachment=not inline, filename=doc.name)
         except Exception:
             pass
     buffer = BytesIO(doc.content_text.encode('utf-8'))
-    return FileResponse(buffer, as_attachment=True, filename=doc.name)
+    return FileResponse(buffer, as_attachment=not inline, filename=doc.name)

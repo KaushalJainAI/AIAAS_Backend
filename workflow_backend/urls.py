@@ -67,6 +67,9 @@ urlpatterns = [
     # Tool library — read-only catalogue of standard tools (grouped by grant)
     path('api/tools/', include('tools_config.urls')),
 
+    # Custom tools — the user's own API and database connections (private rows)
+    path('api/datasources/', include('datasources.urls')),
+
     # Standalone Chat
     path('api/chat/', include('chat.urls')),
 

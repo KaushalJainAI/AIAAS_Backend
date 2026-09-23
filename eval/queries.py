@@ -125,9 +125,11 @@ def agent_scorecard(user, agent_id: int, *, history: int = 10):
             'awaiting_review': 0,
             'history': [],
         })
+        from .graders import score_100 as _score_100
         point = {
             'run_id': str(run.run_id),
             'score': run.score,
+            'score_100': _score_100(run.score),
             'passed': run.passed,
             'status': run.status,
             'revision': run.revision.number if run.revision_id else None,

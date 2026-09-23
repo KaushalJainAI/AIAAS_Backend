@@ -1,10 +1,10 @@
 """
-SMS adapter over MSG91 (India) or Twilio (elsewhere).
+SMS adapter over Twilio.
 
-India needs DLT registration — a sender id and template ids — so free text
-without them is refused rather than silently undelivered. There is no search
-worth offering: SMS has no history API, and the tool says so by searching our
-own outbox and inbox instead.
+The vault holds the Twilio triple (`accountSid`, `authToken`, `fromNumber`)
+under the seeded `twilio` type; an account may point at another slug holding
+the same fields. The sender number may also live on the account config.
+Every send is recorded in the cost ledger — SMS spends money per message.
 """
 from __future__ import annotations
 
@@ -15,49 +15,60 @@ def _engine() -> str:
     return (getattr(settings, 'SMS_ENGINE', 'none') or 'none').strip().lower()
 
 
-async def _send_msg91(*, sender: str, to: str, body: str, config: dict) -> str:
-    from workflow_backend.httpclient import shared_client
-
+async def _twilio_config(user_id: int, account) -> tuple[str, str, str]:
     from .common import Unsupported, vault_field
 
-    key = await vault_field(config.get('user_id'), 'sms', 'api_key')
-    if not key:
-        raise Unsupported('SMS is not connected: add an MSG91 key on the Connections page.')
-    template = (config.get('template_id') or '').strip()
-    if not template:
-        raise Unsupported(
-            'India needs DLT registration: set a sender id and template id on '
-            'the SMS connection, or the message is undelivered.')
-    try:
-        resp = await shared_client().post(
-            'https://control.msg91.com/api/v5/flow/',
-            headers={'authkey': key},
-            json={'sender': sender or 'TXTSMS', 'mobiles': to,
-                  'template_id': template, 'message': body},
-            timeout=20,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise Unsupported('The SMS provider could not be reached.') from exc
-    if resp.status_code >= 400:
-        raise Unsupported(f'The SMS provider refused the send ({resp.status_code}).')
-    return 'msg91'
+    # Seeded vault shape first; an account may override the slug, and the
+    # sender number may live on the account instead of the credential.
+    slug = (account.credential_slug if account else '') or 'twilio'
+    sid = await vault_field(user_id, slug, 'accountSid')
+    token = await vault_field(user_id, slug, 'authToken')
+    sender = ((account.config or {}).get('sender_id')
+              if account else '') or await vault_field(user_id, slug, 'fromNumber')
+    if not sid or not token:
+        raise Unsupported('SMS is not connected: add a Twilio account SID and '
+                          'auth token on the Connections page.')
+    if not sender:
+        raise Unsupported('SMS needs a sender number: set the Twilio '
+                          'from number on the credential or the account.')
+    assert sid is not None and token is not None and sender is not None
+    return sid, token, sender
 
 
 async def send(user_id: int, account, *, to: str, body: str) -> str:
+    from workflow_backend.httpclient import shared_client
+
     from .common import Unsupported
 
     if _engine() == 'none':
         raise Unsupported(
-            'SMS is not connected (SMS_ENGINE=none): add MSG91 for India or '
-            'Twilio elsewhere, with DLT sender and template ids for India.')
-    if _engine() == 'twilio':
+            'SMS is switched off on this platform (SMS_ENGINE=none). Set it '
+            'to twilio and add a Twilio SID and auth token to switch it on.')
+    sid, token, sender = await _twilio_config(user_id, account)
+    try:
+        resp = await shared_client().post(
+            f'https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json',
+            auth=(sid, token),
+            data={'From': sender, 'To': to, 'Body': body},
+            timeout=20,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise Unsupported('The SMS provider could not be reached.') from exc
+    if resp.status_code == 429:
+        raise Unsupported('The SMS provider is rate-limited. Try again later.')
+    if resp.status_code == 401:
+        raise Unsupported('Twilio refused the credentials. Check the SID and '
+                          'auth token on the Connections page.')
+    if resp.status_code >= 400:
+        raise Unsupported(f'The SMS provider refused the send ({resp.status_code}).')
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise Unsupported('The SMS provider returned something unreadable.') from exc
+    if str(payload.get('status') or '') == 'failed':
         raise Unsupported(
-            'Twilio is not wired yet; MSG91 is the v1 route. Say so rather '
-            'than retrying.')
-    config = dict((account.config or {}) if account else {})
-    config['user_id'] = user_id
-    sender = str(config.get('sender_id') or '')
-    return await _send_msg91(sender=sender, to=to, body=body, config=config)
+            f"Twilio failed the send: {payload.get('error_message', 'unknown error')}.")
+    return str(payload.get('sid') or '')
 
 
 async def list_targets(user_id: int, account) -> list[dict]:
@@ -102,20 +113,3 @@ async def search(user_id: int, account, *, query: str = '', sender: str = '',
 async def read(user_id: int, account, *, conversation: str, limit: int = 30) -> list[dict]:
     rows = await search(user_id, account, sender=conversation)
     return rows[:max(1, min(limit, 100))]
-
-
-async def send(user_id: int, account, *, to: str, body: str) -> str:
-    from .common import Unsupported
-
-    if _engine() == 'none':
-        raise Unsupported(
-            'SMS is not connected (SMS_ENGINE=none): add MSG91 for India or '
-            'Twilio elsewhere, with DLT sender and template ids for India.')
-    if _engine() == 'twilio':
-        raise Unsupported(
-            'Twilio is not wired yet; MSG91 is the v1 route. Say so rather '
-            'than retrying.')
-    config = dict((account.config or {}) if account else {})
-    config['user_id'] = user_id
-    sender = str(config.get('sender_id') or '')
-    return await _send_msg91(sender=sender, to=to, body=body, config=config)

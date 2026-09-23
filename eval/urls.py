@@ -18,6 +18,8 @@ urlpatterns = [
 
     # Suites and their cases
     path('suites/', views.suite_list, name='suite_list'),
+    path('suites/from-template/', views.suite_from_template, name='suite_from_template'),
+    path('starter-kits/', views.starter_kits, name='starter_kits'),
     path('suites/<int:suite_id>/', views.suite_detail, name='suite_detail'),
     path('suites/<int:suite_id>/cases/', views.case_list, name='case_list'),
     path('cases/<int:case_id>/', views.case_detail, name='case_detail'),

@@ -16,6 +16,10 @@ class Notification(models.Model):
         # An agent telling its owner something while running unattended
         # (`chat/tools/workspace.py::notify_user`).
         ('agent_update', 'Agent Update'),
+        # A user-asked reminder fired by the scheduled sweep
+        # (`notifications/scheduled.py`, set up through the
+        # `schedule_notification` tool).
+        ('scheduled_reminder', 'Scheduled Reminder'),
     )
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='notifications')
@@ -201,6 +205,88 @@ class HITLReminderSchedule(models.Model):
         if self.next_due_at is not None:
             self.next_due_at = None
             self.save(update_fields=['next_due_at', 'updated_at'])
+
+
+class ScheduledNotification(models.Model):
+    """A reminder the user asked for: at a time, or on a heartbeat.
+
+    Set up through the `schedule_notification` tool (or chat asking for it),
+    fired by the scheduled sweep (`notifications/scheduled.py`) as a
+    `scheduled_reminder` row plus the same device ping `notify_user` sends.
+    The timing is always the user's: the tool description forbids inventing
+    reminders, and this table stores no model-chosen cadence.
+
+    `next_run_at` is the single field the sweep queries — a spent or
+    cancelled reminder is NULL and drops out of the index. Repeats advance
+    from the previous due time, not from when the sweep ran, so a late sweep
+    cannot shift the heartbeat.
+    """
+
+    REPEAT_CHOICES = [
+        ('none', 'Once'),
+        ('hourly', 'Every hour'),
+        ('daily', 'Every day'),
+        ('weekly', 'Every week'),
+    ]
+
+    #: Offsets applied to the previous due time per repeat rung.
+    REPEAT_OFFSETS = {
+        'hourly': 60 * 60,
+        'daily': 24 * 60 * 60,
+        'weekly': 7 * 24 * 60 * 60,
+    }
+
+    #: How many live reminders one user may hold. A run that has something to
+    #: say has a few things to say; without a cap, a loop turns the feed into
+    #: a log — the same reason `notify_user` is capped per run.
+    MAX_ACTIVE_PER_USER = 20
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='scheduled_notifications',
+    )
+    title = models.CharField(max_length=120)
+    message = models.TextField(max_length=1000)
+    #: `{'action_url': '/runs'}` — an in-app path only, same rule as
+    #: `notify_user`: a stored value that becomes a link must never be an
+    #: open redirect.
+    data = models.JSONField(default=dict, blank=True)
+    repeat = models.CharField(
+        max_length=10, choices=REPEAT_CHOICES, default='none',
+    )
+    #: Email too, not just feed + ping — opt-in per reminder, default off.
+    #: Explicit user consent is what separates this from system nudges (which
+    #: never email outside the digest): the tool only sets it when the user
+    #: said the word "email", and the UI carries the same checkbox.
+    send_email = models.BooleanField(default=False)
+    next_run_at = models.DateTimeField(
+        null=True, blank=True, db_index=True,
+        help_text='When this fires next; NULL once spent or cancelled',
+    )
+    active = models.BooleanField(default=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+    times_sent = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['next_run_at']
+        indexes = [
+            models.Index(fields=['next_run_at']),
+            models.Index(fields=['user', 'next_run_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.title} for {self.user_id} @ {self.next_run_at}'
+
+    def cancel(self) -> None:
+        """Stop it — spent and cancelled look the same to the sweep."""
+        if self.active or self.next_run_at is not None:
+            self.active = False
+            self.next_run_at = None
+            self.save(update_fields=['active', 'next_run_at', 'updated_at'])
 
 
 class PushSubscription(models.Model):

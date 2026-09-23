@@ -64,9 +64,12 @@ logger = logging.getLogger(__name__)
 def _candidates(user) -> dict[str, list[dict]]:
     """What this user could satisfy each requirement kind with.
 
-    Three queries, done once per response rather than per requirement: the
-    catalogue is small and several entries ask for the same kind of thing.
+    Done once per response rather than per requirement: the catalogue is
+    small and several entries ask for the same kind of thing. Custom-tool
+    pools are the caller's own connections — picking one reuses it, while
+    `'install'` (handled in `_resolve`) takes the author's frozen copy.
     """
+    from datasources.models import ApiConnection, DataConnection
     from mcp_integration.client import visible_servers_sync
 
     return {
@@ -83,6 +86,14 @@ def _candidates(user) -> dict[str, list[dict]]:
         'skill': [
             {'id': s.id, 'label': s.title}
             for s in Skill.objects.filter(user=user).order_by('title')
+        ],
+        'api_tool': [
+            {'id': r.id, 'label': r.name, 'base_url': r.base_url}
+            for r in ApiConnection.objects.filter(user=user).order_by('name')
+        ],
+        'data_tool': [
+            {'id': r.id, 'label': r.name, 'kind': r.kind}
+            for r in DataConnection.objects.filter(user=user).order_by('name')
         ],
     }
 
@@ -127,6 +138,11 @@ def _present_curated(entry: dict, candidates: dict[str, list[dict]]) -> dict:
         'author': None,
         'install_count': None,
         'version': None,
+        # Which one-click pack this installs with, if any — computed from
+        # `PACKS`, never stored, so the catalogue cannot disagree with the
+        # pack. What the Explore page groups by. Shared entries carry None:
+        # they belong to no pack.
+        'pack': gallery.pack_of(entry['slug']),
         'requirements': _with_candidates(entry.get('requirements'), candidates),
         'config': entry['config'],
     }
@@ -159,6 +175,8 @@ def _present_shared(share: SharedAgent, candidates: dict[str, list[dict]],
         'install_count': share.install_count,
         'version': share.version,
         'updated_at': share.updated_at,
+        # No pack: only curated entries belong to one.
+        'pack': None,
         'requirements': _with_candidates(share.requirements, candidates),
         'config': share.config,
     }
@@ -255,38 +273,70 @@ def template_detail(request, slug: str):
 # -------------------------------------------------------------------- install
 
 
-def _resolve(requirements, chosen: dict) -> tuple[dict, list[str]]:
+def _resolve(requirements, chosen: dict, user) -> tuple[dict, list, list]:
     """Requirement key -> id becomes the `AgentConfig` id lists.
 
-    Returns `(fields, errors)`. Nothing here checks *ownership* — the
-    serializer does that against `request.user`, and doing it in one place is
-    what keeps the install path and the builder path enforcing the same rule.
+    Returns `(fields, errors, installed)`. Nothing here checks *ownership* of
+    chosen ids — the serializer does that against `request.user`, and doing
+    it in one place is what keeps the install path and the builder path
+    enforcing the same rule.
+
+    Custom tools (`api_tool` / `data_tool`) accept `'install'` instead of an
+    id: the author's frozen snapshot is installed as the caller's own private
+    copy. `installed` reports each copy plus the credential type to link, so
+    the installer knows what is still unauthenticated.
     """
-    fields: dict[str, list[int]] = {}
+    from datasources import sharing as _tool_sharing
+
+    fields: dict[str, list] = {}
     errors: list[str] = []
+    installed: list[dict] = []
 
     for req in requirements or []:
         key = req.get('key')
+        kind = req.get('type')
         value = chosen.get(key)
         if value in (None, '', []):
             if not req.get('optional'):
                 errors.append(f'"{req.get("label", key)}" is required.')
             continue
-        try:
-            resolved = int(value)
-        except (TypeError, ValueError):
-            errors.append(f'"{req.get("label", key)}" must be an id.')
-            continue
-        field = gallery.REQUIREMENT_FIELDS.get(req.get('type'))
+        field = gallery.REQUIREMENT_FIELDS.get(kind)
         if field is None:
             # A stored requirement of an unknown kind. Refused rather than
             # skipped: skipping installs an agent missing something it was
             # published as needing.
             errors.append(f'"{req.get("label", key)}" is of an unknown kind.')
             continue
+        if kind in ('api_tool', 'data_tool') and value == 'install':
+            snapshot = req.get('snapshot') or {}
+            try:
+                row, needs = _tool_sharing.install_copy(
+                    snapshot.get('tool_kind'), snapshot.get('config') or {},
+                    snapshot.get('auth_shape') or {}, user)
+            except Exception as exc:  # noqa: BLE001 — serializer detail
+                detail = getattr(exc, 'detail', str(exc))
+                errors.append(f'"{req.get("label", key)}" could not be '
+                              f'installed: {detail}')
+                continue
+            entry: object = row.id
+            if kind == 'api_tool' and req.get('mode') == 'read':
+                entry = {'id': row.id, 'mode': 'read'}
+            fields.setdefault(field, []).append(entry)
+            installed.append({
+                'tool': row.name,
+                'tool_kind': snapshot.get('tool_kind'),
+                'connection_id': row.id,
+                **({'needs': needs} if needs else {}),
+            })
+            continue
+        try:
+            resolved = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            errors.append(f'"{req.get("label", key)}" must be an id.')
+            continue
         fields.setdefault(field, []).append(resolved)
 
-    return fields, errors
+    return fields, errors, installed
 
 
 @extend_schema(
@@ -296,10 +346,12 @@ def _resolve(requirements, chosen: dict) -> tuple[dict, list[str]]:
                                                 'configuration the serializer '
                                                 'refused.'),
                404: OpenApiResponse(description='No such template.')},
-    description='Install a template or a shared agent as one of the caller\'s '
-                'own agents. Body: {"name": optional override, '
-                '"requirements": {key: id}, "timezone": IANA zone for any '
-                'schedule it carries}.',
+     description='Install a template or a shared agent as one of the caller\'s '
+                 'own agents. Body: {"name": optional override, '
+                 '"requirements": {key: id}, "timezone": IANA zone for any '
+                 'schedule it carries}. A custom-tool requirement also '
+                 'accepts "install" to take the author\'s frozen copy as a '
+                 'private, unauthenticated tool of your own.',
 )
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -327,7 +379,7 @@ def template_install(request, slug: str):
                                   '{requirement key: id}.'},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    fields, errors = _resolve(requirements, chosen)
+    fields, errors, installed = _resolve(requirements, chosen, request.user)
     if errors:
         return Response({'error': ' '.join(errors), 'requirements': errors},
                         status=status.HTTP_400_BAD_REQUEST)
@@ -398,10 +450,17 @@ def template_install(request, slug: str):
 
     logger.info('Agent %s installed from %s by user %s',
                 agent.id, slug, request.user.id)
-    return Response(
-        _with_stats([AgentSerializer.to_config(agent)], [agent], request.user)[0],
-        status=status.HTTP_201_CREATED,
-    )
+    body = _with_stats([AgentSerializer.to_config(agent)], [agent],
+                       request.user)[0]
+    if installed:
+        # Tools the install carried over: private copies owned by the
+        # installer, unauthenticated until they link their own credentials.
+        body['installed_tools'] = installed
+        body['credentials_needed'] = [
+            {'tool': item['tool'], **item['needs']}
+            for item in installed if item.get('needs')
+        ]
+    return Response(body, status=status.HTTP_201_CREATED)
 
 
 @extend_schema(

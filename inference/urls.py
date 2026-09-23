@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import folder_views, page_views, views
+from . import dashboard_views, folder_views, page_views, views
 
 app_name = 'inference'
 
@@ -22,6 +22,13 @@ urlpatterns = [
     path('documents/<int:document_id>/', views.document_detail, name='document_detail'),
     path('documents/<int:document_id>/share/', views.document_share, name='document_share'),
     path('documents/<int:document_id>/download/', views.document_download, name='document_download'),
+    path('documents/<int:document_id>/content/', views.document_content, name='document_content'),
+
+    # Dashboards — live tiles bound to sources (see dashboard_views.py).
+    path('dashboards/', dashboard_views.dashboard_list, name='dashboard_list'),
+    path('dashboards/<int:dashboard_id>/', dashboard_views.dashboard_detail, name='dashboard_detail'),
+    path('dashboards/<int:dashboard_id>/refresh/', dashboard_views.dashboard_refresh,
+         name='dashboard_refresh'),
 
     # RAG
     path('rag/search/', views.rag_search, name='rag_search'),

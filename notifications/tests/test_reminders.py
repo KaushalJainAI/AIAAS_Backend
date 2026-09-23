@@ -387,3 +387,48 @@ class AbandonmentTests(ReminderTestCase):
 
         self.assertEqual(result['abandoned'], 1)
         self.assertEqual(result['escalations'], 0)
+
+
+class DeepLinkTests(ReminderTestCase):
+    """Every nudge's "Open" lands on the thing it is about, not the queue top.
+
+    `/inbox` redirects to `/runs` but drops the query, so an id must travel
+    on the canonical `/runs?...` path — a link that arrives as `/inbox` with
+    nowhere to put the id is the bug this pins.
+    """
+
+    @patch('notifications.reminders.push_device_notification')
+    def test_escalation_links_to_its_request(self, push):
+        request = self.make_request()
+
+        notif = Notification.objects.filter(user=self.user).latest('created_at')
+        self.assertEqual(
+            notif.data.get('action_url'), f'/runs?request={request.request_id}',
+        )
+        push.assert_called_once()
+        sent_payload = push.call_args.args[1]
+        self.assertEqual(
+            sent_payload.get('action_url'), f'/runs?request={request.request_id}',
+        )
+
+    @patch('notifications.reminders.push_device_notification')
+    def test_hourly_links_to_the_request_when_only_one_is_pending(self, push):
+        prefs = get_preferences(self.user)
+        prefs.hourly_reminders_enabled = True
+        prefs.save()
+        request = self.make_request()
+        HITLRequest.objects.filter(pk=request.pk).update(
+            created_at=timezone.now() - timedelta(hours=2)
+        )
+        prefs.last_hourly_sent_at = None
+        prefs.save(update_fields=['last_hourly_sent_at'])
+
+        from notifications.reminders import _sweep_hourly
+        self.assertEqual(_sweep_hourly(now=timezone.now()), 1)
+
+        notif = Notification.objects.filter(
+            user=self.user, type='hitl_reminder',
+        ).latest('created_at')
+        self.assertEqual(
+            notif.data.get('action_url'), f'/runs?request={request.request_id}',
+        )

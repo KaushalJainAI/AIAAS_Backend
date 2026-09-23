@@ -33,9 +33,25 @@ class EvalCaseSerializer(serializers.ModelSerializer):
 
     def validate_graders(self, value):
         try:
-            return graders.validate_specs(value)
+            return graders.validate_case_graders(value)
         except graders.GraderError as exc:
             raise serializers.ValidationError(str(exc))
+        # A case with only an LLM judge can be passed by a broken judge.
+        # Pair it with at least one deterministic check — the same rule the
+        # benchmark README documents for code suites.
+        if specs:
+            from .graders import REGISTRY
+            all_judge = all(
+                (REGISTRY.get(s.get('type')) is not None
+                 and REGISTRY[s.get('type')].calls_model)
+                for s in specs
+            )
+            if all_judge:
+                raise serializers.ValidationError(
+                    'A case needs at least one deterministic grader alongside '
+                    'llm_judge, so a broken judge cannot pass it on its own.'
+                )
+        return specs
 
     def validate_weight(self, value):
         if value <= 0:
@@ -52,7 +68,7 @@ class EvalSuiteSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'slug', 'description', 'subagent', 'pass_threshold',
             'supervision', 'sample_percent', 'reviewer', 'concurrency',
-            'max_cost_rupees', 'tags',
+            'max_cost_rupees', 'tags', 'template_slug',
             'is_active', 'case_count', 'last_run', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'slug', 'created_at', 'updated_at']
@@ -137,14 +153,19 @@ class EvalResultSerializer(serializers.ModelSerializer):
     final_passed = serializers.BooleanField(read_only=True, allow_null=True)
     final_score = serializers.FloatField(read_only=True)
     execution_id = serializers.SerializerMethodField(read_only=True)
+    final_score_100 = serializers.SerializerMethodField(read_only=True)
+    auto_score_100 = serializers.SerializerMethodField(read_only=True)
+    flags = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = EvalResult
         fields = [
             'id', 'run', 'case', 'case_name', 'goal', 'status', 'answer',
-            'answer_truncated', 'auto_passed', 'auto_score', 'grades', 'weight',
+            'answer_truncated', 'auto_passed', 'auto_score', 'auto_score_100',
+            'grades', 'weight',
             'review_state', 'review_reason', 'review', 'final_passed',
-            'final_score', 'tokens', 'judge_tokens', 'judge_cost_usd',
+            'final_score', 'final_score_100', 'flags',
+            'tokens', 'judge_tokens', 'judge_cost_usd',
             'duration_ms', 'error_message',
             'execution_id', 'created_at',
         ]
@@ -155,6 +176,18 @@ class EvalResultSerializer(serializers.ModelSerializer):
         # so a client can go from a score to the full trace without a lookup.
         return str(obj.execution.execution_id) if obj.execution_id else None
 
+    def get_final_score_100(self, obj):
+        from . import graders as _graders
+        return _graders.score_100(obj.final_score)
+
+    def get_auto_score_100(self, obj):
+        from . import graders as _graders
+        return _graders.score_100(obj.auto_score)
+
+    def get_flags(self, obj):
+        from . import graders as _graders
+        return _graders.result_flags(obj.grades or [])
+
 
 class EvalRunSerializer(serializers.ModelSerializer):
     run_id = serializers.CharField(read_only=True)
@@ -163,6 +196,7 @@ class EvalRunSerializer(serializers.ModelSerializer):
     revision_number = serializers.IntegerField(
         source='revision.number', read_only=True, default=None,
     )
+    score_100 = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = EvalRun
@@ -170,12 +204,16 @@ class EvalRunSerializer(serializers.ModelSerializer):
             'run_id', 'suite', 'suite_name', 'subagent', 'agent_name',
             'revision', 'revision_number', 'status', 'supervision',
             'total_cases', 'passed_count', 'failed_count', 'error_count',
-            'pending_review_count', 'score', 'passed', 'grader_agreement',
+            'pending_review_count', 'score', 'score_100', 'passed', 'grader_agreement',
             'tokens_used', 'duration_ms', 'started_at', 'completed_at',
             'error_message', 'notes', 'created_at',
             'is_baseline', 'mode',
         ]
         read_only_fields = fields
+
+    def get_score_100(self, obj):
+        from . import graders as _graders
+        return _graders.score_100(obj.score)
 
 
 # ---------------------------------------------------------------- input shapes

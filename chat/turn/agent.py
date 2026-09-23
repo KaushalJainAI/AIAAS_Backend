@@ -1335,8 +1335,14 @@ async def _require_approval(call: ToolCall, turn: TurnContext, meta: dict) -> No
                     # the notification list, where it was printed verbatim as a
                     # JSON block under every row — a tool call's arguments are
                     # not a thing to put on a settings screen for ever.
+                    # Deep link to the waiting conversation: there is no
+                    # `/chat` route (chat lives at `/ai-chat`), and a bare
+                    # page link leaves the user hunting for which thread
+                    # paused. `session_id` is the ChatSession UUID
+                    # (pipeline builds it as `str(session.id)`).
                     data={"tool": call.name, "thread_id": turn.session_id,
-                          "action_url": "/chat"},
+                          "session_id": turn.session_id,
+                          "action_url": f"/ai-chat?session={turn.session_id}"},
                 )
 
             await notify()

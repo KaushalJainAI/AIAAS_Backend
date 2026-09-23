@@ -215,11 +215,14 @@ class CuratedPackageTests(TestCase):
             {"SLACK_BOT_TOKEN", "SLACK_TEAM_ID"},
         )
 
-    def test_notion_maps_the_variable_the_official_server_reads(self):
-        # The official server reads NOTION_TOKEN; the old NOTION_API_KEY is
-        # ignored, so the connection would start and then see nothing.
+    def test_notion_is_native_with_nothing_to_inject(self):
+        # The row used to front a stdio server that read NOTION_TOKEN; it is
+        # now native, so there is no subprocess and no env to inject into — a
+        # leftover mapping would be a claim that something starts.
         notion = MCPServer.objects.get(name="Notion", user__isnull=True)
-        self.assertEqual(set(notion.credential_env_map), {"NOTION_TOKEN"})
+        self.assertEqual(notion.type, "native")
+        self.assertEqual(notion.credential_env_map, {})
+        self.assertEqual(notion.required_credential_types, ["notion"])
 
     def test_a_disabled_connector_explains_itself(self):
         for server in MCPServer.objects.filter(user__isnull=True, enabled=False):
@@ -231,14 +234,15 @@ class CuratedPackageTests(TestCase):
 
 
 class UpcomingConnectorTests(TestCase):
-    """Notion and Slack are announced, not connectable.
+    """Slack is announced, not connectable.
 
-    The pairing is the whole point: `coming_soon` is presentation, `enabled`
-    is access. A flag that drifted apart from the switch would put a
-    "Coming soon" badge on a connector agents could still call.
+    Notion used to be paired here; migration 0021 serves it natively, so a
+    token now activates it and it must appear nowhere in this class. The
+    pairing rule below (`test_no_connector_claims_coming_soon_while_enabled`)
+    is what would catch a future row drifting the same way.
     """
 
-    UPCOMING = ("Notion", "Slack")
+    UPCOMING = ("Slack",)
 
     def test_upcoming_connectors_are_still_listed(self):
         # Withdrawn, not hidden: the catalogue queryset does not filter on

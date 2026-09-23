@@ -224,7 +224,8 @@ def public_page_download(request, slug: str):
     )
     if page is None or not page.file:
         return _public_response({'error': 'Not found.'}, status_code=404)
-    response = FileResponse(page.file.open('rb'), as_attachment=True,
+    inline = request.query_params.get('inline') == '1'
+    response = FileResponse(page.file.open('rb'), as_attachment=not inline,
                             filename=page.file_name or 'file')
     response['Content-Security-Policy'] = CSP_HEADER
     return response
@@ -237,5 +238,6 @@ def page_download(request, slug: str):
     if page is None or not _visible_to(page, request.user) or not page.file:
         return Response({'error': 'Not found.'},
                         status=status.HTTP_404_NOT_FOUND)
-    return FileResponse(page.file.open('rb'), as_attachment=True,
+    inline = request.query_params.get('inline') == '1'
+    return FileResponse(page.file.open('rb'), as_attachment=not inline,
                         filename=page.file_name or 'file')

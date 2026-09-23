@@ -209,7 +209,11 @@ def deliver_escalation(schedule, prefs=None, now=None) -> bool:
             'execution_id': str(request.execution.execution_id) if request.execution_id else None,
             'node_id': request.node_id,
             'stage': stage,
-            'action_url': '/inbox',
+            # Deep link, not the queue top: "Open" selects this request on
+            # /runs (`?request=`), instead of dropping the user on a list
+            # they must search by eye. `/inbox` redirects to `/runs` but
+            # drops the query, so the id must travel on the canonical path.
+            'action_url': f'/runs?request={request.request_id}',
         },
     )
     schedule.advance(now)
@@ -317,7 +321,11 @@ def _sweep_hourly(now: datetime) -> int:
                     f"Your agents cannot finish until you respond. Oldest: "
                     f"“{oldest.title}”."
                 ),
-                data={'pending_count': count, 'action_url': '/inbox', 'reason': 'hourly'},
+                # One pending request links straight to it; several link
+                # to the queue. See the escalation deep link above.
+                data={'pending_count': count,
+                      'action_url': f'/runs?request={oldest.request_id}' if count == 1 else '/runs',
+                      'reason': 'hourly'},
             )
         except Exception as exc:
             logger.exception("Hourly reminder failed for user %s: %s", prefs.user_id, exc)
@@ -400,7 +408,7 @@ def _sweep_daily_digests(now: datetime) -> int:
                 message=_digest_body(pending),
                 data={
                     'pending_count': len(pending),
-                    'action_url': '/inbox',
+                    'action_url': '/runs',
                     'request_ids': [str(r.request_id) for r in pending[:50]],
                 },
                 push_socket=False,
@@ -411,7 +419,7 @@ def _sweep_daily_digests(now: datetime) -> int:
                     'title': f"{len(pending)} request{'s' if len(pending) != 1 else ''} waiting on you",
                     'body': 'Open your Inbox to unblock your agents.',
                     'pending_count': len(pending),
-                    'action_url': '/inbox',
+                    'action_url': '/runs',
                 })
                 from .webpush import send_web_push
 
@@ -419,7 +427,7 @@ def _sweep_daily_digests(now: datetime) -> int:
                     prefs.user,
                     title=f"{len(pending)} request{'s' if len(pending) != 1 else ''} waiting on you",
                     body='Open your Inbox to unblock your agents.',
-                    action_url='/inbox',
+                    action_url='/runs',
                     kind='hitl_digest',
                 )
             sent += 1

@@ -362,7 +362,7 @@ async def _command_toolbox(resolution: CommandResolution | None, *, user,
         names = {t["function"]["name"] for t in offered}
         keep = (pinned & names) | {
             "get_current_time", "update_todos", "render_chart",
-            "render_dashboard", "notify_user",
+            "render_dashboard", "notify_user", "list_user_runs",
         }
         return [t for t in offered if t["function"]["name"] in keep]
 

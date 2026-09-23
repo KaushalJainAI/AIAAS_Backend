@@ -477,6 +477,87 @@ def case_from_run(request):
     return Response(EvalCaseSerializer(case).data, status=status.HTTP_201_CREATED)
 
 
+# ======================== Starter kits (user datasets) ========================
+
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def starter_kits(request):
+    """Starter datasets a user can clone for their own agent.
+
+    Query `?agent_id=` adds a `recommended` list derived from that agent's
+    grants (`eval/starter_kits.py::recommended_kits`). No rows are created.
+    """
+    from . import starter_kits as _kits
+
+    agent_id = request.query_params.get('agent_id')
+    recommended: list[str] = []
+    if agent_id:
+        from agents.models import SubAgent
+        try:
+            agent = SubAgent.objects.filter(id=agent_id, user=request.user).first()
+            if agent is not None:
+                recommended = _kits.recommended_kits(agent.tool_grants or {})
+        except Exception:  # noqa: BLE001
+            recommended = []
+    return Response({
+        'kits': [
+            {'slug': slug, 'name': kit['name'], 'description': kit['description'],
+             'case_count': len(kit['cases'])}
+            for slug, kit in _kits.STARTER_KITS.items()
+        ],
+        'recommended': recommended,
+    })
+
+
+@extend_schema(methods=['POST'], responses={201: OpenApiTypes.OBJECT},
+               description='Clone a starter kit into a new suite for this user.')
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def suite_from_template(request):
+    """Clone a starter kit: one suite + its cases, owned by the caller.
+
+    Body: `{"template": "research", "name": "...", "agent_id": 12?}`.
+    Cases are validated through the same `validate_case_graders` the case
+    editor uses, so a kit that drifted from the registry 400s instead of
+    installing a suite that can never pass.
+    """
+    from . import starter_kits as _kits
+    from .serializers import EvalCaseSerializer
+
+    template = str((request.data or {}).get('template', '')).strip().lower()
+    kit = _kits.get_kit(template)
+    if kit is None:
+        return Response(
+            {'error': f'No such starter kit {template!r}. Known: {", ".join(sorted(_kits.STARTER_KITS))}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    agent = None
+    agent_id = (request.data or {}).get('agent_id')
+    if agent_id:
+        from agents.models import SubAgent
+        agent = SubAgent.objects.filter(id=agent_id, user=request.user).first()
+        if agent is None:
+            return Response({'error': 'Agent not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    from . import api as _api
+    from . import graders as _graders
+    try:
+        suite = _api.clone_starter_kit(
+            user=request.user,
+            template=template,
+            name=str((request.data or {}).get('name') or kit['name']),
+            agent=agent,
+        )
+    except _graders.GraderError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    from .serializers import EvalSuiteSerializer
+    return Response({
+        **EvalSuiteSerializer(suite).data,
+        'cases': EvalCaseSerializer(suite.cases.order_by('order', 'id'), many=True).data,
+    }, status=status.HTTP_201_CREATED)
+
+
 # ======================== Scorecard ========================
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})

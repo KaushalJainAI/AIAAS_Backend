@@ -1140,7 +1140,7 @@ class RAGPipeline:
         # Omit rather than guess a model id for providers other than OpenAI;
         # the handler falls back to its own configured default.
         if llm_type == 'openai':
-            config['model'] = 'gpt-4o-mini'
+            config['model'] = 'gpt-5.6-luna'
         try:
             result = await handler.execute({}, config, context)
             if result.success:

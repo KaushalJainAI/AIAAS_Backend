@@ -40,6 +40,10 @@ REQUIREMENT_FIELDS: dict[str, str] = {
     'connector': 'connectors',
     'knowledge_base': 'knowledgeBases',
     'skill': 'skills',
+    # A custom tool (the installer's own API/database connection, or a fresh
+    # install of the author's frozen snapshot — see `datasources/sharing.py`).
+    'api_tool': 'apiConnections',
+    'data_tool': 'dataConnections',
 }
 
 
@@ -2084,13 +2088,26 @@ PACKS: dict[str, list[str]] = {
 _ID_BEARING_KEYS = frozenset(REQUIREMENT_FIELDS.values())
 
 
+def pack_of(slug: str) -> str | None:
+    """The one-click pack `slug` installs with, if any.
+
+    Computed from `PACKS` rather than stored on the entry, so the catalogue
+    cannot say one thing and the pack another. A template in no pack is not
+    an error — it installs on its own — but one in two packs would render in
+    two groups on Explore, which `check_catalogue` refuses.
+    """
+    for pack, slugs in PACKS.items():
+        if slug in slugs:
+            return pack
+    return None
+
+
 def get(slug: str) -> dict[str, Any] | None:
     """The catalogue entry for `slug`, or None."""
     entry = TEMPLATES.get(slug)
     if entry is None:
         return None
     return {'slug': slug, **entry}
-
 
 def listing() -> list[dict[str, Any]]:
     """Every template, in catalogue order."""
@@ -2109,7 +2126,6 @@ def check_catalogue() -> list[str]:
         for field in ('name', 'tagline', 'description', 'config'):
             if not entry.get(field):
                 problems.append(f'{slug}: missing {field}')
-
         config = entry.get('config') or {}
         leaked = _ID_BEARING_KEYS & set(config)
         if leaked:
@@ -2143,4 +2159,20 @@ def check_catalogue() -> list[str]:
             problems.append(f'{slug}: asks for a knowledge base but has no `rag` grant')
         if config.get('schedule') and not config.get('allowUnattended'):
             problems.append(f'{slug}: has a schedule but is not cleared to run unattended')
+
+    # A pack naming a slug that is not a template installs nothing for that
+    # entry and silently shortens the pack; a template in two packs renders
+    # in two groups on Explore. Both are caught here rather than by whoever
+    # clicks Install. A template in *no* pack is fine — it installs on its own.
+    claimed: dict[str, str] = {}
+    for pack, slugs in PACKS.items():
+        for slug in slugs:
+            if slug not in TEMPLATES:
+                problems.append(f'{pack}: no such template {slug!r}')
+            elif slug in claimed:
+                problems.append(
+                    f'{slug}: in two packs ({claimed[slug]} and {pack})'
+                )
+            else:
+                claimed[slug] = pack
     return problems

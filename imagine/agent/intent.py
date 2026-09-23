@@ -325,7 +325,7 @@ def classify(
 
     caps = capabilities_for(user)
     pinned_kind = _pinned_kind(caps, preferred_model)
-    model_id = getattr(settings, "IMAGINE_AGENT_MODEL", "openrouter/openai/gpt-4o-mini")
+    model_id = getattr(settings, "IMAGINE_AGENT_MODEL", "openrouter/openai/gpt-5.6-luna")
 
     # Short-circuit the LLM entirely when the user already pinned a model:
     # the modality and model are decided, only the prompt needs refining and

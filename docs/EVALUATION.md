@@ -272,18 +272,27 @@ GET    /api/eval/suites/{id}/                 suite + its cases
 PATCH  /api/eval/suites/{id}/
 DELETE /api/eval/suites/{id}/
 GET    /api/eval/suites/{id}/cases/
-POST   /api/eval/suites/{id}/cases/           graders validated here
+POST   /api/eval/suites/{id}/cases/           graders validated here (judge-never-alone)
 GET    /api/eval/cases/{id}/
 PATCH  /api/eval/cases/{id}/
 DELETE /api/eval/cases/{id}/
+GET    /api/eval/starter-kits/                starter datasets (?agent_id= recommends)
+POST   /api/eval/suites/from-template/        clone a starter (template, name?, agent_id?)
 POST   /api/eval/suites/{id}/run/             202 + run_id
 GET    /api/eval/runs/                        sweep history
-GET    /api/eval/runs/{run_id}/               sweep + results + grades + reviews
+GET    /api/eval/runs/{run_id}/               sweep + results + grades + reviews + flags + 0-100
 POST   /api/eval/runs/{run_id}/cancel/
 GET    /api/eval/reviews/pending/             the review queue, oldest first
 POST   /api/eval/results/{id}/review/         a verdict
-GET    /api/eval/agents/{id}/scorecard/       per-suite scores over time
+GET    /api/eval/agents/{id}/scorecard/       per-suite scores over time (score + score_100)
 ```
+
+Scoring is 0–100 everywhere (`score_100`, `final_score_100`,
+`auto_score_100`): done = positive, give-up = 0, guardrail /
+hallucination / out-of-scope = minus inside the case with a `flags`
+entry (`gave_up`, `guardrail`, `hallucination`, `out_of_scope`).
+Guardrail and unexpected give-up results auto-queue for review.
+See [EVAL_EXPANSION_PLAN.md](EVAL_EXPANSION_PLAN.md).
 
 ---
 

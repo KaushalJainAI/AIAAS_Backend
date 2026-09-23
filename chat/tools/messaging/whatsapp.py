@@ -26,9 +26,12 @@ def _creds_error():
 async def _config(user_id: int, account) -> tuple[str, str]:
     from .common import vault_field
 
-    slug = (account.credential_slug if account else '') or 'whatsapp'
-    phone_id = await vault_field(user_id, slug, 'phone_number_id')
-    token = await vault_field(user_id, slug, 'token')
+    # The seeded vault type is `whatsapp-cloud` (`accessToken` +
+    # `phoneNumberId`); an account may point at another slug holding the
+    # same two fields.
+    slug = (account.credential_slug if account else '') or 'whatsapp-cloud'
+    phone_id = await vault_field(user_id, slug, 'phoneNumberId')
+    token = await vault_field(user_id, slug, 'accessToken')
     if not phone_id or not token:
         _creds_error()
     assert phone_id is not None and token is not None

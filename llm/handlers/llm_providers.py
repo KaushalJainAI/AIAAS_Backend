@@ -35,7 +35,7 @@ class OpenAINode(OpenAICompatibleLLMNode):
     provider_slug = "openai"
     api_label = "OpenAI"
     base_url = "https://api.openai.com/v1"
-    default_model = "gpt-4o-mini"
+    default_model = "gpt-5.6-luna"
     image_endpoint = "https://api.openai.com/v1/images/generations"
 
 

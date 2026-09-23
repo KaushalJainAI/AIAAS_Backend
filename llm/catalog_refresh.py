@@ -70,6 +70,21 @@ SUGGESTED_SUCCESSORS = {
     'deepseek/deepseek-v4-pro-0813': 'deepseek/deepseek-v4.1-flash',
     'google/gemini-3.6-flash': 'google/gemini-3.7-flash',
     'google/gemini-3.5-flash-lite': 'google/gemini-3.7-flash',
+    'openai/gpt-4o-mini': 'openai/gpt-5.6-luna',
+    'google/gemini-3.1-pro-preview': 'google/gemini-3.8-flash',
+    'meta/muse-spark-1.2': 'meta/muse-spark-1.3',
+    'mistralai/mistral-small-2603': 'qwen/qwen3.7-flash',
+    'meta-llama/llama-4-maverick': 'meta-llama/llama-4-scout',
+    'openai/gpt-5.6-sol': 'openai/gpt-6-sol',
+    'openai/gpt-5.6-sol-pro': 'openai/gpt-6-sol-pro',
+    'anthropic/claude-opus-5': 'anthropic/claude-opus-5.5',
+    'anthropic/claude-fable-5': 'anthropic/claude-fable-5.1',
+    'meta/muse-spark-1.2-contributor': 'meta/muse-spark-1.3-contributor',
+    'deepseek/deepseek-v4-flash-vision-exp': 'deepseek/deepseek-v4.1-flash',
+    'google/gemini-3.7-flash': 'google/gemini-3.8-flash',
+    'x-ai/grok-4.5': 'x-ai/grok-4.6',
+    'moonshotai/kimi-k2.7-code': 'minimax/minimax-m3',
+    'meta/muse-glimmer-30b': 'meta-llama/llama-4-scout',
 }
 
 

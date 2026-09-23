@@ -26,14 +26,16 @@ What lives where:
 +  voice         transcription and speech, behind one-door engines
 +  docs          `ocr_document`: scanned PDFs and photos as text, rows or fields
 +  esign         documents out for e-signature, completed by webhook
-+  talk          one tool set for Slack, WhatsApp, Teams and SMS
++  talk          one tool set for Slack, WhatsApp, Teams, SMS and Telegram
 +  publish       hosted pages: snapshots shareable by link (`link`/`platform`/`public`)
    internal      this platform's own API, called as the user
   clock         wall-clock time
 +  data          SQL over the user's databases (read, and writes where allowed)
 +  apicaller     one generic caller for the user's HTTP APIs
-  fetch         `download_file`: a URL the user named, kept as their file
-  workspace     the platform itself: `extract_data`, `notify_user`
+   fetch         `download_file`: a URL the user named, kept as their file
+  runs          the user's jobs: `list_user_runs` plus the progress block
+  workspace     the platform itself: `extract_data`, `notify_user` now, and
+                the reminder trio for later (`schedule_notification` and co.)
   google        native Gmail / Drive / Sheets / Calendar connector tools
 
 Connector tools (`google`) *are* registered here, and carry `connector=` so the
@@ -62,6 +64,7 @@ from . import (  # noqa: F401  — imported for their registration side effect
     data,
     docs,
     esign,
+    eval_manager,
     fetch,
     files,
     google,
@@ -70,9 +73,11 @@ from . import (  # noqa: F401  — imported for their registration side effect
     media,
     memory,
     missions,
+    notion,
     office,
     planning,
     publish,
+    runs,
     sandbox,
     talk,
     tasks,

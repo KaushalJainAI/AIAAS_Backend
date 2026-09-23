@@ -54,7 +54,7 @@ GRANT_RISKS: dict[str, str] = {
     'mcp': 'Reaches connected accounts under your credentials.',
     'voice': 'Transcribes recordings; synthesis spends money per call.',
     'esign': 'Sends documents out for signature; completion arrives by webhook.',
-    'talk': 'Messages on four channels; unattended sends need recipients.',
+    'talk': 'Messages on five channels; unattended sends need recipients.',
     'data': 'Reads databases; writes only where the owner allowed.',
     'api': 'Calls HTTP APIs; auth comes from the vault.',
     'compute': 'Runs commands on your workspace; quotas apply.',

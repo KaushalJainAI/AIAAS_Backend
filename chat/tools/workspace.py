@@ -1,14 +1,10 @@
 """
-Two tools that reach the platform's own machinery on the user's behalf:
-`extract_data` (the extraction engine) and `notify_user` (the notification
-feed).
-
-Both existed as features with no way in from a run. `inference/extraction.py`
-has schemas, confidence scoring and a human review queue, reachable only from
-its own page — so an agent asked to "pull the totals out of these invoices"
-re-read every document and re-invented the shape each time. And an agent that
-runs for twenty minutes unattended had no way to tell anybody it had finished;
-the one notification a run could produce was the approval prompt.
+Tools that reach the platform's own machinery on the user's behalf:
+`extract_data` (the extraction engine), `notify_user` (the notification feed,
+right now) and the reminder trio (`schedule_notification`,
+`list_scheduled_notifications`, `cancel_scheduled_notification` — the feed at
+a user-asked time, or on a user-asked heartbeat, fired by the scheduled
+sweep in `notifications/scheduled.py`).
 """
 from __future__ import annotations
 
@@ -213,7 +209,7 @@ async def notify_user(args: Dict, context: Dict) -> str:
                 prefs = NotificationPreference.objects.filter(user=user).first()
                 if prefs is None or prefs.device_notifications_enabled:
                     send_web_push(user, title=title, body=message,
-                                  action_url=data.get('action_url') or '/inbox',
+                                  action_url=data.get('action_url') or '/runs',
                                   kind='agent_update')
             except Exception:
                 logger.exception('[Notify] web push failed')
@@ -233,3 +229,196 @@ async def notify_user(args: Dict, context: Dict) -> str:
         'remaining': (await alimit(context, "notify_user", "maxPerRun")) - sent[0],
         'rendered': 'The user has been notified. Do not repeat this in every turn.',
     })
+
+
+# ---------------------------------------------------------------------------
+# schedule_notification / list_scheduled_notifications /
+# cancel_scheduled_notification
+# ---------------------------------------------------------------------------
+
+@tool({
+    'type': 'function',
+    'function': {
+        'name': 'schedule_notification',
+        'description': (
+            'Set a reminder the user asked for: at an exact time ("remind me '
+            'tomorrow at 9am"), or on a heartbeat they named ("every morning", '
+            '"hourly while the migration runs"). The sweep fires it as a '
+            'feed notification plus the usual device ping — never email. '
+            'Only schedule what the user explicitly asked for, at the exact '
+            'time they gave: never invent reminders, never round their time '
+            'to something tidier, and never schedule what belongs in your '
+            'answer. When a job finishes, call notify_user now instead of '
+            'scheduling an echo of it. A time without a timezone is read in '
+            'the user\u2019s own timezone.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'title': {'type': 'string', 'description': 'One line, what the reminder is about.'},
+                'message': {'type': 'string', 'description': 'A sentence or two: what and what next.'},
+                'run_at': {'type': 'string', 'description': 'ISO date-time, e.g. 2026-09-24T09:00:00+05:30. Must be in the future.'},
+                'repeat': {'type': 'string', 'description': 'none (once, the default), hourly, daily or weekly.'},
+                'email': {
+                    'type': 'boolean',
+                    'description': 'Also email it. Pass true only when the user explicitly asked for email — a reminder is feed + ping unless they said the word.',
+                },
+                'link': {
+                    'type': 'string',
+                    'description': 'Optional in-app path to open, e.g. /runs.',
+                },
+            },
+            'required': ['title', 'message', 'run_at'],
+            'additionalProperties': False,
+        },
+    },
+}, effect='reversible')
+async def schedule_notification(args: Dict, context: Dict) -> str:
+    from django.contrib.auth import get_user_model
+    from django.utils import timezone
+    from notifications.scheduled import (
+        parse_run_at, schedule_for_user, validate_schedule,
+    )
+
+    user_id = context.get('user_id')
+    if not user_id:
+        return json.dumps({'error': 'No user context.'})
+
+    title = str(args.get('title') or '').strip()[:TITLE_CHARS]
+    message = str(args.get('message') or '').strip()[:MESSAGE_CHARS]
+    if not title or not message:
+        return json.dumps({'error': 'Title, message and run_at are all required.'})
+    repeat = str(args.get('repeat') or 'none').lower()
+
+    link = str(args.get('link') or '').strip()
+    # Same rule as notify_user: a stored value that becomes a link must be an
+    # in-app path, never an open redirect.
+    data = {'action_url': link} if link.startswith('/') and not link.startswith('//') else {}
+
+    def work():
+        user = get_user_model().objects.filter(id=user_id).first()
+        if user is None:
+            return None
+        now = timezone.now()
+        run_at = parse_run_at(str(args.get('run_at') or ''), user)
+        validate_schedule(run_at, repeat, now)
+        return schedule_for_user(user, title, message, run_at, repeat, data,
+                                 send_email=args.get('email') is True)
+
+    try:
+        reminder = await sync_to_async(work)()
+    except ValueError as exc:
+        return json.dumps({'error': str(exc)})
+    except Exception:
+        logger.exception('[Notify] could not schedule a notification')
+        return json.dumps({'error': 'The reminder could not be scheduled.'})
+    if reminder is None:
+        return json.dumps({'error': 'The reminder could not be scheduled.'})
+    return json.dumps({
+        'scheduled': True,
+        'id': reminder.id,
+        'run_at': reminder.next_run_at.isoformat(),
+        'repeat': reminder.repeat,
+        'email': reminder.send_email,
+        'rendered': f'Reminder set for {reminder.next_run_at.isoformat()}.',
+    })
+
+
+@tool({
+    'type': 'function',
+    'function': {
+        'name': 'list_scheduled_notifications',
+        'description': (
+            'List this user\u2019s live reminders — what is scheduled, when '
+            'each fires next, and whether it repeats. Use it when the user '
+            'asks what reminders exist, before scheduling a duplicate, and to '
+            'resolve "cancel my morning reminder" to an id.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {},
+            'additionalProperties': False,
+        },
+    },
+}, parallel=True, effect='read')
+async def list_scheduled_notifications(args: Dict, context: Dict) -> str:
+    user_id = context.get('user_id')
+    if not user_id:
+        return json.dumps({'error': 'No user context.'})
+
+    def _read():
+        from notifications.models import ScheduledNotification
+
+        return list(
+            ScheduledNotification.objects
+            .filter(user_id=user_id, active=True, next_run_at__isnull=False)
+            .order_by('next_run_at')
+            .values('id', 'title', 'message', 'repeat', 'send_email',
+                    'next_run_at', 'times_sent'))
+
+    try:
+        rows = await sync_to_async(_read)()
+    except Exception:  # noqa: BLE001
+        logger.exception('[Notify] list failed')
+        return json.dumps({'error': 'The reminders could not be listed.'})
+    return json.dumps({
+        'reminders': [
+            {**row,
+             'next_run_at': row['next_run_at'].isoformat(),
+             'message': str(row['message'])[:200]}
+            for row in rows
+        ],
+        'count': len(rows),
+    }, default=str)
+
+
+@tool({
+    'type': 'function',
+    'function': {
+        'name': 'cancel_scheduled_notification',
+        'description': (
+            'Cancel one of this user\u2019s live reminders by id — resolve '
+            'the id with list_scheduled_notifications first, never guess one. '
+            'Fired reminders need no cancelling; they already went quiet.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'id': {'type': 'integer', 'description': 'The reminder id.'},
+            },
+            'required': ['id'],
+            'additionalProperties': False,
+        },
+    },
+}, effect='reversible')
+async def cancel_scheduled_notification(args: Dict, context: Dict) -> str:
+    user_id = context.get('user_id')
+    if not user_id:
+        return json.dumps({'error': 'No user context.'})
+    try:
+        reminder_id = int(args.get('id'))
+    except (TypeError, ValueError):
+        return json.dumps({'error': 'Give the numeric id of the reminder.'})
+
+    def _cancel():
+        from notifications.models import ScheduledNotification
+
+        # Owned only: a foreign id cancels nothing and says it cancelled
+        # nothing — the same anti-oracle shape the run tools keep.
+        row = (ScheduledNotification.objects
+               .filter(id=reminder_id, user_id=user_id,
+                       active=True, next_run_at__isnull=False)
+               .first())
+        if row is None:
+            return False
+        row.cancel()
+        return True
+
+    try:
+        cancelled = await sync_to_async(_cancel)()
+    except Exception:  # noqa: BLE001
+        logger.exception('[Notify] cancel failed')
+        return json.dumps({'error': 'The reminder could not be cancelled.'})
+    if not cancelled:
+        return json.dumps({'error': 'No live reminder with that id for this user.'})
+    return json.dumps({'cancelled': True})

@@ -118,3 +118,51 @@ async def send(user_id: int, account, *, to: str, body: str) -> str:
             f"Telegram refused the send: {payload.get('description', 'unknown error')}.")
     result = payload.get('result') or {}
     return str(result.get('message_id') or '')
+
+
+def register_webhook(user_id: int, account, base_url: str) -> str:
+    """Point the bot at this platform's webhook. Returns the webhook URL.
+
+    Synchronous: used by the management command and the account view, neither
+    of which runs in the turn loop. Registers the account's own path secret
+    as Telegram's `secret_token`, which `message_hook` verifies.
+    """
+    import httpx
+
+    from .common import Unsupported
+
+    token = None
+    try:
+        from credentials.manager import CredentialManager
+
+        slug = (account.credential_slug if account else '') or 'telegram'
+        credential = CredentialManager.lookup_by_slug_sync(slug, user_id)
+        data = (credential.get_credential_data() or {}) if credential else {}
+        token = data.get('token') or data.get('bot_token')
+    except Exception:  # noqa: BLE001
+        token = None
+    if not token:
+        raise Unsupported(
+            'Telegram is not connected: talk to @BotFather, create a bot, and '
+            'store its token on the Connections page.')
+    if not base_url:
+        raise Unsupported('PUBLIC_URL is not set; cannot build the webhook URL.')
+    from django.urls import reverse
+
+    url = f"{base_url.rstrip('/')}{reverse('messaging:message_hook', args=['telegram', account.secret])}"
+    try:
+        resp = httpx.post(
+            f'https://api.telegram.org/bot{token}/setWebhook',
+            json={'url': url, 'secret_token': account.secret,
+                  'allowed_updates': ['message', 'edited_message']},
+            timeout=20,
+        )
+        payload = resp.json()
+    except Exception as exc:
+        raise Unsupported('Telegram could not be reached. Try again shortly.') from exc
+    if not payload.get('ok'):
+        raise Unsupported(
+            f"Telegram refused: {payload.get('description', 'unknown error')}.")
+    account.verified = True
+    account.save(update_fields=['verified', 'updated_at'])
+    return url

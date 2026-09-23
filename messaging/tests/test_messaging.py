@@ -20,6 +20,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
+from rest_framework.test import APITestCase
 
 from chat.tools import execute_tool
 from logs.models import CostEntry
@@ -394,3 +395,182 @@ class TelegramWebhookTests(TestCase):
             content_type='application/json', **self.headers())
         self.assertEqual(response.json(), {'ok': True})
         self.assertFalse(InboundMessage.objects.exists())
+
+
+class ChannelListTests(APITestCase):
+    def setUp(self):
+        from credentials.models import CredentialType
+
+        self.user = User.objects.create_user('chan', 'c@example.com', 'pw')
+        self.client.force_authenticate(user=self.user)
+        # Seeded by migration, not empty: update, never create.
+        CredentialType.objects.update_or_create(
+            slug='telegram',
+            defaults={
+                'name': 'Telegram', 'auth_method': 'api_key',
+                'fields_schema': [
+                    {'name': 'token', 'label': 'Bot Token', 'type': 'password',
+                     'required': True}],
+            })
+
+    def url(self):
+        return reverse('messaging:channel_list')
+
+    def test_unauthenticated_is_refused(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.get(self.url())
+        self.assertIn(response.status_code, (401, 403))
+
+    def test_every_channel_is_listed_with_its_needs(self):
+        response = self.client.get(self.url())
+        self.assertEqual(response.status_code, 200)
+        by_id = {c['id']: c for c in response.data['channels']}
+        self.assertEqual(sorted(by_id),
+                         ['slack', 'sms', 'teams', 'telegram', 'whatsapp'])
+        telegram = by_id['telegram']
+        self.assertEqual(telegram['tools'],
+                         ['message_channels', 'message_search', 'message_read',
+                          'message_draft', 'message_send'])
+        self.assertEqual(telegram['credential']['slug'], 'telegram')
+        self.assertEqual(telegram['status'], 'needs_key')
+        self.assertTrue(telegram['setup'])
+        # Gated channels say why, in their own words.
+        self.assertEqual(by_id['teams']['status'], 'gated')
+        self.assertEqual(by_id['sms']['status'], 'gated')
+
+    def test_a_stored_credential_reads_as_ready(self):
+        credential = mock.Mock()
+        with mock.patch(
+                'credentials.manager.CredentialManager.lookup_by_slug_sync',
+                return_value=credential):
+            response = self.client.get(self.url())
+        by_id = {c['id']: c for c in response.data['channels']}
+        self.assertTrue(by_id['telegram']['credential']['stored'])
+        self.assertEqual(by_id['telegram']['status'], 'needs_account')
+
+
+class AccountCreateTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user('acct', 'a@example.com', 'pw')
+        self.client.force_authenticate(user=self.user)
+
+    def test_an_unknown_channel_is_refused(self):
+        response = self.client.post(
+            reverse('messaging:account_create'), {'channel': 'pigeon'},
+            format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_creating_returns_the_webhook_url(self):
+        import os
+        from unittest.mock import patch as _patch
+
+        with _patch.dict(os.environ, {'PUBLIC_URL': 'https://x.test'}):
+            response = self.client.post(
+                reverse('messaging:account_create'),
+                {'channel': 'telegram', 'label': 'shop'}, format='json')
+        self.assertEqual(response.status_code, 201)
+        self.assertIn('/api/messaging/hooks/telegram/', response.data['webhook_url'])
+        self.assertTrue(response.data['webhook_url'].startswith('https://x.test'))
+        account = MessagingAccount.objects.get(id=response.data['id'])
+        self.assertEqual(account.user, self.user)
+
+    def test_creating_twice_returns_the_same_row(self):
+        url = reverse('messaging:account_create')
+        first = self.client.post(url, {'channel': 'slack'}, format='json')
+        second = self.client.post(url, {'channel': 'slack'}, format='json')
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data['id'], second.data['id'])
+        self.assertFalse(second.data['created'])
+
+    def test_registering_a_non_telegram_account_is_refused(self):
+        account = MessagingAccount.objects.create(
+            user=self.user, channel='slack', label='team')
+        response = self.client.post(
+            reverse('messaging:account_register', args=[account.id]))
+        self.assertEqual(response.status_code, 400)
+
+    def test_registering_marks_the_account_verified(self):
+        account = MessagingAccount.objects.create(
+            user=self.user, channel='telegram', label='shop')
+
+        def _reg(user_id, acct, base):
+            acct.verified = True
+            acct.save(update_fields=['verified', 'updated_at'])
+            return 'https://x/hooks'
+
+        with mock.patch(
+                'chat.tools.messaging.telegram.register_webhook',
+                side_effect=_reg) as reg:
+            response = self.client.post(
+                reverse('messaging:account_register', args=[account.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['verified'])
+        reg.assert_called_once()
+
+
+class WhatsappShapeTests(TestCase):
+    """The adapter follows the seeded vault shape: type `whatsapp-cloud`
+    holding `accessToken` + `phoneNumberId`."""
+
+    def setUp(self):
+        self.user = User.objects.create_user('wa', 'w@example.com', 'pw')
+
+    def _config(self, data):
+        from chat.tools.messaging import whatsapp
+
+        credential = mock.Mock()
+        credential.get_credential_data.return_value = data
+        with mock.patch(
+                'credentials.manager.CredentialManager.lookup_by_slug_sync',
+                return_value=credential) as lookup:
+            return async_to_sync(whatsapp._config)(self.user.id, None), lookup
+
+    def test_reads_the_seeded_shape(self):
+        (phone_id, token), lookup = self._config(
+            {'accessToken': 'tok', 'phoneNumberId': '123'})
+        self.assertEqual((phone_id, token), ('123', 'tok'))
+        lookup.assert_called_with('whatsapp-cloud', self.user.id)
+
+
+class SmsTwilioTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user('sms', 's@example.com', 'pw')
+        self.ctx = {'user_id': self.user.id, 'caller': 'chat'}
+
+    def _vault(self, data):
+        credential = mock.Mock()
+        credential.get_credential_data.return_value = data
+        return mock.patch(
+            'credentials.manager.CredentialManager.lookup_by_slug_sync',
+            return_value=credential)
+
+    def _http(self, response):
+        client = mock.Mock()
+
+        async def _post(*args, **kwargs):
+            client.last_kwargs = kwargs
+            return response
+        client.post = _post
+        return mock.patch(
+            'workflow_backend.httpclient.shared_client', return_value=client), client
+
+    @override_settings(SMS_ENGINE='twilio')
+    def test_send_posts_with_basic_auth(self):
+        resp = FakeBotResponse(payload={'sid': 'SM1', 'status': 'queued'})
+        patcher, client = self._http(resp)
+        with self._vault({'accountSid': 'AC1', 'authToken': 'tok',
+                          'fromNumber': '+1000'}), patcher:
+            out = json.loads(async_to_sync(execute_tool)(
+                'message_send',
+                {'channel': 'sms', 'to': '+1001', 'body': 'hi'}, dict(self.ctx)))
+        self.assertTrue(out['sent'])
+        self.assertEqual(out['provider_message_id'], 'SM1')
+        self.assertEqual(client.last_kwargs.get('auth'), ('AC1', 'tok'))
+        row = CostEntry.objects.get(user=self.user, kind='sms')
+        self.assertEqual(row.amount_inr, 1)
+
+    def test_engine_off_says_so(self):
+        out = json.loads(async_to_sync(execute_tool)(
+            'message_send',
+            {'channel': 'sms', 'to': '+1001', 'body': 'hi'}, dict(self.ctx)))
+        self.assertIn('SMS_ENGINE', out['error'])

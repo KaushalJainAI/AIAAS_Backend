@@ -113,6 +113,11 @@ class EvalSuite(models.Model):
     tags = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
 
+    #: Which starter template this suite was cloned from, if any
+    #: (`eval/starter_kits.py` key, e.g. 'research'). Null for hand-made
+    #: suites. Used by the Evals page to offer "clone starter for my agent".
+    template_slug = models.CharField(max_length=100, null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

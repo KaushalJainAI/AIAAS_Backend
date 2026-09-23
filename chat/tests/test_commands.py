@@ -406,3 +406,129 @@ class CommandEndpointTests(TestCase):
                                format="json")
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(res.data["card"]["type"], "memory_saved")
+
+
+class NewCapabilityCommandsTests(TestCase):
+    """Every newer capability gets a slash spelling: web, media, office,
+    knowledge, APIs, messaging, signing and running code. All are plain
+    turns — the turn itself is side-effect free and the priced or outward
+    tool still gates at dispatch — so each test pins the status, the pin
+    and the refusal of an empty line."""
+
+    def setUp(self):
+        self.user = _user("capabilities")
+        self.ctx = _ctx(self.user)
+
+    def _run(self, dotted, **call_kwargs):
+        import importlib
+
+        from chat.commands.registry import CommandCall
+
+        module_name, func_name = dotted.rsplit(".", 1)
+        func = getattr(importlib.import_module(module_name), func_name)
+        call_kwargs.setdefault("name", func_name.replace("_command", ""))
+        return async_to_sync(func)(
+            CommandCall(**call_kwargs), self.ctx)
+
+    def test_web_tier_pins_search_read_download(self):
+        res = self._run("chat.commands.web.search_command",
+                        args={"text": "repo rates"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.tool_pin, ("web_search",))
+        self.assertIn("/search", res.context_block)
+
+        res = self._run("chat.commands.web.read_command",
+                        args={"text": "https://example.com"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.tool_pin, ("scrape_webpage", "read_url"))
+
+        res = self._run("chat.commands.web.download_command",
+                        args={}, text="https://example.com/f.pdf")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.tool_pin, ("download_file",))
+        res = self._run("chat.commands.web.download_command",
+                        args={}, text="  ")
+        self.assertEqual(res.status, "error")
+
+    def test_image_needs_a_subject_and_pins_generation(self):
+        res = self._run("chat.commands.media.image_command",
+                        args={"text": "a heron at dawn"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.tool_pin, ("generate_image",))
+        res = self._run("chat.commands.media.image_command",
+                        args={}, text=" ")
+        self.assertEqual(res.status, "error")
+
+    def test_voice_commands_pin_their_engines(self):
+        from chat.commands import registry as command_registry
+
+        res = self._run("chat.commands.media.speak_command",
+                        args={"text": "hello"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.tool_pin, ("text_to_speech",))
+        self.assertEqual(command_registry.get("speak").requires, "tts")
+
+        res = self._run("chat.commands.media.transcribe_command",
+                        args={"file": "/Chat/note.m4a"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.tool_pin, ("transcribe_audio",))
+        self.assertEqual(command_registry.get("transcribe").requires, "stt")
+
+    def test_office_trio_pins_renderers(self):
+        for dotted, tool in [
+            ("chat.commands.library.chart_command", "render_chart"),
+            ("chat.commands.library.diagram_command", "render_diagram"),
+            ("chat.commands.library.pdf_command", "render_pdf"),
+        ]:
+            res = self._run(dotted, args={"text": "q3"}, text="")
+            self.assertEqual(res.status, "ok", dotted)
+            self.assertEqual(res.tool_pin, (tool,), dotted)
+
+    def test_knowledge_commands_pin_rag(self):
+        res = self._run("chat.commands.knowledge.kb_command",
+                        args={"text": "refund policy"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertIn("knowledge_base_search", res.tool_pin)
+        self.assertIn("read_document", res.tool_pin)
+        res = self._run("chat.commands.knowledge.kb_command",
+                        args={}, text=" ")
+        self.assertEqual(res.status, "error")
+
+        res = self._run("chat.commands.knowledge.extract_command",
+                        args={"text": "invoice totals"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.tool_pin, ("extract_data",))
+
+    def test_api_mirrors_sql_without_a_connection(self):
+        res = self._run("chat.commands.shortcuts.api_command",
+                        args={}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.card.get("type"), "api_pick")
+
+    def test_message_sign_run_are_plain_turns_with_pins(self):
+        res = self._run("chat.commands.shortcuts.message_command",
+                        args={"text": "ping ops"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertIn("message_send", res.tool_pin)
+
+        from chat.commands import registry as command_registry
+
+        self.assertEqual(command_registry.get("sign").requires, "esign")
+        res = self._run("chat.commands.shortcuts.sign_command",
+                        args={"text": "msa.pdf to legal"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertIn("request_signature", res.tool_pin)
+
+        res = self._run("chat.commands.shortcuts.run_command",
+                        args={"text": "sum the column"}, text="")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.tool_pin, ("execute_python",))
+
+    def test_new_commands_are_listed(self):
+        from chat.commands import registry as command_registry
+
+        names = {c.name for c in command_registry.all_commands()}
+        for expected in ("search", "read", "download", "image", "speak",
+                         "transcribe", "chart", "diagram", "pdf", "kb",
+                         "extract", "api", "message", "sign", "run"):
+            self.assertIn(expected, names)

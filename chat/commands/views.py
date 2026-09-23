@@ -32,12 +32,15 @@ from rest_framework.response import Response
 from chat.commands import registry as _registry  # noqa: F401
 from chat.commands import (  # noqa: F401 — registration side effect
     agents as _commands_agents,
+    knowledge as _commands_knowledge,
     library as _commands_library,
+    media as _commands_media,
     memory as _commands_memory,
     missions as _commands_missions,
     review as _commands_review,
     session as _commands_session,
     shortcuts as _commands_shortcuts,
+    web as _commands_web,
 )
 from chat.commands.registry import CommandContext
 

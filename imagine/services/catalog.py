@@ -37,21 +37,40 @@ EMPTY_CAPABILITIES: Capabilities = {"image": [], "video": [], "audio": []}
 #: Models surfaced first in the picker. Everything else stays reachable via
 #: search — this list only decides what a user sees before they type. Ordered:
 #: the first entry present in the live catalog becomes the default selection.
+#: Curated 2026-09-23 against the live /images/models + /videos/models
+#: endpoints: GPT Image 2.5 (Sunburst precision / Flare speed) replaces GPT
+#: Image 2, Hailuo 3 Max replaces Hailuo 3 ($0.05-0.08/s vs $0.13/s), Flux.2
+#: Max joins Pro, Wan 3.0 (+Prime fast tier) and FLUX.3 Video join video,
+#: Nano Banana 2 Lite is the budget image tier. Anything absent from the live
+#: catalog is skipped by `default_model_id`, never offered.
 RECOMMENDED: Dict[str, List[str]] = {
     "image": [
+        "openai/gpt-image-2.5-sunburst",
         "google/gemini-3.1-flash-image",
         "bytedance-seed/seedream-5-0-pro",
-        "black-forest-labs/flux.2-pro",
-        "openai/gpt-image-2",
+        "black-forest-labs/flux.2-max",
+        "meta/muse-image",
         "google/gemini-3-pro-image",
         "qwen/qwen-image-3-pro",
+        "black-forest-labs/flux.2-pro",
+        "microsoft/mai-image-2.6-flash",
+        "openai/gpt-image-2.5-flare",
+        "bytedance-seed/seedream-5-0-lite",
+        "google/gemini-3.1-flash-lite-image",
+        "x-ai/grok-imagine-image-2.0",
+        "inclusionai/ming-image-0.1-design",
     ],
     "video": [
         "google/veo-3.1-fast",
         "bytedance/seedance-2.5",
         "openai/sora-2-pro",
-        "minimax/hailuo-3",
+        "minimax/hailuo-3-max",
+        "alibaba/wan-3.0",
+        "alibaba/wan-3.0-prime",
         "kwaivgi/kling-v3.0-pro",
+        "kwaivgi/kling-v3.0-std",
+        "black-forest-labs/flux-3-video",
+        "google/veo-3.1-lite",
     ],
     "audio": [
         "openai/gpt-4o-mini-tts",

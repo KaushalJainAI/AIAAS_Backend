@@ -55,6 +55,8 @@ _TALK_MAX_PER_RUN = 20
 _TALK_MAX_PER_RECIPIENT = 5
 _AGENT_SEARCH_DEFAULT = 10
 _AGENT_SEARCH_MAX = 25
+_RUN_LIST_DEFAULT = 10
+_RUN_LIST_MAX = 25
 _AGENT_ANSWER_CHARS = 20_000
 _HISTORY_MAX_MATCHES = 12
 _HISTORY_MAX_TOTAL_CHARS = 12_000
@@ -167,6 +169,18 @@ TOOL_SETTINGS: dict[str, tuple[Setting, ...]] = {
         Setting('maxResults', 'Events per listing',
                 'How many calendar events one listing returns.',
                 25, 1, 100),
+    ),
+    'docs_read': (
+        Setting('charLimit', 'Document text kept',
+                'How much of a Google Doc one read returns. Longer documents are clipped.',
+                20_000, 2_000, 60_000, 'characters'),
+    ),
+    # Native Notion connector (`chat/tools/notion.py`). Same two shapes:
+    # how many items search returns, and reads clip in code with a notice.
+    'notion_search': (
+        Setting('maxResults', 'Results per search',
+                'How many pages and databases one search brings back.',
+                10, 1, 50),
     ),
     # 20k mirrors `chat.tools.sandbox.MAX_CODE_OUTPUT_CHARS`, which stays as
     # the floor under a failed overlay read.
@@ -307,6 +321,11 @@ TOOL_SETTINGS: dict[str, tuple[Setting, ...]] = {
         Setting('maxResults', 'Agents per search',
                 'How many agents one search returns.',
                 _AGENT_SEARCH_MAX, 5, 50),
+    ),
+    'list_user_runs': (
+        Setting('maxResults', 'Runs per listing',
+                'How many of your runs one listing returns.',
+                _RUN_LIST_MAX, 5, 50),
     ),
     'search_conversation_history': (
         Setting('maxMatches', 'Messages per search',

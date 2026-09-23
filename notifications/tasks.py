@@ -24,3 +24,15 @@ def sweep_hitl_reminders():
     except Exception as exc:
         logger.exception("HITL reminder sweep failed: %s", exc)
         raise
+
+
+@shared_task(name='notifications.sweep_scheduled', ignore_result=True)
+def sweep_scheduled():
+    """Fire every due user-asked reminder. Scheduled by Celery beat."""
+    from .scheduled import run_scheduled_sweep
+
+    try:
+        return run_scheduled_sweep()
+    except Exception as exc:
+        logger.exception("Scheduled reminder sweep failed: %s", exc)
+        raise
