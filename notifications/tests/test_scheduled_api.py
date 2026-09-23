@@ -34,12 +34,16 @@ class ScheduledApiTests(TestCase):
     def test_list_shows_only_live_own_rows(self):
         res = self.client.get('/api/notifications/scheduled/')
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(len(res.data), 1)
-        self.assertEqual(res.data[0]['repeat'], 'daily')
-        self.assertTrue(res.data[0]['send_email'])
+        rows = res.data['results'] if isinstance(res.data, dict) else res.data
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['repeat'], 'daily')
+        self.assertTrue(rows[0]['send_email'])
         other = APIClient()
         other.force_authenticate(self.other)
-        self.assertEqual(other.get('/api/notifications/scheduled/').data, [])
+        other_res = other.get('/api/notifications/scheduled/')
+        other_rows = (other_res.data['results']
+                      if isinstance(other_res.data, dict) else other_res.data)
+        self.assertEqual(other_rows, [])
 
     def test_cancel_is_idempotent_and_owner_only(self):
         url = f'/api/notifications/scheduled/{self.row.id}/'

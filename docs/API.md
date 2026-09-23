@@ -59,7 +59,7 @@ called out here once.
 | `inference` | tests (3), tests_units (12), test_extraction (12), test_extract_task (12) — extraction engine (LLM per-document with threshold) + merge migration 0009; test_fulltext_backend, test_backends, test_kb_backends_api — retrieval backends (2026-08-24); test_regressions (38) — the audit fixes of 2026-08-24: KB resolution, fail-fast retrieval, file_type vocabulary, delete-side stats, hybrid stats, row write surface, duplicate-name message, session-KB id stability, share ordering, posting-scan order; test_filesystem (42) + test_recycle (28) — the per-user file system (2026-08-25): isolation table, choke point, tree mechanics, recycle bin and the 30-day sweep; chat/tests/test_knowledge_tools — retrieval tool routing and trash invisibility |  strong |
 | `orchestrator` | tests (4), tests_partial (5), tests_security (7), tests_units (9), test_agent_runtime |  good — `integration/test_workflow_lifecycle` and `integration/test_adversarial_orchestrator` deleted 2026-08-18 (they exercised the retired Workflow model / `/api/orchestrator/workflows/` routes) |
 | `streaming` | tests (1), tests_units (14) | ~ moderate |
-| `notifications` | tests (3) + tests_reminders (20) + test_scheduled_sweep (6) |  reminders + scheduled; ~ thin elsewhere |
+| `notifications` | tests (3) + tests_reminders (20) + test_scheduled_sweep (7) + test_scheduled_api (3) |  reminders + scheduled; ~ thin elsewhere |
 | `logs` | tests (69 across 5 files) |  strong — every route + turn/delegation/revision semantics + the 0015 backfill |
 | `templates` | tests (1) | ~ thin |
 | `skills` | tests (1) | ~ thin |
@@ -616,6 +616,8 @@ ViewSet (full CRUD) plus non-router routes declared *before* the router — its
 | `/api/notifications/push/` | GET | Caller's subscribed browsers | Auth (owner) | O(n) | Yes | `PushSubscriptionSerializer` | PushSubscription | |
 | `/api/notifications/push/subscribe/` | POST | Store/refresh one browser subscription (upsert on endpoint) | Auth | O(1) | Yes | `PushSubscriptionSerializer` | PushSubscription | Re-login on a shared machine re-owns the endpoint |
 | `/api/notifications/push/unsubscribe/` | POST | Remove one browser subscription (unknown endpoint still 200) | Auth | O(1) | Yes | — | PushSubscription | |
+| `/api/notifications/scheduled/` | GET | Caller's live reminders (ordered, capped at the 20-live limit) | Auth | O(n) | Y | `ScheduledNotificationSerializer` (read-only) | ScheduledNotification | Creation stays in chat — the tool quotes the user's timing; no second write path |
+| `/api/notifications/scheduled/{id}/` | DELETE | Cancel one live reminder (idempotent 204; foreign id → 404, never 403) | Auth (owner) | O(1) | Y | — | ScheduledNotification | Spent rows answer 404, not a state error |
 
 **Reminder delivery** (`notifications/reminders.py`, swept by
 `notifications.sweep_hitl_reminders` on Celery beat every
@@ -628,19 +630,24 @@ ViewSet (full CRUD) plus non-router routes declared *before* the router — its
 | Hourly | Opt-in; once an hour while anything is pending | Device push (`ws/hitl/` + Web Push) + in-app row. **Never email.** |
 | Daily digest | User's chosen local wall-clock time | Email + in-app row + device push (`ws/hitl/` + Web Push). Capped at one per calendar day. |
 | Agent update | `notify_user` tool / e-sign events | Socket + Web Push + in-app row. Max 3 per run. **Never email.** |
-| Scheduled reminder | `schedule_notification` tool, fired by `notifications.sweep_scheduled` on beat every `SCHEDULED_SWEEP_SECONDS` (default 60) or `manage.py send_scheduled_notifications` | In-app row always + device ping unless quiet hours + Web Push twin. **Never email.** One-shot spends after firing; `hourly`/`daily`/`weekly` advance from the due time. Max 20 live per user. |
+| Scheduled reminder | `schedule_notification` tool, fired by `notifications.sweep_scheduled` on beat every `SCHEDULED_SWEEP_SECONDS` (default 60) or `manage.py send_scheduled_notifications` | In-app row always + device ping unless quiet hours + Web Push twin. Email only per-reminder opt-in (`email: true`, default off — explicit user consent is what separates it from system nudges). One-shot spends after firing; `hourly`/`daily`/`weekly` advance from the due time. Max 20 live per user. |
 
 **Run visibility + reminder tools** (`chat/tools/runs.py`,
 `chat/tools/workspace.py`, `chat/tools/agents.py::get_agent_run`): `list_user_runs`
 (status default `running`, limit default 10/max 25, user-scoped, compact rows —
 goal, turns/steps, todo/task progress, approval flag, cost, `/runs` link) and
-the progress block on `get_agent_run` (same shape, no trace payloads:
-`output_data` todos/tasks/files exist only at run close, so running runs
-report live turn activity instead). All four reminder-adjacent tools
+the progress block on `get_agent_run` (same shape, no trace payloads).
+Progress names its source per half: `output_data` todos/tasks/files exist at
+run close (`run record`); a running run's plan is read best-effort from its
+own checkpointer (`live`, bounded rows and seconds, miss degrades to turn
+activity rather than failing). All four reminder-adjacent tools
 (`list_user_runs`, `schedule/list/cancel_scheduled_notification`) are
-`ALWAYS_AVAILABLE` — they touch only the caller's own rows. Tests:
+`ALWAYS_AVAILABLE` — they touch only the caller's own rows. Pending reminders
+are managed on the Notifications tab (`ScheduledReminders.tsx`) over
+`GET/DELETE /api/notifications/scheduled/`. Tests:
 `chat/tests/test_run_visibility.py`, `chat/tests/test_reminder_tools.py`,
-`notifications/tests/test_scheduled_sweep.py`.
+`notifications/tests/test_scheduled_sweep.py`,
+`notifications/tests/test_scheduled_api.py`.
 
 ---
 
