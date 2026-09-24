@@ -127,6 +127,88 @@ def clone_starter_kit(*, user, template: str, name: str = '',
     return suite
 
 
+def save_cases(suite, cases: list[dict[str, Any]], *, drafts: bool = True,
+               world_version: int | None = None):
+    """The one write path for model-derived cases. Sync ORM.
+
+    Generation, run imports, "save as case", the chat `add_eval_case` tool
+    and the `/eval` command all arrive here, so the draft rule lives in one
+    place: `drafts=True` saves `is_active=False` tagged `needs-review`, and
+    the runner sweeps only active cases — nothing a model wrote counts
+    towards a score until a person accepts it on the Evals page. The
+    hand-written case editor (`case_list` POST) is the only other writer,
+    and it stays separate: a person wrote those.
+
+    Each case: `{name?, goal, input_data?, reference?, graders?, tags?}`.
+    Graders are validated through the same registry the runner dispatches
+    through (`GraderError` on unknown). Orders continue past the suite's
+    existing cases; every row is stamped with the live world version (or
+    the override a fresh world draft passes), so generation-time cases
+    belong to the world they were built for. The suite cap bounds the
+    write, never silently truncates it: rows past the room are not created,
+    and the caller reports how many landed.
+    """
+    from django.db.models import Max
+
+    from workflow_backend.thresholds import EVAL_MAX_CASES_PER_SUITE
+
+    from .environment import case_world_version
+    from .generator import DRAFT_TAG
+    from .models import EvalCase
+
+    room = max(0, EVAL_MAX_CASES_PER_SUITE - suite.cases.count())
+    start = (suite.cases.aggregate(m=Max('order'))['m'] or 0) + 1
+    if world_version is None:
+        world_version = case_world_version(suite)
+    rows = []
+    for offset, draft in enumerate(cases[:room]):
+        validated = graders.validate_case_graders(draft.get('graders') or [])
+        tags = [str(t) for t in (draft.get('tags') or []) if str(t).strip()]
+        if drafts:
+            tags = [t for t in tags if t != DRAFT_TAG] + [DRAFT_TAG]
+        rows.append(EvalCase(
+            suite=suite, order=start + offset,
+            name=str(draft.get('name') or draft.get('goal', '')[:60])[:200],
+            goal=str(draft.get('goal') or ''),
+            input_data=dict(draft.get('input_data') or {}),
+            reference=str(draft.get('reference') or ''),
+            graders=validated, tags=tags,
+            is_active=not drafts, world_version=world_version,
+        ))
+    EvalCase.objects.bulk_create(rows)
+    return rows
+
+
+def save_generated_world(suite, out: dict[str, Any]):
+    """Persist a `generate_world` result as a draft world + draft cases.
+
+    Shared by the HTTP view and the chat tool, so both mint versions the
+    same way: the next version number, `draft` status, and case drafts on
+    that version through `save_cases` (which stamps and validates them).
+    Sync ORM.
+    """
+    from django.db.models import Max
+
+    from .models import EvalWorld
+
+    version = (suite.worlds.aggregate(m=Max('version'))['m'] or 0) + 1
+    world = EvalWorld.objects.create(
+        suite=suite, version=version, status='draft',
+        brief=out.get('brief', ''), surfaces=out.get('surfaces') or {},
+        fixtures=out.get('fixtures') or {}, facts=out.get('facts') or [],
+        created_by_model=out.get('model') or '',
+        cost_usd=out.get('cost_usd'),
+    )
+    tagged = []
+    for case in out.get('cases') or []:
+        entry = dict(case)
+        tags = ['generated', 'needs-review', case.get('category', '')]
+        entry['tags'] = [t for t in tags if t]
+        tagged.append(entry)
+    saved = save_cases(suite, tagged, drafts=True, world_version=world.version)
+    return world, saved
+
+
 def list_graders() -> list[dict[str, Any]]:
     """Every grader a case may use. Pure; safe to call at import-time in a view."""
     return graders.catalog()
@@ -139,7 +221,7 @@ async def grade_answer(answer: str, specs: list[dict[str, Any]], **context) -> d
     what a good one looks like — a chat turn, an extraction, a connector's
     reply. `context` is any `GradeContext` field: `reference`, `goal`,
     `tool_trace`, `structured`, `tokens`, `duration_ms`, `error`, `user_id`
-    (needed only by `llm_judge`).
+    (needed only by `llm_judge`), `files`, `binaries`, `env`.
 
     Returns `{'score', 'passed', 'grades'}` — plain JSON, because a caller
     persisting this into its own table should not have to import our dataclass.
@@ -216,6 +298,8 @@ __all__ = [
     # reads
     'agent_scorecard', 'review_queue', 'reviewable_result', 'run_page',
     'run_with_results', 'suite_health', 'baseline_for',
+    # writes (model-derived cases + generated worlds; drafts by default)
+    'save_cases', 'save_generated_world',
     # starter kits (user datasets + orchestrator)
     'starter_kit_list', 'recommended_kits_for', 'clone_starter_kit',
 ]

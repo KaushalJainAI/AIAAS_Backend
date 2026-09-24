@@ -419,6 +419,11 @@ AGENT_CHECKPOINTER = os.environ.get('AGENT_CHECKPOINTER', 'sqlite')
 # SQLite's single write lock on the application database on every super-step.
 AGENT_CHECKPOINT_PATH = os.environ.get('AGENT_CHECKPOINT_PATH', '')
 AGENT_CHECKPOINT_DSN = os.environ.get('AGENT_CHECKPOINT_DSN', '')
+# Cap for the Postgres saver's own pool, read from the
+# `AGENT_CHECKPOINT_POOL_MAX` env var in chat/turn/checkpoints.py::_postgres
+# (default 4). With app pool 10 + saver 4 the process holds at most 14 of the
+# server's 25 max_connections — raise it only with the sum re-checked
+# (docker-compose.prod.yml documents the math).
 # How often to look for runs whose process is gone.
 RUN_RECOVERY_SWEEP_SECONDS = int(
     os.environ.get('RUN_RECOVERY_SWEEP_SECONDS', '600')
@@ -648,6 +653,15 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'orchestrator.recover_runs',
         'schedule': RUN_RECOVERY_SWEEP_SECONDS,
     },
+    # Chat threads accumulate a checkpoint per turn with nothing ever deleting
+    # them; a new turn reads only the latest, so the sweep keeps the latest
+    # few per thread. Same cadence as the recovery sweep above, same reason
+    # for a second path: `manage.py prune_chat_checkpoints` — see
+    # chat/turn/prune.py. No-op off the Postgres saver.
+    'prune-chat-checkpoints': {
+        'task': 'orchestrator.prune_chat_checkpoints',
+        'schedule': RUN_RECOVERY_SWEEP_SECONDS,
+    },
     # Idle workspaces hibernate. Also runnable as `manage.py sweep_workspaces`.
     'sweep-workspaces': {
         'task': 'workspaces.sweep_workspaces',
@@ -725,7 +739,7 @@ EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'no-reply@aiaas.local')
 
-NOTIFICATIONS_EMAIL_ENABLED = os.environ.get('NOTIFICATIONS_EMAIL_ENABLED', 'True') == 'True'
+NOTIFICATIONS_EMAIL_ENABLED = os.environ.get('NOTIFICATIONS_EMAIL_ENABLED', 'False') == 'True'
 NOTIFICATIONS_EMAIL_TYPES = _split_env_list(os.environ.get('NOTIFICATIONS_EMAIL_TYPES', ''))
 NOTIFICATIONS_EMAIL_SUBJECT_PREFIX = os.environ.get('NOTIFICATIONS_EMAIL_SUBJECT_PREFIX', '[AIAAS]')
 
@@ -804,6 +818,21 @@ IMAGINE_HITL_COST_THRESHOLD = float(os.environ.get('IMAGINE_HITL_COST_THRESHOLD'
 # from an agent failure. It is a reasoning model: see `JUDGE_MAX_TOKENS`.
 EVAL_JUDGE_PROVIDER = os.environ.get('EVAL_JUDGE_PROVIDER', 'openrouter')
 EVAL_JUDGE_MODEL = os.environ.get('EVAL_JUDGE_MODEL', 'meta/muse-spark-1.3-contributor')
+
+
+# ==================== Auto-mode reviewer ====================
+# The judge `chat/turn/reviewer.py` asks before letting an irreversible call
+# through under chat `auto`. It must answer inside AUTO_REVIEWER_TIMEOUT_S or the
+# call asks, so it has to be a fast *non-reasoning* model — not the user's chat
+# model. Measured 2026-09-24 on OpenRouter with the real judge prompt:
+# `meta-llama/llama-4-scout` 1.3-1.5 s with stable verdicts; the shipped chat
+# default `openrouter/free` 6 s / 22 s / 1.7 s with disagreeing verdicts (it has
+# no `none` effort rung, so it reasons); `inception/mercury-2.5` returned empty.
+# OpenRouter because it is the provider the platform key is required for.
+# A blank model falls back to the chat's own provider + model.
+AUTO_REVIEWER_PROVIDER = os.environ.get('AUTO_REVIEWER_PROVIDER', 'openrouter')
+AUTO_REVIEWER_MODEL = os.environ.get('AUTO_REVIEWER_MODEL', 'meta-llama/llama-4-scout')
+AUTO_REVIEWER_TIMEOUT_S = float(os.environ.get('AUTO_REVIEWER_TIMEOUT_S', '3'))
 #: Where external benchmark datasets are cached (git-ignored, never committed).
 EVAL_DATA_DIR = os.environ.get('EVAL_DATA_DIR', 'Backend/.eval_data/')
 

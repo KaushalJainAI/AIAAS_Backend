@@ -228,7 +228,14 @@ class SSEBroadcaster:
         """
         execution_id = str(execution_id)
         queue = await self.subscribe(execution_id)
-        
+
+        # The loop below waits on the queue for up to `timeout` seconds. The
+        # ownership check in the view already ran; nothing below touches the
+        # ORM, so hand this stream's pooled connection back before waiting or
+        # every open run-watch stream pins one (G1).
+        from workflow_backend.background import release_db
+        await release_db()
+
         try:
             # Send initial connection event
             yield StreamEvent(

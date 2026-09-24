@@ -77,6 +77,8 @@ class GrantMappingTests(SimpleTestCase):
         # so an agent that may not see the user's jobs cannot answer "is it
         # done?" or notify about a completion. The reminder trio joins on
         # the same terms — rows the user owns, every one cancellable.
+        # `ask_user` joins them: it reaches nothing and only records the
+        # question, and an agent that may not ask only guesses more.
         names = toolbox().allowed_names
         self.assertEqual(
             names,
@@ -86,8 +88,8 @@ class GrantMappingTests(SimpleTestCase):
                        'save_dashboard', 'list_user_runs',
                        'schedule_notification',
                        'list_scheduled_notifications',
-                       'cancel_scheduled_notification', 'read_tool_output',
-                       'recall_context'}),
+                       'cancel_scheduled_notification', 'ask_user',
+                       'read_tool_output', 'recall_context'}),
         )
 
     def test_a_grant_unlocks_exactly_its_own_tools(self):

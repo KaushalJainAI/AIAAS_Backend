@@ -8,7 +8,7 @@ failure with a node-level error, so the failure paths render too.
 
 Idempotent: wipes only this user's execution logs and notifications first.
 
-Run:  python manage.py shell < seed_runs.py
+Run:  python manage.py shell < scripts/seed_runs.py
 """
 from datetime import timedelta
 import uuid

@@ -43,7 +43,7 @@ class CatalogueIntegrityTests(APITestCase):
     def test_every_template_config_is_accepted_by_the_agent_serializer(self):
         """A template the builder would refuse can never be installed.
 
-        This is the check that keeps `gallery.py` honest as the serializer
+        This is the check that keeps `agents/gallery/` honest as the serializer
         gains rules: a new validation lands here as a failing test rather than
         as a 400 the first user to click Install discovers.
         """

@@ -959,6 +959,15 @@ def find(scope: FileScope, query: str, *, limit: int = 0) -> dict:
         # and this prefix comes from a row we already own. One indexed match,
         # which is what `Folder.path` holding ids is for.
         rows = rows.filter(folder__in=fs.subtree(scope.root, include_trashed=False))
+    else:
+        # The whole tree is in scope, except the hidden eval tree: fixture
+        # documents are working data for the eval harness, and a search that
+        # surfaces them answers from a test the owner never saw (see
+        # `filesystem.EVAL_ROOT_NAME`). An eval run searches inside its world
+        # instead, through the branch above.
+        hidden = fs.eval_subtree_ids(scope.user)
+        if hidden:
+            rows = rows.exclude(folder_id__in=hidden)
 
     from django.db.models import Q
 

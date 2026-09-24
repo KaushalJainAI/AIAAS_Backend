@@ -28,7 +28,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterator, Literal
 #: `esign` — an e-signature provider must be configured (`esign/provider.py`);
 #: `workspace` — a compute workspace engine must be configured
 #: (`workspaces/engine.py`).
-Requirement = Literal["memory", "vision", "spill", "files", "browser", "stt", "tts", "esign", "workspace"]
+Requirement = Literal["memory", "vision", "spill", "files", "browser", "stt", "tts", "esign", "workspace", "agent_run"]
 
 #: What running this tool does to the world, which is what an autonomy level
 #: actually needs to know. `sensitive` answers "ask in chat"; this answers "how

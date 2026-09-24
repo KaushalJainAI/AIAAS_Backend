@@ -74,7 +74,9 @@ def review_queue(user, *, limit: int = 25, suite_id=None, run_id=None):
 
     **Oldest first**, unlike every other list here: a queue is worked through,
     and newest-first would bury the results that have been waiting longest —
-    which are exactly the ones holding a run in `awaiting_review`.
+    which are exactly the ones holding a run in `awaiting_review`. Legacy
+    errored/skipped rows that were already queued stay visible so the reviewer
+    can dismiss them; new ones are marked `not_required` by `apply_policy`.
     """
     limit = min(limit, EVAL_REVIEW_QUEUE_LIMIT)
     qs = EvalResult.objects.filter(

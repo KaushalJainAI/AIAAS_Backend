@@ -36,6 +36,7 @@ them from.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from django.conf import settings
@@ -129,8 +130,10 @@ def _postgres():
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     from psycopg_pool import AsyncConnectionPool
 
-    dsn = getattr(settings, 'AGENT_CHECKPOINT_DSN', '') or getattr(
-        settings, 'DATABASE_URL', ''
+    dsn = (
+        getattr(settings, 'AGENT_CHECKPOINT_DSN', '')
+        or getattr(settings, 'DATABASE_URL', '')
+        or _dsn_from_django_db()
     )
     if not dsn:
         raise RuntimeError(
@@ -138,13 +141,45 @@ def _postgres():
             'DATABASE_URL). Refusing to start rather than silently losing runs.'
         )
 
+    # Small on purpose (G2 pool math): the app pool holds up to
+    # `DB_POOL_MAX_SIZE` (10 in prod) and the server allows `max_connections`
+    # (25), with room needed for psql and migrations — so the saver gets 4.
+    # Overridable per deploy, but raise it and the sum must still fit.
+    max_size = int(os.environ.get('AGENT_CHECKPOINT_POOL_MAX', '4'))
     # `open=False`: opening a pool needs a running loop, and this is called at
     # import time while the graph is compiled. The saver opens it on first use.
-    pool = AsyncConnectionPool(conninfo=dsn, max_size=10, open=False,
+    pool = AsyncConnectionPool(conninfo=dsn, min_size=1, max_size=max_size,
+                               open=False,
                                kwargs={'autocommit': True, 'prepare_threshold': 0})
     saver = AsyncPostgresSaver(pool)
-    logger.info('[Checkpoints] Postgres checkpointer configured')
+    logger.info('[Checkpoints] Postgres checkpointer configured (pool max=%d)', max_size)
     return saver
+
+
+def _dsn_from_django_db() -> str:
+    """A libpq DSN for Django's own default database, when it is Postgres.
+
+    The checkpointer must live on the app's database — deriving it here means
+    the saver cannot drift onto a different host/port/database from the rows
+    (`ExecutionLog.thread_id`) that name its threads, whatever combination of
+    `DATABASE_URL` / `DB_*` vars the deploy uses.
+    """
+    try:
+        from urllib.parse import quote
+
+        db = settings.DATABASES.get('default', {})
+    except Exception:  # noqa: BLE001 — settings not ready means "no DSN"
+        return ''
+    if db.get('ENGINE') != 'django.db.backends.postgresql':
+        return ''
+    if not db.get('NAME'):
+        return ''
+    user = quote(str(db.get('USER') or ''), safe='')
+    password = quote(str(db.get('PASSWORD') or ''), safe='')
+    host = db.get('HOST') or 'localhost'
+    port = db.get('PORT') or '5432'
+    auth = f'{user}:{password}@' if user else ''
+    return f'postgresql://{auth}{host}:{port}/{db["NAME"]}'
 
 
 def is_durable() -> bool:

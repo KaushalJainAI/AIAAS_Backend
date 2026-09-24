@@ -52,7 +52,7 @@ urlpatterns = [
     path('runs/<str:execution_id>/autonomy/', runs.run_autonomy, name='run_autonomy'),
 
     # Explore — everything installable, from two sources: the curated
-    # catalogue (code, `agents/gallery.py`) and agents users have published
+    # catalogue (code, `agents/gallery/`) and agents users have published
     # (`SharedAgent` rows). They are presented and installed identically;
     # install writes through the same serializer the builder saves through.
     path('templates/', gallery.template_list, name='template_list'),

@@ -181,6 +181,11 @@ def upsert_suite(user, suite_def: dict, agent, report: InstallReport):
             'pass_threshold': suite_def.get('pass_threshold', 0.8),
             'supervision': suite_def.get('supervision', 'disagreement'),
             'concurrency': suite_def.get('concurrency', 2),
+            # A guardrail suite proves the gate fires; running the gated call
+            # anyway would send the email it exists to stop. Capability suites
+            # take the default and carry on as if approved.
+            'gated_calls': suite_def.get(
+                'gated_calls', 'block' if suite_def['group'] == 'guardrail' else 'run'),
             'max_cost_rupees': suite_def.get('max_cost_rupees'),
             'tags': ['benchmark', suite_def['group'], suite_def['slug']],
             'is_active': True,

@@ -100,8 +100,15 @@ def _load_images(scope, paths: list[str]) -> dict[str, bytes]:
     return {p: read_image(scope, p)[0] for p in dict.fromkeys(paths)}
 
 
-async def _save(context: Dict, work) -> str:
-    """Run `work(scope)` off the event loop; render its outcome for the model."""
+async def _save(context: Dict, run) -> str:
+    """Run `run(scope)` — an async function doing its own thread placement —
+    and render its outcome for the model.
+
+    The rule (G5): ORM stays on the run's thread (plain `sync_to_async`),
+    CPU and HTTP go to the default pool (`thread_sensitive=False`). `run`
+    places each stage itself, so a render never sits on the run's only thread
+    blocking that run's ORM calls. Errors map exactly as before.
+    """
     from inference.vfs import VfsError
 
     scope = context.get('file_scope')
@@ -111,7 +118,7 @@ async def _save(context: Dict, work) -> str:
                      'An agent needs file access turned on in its settings.'
         })
     try:
-        result = await sync_to_async(work)(scope)
+        result = await run(scope)
     except (SpecError, VfsError) as exc:
         return json.dumps({'error': str(exc)})
     except Exception:
@@ -228,20 +235,20 @@ async def render_workbook(args: Dict, context: Dict) -> str:
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
-    def work(scope):
+    async def run(scope):
         from inference.vfs import write_binary
 
         path = _target(scope, args.get('path'), 'xlsx', spec['sheets'][0]['name'])
-        data, warnings = workbook.render(spec)
-        result = write_binary(scope, path, data, text=workbook.extract_text(spec),
-                              spec=workbook.preview(spec),
-                              overwrite=bool(args.get('overwrite')))
+        data, warnings = await sync_to_async(workbook.render, thread_sensitive=False)(spec)
+        result = await sync_to_async(write_binary)(
+            scope, path, data, text=workbook.extract_text(spec),
+            spec=workbook.preview(spec), overwrite=bool(args.get('overwrite')))
         result['sheets'] = [{'name': s['name'], 'rows': len(s['rows'])} for s in spec['sheets']]
         if warnings:
             result['warnings'] = warnings
         return result
 
-    return await _save(context, work)
+    return await _save(context, run)
 
 
 # ---------------------------------------------------------------------------
@@ -342,18 +349,19 @@ async def render_deck(args: Dict, context: Dict) -> str:
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
-    def work(scope):
+    async def run(scope):
         from inference.vfs import write_binary
 
         path = _target(scope, args.get('path'), 'pptx', spec['title'] or 'deck')
-        data = deck.render(spec, _load_images(scope, deck.image_paths(spec)))
-        result = write_binary(scope, path, data, text=deck.extract_text(spec),
-                              spec=deck.preview(spec),
-                              overwrite=bool(args.get('overwrite')))
+        images = await sync_to_async(_load_images)(scope, deck.image_paths(spec))
+        data = await sync_to_async(deck.render, thread_sensitive=False)(spec, images)
+        result = await sync_to_async(write_binary)(
+            scope, path, data, text=deck.extract_text(spec),
+            spec=deck.preview(spec), overwrite=bool(args.get('overwrite')))
         result['slides'] = len(spec['slides'])
         return result
 
-    return await _save(context, work)
+    return await _save(context, run)
 
 
 # ---------------------------------------------------------------------------
@@ -418,20 +426,21 @@ async def render_document(args: Dict, context: Dict) -> str:
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
-    def work(scope):
+    async def run(scope):
         from inference.vfs import write_binary
 
         path = _target(scope, args.get('path'), 'docx', spec['title'])
-        data = document.render(spec, _load_images(scope, document.image_paths(spec)))
-        result = write_binary(scope, path, data, text=document.extract_text(spec),
-                              spec=document.preview(spec),
-                              overwrite=bool(args.get('overwrite')))
+        images = await sync_to_async(_load_images)(scope, document.image_paths(spec))
+        data = await sync_to_async(document.render, thread_sensitive=False)(spec, images)
+        result = await sync_to_async(write_binary)(
+            scope, path, data, text=document.extract_text(spec),
+            spec=document.preview(spec), overwrite=bool(args.get('overwrite')))
         result['blocks'] = len(spec['blocks'])
         if document.chart_count(spec):
             result['charts_as_tables'] = document.chart_count(spec)
         return result
 
-    return await _save(context, work)
+    return await _save(context, run)
 
 
 # ---------------------------------------------------------------------------
@@ -494,20 +503,21 @@ async def render_pdf(args: Dict, context: Dict) -> str:
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
-    def work(scope):
+    async def run(scope):
         from inference.vfs import write_binary
 
         target = _target(scope, args.get('path'), 'pdf', spec['title'])
-        data = pdf.render(spec, _load_images(scope, document.image_paths(spec)))
-        result = write_binary(scope, target, data, text=document.extract_text(spec),
-                              spec=document.preview(spec),
-                              overwrite=bool(args.get('overwrite')))
+        images = await sync_to_async(_load_images)(scope, document.image_paths(spec))
+        data = await sync_to_async(pdf.render, thread_sensitive=False)(spec, images)
+        result = await sync_to_async(write_binary)(
+            scope, target, data, text=document.extract_text(spec),
+            spec=document.preview(spec), overwrite=bool(args.get('overwrite')))
         result['blocks'] = len(spec['blocks'])
         if document.chart_count(spec):
             result['charts_as_tables'] = document.chart_count(spec)
         return result
 
-    return await _save(context, work)
+    return await _save(context, run)
 
 
 # ---------------------------------------------------------------------------
@@ -563,23 +573,25 @@ async def edit_workbook(args: Dict, context: Dict) -> str:
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
-    def work(scope):
+    async def run(scope):
         from inference.vfs import VfsError, read_binary, write_binary
 
         path = str(args.get('path') or '').strip()
         if not path.lower().endswith('.xlsx'):
             raise SpecError('edit_workbook changes .xlsx files; give the path of one.')
         try:
-            data = read_binary(scope, path)
+            data = await sync_to_async(read_binary)(scope, path)
         except VfsError:
             raise
-        updated, report = edit.apply(data, change)
-        result = write_binary(scope, path, updated,
-                              text=_workbook_text(updated), overwrite=True)
+        updated, report = await sync_to_async(edit.apply, thread_sensitive=False)(
+            data, change)
+        text = await sync_to_async(_workbook_text, thread_sensitive=False)(updated)
+        result = await sync_to_async(write_binary)(
+            scope, path, updated, text=text, overwrite=True)
         result.update(report)
         return result
 
-    return await _save(context, work)
+    return await _save(context, run)
 
 
 def _workbook_text(data: bytes) -> str:
@@ -661,19 +673,19 @@ async def render_diagram(args: Dict, context: Dict) -> str:
     except SpecError as exc:
         return json.dumps({'error': str(exc)})
 
-    def work(scope):
+    async def run(scope):
         from inference.vfs import write_binary
 
         target = _target(scope, args.get('path'), 'svg', spec['title'] or 'diagram')
-        result = write_binary(scope, target, diagram.render(spec),
-                              text=diagram.extract_text(spec),
-                              spec={'kind': 'diagram', **spec},
-                              overwrite=bool(args.get('overwrite')))
+        data = await sync_to_async(diagram.render, thread_sensitive=False)(spec)
+        result = await sync_to_async(write_binary)(
+            scope, target, data, text=diagram.extract_text(spec),
+            spec={'kind': 'diagram', **spec}, overwrite=bool(args.get('overwrite')))
         result['nodes'] = len(spec['nodes'])
         result['edges'] = len(spec['edges'])
         return result
 
-    return await _save(context, work)
+    return await _save(context, run)
 
 
 OFFICE_TOOLS = ('render_deck', 'render_workbook', 'render_document', 'render_pdf',

@@ -81,9 +81,11 @@ def folder_list(request):
         except fs.FolderNotFound as exc:
             return _folder_error(exc)
 
-        children = _with_counts(
-            Folder.objects.filter(user=request.user, parent=parent)
-        ).order_by('name')
+        qs = Folder.objects.filter(user=request.user, parent=parent)
+        if parent is None:
+            # The hidden eval tree never lists (see `filesystem.EVAL_ROOT_NAME`).
+            qs = qs.exclude(name=fs.EVAL_ROOT_NAME)
+        children = _with_counts(qs).order_by('name')
         # Capped rather than cursored: folder rows are tiny, and a second
         # pagination scheme on one page is worse than a cap. A capped response
         # says so in its own body — a truncated list and a complete one must

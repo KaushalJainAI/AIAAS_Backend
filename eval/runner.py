@@ -78,11 +78,19 @@ def open_run(suite, agent, user, notes: str = '', *, mode: str = 'agent'):
     """
     from logs import revisions
 
+    from .environment import live_world
     from .models import EvalRun
+
+    try:
+        world = live_world(suite)
+    except Exception:  # noqa: BLE001 - a world lookup must not block a sweep
+        world = None
 
     kwargs: dict = {}
     if hasattr(EvalRun, 'mode'):
         kwargs['mode'] = mode
+    if hasattr(EvalRun, 'world_version'):
+        kwargs['world_version'] = world.version if world is not None else None
     return EvalRun.objects.create(
         suite=suite,
         subagent=agent,
@@ -102,7 +110,39 @@ def open_run(suite, agent, user, notes: str = '', *, mode: str = 'agent'):
 
 @sync_to_async
 def _active_cases(suite) -> list:
-    return list(suite.cases.filter(is_active=True).order_by('order', 'id'))
+    """Cases this sweep will run: active, and built for the live world.
+
+    A case whose `world_version` is not the live world's is stale — kept and
+    listed, never swept — because regenerating the world invalidates the
+    cases built on the old one. Cases predating worlds (`world_version`
+    null) run on whatever the live world is.
+    """
+    from .environment import live_world
+
+    cases = list(suite.cases.filter(is_active=True).order_by('order', 'id'))
+    try:
+        world = live_world(suite)
+    except Exception:  # noqa: BLE001
+        world = None
+    if world is None:
+        return cases
+    return [c for c in cases
+            if c.world_version is None or c.world_version == world.version]
+
+
+@sync_to_async
+def _stale_case_count(suite) -> int:
+    """Active cases excluded from the sweep for belonging to an old world."""
+    from .environment import live_world
+
+    try:
+        world = live_world(suite)
+    except Exception:  # noqa: BLE001
+        return 0
+    if world is None:
+        return 0
+    return suite.cases.filter(is_active=True).exclude(
+        world_version__in=(None, world.version)).count()
 
 
 @sync_to_async
@@ -214,8 +254,7 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
 
     result = await _open_result(run, case)
 
-    async with sem:
-        # Checked after acquiring, not before: with a concurrency of 2 and 200
+    async with sem:        # Checked after acquiring, not before: with a concurrency of 2 and 200
         # cases, 198 of them are queued behind the semaphore when a refusal or
         # a cancel lands, and the check that matters is the one they make on
         # the way out of the queue.
@@ -243,15 +282,31 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
 
         started = time.monotonic()
         spec = workspace.spec_for(case)
+        # An accepted world means this attempt runs inside it: confined
+        # scopes, simulated dispatch, fresh fixtures. No world means the run
+        # behaves exactly as today.
+        from . import environment as envmod
+        env = await sync_to_async(envmod.for_attempt)(user, agent, suite, case)
         try:
             # Reset inside the semaphore and the try: a fixture that fails to
             # write is this case's error, and two attempts at the same case
             # must never share a half-written folder.
-            workspace_path = await workspace.prepare(user, agent, spec) if spec else ''
-            agent_run = await run_agent(
-                agent, _goal_for(case, workspace_path), user=user,
-                trigger_type='api', caller='eval',
-            )
+            if env is None:
+                workspace_path = await workspace.prepare(user, agent, spec) if spec else ''
+                agent_run = await run_agent(
+                    agent, _goal_for(case, workspace_path), user=user,
+                    trigger_type='api', caller='eval',
+                    gated_calls=getattr(suite, 'gated_calls', 'run') or 'run',
+                )
+            else:
+                workspace_path = await sync_to_async(env.prepare)(
+                    case, spec, str(result.pk))
+                agent_run = await run_agent(
+                    agent, _goal_for(case, workspace_path), user=user,
+                    trigger_type='api', caller='eval',
+                    gated_calls=getattr(suite, 'gated_calls', 'run') or 'run',
+                    environment=env,
+                )
         except (AgentRunRefused, LLMUserActionable) as exc:
             # Every remaining case would fail the same way. Stop the sweep
             # rather than fill it with identical rows.
@@ -268,13 +323,28 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
             return 0
 
     answer = agent_run.answer or ''
-    files = await workspace.snapshot(user, agent, spec) if spec else {}
-    binaries = await workspace.snapshot_binaries(user, agent, spec) if spec else {}
+    if env is None:
+        files = await workspace.snapshot(user, agent, spec) if spec else {}
+        binaries = await workspace.snapshot_binaries(user, agent, spec) if spec else {}
+        env_snapshot: dict = {}
+        env_changes: dict = {}
+        allowed = _allowed_tools_for(agent)
+    else:
+        files, binaries = await sync_to_async(env.snapshot_files)()
+        env_snapshot = env.snapshot_env()
+        env_changes = env.changes(files)
+        base_allowed = _allowed_tools_for(agent)
+        if base_allowed is None:
+            allowed = None
+        else:
+            withheld = env.withheld_names(set(base_allowed))
+            allowed = [t for t in base_allowed if t not in withheld]
     ctx = graders.GradeContext(
         files=files,
         binaries=binaries,
+        env=env_snapshot,
         code_changes=await _code_changes_for(agent_run.execution_id),
-        allowed_tools=_allowed_tools_for(agent),
+        allowed_tools=allowed,
         scope_claims=_scope_claims_for(case, spec),
         answer=answer,
         structured=agent_run.structured,
@@ -282,11 +352,13 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
         tool_trace=agent_run.tool_trace or [],
         tokens=agent_run.tokens,
         duration_ms=agent_run.duration_ms,
-        # A run paused for approval never produced a final answer. Reported as
-        # an error condition to the graders so `no_error` catches it instead of
-        # the empty answer being graded as a bad one.
+        # Eval runs record gated calls instead of pausing (`record_intents`),
+        # so this is only reachable through something that still interrupts.
+        # Reported as an error so `no_error` catches it instead of the empty
+        # answer being graded as a bad one.
         error='run paused for approval' if agent_run.awaiting_approval else '',
         awaiting_approval=agent_run.awaiting_approval,
+        intents=list(agent_run.intents or []),
         reasoning=agent_run.thinking or '',
         reference=case.reference or '',
         goal=case.goal or '',
@@ -312,6 +384,8 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
         judge_cost_usd=judge_cost,
         duration_ms=agent_run.duration_ms,
         error_message='',
+        intents=list(agent_run.intents or []),
+        env_changes=env_changes,
     )
     return agent_run.tokens + judge_tokens
 
@@ -503,8 +577,11 @@ async def start_suite_run(suite, agent, user, *, notes: str = '') -> str:
 
     cases = await _active_cases(suite)
     if not cases:
+        stale = await _stale_case_count(suite)
+        hint = (f' {stale} active case(s) belong to an older world version — '
+                f'regenerate the world or rebuild them.') if stale else ''
         raise NoCasesToRun(
-            f'"{suite.name}" has no active cases. Add one before running it.'
+            f'"{suite.name}" has no active cases. Add one before running it.{hint}'
         )
 
     await check_guardrails(agent, user)

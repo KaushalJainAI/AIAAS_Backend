@@ -39,6 +39,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 
+from workflow_backend.background import release_db
 from workflow_backend.thresholds import MAX_TOOL_ITERATIONS
 
 from asgiref.sync import sync_to_async
@@ -340,6 +341,16 @@ class TurnContext:
     #: write another, so one pause would reach the Inbox twice and one of the
     #: two would ignore the agent's `notifyOnHitl` setting entirely.
     approval_queue: bool = False
+
+    #: Record a gated call instead of pausing on it (eval runs). The gate is
+    #: still *decided* under the agent's own autonomy — that decision is what
+    #: an eval wants to see — but nobody is there to answer it, so the call is
+    #: written to `metadata['intents']` and then, per the suite's choice,
+    #: `"run"` (dispatched for real) or `"block"` (answered as declined, which
+    #: is what a guardrail suite proving the gate fires needs). `""` pauses as
+    #: normal. A paused eval run used to open a `HITLRequest` in the owner's
+    #: Inbox, start the reminder ladder for a test, and end the case as an error.
+    record_intents: str = ""
 
     #: What started the run (`chat` | `orchestrator` | `trigger` | `api` |
     #: `eval`). Tools that are safe in a watched chat turn but not from a
@@ -824,6 +835,10 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     effective = replace(
         turn, effort=iteration_effort(turn.effort, iteration, at_limit=at_limit)
     )
+    # The call below waits on a provider, not on the database. Hand this run's
+    # pooled connection back first, or every iteration of every concurrent run
+    # holds one for the whole model wait (G1). The next ORM call re-takes one.
+    await release_db()
     try:
         completion = await _run_model(
             effective, prompt=prompt, history=history, tools=tools, timings=timings
@@ -1343,6 +1358,10 @@ async def _require_approval(call: ToolCall, turn: TurnContext, meta: dict) -> No
                     data={"tool": call.name, "thread_id": turn.session_id,
                           "session_id": turn.session_id,
                           "action_url": f"/ai-chat?session={turn.session_id}"},
+                    # Email belongs to the digest alone: with SMTP
+                    # configured this row would otherwise send one email
+                    # per tool approval.
+                    send_email=False,
                 )
 
             await notify()
@@ -1357,6 +1376,29 @@ async def _require_approval(call: ToolCall, turn: TurnContext, meta: dict) -> No
         "detail": detail,
     })
     interrupt(f"Permission required for {call.name}")
+
+
+async def _record_approval_intent(call: ToolCall, meta: dict, iteration: int) -> None:
+    """Note that this call would have paused for a human, and let it run.
+
+    Keyed by call id so the node re-running (it is idempotent by design) never
+    records one intent twice. The sentence comes from the same renderer the
+    approval card uses, so an eval result reads the way the pause would have.
+    """
+    intents = list(meta.get("intents") or [])
+    if any(i.get("call_id") == call.id for i in intents):
+        return
+    try:
+        from chat.tools.describe import describe_call_async
+
+        sentence = (await describe_call_async(call.name, call.arguments)).get("sentence", "")
+    except Exception:  # noqa: BLE001 - a missing sentence must not stop the run
+        sentence = ""
+    intents.append({
+        "kind": "approval", "tool": call.name, "args": call.arguments,
+        "call_id": call.id, "iteration": iteration, "sentence": sentence,
+    })
+    meta["intents"] = intents
 
 
 def _refusal_text(name: str, reason: str) -> str:
@@ -1493,13 +1535,41 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     # only work before the pause is asking, and the answers persist in
     # `metadata` (written by `approve_tool_call` / `reject_tool_call` from
     # outside the node, so they survive the rollback).
-    for call in calls:
-        if call.id in rejected:
-            continue
+    #
+    # The gates are *decided* concurrently and *acted on* in call order. Under
+    # chat `auto` a policy is a model call (~1.5 s), and awaiting them one at
+    # a time made a batch of four writes a six-second silence; every policy is
+    # a pure read, so overlapping them changes nothing but the wait. A call
+    # the user already approved is not re-judged: the resumed node re-runs
+    # this pass for the whole batch, and asking the policy again could turn
+    # an answer the user just gave into a second approval card.
+    approved = set(meta.get("approved_tool_calls", []) or [])
+
+    async def _gated(call: ToolCall) -> bool:
+        if call.id in rejected or call.id in approved:
+            return False
         # Two gates, checked cheapest first. The name list carries reasoning
         # about tools we wrote; the policy inspects calls nobody could have
-        # listed in advance. Either one is enough to pause.
-        if call.name in sensitive or await policy(call.name, call.arguments, tool_context):
+        # listed in advance. Either one is enough to pause. The call id and
+        # the live plan ride along so the `auto` reviewer can cache its
+        # verdict per call and judge against the plan as it now stands.
+        return call.name in sensitive or await policy(
+            call.name, call.arguments,
+            {**tool_context, "call_id": call.id,
+             "todos": list(meta.get("todos") or [])},
+        )
+
+    gates = await asyncio.gather(*(_gated(call) for call in calls))
+    for call, gated in zip(calls, gates):
+        if gated:
+            if turn.record_intents:
+                await _record_approval_intent(call, meta, iteration)
+                if turn.record_intents == "block":
+                    rejected[call.id] = (
+                        "This is an evaluation run: the call would have waited "
+                        "for approval, so it was recorded and not run."
+                    )
+                continue
             await _require_approval(call, turn, meta)
 
     # ── Pass 2: plan every call, in call order ──

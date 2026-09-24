@@ -9,22 +9,78 @@ unseen recipients, publishing above `link`, first-seen browser submit domains,
 spend over the per-call threshold, or arguments carrying instruction-shaped
 tool-result text.
 
-A cheap model (`effort="none"`) sees the user's latest instructions, the
+A cheap model (`effort="none"`) sees the user's recent instructions, the
 current todo list and the call as rendered by `describe_call` — never raw
 secrets. Every decision is returned as audit (`mode`, `verdict`, `reason`) so
 it can ride the trace entry and the step row. If the reviewer is unavailable
 or slow (>3 s), the call asks: a failure is never an allow.
+
+**The judge is a fixed fast model, not the chat's (2026-09-24).** Until then
+`import llm; llm.complete(...)` raised `AttributeError` on every call — the
+funnel is `llm.access`, the package root is empty — and `review` swallowed it
+as "reviewer unavailable", so `auto` never allowed anything and behaved as
+`ask` with a delay. Every test replaced `_model_judge`, which is how it passed
+green. Even imported correctly, falling back to the *chat* model was wrong: the
+shipped default `openrouter/free` has no `none` effort rung (so the judge
+reasoned inside 200 tokens) and measured 6 s / 22 s / 1.7 s with verdicts that
+disagreed, against the 3 s budget. `AUTO_REVIEWER_PROVIDER/MODEL` default to a
+non-reasoning model measured at 1.3-1.5 s with stable verdicts; blank falls
+back to the chat model.
+
+**A verdict is reached once per call.** `interrupt()` re-runs `tools_node`
+from the top on resume, which re-reviewed the whole batch after every approval
+— paying the judge again, and able to turn a call it had just allowed into a
+fresh approval card. Verdicts are cached by `(session, call_id)` in-process,
+the same lifetime as the steering mailbox that resumes these runs.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import OrderedDict
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
 #: Seconds the reviewer may take before the call asks by default.
 REVIEW_TIMEOUT_S = 3.0
+
+#: How many verdicts the in-process cache keeps, and for how long. A verdict
+#: only needs to outlive one approval round-trip on the same batch.
+VERDICT_CACHE_SIZE = 2048
+VERDICT_CACHE_TTL_S = 3600.0
+
+_verdicts: OrderedDict[tuple[str, str], tuple[float, dict[str, Any]]] = OrderedDict()
+
+
+def _cached_verdict(key: tuple[str, str] | None) -> dict[str, Any] | None:
+    if key is None:
+        return None
+    hit = _verdicts.get(key)
+    if hit is None:
+        return None
+    stored_at, verdict = hit
+    if time.monotonic() - stored_at > VERDICT_CACHE_TTL_S:
+        _verdicts.pop(key, None)
+        return None
+    _verdicts.move_to_end(key)
+    return verdict
+
+
+def _remember_verdict(key: tuple[str, str] | None, verdict: dict[str, Any]) -> None:
+    if key is None:
+        return
+    _verdicts[key] = (time.monotonic(), verdict)
+    _verdicts.move_to_end(key)
+    while len(_verdicts) > VERDICT_CACHE_SIZE:
+        _verdicts.popitem(last=False)
+
+
+def _setting(name: str, default: Any) -> Any:
+    from django.conf import settings
+
+    return getattr(settings, name, default)
 
 #: Argument keys naming a recipient. A send to a value seen nowhere in the
 #: user's own words is never auto-allowed.
@@ -105,7 +161,8 @@ def _judge_prompt(*, described: str, user_text: str, todos: Any) -> str:
         'Answer with the first word ALLOW or ASK, then one short reason.',
         'ALLOW only when the call is plainly the user\'s request carried out,',
         'with the same target and the same content they asked for.',
-        f'User asked: {user_text or "(nothing captured)"}',
+        'What the user said (oldest first; the last line is the latest):',
+        user_text or '(nothing captured)',
     ]
     try:
         items = list(todos or [])
@@ -132,12 +189,16 @@ async def _model_judge(
     model: str,
 ) -> tuple[bool, str]:
     """Ask the cheap model. Raises on any failure — the caller turns that into ask."""
-    import llm
+    from llm import access as llm
 
-    provider_override = getattr(__import__('django.conf', fromlist=['settings']).settings,
-                                'AUTO_REVIEWER_PROVIDER', '') or provider
-    model_override = getattr(__import__('django.conf', fromlist=['settings']).settings,
-                             'AUTO_REVIEWER_MODEL', '') or model
+    # Both halves of the pair come from one place: a configured provider with
+    # the chat's model (or the reverse) names a model that provider lacks.
+    configured_model = _setting('AUTO_REVIEWER_MODEL', '')
+    if configured_model:
+        provider_override = _setting('AUTO_REVIEWER_PROVIDER', '') or provider
+        model_override = configured_model
+    else:
+        provider_override, model_override = provider, model
     completion = await asyncio.wait_for(
         llm.complete(
             provider=provider_override,
@@ -151,7 +212,7 @@ async def _model_judge(
             max_tokens=200,
             effort='none',
         ),
-        timeout=REVIEW_TIMEOUT_S,
+        timeout=_setting('AUTO_REVIEWER_TIMEOUT_S', REVIEW_TIMEOUT_S),
     )
     text = (completion.content or '').strip()
     first, _, rest = text.partition(' ')
@@ -190,6 +251,7 @@ async def review(
             allow, reason = static
             return {'allow': allow, 'reason': reason, 'reviewed_by': 'rules'}
         call_judge = judge or _model_judge
+        started = time.monotonic()
         try:
             outcome = await asyncio.wait_for(
                 call_judge(
@@ -198,16 +260,25 @@ async def review(
                     else (context or {}).get('user_id'),
                     provider=provider, model=model,
                 ),
-                timeout=REVIEW_TIMEOUT_S + 1.0,
+                timeout=_setting('AUTO_REVIEWER_TIMEOUT_S', REVIEW_TIMEOUT_S) + 1.0,
             )
-        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-            logger.warning('[Reviewer] Judge failed for %s; asking.', tool_name)
+        except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
+            # Logged with its type: "unavailable" hid an AttributeError on
+            # every call for as long as auto mode existed.
+            logger.warning(
+                '[Latency] reviewer %dms fail %s (%s: %s); asking.',
+                (time.monotonic() - started) * 1000, tool_name,
+                type(exc).__name__, exc,
+            )
             return {'allow': False, 'reason': 'The reviewer was unavailable.', 'reviewed_by': 'model'}
         if isinstance(outcome, dict):
             allow = bool(outcome.get('allow'))
             reason = str(outcome.get('reason') or '')
         else:
             allow, reason = bool(outcome[0]), str(outcome[1] or '')
+        logger.info('[Latency] reviewer %dms %s %s',
+                    (time.monotonic() - started) * 1000,
+                    'allow' if allow else 'ask', tool_name)
         return {'allow': allow, 'reason': reason or 'Reviewed.', 'reviewed_by': 'model'}
     except Exception:  # noqa: BLE001 — a failure is never an allow
         logger.exception('[Reviewer] review failed for %s', tool_name)
@@ -247,19 +318,48 @@ def auto_policy(
 
     async def policy(name: str, args: dict, context: dict) -> bool:
         if name in ask_names or await permissions.default_policy(name, args, context):
-            from chat.tools.describe import describe_call
-
-            try:
-                described = describe_call(name, args).get('sentence', name)
-            except Exception:  # noqa: BLE001
-                described = name
-            verdict = await review(
-                tool_name=name, args=args, described=described,
-                user_text=user_text, todos=todos, context=context,
-                provider=(context.get('provider', '') if isinstance(context, dict) else '') or provider,
-                model=model,
-                user_id=context.get('user_id'),
+            # One verdict per call. `tools_node` passes the call id, and a
+            # resumed node (after an approval) re-runs this for the whole
+            # batch — reuse what was decided rather than asking again.
+            call_id = context.get('call_id') if isinstance(context, dict) else None
+            cache_key = (
+                (str(context.get('session_id') or ''), str(call_id))
+                if call_id else None
             )
+            verdict = _cached_verdict(cache_key)
+            if verdict is None:
+                from chat.tools.describe import describe_call
+
+                try:
+                    described = describe_call(name, args).get('sentence', name)
+                except Exception:  # noqa: BLE001
+                    described = name
+                # The plan as it stands at this batch, not as it stood when
+                # the turn began — the model rewrites it between batches.
+                live_todos = context.get('todos') if isinstance(context, dict) else None
+                sink = context.get('sink') if isinstance(context, dict) else None
+                if sink is not None:
+                    # The judge takes a second or so; without a frame the
+                    # chat looks frozen for exactly that long.
+                    try:
+                        from .events import Event
+
+                        await sink(Event.STATUS, {
+                            'phase': 'reviewing',
+                            'message': f'Auto mode is checking: {described}',
+                        })
+                    except Exception:  # noqa: BLE001 — a status must not block review
+                        logger.debug('[Reviewer] status frame failed', exc_info=True)
+                verdict = await review(
+                    tool_name=name, args=args, described=described,
+                    user_text=user_text,
+                    todos=live_todos if live_todos is not None else todos,
+                    context=context,
+                    provider=(context.get('provider', '') if isinstance(context, dict) else '') or provider,
+                    model=model,
+                    user_id=context.get('user_id'),
+                )
+                _remember_verdict(cache_key, verdict)
             audits[_key(name, args)] = {
                 'mode': 'auto', 'verdict': 'allow' if verdict['allow'] else 'ask',
                 'reason': verdict['reason'], 'reviewed_by': verdict['reviewed_by'],

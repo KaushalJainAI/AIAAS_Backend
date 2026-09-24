@@ -13,6 +13,7 @@ from rest_framework.test import APITestCase
 
 from agents.models import SubAgent
 from eval.models import EvalCase, EvalResult, EvalRun, EvalSuite
+from logs.models import ExecutionLog
 
 
 class EvalAPITestCase(APITestCase):
@@ -98,6 +99,49 @@ class SuiteTests(EvalAPITestCase):
         )
         self.assertEqual(self.client.delete(url).status_code, 204)
         self.assertFalse(EvalSuite.objects.filter(pk=self.suite.pk).exists())
+
+    def test_deleting_suite_cleans_finished_sweeps_and_eval_storage(self):
+        from inference import filesystem as fs
+        from inference.models import Document
+
+        run = EvalRun.objects.create(
+            suite=self.suite, subagent=self.agent, user=self.user,
+            status='completed', world_version=4,
+        )
+        execution = ExecutionLog.objects.create(
+            user=self.user, subagent=self.agent, status='failed', caller='eval',
+        )
+        result = EvalResult.objects.create(
+            run=run, case=self.case, status='error', execution=execution,
+        )
+        attempt = fs.ensure_folder(self.user, fs.EVAL_ROOT_NAME, None)
+        for name in (f's{self.suite.id}', 'v4', 'attempts', str(result.pk)):
+            attempt = fs.ensure_folder(self.user, name, attempt)
+        Document.objects.create(
+            user=self.user, folder=attempt, name='scratch.txt', file='',
+            file_type='txt', file_size=5, content_text='unused', status='stored',
+        )
+
+        response = self.client.delete(
+            reverse('eval:suite_detail', args=[self.suite.id])
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(EvalRun.objects.filter(pk=run.pk).exists())
+        self.assertFalse(ExecutionLog.objects.filter(pk=execution.pk).exists())
+        self.assertFalse(Document.objects.filter(name='scratch.txt').exists())
+
+    def test_cannot_delete_suite_while_a_sweep_is_running(self):
+        EvalRun.objects.create(
+            suite=self.suite, subagent=self.agent, user=self.user, status='running',
+        )
+
+        response = self.client.delete(
+            reverse('eval:suite_detail', args=[self.suite.id])
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(EvalSuite.objects.filter(pk=self.suite.pk).exists())
 
 
 class CaseTests(EvalAPITestCase):
@@ -261,6 +305,45 @@ class RunReadTests(RunFixture):
         response = self.client.get(reverse('eval:run_detail', args=[str(theirs.run_id)]))
         self.assertEqual(response.status_code, 404)
 
+    def test_delete_finished_run_removes_its_results_and_eval_trace(self):
+        from inference import filesystem as fs
+        from inference.models import Document
+
+        execution = ExecutionLog.objects.create(
+            user=self.user, subagent=self.agent, status='failed', caller='eval',
+        )
+        self.result.execution = execution
+        self.result.save(update_fields=['execution'])
+        self.run.world_version = 3
+        self.run.save(update_fields=['world_version'])
+        attempt = fs.ensure_folder(self.user, fs.EVAL_ROOT_NAME, None)
+        for name in (f's{self.suite.id}', 'v3', 'attempts', str(self.result.pk)):
+            attempt = fs.ensure_folder(self.user, name, attempt)
+        Document.objects.create(
+            user=self.user, folder=attempt, name='scratch.txt', file='',
+            file_type='txt', file_size=5, content_text='unused', status='stored',
+        )
+        url = reverse('eval:run_detail', args=[str(self.run.run_id)])
+
+        response = self.client.delete(url)
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(EvalRun.objects.filter(pk=self.run.pk).exists())
+        self.assertFalse(EvalResult.objects.filter(pk=self.result.pk).exists())
+        self.assertFalse(ExecutionLog.objects.filter(pk=execution.pk).exists())
+        self.assertFalse(Document.objects.filter(name='scratch.txt').exists())
+
+    def test_delete_refuses_a_running_sweep(self):
+        self.run.status = 'running'
+        self.run.save(update_fields=['status'])
+
+        response = self.client.delete(
+            reverse('eval:run_detail', args=[str(self.run.run_id)])
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(EvalRun.objects.filter(pk=self.run.pk).exists())
+
     def test_cancel(self):
         response = self.client.post(
             reverse('eval:run_cancel', args=[str(self.run.run_id)])
@@ -292,6 +375,16 @@ class ReviewTests(RunFixture):
         response = self.client.get(reverse('eval:review_queue'))
         self.assertEqual(response.data['count'], 0)
 
+    def test_legacy_errored_result_stays_visible_so_it_can_be_dismissed(self):
+        self.result.status = 'error'
+        self.result.save(update_fields=['status'])
+
+        response = self.client.get(reverse('eval:review_queue'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['queue'][0]['status'], 'error')
+
     def test_a_verdict_settles_the_run(self):
         response = self.client.post(
             reverse('eval:submit_review', args=[self.result.id]),
@@ -319,16 +412,36 @@ class ReviewTests(RunFixture):
         )
         self.assertEqual(response.status_code, 404)
 
-    def test_an_errored_case_cannot_be_reviewed(self):
-        # There is no answer to have an opinion about, and letting one in would
-        # dilute the agreement figure with verdicts on outages.
+    def test_unsure_dismisses_an_errored_result_instead_of_returning_400(self):
+        # Older sweeps could leave errored cases in the review queue. An
+        # `unsure` click dismisses that dead-end row and frees its trace.
+        from inference import filesystem as fs
+        from inference.models import Document
+
+        execution = ExecutionLog.objects.create(
+            user=self.user, subagent=self.agent, status='failed', caller='eval',
+        )
+        self.result.execution = execution
         self.result.status = 'error'
-        self.result.save(update_fields=['status'])
+        self.result.save(update_fields=['status', 'execution'])
+        self.run.world_version = 3
+        self.run.save(update_fields=['world_version'])
+        attempt = fs.ensure_folder(self.user, fs.EVAL_ROOT_NAME, None)
+        for name in (f's{self.suite.id}', 'v3', 'attempts', str(self.result.pk)):
+            attempt = fs.ensure_folder(self.user, name, attempt)
+        Document.objects.create(
+            user=self.user, folder=attempt, name='scratch.txt', file='',
+            file_type='txt', file_size=5, content_text='unused', status='stored',
+        )
         response = self.client.post(
             reverse('eval:submit_review', args=[self.result.id]),
-            {'verdict': 'fail'}, format='json',
+            {'verdict': 'unsure'}, format='json',
         )
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['deleted'])
+        self.assertFalse(EvalResult.objects.filter(pk=self.result.pk).exists())
+        self.assertFalse(ExecutionLog.objects.filter(pk=execution.pk).exists())
+        self.assertFalse(Document.objects.filter(name='scratch.txt').exists())
 
 
 class ScorecardTests(RunFixture):

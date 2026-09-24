@@ -141,15 +141,20 @@ def _record_cost(user, context: Dict[str, Any], out: dict) -> None:
         logger.exception('[Media] Failed to record image cost')
 
 
-def _generate(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_CHARS) -> dict:
-    """Blocking half: call the provider, keep the bytes, report the cost."""
+def _prepare(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_CHARS):
+    """On-thread half of a generation: validate, resolve service and model.
+
+    Everything here either is pure or touches the ORM (the credential lookup
+    in `for_user`, the capabilities read), so it stays on the run's thread.
+    Returns what the HTTP half needs plus the path stem — the extension is
+    only known once the bytes are fetched. Raises `MediaError`, as before.
+    """
     from imagine.services.capabilities import capabilities_for
     from imagine.services.catalog import default_model_id, find_model
     from imagine.services.openrouter import (
         MissingOpenRouterCredentialError, OpenRouterService,
     )
     from imagine.validation import constrain
-    from inference.vfs import write_binary
 
     prompt = str(args.get('prompt') or '').strip()
     if not prompt:
@@ -174,14 +179,27 @@ def _generate(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_CHARS)
         raise MediaError(f'{model_id!r} is not an image model on OpenRouter. Omit `model` to use the default.')
 
     config = constrain('image', model, {'aspect_ratio': args.get('aspect_ratio')})
-    result = service.generate_image(prompt, model_id, config)
-    if 'error' in result:
-        raise MediaError(f'The image could not be generated: {result["error"]}')
-
-    data, ext = _image_bytes(result.get('url') or '')
     raw_path = str(args.get('path') or '').strip()
     if raw_path and '.' in raw_path.rsplit('/', 1)[-1]:
         raw_path = raw_path.rsplit('.', 1)[0]
+    return service, model_id, config, prompt, raw_path
+
+
+async def _generate(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_CHARS) -> dict:
+    """Three stages, two threads: resolve on the run's thread (ORM), fetch
+    bytes off it (HTTP/CPU), save back on it (ORM). A generation that sat on
+    the run's only thread blocked that run's ORM calls for the whole call."""
+    from inference.vfs import write_binary
+
+    service, model_id, config, prompt, raw_path = await sync_to_async(_prepare)(
+        scope, user, args, prompt_cap)
+    result = await sync_to_async(service.generate_image, thread_sensitive=False)(
+        prompt, model_id, config)
+    if 'error' in result:
+        raise MediaError(f'The image could not be generated: {result["error"]}')
+
+    data, ext = await sync_to_async(_image_bytes, thread_sensitive=False)(
+        result.get('url') or '')
     path = f'{raw_path or "images/" + _slug(prompt)}.{ext}'
     if not path.startswith('/') and scope.write_prefix:
         # A relative path lands in the scope's own write folder, the only
@@ -190,7 +208,7 @@ def _generate(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_CHARS)
 
     reported = result.get('cost')
     cost = Decimal(str(reported)) if reported is not None else IMAGE_COST_ESTIMATE_USD
-    out = write_binary(
+    out = await sync_to_async(write_binary)(
         scope, path, data, text=f'Generated image: {prompt}',
         spec={'kind': 'image', 'prompt': prompt, 'model': model_id},
     )
@@ -251,7 +269,7 @@ async def generate_image(args: Dict, context: Dict) -> str:
         from tools_config.overlay import alimit
 
         prompt_cap = await alimit(context, "generate_image", "promptChars")
-        out = await sync_to_async(_generate)(scope, user, args, prompt_cap)
+        out = await _generate(scope, user, args, prompt_cap)
     except (MediaError, VfsError) as exc:
         return json.dumps({'error': str(exc)})
     except Exception:

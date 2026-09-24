@@ -3,7 +3,7 @@ Starter datasets for user-created evals (EVAL_EXPANSION_PLAN §5.3).
 
 A starter kit is a small suite template cloned into a user's account via
 `POST /api/eval/suites/from-template/`. Kits are code, not rows — the same
-rule as `agents/gallery.py`: a migration-seeded row would drift from the
+rule as `agents/gallery/`: a migration-seeded row would drift from the
 grader registry that validates it.
 
 Each kit has 10 cases. The first 5 are the core loop: normal, ambiguous

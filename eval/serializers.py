@@ -18,7 +18,32 @@ from workflow_backend.thresholds import (
 )
 
 from . import graders
-from .models import EvalCase, EvalResult, EvalReview, EvalRun, EvalSuite
+from .models import EvalCase, EvalResult, EvalReview, EvalRun, EvalSuite, EvalWorld
+
+
+class EvalWorldSerializer(serializers.ModelSerializer):
+    #: Cases built for this version — the ones a sweep on it will run.
+    case_count = serializers.SerializerMethodField(read_only=True)
+    #: Whether this is the version sweeps run on (newest accepted).
+    is_live = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = EvalWorld
+        fields = [
+            'id', 'suite', 'version', 'status', 'brief', 'surfaces',
+            'fixtures', 'facts', 'created_by_model', 'cost_usd',
+            'case_count', 'is_live', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_case_count(self, obj) -> int:
+        return obj.suite.cases.filter(
+            is_active=True, world_version=obj.version).count()
+
+    def get_is_live(self, obj) -> bool:
+        live = (obj.suite.worlds.filter(status='accepted')
+                .order_by('-version').first())
+        return live is not None and live.pk == obj.pk
 from .supervision import POLICIES
 
 
@@ -27,31 +52,18 @@ class EvalCaseSerializer(serializers.ModelSerializer):
         model = EvalCase
         fields = [
             'id', 'suite', 'name', 'order', 'goal', 'input_data', 'reference',
-            'graders', 'weight', 'tags', 'is_active', 'created_at', 'updated_at',
+            'graders', 'weight', 'tags', 'is_active', 'world_version',
+            'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'suite', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'suite', 'world_version', 'created_at', 'updated_at']
 
     def validate_graders(self, value):
+        # Includes the judge-never-alone rule: a case graded only by a model
+        # can be passed by a broken judge.
         try:
             return graders.validate_case_graders(value)
         except graders.GraderError as exc:
             raise serializers.ValidationError(str(exc))
-        # A case with only an LLM judge can be passed by a broken judge.
-        # Pair it with at least one deterministic check — the same rule the
-        # benchmark README documents for code suites.
-        if specs:
-            from .graders import REGISTRY
-            all_judge = all(
-                (REGISTRY.get(s.get('type')) is not None
-                 and REGISTRY[s.get('type')].calls_model)
-                for s in specs
-            )
-            if all_judge:
-                raise serializers.ValidationError(
-                    'A case needs at least one deterministic grader alongside '
-                    'llm_judge, so a broken judge cannot pass it on its own.'
-                )
-        return specs
 
     def validate_weight(self, value):
         if value <= 0:
@@ -67,7 +79,7 @@ class EvalSuiteSerializer(serializers.ModelSerializer):
         model = EvalSuite
         fields = [
             'id', 'name', 'slug', 'description', 'subagent', 'pass_threshold',
-            'supervision', 'sample_percent', 'reviewer', 'concurrency',
+            'supervision', 'sample_percent', 'reviewer', 'concurrency', 'gated_calls',
             'max_cost_rupees', 'tags', 'template_slug',
             'is_active', 'case_count', 'last_run', 'created_at', 'updated_at',
         ]
@@ -166,7 +178,7 @@ class EvalResultSerializer(serializers.ModelSerializer):
             'review_state', 'review_reason', 'review', 'final_passed',
             'final_score', 'final_score_100', 'flags',
             'tokens', 'judge_tokens', 'judge_cost_usd',
-            'duration_ms', 'error_message',
+            'duration_ms', 'error_message', 'intents', 'env_changes',
             'execution_id', 'created_at',
         ]
         read_only_fields = fields
@@ -207,7 +219,7 @@ class EvalRunSerializer(serializers.ModelSerializer):
             'pending_review_count', 'score', 'score_100', 'passed', 'grader_agreement',
             'tokens_used', 'duration_ms', 'started_at', 'completed_at',
             'error_message', 'notes', 'created_at',
-            'is_baseline', 'mode',
+            'is_baseline', 'mode', 'world_version',
         ]
         read_only_fields = fields
 

@@ -24,12 +24,39 @@ import json
 import logging
 from typing import Any
 
+from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
+from django.db import close_old_connections
 
 logger = logging.getLogger(__name__)
 
 
-class UserGroupConsumer(AsyncWebsocketConsumer):
+class SocketThreadConsumer(AsyncWebsocketConsumer):
+    """One thread per socket.
+
+    Channels 4.3 runs consumers in no `ThreadSensitiveContext`, so every
+    `database_sync_to_async` from every socket of every user falls through to
+    asgiref's process-wide single thread (G6): all sockets' DB calls queue
+    behind each other. Entering a context for the life of the connection —
+    `__call__` spans connect to disconnect in one task — gives each socket
+    its own thread instead, and closing connections on disconnect hands its
+    pooled connection back (Phase 1's rule, applied to sockets).
+    """
+
+    async def __call__(self, scope, receive, send):
+        async with ThreadSensitiveContext():
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                try:
+                    await sync_to_async(close_old_connections)()
+                except Exception:  # noqa: BLE001 — disconnect must not fail
+                    logger.exception(
+                        "%s failed closing connections", type(self).__name__,
+                    )
+
+
+class UserGroupConsumer(SocketThreadConsumer):
     """Authenticated consumer bound to a single per-user channel group."""
 
     #: Group name is f"{group_prefix}_{user_id}". Required.

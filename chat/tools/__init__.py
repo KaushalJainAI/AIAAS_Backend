@@ -18,6 +18,7 @@ What lives where:
   sandbox       the wasm Python sandbox
   artifacts     the sandboxed-iframe HTML renderer
   charts        `render_chart` — data and a spec, drawn by the frontend
+  ask           `ask_user`: an agent run records a question and proceeds
   vision        the `ask_vision` surface over `chat.vision`
   files         the agent's virtual filesystem over `inference.vfs`
    office        .pptx / .xlsx / .docx rendered from a spec into that filesystem
@@ -53,6 +54,7 @@ from . import (  # noqa: F401  — imported for their registration side effect
     agents,
     apicaller,
     artifacts,
+    ask,
     authoring,
     browser,
     charts,
@@ -251,6 +253,12 @@ async def _requirement_met(
         from esign.provider import esign_available
 
         return esign_available()
+    if requirement == "agent_run":
+        # Never met here: this function answers for chat, where the person is
+        # reading the reply and a question is just the reply. The agent
+        # toolbox does not consult requirements; `ask_user` reaches agents by
+        # being in `ALWAYS_AVAILABLE`.
+        return False
     if requirement == "workspace":
         from workspaces.engine import workspace_available
 

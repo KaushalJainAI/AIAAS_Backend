@@ -129,7 +129,9 @@ async def download_file(args: Dict, context: Dict) -> str:
         return json.dumps({'error': reason})
 
     try:
-        data, mime = await sync_to_async(_fetch)(url)
+        # Pure HTTP (`requests`): off the run's thread, or a 60 s download
+        # blocks that run's ORM calls and serialises its parallel siblings.
+        data, mime = await sync_to_async(_fetch, thread_sensitive=False)(url)
     except ValueError as exc:
         return json.dumps({'error': str(exc)})
     except Exception as exc:  # noqa: BLE001 — a dead link is an answer

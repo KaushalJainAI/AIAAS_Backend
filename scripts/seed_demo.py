@@ -5,7 +5,7 @@ main product surfaces: Agents, Knowledge Bases + Documents, AI Chat,
 and Skills. Re-running wipes ONLY the demo user's owned rows and recreates
 them, so it is safe to run repeatedly. It does not touch other users.
 
-Run:  /home/ec2-user/.venvs/shared/bin/python manage.py shell < seed_demo.py
+Run:  /home/ec2-user/.venvs/shared/bin/python manage.py shell < scripts/seed_demo.py
 """
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile

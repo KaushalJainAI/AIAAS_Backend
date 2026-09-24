@@ -206,6 +206,20 @@ class ReviewTests(TestCase):
         self.assertAlmostEqual(self.run.score, 0.5)
         self.assertEqual(self.run.error_count, 1)
 
+    def test_an_errored_result_is_not_queued_for_review(self):
+        result = self.result(status='error', auto_passed=None, auto_score=0.0)
+        supervision.apply_policy(result, self.suite)
+
+        self.assertEqual(result.review_state, 'not_required')
+        self.assertEqual(result.review_reason, '')
+
+    def test_a_skipped_result_is_not_queued_for_review(self):
+        result = self.result(status='skipped', auto_passed=None, auto_score=0.0)
+        supervision.apply_policy(result, self.suite)
+
+        self.assertEqual(result.review_state, 'not_required')
+        self.assertEqual(result.review_reason, '')
+
     def test_recompute_leaves_a_cancelled_run_cancelled(self):
         self.result(review_state='not_required')
         self.run.status = 'cancelled'

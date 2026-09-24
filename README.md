@@ -10,6 +10,9 @@ anything irreversible happens.
 Django (ASGI) + LangGraph + Celery + Redis, with the frontend in
 [`workflow_assistant`](https://github.com/KaushalJainAI/workflow_assistant).
 
+> **New here?** Start with [`../START_HERE.md`](../START_HERE.md). Each app
+> folder also has its own `README.md` explaining its files in plain words.
+>
 > **Engineering write-up:** [`docs/ENGINEERING_DECISIONS.md`](docs/ENGINEERING_DECISIONS.md)
 > covers the hard problems (memory limits, human approval, long-context agents,
 > scaling limits) and why each was solved the way it was.
@@ -77,7 +80,7 @@ management command (`run_due_triggers`, `send_hitl_reminders`, `recover_runs`,
 ## Tests
 
 ```bash
-python -m pytest            # ~2,300 tests, no network, Redis or database server needed
+python -m pytest            # ~3,250 tests (about 12 min), no network, Redis or database server needed
 ```
 
 Tests live in `<app>/tests/`. Several are end-to-end: they drive the real
@@ -110,7 +113,8 @@ was caught.
 | `notifications/` | Notifications and the HITL reminder ladder |
 | `sandbox/` + `sandbox_service/` | Python execution in a hardened sidecar container |
 
-Detailed design docs are in [`docs/`](docs/). Start with
+Detailed design docs are in [`docs/`](docs/); [`docs/README.md`](docs/README.md)
+sorts them into current reference and old plans. Start with
 [`API.md`](docs/API.md) (every route), [`CONTEXT_LIFECYCLE.md`](docs/CONTEXT_LIFECYCLE.md),
 [`AGENT_OBSERVABILITY.md`](docs/AGENT_OBSERVABILITY.md),
 [`SANDBOX_EXECUTION.md`](docs/SANDBOX_EXECUTION.md) and

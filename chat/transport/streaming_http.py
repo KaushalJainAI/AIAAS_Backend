@@ -16,6 +16,8 @@ from uuid import UUID
 from asgiref.sync import sync_to_async
 from django.http import StreamingHttpResponse
 
+from workflow_backend.background import release_db
+
 from chat.turn import runs
 from chat.models import ChatSession
 from chat.turn.pipeline import TurnError
@@ -82,6 +84,10 @@ def stream_response(run: runs.ChatRun, from_index: int = 0) -> StreamingHttpResp
     """Render a run as `text/event-stream`, replaying from `from_index`."""
 
     async def frames():
+        # The request thread's connection — opened by `authenticate` above —
+        # would otherwise stay held for the whole stream. Nothing below touches
+        # the ORM (`runs.subscribe` is in-memory queues), so hand it back now.
+        await release_db()
         async for event, payload in runs.subscribe(run, from_index):
             yield frame(event, payload)
 

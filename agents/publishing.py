@@ -1,7 +1,7 @@
 """
 Turning one user's agent into something another user can install.
 
-The gallery in `agents/gallery.py` is hand-written and portable by
+The gallery in `agents/gallery/` is hand-written and portable by
 construction: a human wrote `requirements` and never typed an id. A *published*
 agent is the opposite — it is a live configuration full of ids that mean
 something only in its author's account, and nothing about saving it made anyone

@@ -41,6 +41,26 @@ logger = logging.getLogger(__name__)
 #: Intents a client may request explicitly. Anything else is inferred.
 SELECTABLE_INTENTS = frozenset({"chat", "search", "research", "image", "video"})
 
+#: How many user messages (this one included) the `auto` reviewer reads.
+REVIEWER_RECENT_USER_MESSAGES = 4
+#: Per earlier message, so one pasted document cannot blow the judge's budget.
+REVIEWER_MESSAGE_CHARS = 2_000
+
+
+def reviewer_text(past, question: str) -> str:
+    """What the `auto` reviewer reads as "what the user asked for".
+
+    The last few user messages, oldest first, not only this one: "yes, send
+    it" names nothing, and judged alone it can only ask. Recipients are
+    matched against the same text, so "reply to John" two messages ago still
+    covers the address the model found for him. With memory off `past` is
+    empty and this is the message alone, as the reviewer was promised.
+    """
+    earlier = [(m.content or "")[:REVIEWER_MESSAGE_CHARS]
+               for m in past if m.role == "user"]
+    keep = REVIEWER_RECENT_USER_MESSAGES - 1
+    return "\n".join((earlier[-keep:] if keep > 0 else []) + [question])
+
 _SLASH_COMMANDS = {
     "/search": "search",
     "/image": "image",
@@ -1004,7 +1024,7 @@ async def run_chat_turn(
     if session_autonomy not in ('ask', 'auto', 'plan', 'review'):
         session_autonomy = 'ask'
     _auto_policy = _reviewer.auto_policy(
-        user_text=question, provider=provider, model=model,
+        user_text=reviewer_text(past, question), provider=provider, model=model,
     )
 
     turn = TurnContext(

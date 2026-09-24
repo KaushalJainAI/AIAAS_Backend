@@ -4,19 +4,24 @@ Import Checker — Verifies every Python module in the project can be imported.
 Runs each import in a subprocess with a timeout so one bad module
 can't hang the entire check.
 
-Usage:
-    python check_imports.py          # check all modules
-    python check_imports.py core     # check only modules starting with 'core'
+Usage (from the Backend/ folder):
+    python scripts/check_imports.py          # check all modules
+    python scripts/check_imports.py core     # check only modules starting with 'core'
 """
 import os
 import sys
 import subprocess
 import time
 
-# Directories to skip entirely
+# This file lives in Backend/scripts/; the project root is one level up.
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BACKEND_DIR)
+
+# Directories to skip entirely. `scripts` holds seed scripts that write to the
+# database when imported, so they must never be imported by this check.
 SKIP_DIRS = {
     'venv', '.git', '__pycache__', 'media', 'static',
-    'templates', 'docs', 'migrations', '.gemini',
+    'templates', 'docs', 'migrations', '.gemini', 'scripts',
 }
 
 # Files to skip (not real importable modules)
@@ -70,7 +75,7 @@ def check_module(module_name):
             capture_output=True,
             text=True,
             timeout=TIMEOUT_SECONDS,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
+            cwd=BACKEND_DIR,
         )
         return result.returncode == 0, (result.stdout + result.stderr).strip()
     except subprocess.TimeoutExpired:
@@ -78,12 +83,10 @@ def check_module(module_name):
 
 
 def main():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Optional filter: python check_imports.py core
+    # Optional filter: python scripts/check_imports.py core
     prefix = sys.argv[1] if len(sys.argv) > 1 else None
 
-    modules = get_python_modules(base_dir, prefix_filter=prefix)
+    modules = get_python_modules(BACKEND_DIR, prefix_filter=prefix)
     total = len(modules)
     print(f"Checking {total} modules{f' (filter: {prefix}*)' if prefix else ''}...\n")
 

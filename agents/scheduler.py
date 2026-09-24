@@ -33,7 +33,7 @@ from django.db import IntegrityError
 from django.db.models import Q
 from django.utils import timezone
 
-from workflow_backend.background import spawn
+from workflow_backend.background import release_db, spawn
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,9 @@ async def run_forever() -> None:
                 await sweep_once(now)
         except Exception:  # noqa: BLE001 — a dead scheduler fires nothing
             logger.exception('[Scheduler] tick failed')
+        # The 30 s tick is a sleep, not database work. The sweep borrows a
+        # connection per tick; without this the scheduler pins one for ever.
+        await release_db()
         await asyncio.sleep(TICK_SECONDS)
 
 
@@ -168,3 +171,9 @@ def ensure_started() -> None:
         return
     _started = True
     spawn(run_forever(), name='scheduler')
+    # Phase 0 instrument (CONCURRENCY_LAG_FIX_PLAN.md): the loop-lag watchdog
+    # lives next to the scheduler because both are one-task-per-process loops
+    # started from the request path. It holds no DB connection, so it starts
+    # unconditionally once the scheduler does.
+    from workflow_backend.loopwatch import ensure_started as ensure_loopwatch
+    ensure_loopwatch()

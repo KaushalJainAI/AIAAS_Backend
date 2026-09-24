@@ -65,6 +65,14 @@ _ILLEGAL_NAME = re.compile(r'[/\\\x00-\x1f]')
 #: collisions do not stack up as "report (1) (1) (1)".
 _SUFFIXED = re.compile(r'^(?P<stem>.*?) \((?P<n>\d+)\)$')
 
+#: The hidden tree eval worlds live in (`/.eval/`). Eval fixture rows are the
+#: user's own data and must be writable by the eval code, so they cannot hide
+#: behind a manager the way trashed rows do — instead they hide by name: no
+#: user-facing listing shows this folder or anything under it (see `children`
+#: and `eval_subtree_ids`), while id-addressed reads and the eval code that
+#: owns the tree keep working unchanged.
+EVAL_ROOT_NAME = '.eval'
+
 
 class FolderNotFound(Exception):
     """Unknown id, or an id belonging to someone else. Deliberately one
@@ -269,8 +277,39 @@ def create_folder(user, name: str, parent: Folder | None) -> Folder:
 
 def children(user, parent: Folder | None):
     """Live child folders of `parent`, by name. `parent` must already have come
-    from `resolve_folder` (or be None, the root)."""
-    return Folder.objects.filter(user=user, parent=parent).order_by('name')
+    from `resolve_folder` (or be None, the root).
+
+    The eval tree (`EVAL_ROOT_NAME`) is never listed at the root: fixture
+    folders are working data for the eval harness, not the owner's files, and
+    showing them in the file browser would also let any listing leak what is
+    being tested. Only the top level hides — a nested folder that happens to
+    share the name stays visible, so the name can never be used to hide files
+    from the owner. The eval code reaches its folders through `child_by_name`
+    / `ensure_folder`, never through here, so hiding changes nothing it does.
+    """
+    qs = Folder.objects.filter(user=user, parent=parent)
+    if parent is None:
+        qs = qs.exclude(name=EVAL_ROOT_NAME)
+    return qs.order_by('name')
+
+
+def eval_root(user) -> Folder | None:
+    """The user's hidden eval tree, if it exists yet. One indexed lookup."""
+    return Folder.objects.filter(
+        user=user, parent=None, name=EVAL_ROOT_NAME).first()
+
+
+def eval_subtree_ids(user) -> list[int]:
+    """Ids of every folder in the hidden eval tree, or `[]` when there is none.
+
+    The one extra query listings pay to stay blind to eval fixtures. Empty is
+    the common case (most users never run an environment eval) and costs a
+    single indexed lookup that finds nothing.
+    """
+    root = eval_root(user)
+    if root is None:
+        return []
+    return list(subtree(root, include_trashed=False).values_list('id', flat=True))
 
 
 def child_by_name(user, parent: Folder | None, name: str) -> Folder | None:

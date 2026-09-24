@@ -1,7 +1,7 @@
 """
 Explore: the catalogue you install a starting point from, and publishing into it.
 
-Two sources, one shape. A **curated template** is code (`agents/gallery.py`); a
+Two sources, one shape. A **curated template** is code (`agents/gallery/`); a
 **shared agent** is a `SharedAgent` row somebody published. They differ in
 provenance and in nothing else the installer cares about, so they are presented
 with the same keys and installed by the same function. A second install path
@@ -52,10 +52,32 @@ from skills.models import Skill
 from agents import gallery, publishing
 from agents.models import SharedAgent, SubAgent
 from agents.triggers import zone_is_valid
+from agents.views.capabilities import unavailable_grants
 from workflow_backend.thresholds import PUBLIC_CATALOGUE_LIMIT
 from agents.views.agents import AgentSerializer, _with_stats
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------- engine availability
+#
+# A template holding a grant whose engine is `none` installs an agent that can
+# only talk: the runtime silently withholds `compute`/`shell`/`browser`/... —
+# so Explore says so *before* the install, and the install refuses (409)
+# rather than writing a row that cannot run. One predicate
+# (`capabilities.unavailable_grants`), read here and rendered there.
+
+
+def _availability(config: dict | None) -> tuple[bool, str]:
+    """Whether `config` can run on this server, and why not."""
+    blocked = unavailable_grants(config)
+    if not blocked:
+        return True, ''
+    grants = ', '.join(sorted({b['grant'] for b in blocked}))
+    return False, (
+        f'Requires {grants}, which is not available on this server: '
+        f"{blocked[0]['reason']}"
+    )
 
 
 # ---------------------------------------------------------------- candidates
@@ -126,7 +148,11 @@ def _present_curated(entry: dict, candidates: dict[str, list[dict]]) -> dict:
     The permissions screen is built from `config` — the same keys the
     serializer stores and the runtime enforces — so this hands the config over
     whole rather than summarising it into a second vocabulary that could drift.
+    `available` says whether the entry can run on this server at all (a grant
+    whose engine is `none`), so Explore can badge it instead of installing an
+    agent that can only talk.
     """
+    available, unavailable_reason = _availability(entry.get('config'))
     return {
         'slug': entry['slug'],
         'source': 'curated',
@@ -138,6 +164,8 @@ def _present_curated(entry: dict, candidates: dict[str, list[dict]]) -> dict:
         'author': None,
         'install_count': None,
         'version': None,
+        'available': available,
+        **({'unavailable_reason': unavailable_reason} if unavailable_reason else {}),
         # Which one-click pack this installs with, if any — computed from
         # `PACKS`, never stored, so the catalogue cannot disagree with the
         # pack. What the Explore page groups by. Shared entries carry None:
@@ -160,6 +188,7 @@ def _author_name(user) -> str:
 
 def _present_shared(share: SharedAgent, candidates: dict[str, list[dict]],
                     *, viewer=None) -> dict:
+    available, unavailable_reason = _availability(share.config or {})
     return {
         'slug': share.slug,
         'source': 'community',
@@ -175,6 +204,8 @@ def _present_shared(share: SharedAgent, candidates: dict[str, list[dict]],
         'install_count': share.install_count,
         'version': share.version,
         'updated_at': share.updated_at,
+        'available': available,
+        **({'unavailable_reason': unavailable_reason} if unavailable_reason else {}),
         # No pack: only curated entries belong to one.
         'pack': None,
         'requirements': _with_candidates(share.requirements, candidates),
@@ -345,13 +376,18 @@ def _resolve(requirements, chosen: dict, user) -> tuple[dict, list, list]:
                400: OpenApiResponse(description='Unsatisfied requirement, or a '
                                                 'configuration the serializer '
                                                 'refused.'),
-               404: OpenApiResponse(description='No such template.')},
+               404: OpenApiResponse(description='No such template.'),
+               409: OpenApiResponse(description='The entry needs an engine '
+                                                'this server has not '
+                                                'configured.')},
      description='Install a template or a shared agent as one of the caller\'s '
                  'own agents. Body: {"name": optional override, '
                  '"requirements": {key: id}, "timezone": IANA zone for any '
                  'schedule it carries}. A custom-tool requirement also '
                  'accepts "install" to take the author\'s frozen copy as a '
-                 'private, unauthenticated tool of your own.',
+                 'private, unauthenticated tool of your own. 409 when the entry '
+                 'holds a grant whose engine is `none` on this server — '
+                 'installing it would write an agent that can only talk.',
 )
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -378,6 +414,16 @@ def template_install(request, slug: str):
         return Response({'error': 'requirements must be an object of '
                                   '{requirement key: id}.'},
                         status=status.HTTP_400_BAD_REQUEST)
+
+    available, unavailable_reason = _availability(base_config)
+    if not available:
+        # 409, not 400: the request is well-formed, the server cannot honour
+        # it — installing would write an agent that can only talk.
+        return Response(
+            {'error': f'"{slug}" cannot run on this server. {unavailable_reason}',
+             'unavailable_reason': unavailable_reason},
+            status=status.HTTP_409_CONFLICT,
+        )
 
     fields, errors, installed = _resolve(requirements, chosen, request.user)
     if errors:
@@ -465,11 +511,17 @@ def template_install(request, slug: str):
 
 @extend_schema(
     methods=['POST'],
-    responses={200: OpenApiResponse(description='Pack install result.')},
+    responses={200: OpenApiResponse(description='Pack install result.'),
+               409: OpenApiResponse(description='Nothing in the pack can run '
+                                                'on this server.')},
     description='Install every template in a pack that needs no setup and is '
                 'not already installed. Body: {"pack": "office"}. Templates '
                 'with requirements are listed as needing setup rather than '
-                'installed. Idempotent: reinstalling skips what is already there. '
+                'installed. Templates holding a grant whose engine is `none` '
+                'on this server are skipped as engine-unavailable rather than '
+                'installed unable to run — and when *every* setup-free member '
+                'is engine-blocked the pack answers 409 instead of an empty '
+                'install. Idempotent: reinstalling skips what is already there. '
                 'Optional "overrides": {slug: AgentConfig-fragment} — per-template '
                 'tightening (autonomy, writePaths, commandScope, toolPermissions) '
                 'applied through the same serializer the builder saves through.',
@@ -490,6 +542,7 @@ def template_install_pack(request):
 
     installed: list[dict] = []
     skipped: list[dict] = []
+    engine_blocked: list[dict] = []
     for slug in slugs:
         entry = gallery.get(slug)
         if entry is None:
@@ -501,6 +554,13 @@ def template_install_pack(request):
         requirements = entry.get('requirements') or []
         if [r for r in requirements if not r.get('optional')]:
             skipped.append({'slug': slug, 'reason': 'needs setup'})
+            continue
+        available, unavailable_reason = _availability(entry.get('config'))
+        if not available:
+            skipped.append({'slug': slug,
+                            'reason': f'engine unavailable: {unavailable_reason}'})
+            engine_blocked.append({'slug': slug,
+                                   'unavailable_reason': unavailable_reason})
             continue
 
         config = dict(entry['config'])
@@ -540,6 +600,22 @@ def template_install_pack(request):
     if pack == 'code':
         _wire_coding_lead(request.user)
 
+    if not installed and engine_blocked and not any(
+        s['reason'] in ('already installed', 'needs setup', 'no such template',
+                        'bad overrides', 'invalid configuration')
+        for s in skipped
+    ):
+        # Every member that could install is engine-blocked: an empty 200
+        # would read as "done" while installing nothing, so this is a 409
+        # naming the engine, like the single-template install.
+        return Response(
+            {'error': f'Pack "{pack}" cannot run on this server. '
+                      f"{engine_blocked[0]['unavailable_reason']}",
+             'unavailable_reason': engine_blocked[0]['unavailable_reason'],
+             'blocked': engine_blocked},
+            status=status.HTTP_409_CONFLICT,
+        )
+
     return Response({'pack': pack, 'installed': installed, 'skipped': skipped})
 
 
@@ -549,7 +625,7 @@ def _wire_coding_lead(user) -> None:
     `coding-lead` gets `delegatesTo` set to the other code agents at install
     time, through the existing delegation scope — so a lead cannot delegate
     outside the roster. Templates travel without ids, so this cannot live in
-    `gallery.py`: it resolves slugs to the caller's own rows after install
+    `agents/gallery/`: it resolves slugs to the caller's own rows after install
     (including rows from an earlier install — reinstalling only adds what is
     missing, and the scope is recomputed over all of it).
     """
@@ -753,6 +829,9 @@ def _present_public(share: SharedAgent) -> dict:
             for req in (share.requirements or [])
         ],
         'config': share.config,
+        # Server state, not caller state, so the anonymous projection may
+        # carry it: a visitor deciding whether to sign up wants to know.
+        'available': _availability(share.config or {})[0],
     }
 
 

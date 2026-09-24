@@ -6,12 +6,24 @@ requirements are never installed by the pack — they are listed as needing
 setup, with a link to the normal install screen.
 """
 from django.contrib.auth.models import User
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from agents import gallery
 from agents.models import SubAgent
+
+#: Engines on: every grant's machinery configured, so packs install whole.
+#: `browser_available` needs the remote URL as well as the engine name.
+ENGINES_ON = {
+    'WORKSPACE_ENGINE': 'docker',
+    'ESIGN_ENGINE': 'local',
+    'STT_ENGINE': 'local',
+    'TTS_ENGINE': 'local',
+    'BROWSER_ENGINE': 'remote',
+    'BROWSER_REMOTE_URL': 'http://localhost:9999/',
+}
 
 
 class InstallPackTests(APITestCase):
@@ -99,26 +111,86 @@ class InstallPackTests(APITestCase):
 
     def test_every_pack_installs_fully_with_an_empty_body(self):
         """One click, no setup screen: the whole promise of a pack."""
-        for pack, members in gallery.PACKS.items():
-            with self.subTest(pack=pack):
-                response = self._pack(pack=pack)
-                self.assertEqual(response.status_code, status.HTTP_200_OK)
-                self.assertEqual(
-                    sorted(i['slug'] for i in response.data['installed']),
-                    sorted(members),
-                )
-                self.assertEqual(response.data['skipped'], [])
+        with self.settings(**ENGINES_ON):
+            for pack, members in gallery.PACKS.items():
+                with self.subTest(pack=pack):
+                    response = self._pack(pack=pack)
+                    self.assertEqual(response.status_code, status.HTTP_200_OK)
+                    self.assertEqual(
+                        sorted(i['slug'] for i in response.data['installed']),
+                        sorted(members),
+                    )
+                    self.assertEqual(response.data['skipped'], [])
 
     def test_every_pack_reinstall_is_idempotent(self):
-        for pack, members in gallery.PACKS.items():
-            with self.subTest(pack=pack):
-                self._pack(pack=pack)
-                second = self._pack(pack=pack)
-                self.assertEqual(second.data['installed'], [])
-                self.assertEqual(
-                    sorted(s['slug'] for s in second.data['skipped']),
-                    sorted(members),
-                )
+        with self.settings(**ENGINES_ON):
+            for pack, members in gallery.PACKS.items():
+                with self.subTest(pack=pack):
+                    self._pack(pack=pack)
+                    second = self._pack(pack=pack)
+                    self.assertEqual(second.data['installed'], [])
+                    self.assertEqual(
+                        sorted(s['slug'] for s in second.data['skipped']),
+                        sorted(members),
+                    )
+
+    def test_a_pack_whose_engines_are_off_is_409(self):
+        # Default test settings configure no workspace engine, so the whole
+        # code pack would arrive unable to run: 409 naming the engine, and
+        # no rows written.
+        response = self._pack(pack="code")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('workspace', response.data['error'].lower())
+        self.assertFalse(SubAgent.objects.filter(user=self.user).exists())
+
+    def test_a_pack_whose_engines_are_on_installs(self):
+        with self.settings(**ENGINES_ON):
+            response = self._pack(pack="code")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            sorted(i['slug'] for i in response.data['installed']),
+            sorted(gallery.PACKS['code']),
+        )
+
+    def test_a_partially_blocked_pack_installs_what_can_run(self):
+        # Only the browser engine is off: the web pack installs the API
+        # runner and skips the scout with the reason, rather than 409-ing
+        # a pack that is mostly installable.
+        with self.settings(WORKSPACE_ENGINE='docker'):
+            response = self._pack(pack="web")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [i['slug'] for i in response.data['installed']], ['api-runner'])
+        skipped = {s['slug']: s['reason'] for s in response.data['skipped']}
+        self.assertIn('browser', skipped['browser-scout'])
+
+    def test_a_single_template_needing_a_dead_engine_is_409(self):
+        response = self.client.post(
+            reverse('orchestrator:template_install', args=['browser-scout']),
+            {}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('browser', response.data['error'].lower())
+        self.assertFalse(SubAgent.objects.filter(user=self.user).exists())
+
+    def test_a_single_template_installs_when_its_engine_is_on(self):
+        with self.settings(BROWSER_ENGINE='remote',
+                           BROWSER_REMOTE_URL='http://localhost:9999/'):
+            response = self.client.post(
+                reverse('orchestrator:template_install', args=['browser-scout']),
+                {}, format='json',
+            )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_the_listing_carries_availability(self):
+        response = self.client.get(reverse('orchestrator:template_list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        by_slug = {e['slug']: e for e in response.data}
+        scout = by_slug['browser-scout']
+        self.assertFalse(scout['available'])
+        self.assertIn('browser', scout['unavailable_reason'].lower())
+        self.assertTrue(by_slug['analyst']['available'])
+        self.assertNotIn('unavailable_reason', by_slug['analyst'])
 
 
 class CodePackTests(APITestCase):
@@ -127,6 +199,11 @@ class CodePackTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user('coder', 'c@example.com', 'pw')
         self.client.force_authenticate(user=self.user)
+        # The roster holds the `shell` grant: without a workspace engine the
+        # pack install is a 409, so these tests configure one.
+        self._engines = self.settings(**ENGINES_ON)
+        self._engines.enable()
+        self.addCleanup(self._engines.disable)
 
     def _pack(self, **body):
         return self.client.post(

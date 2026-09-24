@@ -270,7 +270,7 @@ publisher. §3's data-model plan is superseded: `Workflow` was replaced by
 `SubAgent`, and `WorkflowTemplate` was deleted with the DAG gallery
 (`templates.0003_delete_template_gallery`). What replaced it is smaller.
 
-- **The catalogue is code**, `agents/gallery.py`, not a table. `templates/
+- **The catalogue is code**, `agents/gallery/`, not a table. `templates/
   models.py` states the rule: a template is a `SubAgent` used as a starting
   point. A table would buy nothing — nobody edits a curated template through
   the admin, every field it carries is already a column on the thing it

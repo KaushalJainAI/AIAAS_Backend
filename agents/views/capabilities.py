@@ -62,8 +62,14 @@ GRANT_RISKS: dict[str, str] = {
 }
 
 
-def _engine_live(grant: str) -> tuple[bool, str]:
-    """Whether the machinery behind `grant` is configured, and why not."""
+def engine_live(grant: str) -> tuple[bool, str]:
+    """Whether the machinery behind `grant` is configured, and why not.
+
+    The one predicate for "can this grant run here": `capability_list`
+    renders it and the gallery's install path refuses on it, so the Explore
+    page and the builder cannot disagree about what is installable (the
+    `visible_servers_sync` rule — one predicate, two readers).
+    """
     if grant == 'browser':
         from browsing.engine import browser_available
 
@@ -103,13 +109,30 @@ def _engine_live(grant: str) -> tuple[bool, str]:
     return True, ''
 
 
+def unavailable_grants(config: dict | None) -> list[dict[str, str]]:
+    """Grants `config` holds whose engine is down, as `{grant, reason}`.
+
+    `config` is a flat `AgentConfig` (template entry or shared agent) — the
+    same `tools` keys the serializer stores and the runtime enforces, so the
+    install screen refuses exactly what would arrive unable to run.
+    """
+    out = []
+    for grant, on in ((config or {}).get('tools') or {}).items():
+        if not on:
+            continue
+        live, reason = engine_live(grant)
+        if not live:
+            out.append({'grant': grant, 'reason': reason})
+    return out
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def capability_list(request):
     """Every grant the runtime serves, with its tools, scope and engine state."""
     grants = []
     for key in sorted(GRANT_TOOLS):
-        live, reason = _engine_live(key)
+        live, reason = engine_live(key)
         grants.append({
             'key': key,
             'tools': sorted(GRANT_TOOLS[key]),

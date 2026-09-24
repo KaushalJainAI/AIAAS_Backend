@@ -177,12 +177,14 @@ UNSERVED_GRANTS = frozenset()
 #: doing cannot answer "is it done?" or notify about a completion.
 #: The reminder trio joins them on the same terms: rows the user owns,
 #: reversible (every one cancellable), scoped to the caller.
+#: `ask_user` joins them because an agent that may not ask is not safer, only
+#: more inclined to guess; it reaches nothing and only records the question.
 ALWAYS_AVAILABLE = ('get_current_time', 'update_todos', 'render_chart',
                     'render_dashboard', 'notify_user', 'mission_status',
                     'wait_for', 'complete_mission', 'report_progress',
                     'save_dashboard', 'list_user_runs',
                     'schedule_notification', 'list_scheduled_notifications',
-                    'cancel_scheduled_notification')
+                    'cancel_scheduled_notification', 'ask_user')
 
 #: Offered only once this run has actually stored something — a tool result too
 #: large to replay, or a step the curator removed. Both read back the run's own
@@ -306,10 +308,20 @@ class AgentToolbox:
     #: is; dispatch reads it too, and `execute_tool` re-checks the card fresh.
     _native_live: dict[str, int] | None = None
 
+    #: The eval world this run is confined to (`eval/environment.py`), or None
+    #: for every other caller. When set, three things change: `allowed_names`
+    #: loses every tool with no fake version (fail closed), `mcp_allowed` goes
+    #: False (MCP tools are never simulated), and `dispatch` answers simulated
+    #: tools from the world instead of calling anything real. Duck-typed on
+    #: purpose — this module must not import `eval`, which imports this module
+    #: for `run_agent`.
+    environment: Any = None
+
     @classmethod
     def for_agent(cls, agent, user_id: int, *, file_scope: Any = None,
                   read_only: bool = False, session_key: str = '',
-                  archive_scopes: tuple[str, ...] = ()) -> AgentToolbox:
+                  archive_scopes: tuple[str, ...] = (),
+                  environment: Any = None) -> AgentToolbox:
         grants = {k: bool(v) for k, v in (agent.tool_grants or {}).items()}
         unserved = tuple(sorted(g for g in UNSERVED_GRANTS if grants.get(g)))
         return cls(grants=grants, user_id=user_id, unserved=unserved,
@@ -317,7 +329,8 @@ class AgentToolbox:
                    session_key=session_key, archive_scopes=archive_scopes,
                    mcp_scope=connector_scope.for_agent(agent),
                    tool_scope=tool_scope_for(agent),
-                   tool_permissions=tool_permissions_for(agent))
+                   tool_permissions=tool_permissions_for(agent),
+                   environment=environment)
 
     @property
     def allowed_names(self) -> frozenset[str]:
@@ -399,6 +412,11 @@ class AgentToolbox:
                 | {'transcribe_audio', 'text_to_speech', 'ocr_document',
                    'request_signature'}
             )
+        if self.environment is not None:
+            # An eval world has no fake version of these tools, so the run
+            # does not get them at all — fail closed, both when offering and
+            # when the model names one anyway (dispatch re-checks below).
+            names -= self.environment.withheld_names(names)
         return frozenset(names)
 
     @property
@@ -411,6 +429,12 @@ class AgentToolbox:
         # by `descriptors` and by `dispatch`, so the withdrawal covers both
         # advertising the tools and running one the model named anyway.
         if self.read_only:
+            return False
+        # And withheld wholesale inside an eval world: MCP tools are never
+        # simulated, so offering them would hand the run a live third-party
+        # service. Simulated *native* tools (Gmail, Calendar, …) are not MCP
+        # tools and are unaffected — they arrive through `allowed_names`.
+        if self.environment is not None:
             return False
         return bool(self.grants.get('mcp'))
 
@@ -511,6 +535,12 @@ class AgentToolbox:
         from chat.tools.registry import connector_of
 
         for name in [n for n in allowed if connector_of(n) is not None]:
+            # Simulated in the eval world: offered without a live card or a
+            # credential, because the call never reaches the real connector —
+            # `dispatch` answers it from the fixtures. Asking for a live
+            # connection here would hide every simulated tool from the run.
+            if self.environment is not None and self.environment.simulates(name):
+                continue
             if not (await self.native_call_allowed(name))[0]:
                 allowed.discard(name)
 
@@ -553,6 +583,14 @@ class AgentToolbox:
         Checked here and not only at advertising time: the model can name a tool
         it was never offered, and "we didn't mention it" is not access control.
         """
+        # Simulated first, before grants, scopes and credentials: inside an
+        # eval world these names name fixtures, not services, and nothing
+        # below this line may decide about them — least of all the live-card
+        # check, which would refuse every simulated call for having no real
+        # connection behind it.
+        if self.environment is not None and self.environment.simulates(name):
+            return await self.environment.run_simulated(name, args, context)
+
         from mcp_integration.tool_provider import is_mcp_tool
 
         if is_mcp_tool(name):
@@ -1366,6 +1404,12 @@ def build_system_prompt(agent, gathered: dict[str, Any], file_scope: Any = None,
         'LIMITS',
         f"- Capabilities granted: {', '.join(granted) or 'none beyond answering directly'}.",
         '- Any other tool will be refused. Do not retry a refused tool.',
+        # Static, so it may sit in the cached prefix. Without it a model asks
+        # in prose, which ends the run, or guesses silently.
+        '- If the task is ambiguous in a way that changes what you do, call '
+        'ask_user with the question and the assumption you will proceed on. '
+        'Nobody answers during the run, so do not wait: carry on with the '
+        'assumption and repeat the question in your final answer.',
     ]
     if guards.get('autonomy') != 'full':
         parts.append('- Some actions pause for human approval before they run.')
@@ -1498,6 +1542,10 @@ class AgentRun:
     #: it. None means either no contract or a contract it failed.
     structured: dict[str, Any] | None = None
     contract_error: str = ''
+    #: Approvals the run would have paused for and questions it asked — see
+    #: `collect_intents`. Approvals appear only on eval runs, which record
+    #: instead of pausing.
+    intents: list[dict[str, Any]] = field(default_factory=list)
 
 
 @sync_to_async
@@ -1883,11 +1931,23 @@ async def run_agent(agent, goal: str, *, user, sink=None,
                     deadline=None,
                     briefing: str = '',
                     parent_session_key: str = '',
-                    workspace=(),
-                    task_claims=(), task_id: str = '',
-                    worker_label: str = '',
-                    write_paths=None, command_scope=None) -> AgentRun:
+                     workspace=(),
+                     task_claims=(), task_id: str = '',
+                     worker_label: str = '',
+                     write_paths=None, command_scope=None,
+                     gated_calls: str = 'run',
+                     environment: Any = None) -> AgentRun:
     """Run `agent` against `goal` and record the run.
+
+    `gated_calls` applies to `caller='eval'` only: a call that would pause is
+    recorded as an intent and then `run` for real or `block`ed (declined).
+
+    `environment` is an `eval/environment.py::EvalEnvironment` (duck-typed —
+    this module must not import `eval`). When set, the run is confined to
+    the eval world: the file scope is rooted at the attempt folder whatever
+    the agent's `fileAccess` says, the KB scope is the world's hidden KB,
+    tools with no simulator are withheld, and simulated calls are answered
+    from fixtures. Only `caller='eval'` passes one.
 
     `thread_id` keys the checkpointer, so passing the id of a paused run is how
     an approved run resumes — the same mechanism chat uses, reached through
@@ -1960,7 +2020,15 @@ async def run_agent(agent, goal: str, *, user, sink=None,
 
         guards = agent.guardrails or {}
         autonomy = guards.get('autonomy', 'ask')
-        file_scope = await build_file_scope(agent, user, workspace=workspace)
+        if environment is not None:
+            # Prepared by the caller (`eval/runner.py`): the attempt folder
+            # and the simulators already exist. Rooted here, the walk itself
+            # is the confinement — the agent's own `fileAccess` is not
+            # consulted, because "read everything" must not survive into a
+            # run whose whole point is that the owner is not in the room.
+            file_scope = environment.attempt_scope()
+        else:
+            file_scope = await build_file_scope(agent, user, workspace=workspace)
         # `plan` is the one level that changes which tools exist rather than
         # which ones pause, so it has to be known before the toolbox is built.
         toolbox = AgentToolbox.for_agent(
@@ -1968,8 +2036,21 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             read_only=(autonomy == 'plan'),
             session_key=thread_id,
             archive_scopes=(parent_session_key,) if parent_session_key else (),
+            environment=environment,
         )
         gathered = await _gather_context(agent, user)
+        if environment is not None:
+            # The prompt names the world's hidden KB, never the owner's
+            # rows — naming them would send the run to ask for ids it is
+            # then refused.
+            gathered = environment.filter_gathered(gathered)
+            world_kb = environment.kb_scope()
+            # No KB surface: an id that matches nothing, so even a rag tool
+            # reached by some path finds no corpus. The tools are withheld
+            # too (`withheld_names`); this is the second door, not the first.
+            env_kb_scope = world_kb if world_kb is not None else (-1,)
+        else:
+            env_kb_scope = None
 
         turn = TurnContext(
             provider=provider,
@@ -2028,6 +2109,9 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             # takes it from there. Telling the graph stops it writing a second,
             # unconditional notification of its own — see `TurnContext`.
               approval_queue=True,
+              # An eval has nobody to answer a pause, so a gated call is
+              # recorded as an intent and then runs (see `TurnContext`).
+              record_intents=(gated_calls if caller == 'eval' else ''),
               # A worker is one level deeper than whoever asked for it, and the
               # counter is what stops delegation multiplying without bound.
               depth=depth,
@@ -2068,8 +2152,11 @@ async def run_agent(agent, goal: str, *, user, sink=None,
             # And which knowledge bases the KB tools may reach. The builder's
             # selection, finally enforced rather than merely printed into the
             # prompt: before this an agent configured for one KB could search
-            # every other KB its owner had.
-            kb_scope=kb_scope_for(gathered),
+            # every other KB its owner had. Inside an eval world it is the
+            # world's hidden KB, or an id matching nothing when the world
+            # has no KB surface.
+            kb_scope=(env_kb_scope if env_kb_scope is not None
+                      else kb_scope_for(gathered)),
             # A worker may read what its parent archived, and nothing else.
             # Empty for every run a person started.
             archive_scopes=(parent_session_key,) if parent_session_key else (),
@@ -2196,6 +2283,9 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         payload['todos'] = todos
     if files := (result.metadata or {}).get('files'):
         payload['files'] = files
+    intents = collect_intents(result.metadata, result.tool_trace)
+    if intents:
+        payload['intents'] = intents
     # The lead's tasks, final state each — the panel redraws from this on
     # `/runs` after the fact, the way it redraws todos and charts. Keyed by
     # the run's own thread id, which is the bucket the dispatch tools filed
@@ -2256,7 +2346,32 @@ async def run_agent(agent, goal: str, *, user, sink=None,
         duration_ms=int((time.monotonic() - started) * 1000),
         structured=structured,
         contract_error=contract_error,
+        intents=intents,
     )
+
+
+def collect_intents(metadata: dict | None, tool_trace: list | None) -> list[dict[str, Any]]:
+    """What the run wanted from a person: approvals it would have paused
+    for, and questions it asked through `ask_user`, in the order they arose.
+
+    Approvals come from `metadata['intents']` (written only when the turn was
+    told to record rather than pause). Questions come from the trace, because
+    `ask_user` is an ordinary tool and its call *is* the record.
+    """
+    intents = [dict(i) for i in ((metadata or {}).get('intents') or [])]
+    for call in tool_trace or []:
+        if (call.get('tool') or call.get('name')) != 'ask_user':
+            continue
+        args = call.get('args') or {}
+        intents.append({
+            'kind': 'question',
+            'question': str(args.get('question') or ''),
+            'assumption': str(args.get('assumption') or ''),
+            'call_id': call.get('call_id', ''),
+            'iteration': call.get('iteration', 0),
+        })
+    intents.sort(key=lambda i: int(i.get('iteration') or 0))
+    return intents
 
 
 def _apply_contract(agent, result) -> tuple[dict[str, Any] | None, str]:

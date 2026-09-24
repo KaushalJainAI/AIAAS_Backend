@@ -422,7 +422,7 @@ async def pdf_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
 
 @command(
     name="eval",
-    summary="Save the last answer as an eval case",
+    summary="Save the last exchange as an eval case draft",
     kind="action", group="general",
 )
 async def eval_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
@@ -432,36 +432,56 @@ async def eval_command(call: CommandCall, ctx: CommandContext) -> CommandResult:
         return CommandResult(status="error", message="Open a conversation first.")
 
     def _load():
-        return list(
-            ChatMessage.objects.filter(session_id=ctx.session_id, role="assistant")
+        rows = list(
+            ChatMessage.objects.filter(session_id=ctx.session_id)
             .order_by("-created_at")
-            .values("id", "content")[:1]
+            .values("id", "role", "content")[:10]
         )
+        question = next((r["content"] for r in rows if r["role"] == "user"
+                         and (r["content"] or "").strip()), "")
+        answer = next((r for r in rows if r["role"] == "assistant"
+                       and (r["content"] or "").strip()), None)
+        return question, answer
 
-    rows = await sync_to_async(_load)()
-    if not rows:
+    question, answer = await sync_to_async(_load)()
+    if answer is None:
         return CommandResult(status="error", message="No assistant answer to save yet.")
-    answer = rows[0]
-    case = await _save_chat_case(ctx, str(answer.get("content") or ""))
+    case = await _save_chat_case(
+        ctx, str(question or ""), str(answer.get("content") or ""),
+        message_id=answer["id"])
     return CommandResult(
         status="ok",
         card={"type": "eval_saved", "case_id": case["id"],
-              "suite": case["suite"], "message_id": answer["id"]},
+              "suite": case["suite"], "message_id": answer["id"],
+              "draft": True},
     )
 
 
 @sync_to_async
-def _save_chat_case(ctx: CommandContext, answer: str) -> dict:
-    from eval.models import EvalCase, EvalSuite
+def _save_chat_case(ctx: CommandContext, question: str, answer: str,
+                    message_id: int = 0) -> dict:
+    """The user's question as the goal, the saved answer as the reference.
+
+    A draft, like every other model-derived case: the answer is the model's
+    own words, so it scores nothing until a person accepts it on the Evals
+    page. (Before this, the goal was a stub about the answer and the case
+    was active — testing the wrong thing with no review.)
+    """
+    from eval import api as evals
+    from eval.models import EvalSuite
 
     suite, _ = EvalSuite.objects.get_or_create(
         user_id=ctx.user_id, name="From chat",
         defaults={"description": "Cases saved from chat with /eval.",
                   "supervision": "all"},
     )
-    case = EvalCase.objects.create(
-        suite=suite, name=f"From chat {suite.cases.count()}",
-        goal=f"Chat answer saved for regression: {answer[:120]}",
-        reference=answer[:4000], graders=[], tags=["from-chat"],
-    )
-    return {"id": case.id, "suite": suite.name}
+    saved = evals.save_cases(suite, [{
+        'name': f'From chat {message_id or suite.cases.count()}',
+        'goal': (question.strip() or 'Chat question saved for regression.'),
+        'reference': answer[:4000],
+        'graders': [],
+        'tags': ['from-chat'],
+    }], drafts=True)
+    if not saved:
+        raise ValueError('The suite is full.')
+    return {"id": saved[0].id, "suite": suite.name}

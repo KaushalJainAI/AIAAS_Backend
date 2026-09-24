@@ -95,7 +95,11 @@ _BUILTIN_PHRASES = {
     'list_eval_suites': 'List eval suites',
     'get_scorecard': 'Show an agent’s 0–100 scorecard',
     'create_eval_suite_from_starter': 'Create an eval suite from a starter',
-    'add_eval_case': 'Add an eval case',
+    'create_eval_suite': 'Create an empty eval suite',
+    'add_eval_case': 'Draft an eval case',
+    'generate_eval_world': 'Build an eval world and its cases (spends judge credits)',
+    'import_eval_cases_from_runs': 'Draft eval cases from real runs',
+    'get_eval_results': 'Show one eval sweep’s results',
     'run_eval_suite': 'Run an eval suite (spends credits)',
     'execute_python': 'Run Python code',
     'generate_image': 'Generate an image (this costs money)',
@@ -192,6 +196,35 @@ def _fields(args: Mapping[str, Any] | None) -> list[dict[str, str]]:
     return out
 
 
+def _world_cost_note(args: Mapping[str, Any] | None) -> str:
+    """What `generate_eval_world` is about to spend, on its approval card.
+
+    A fixed estimate, not a quote: facts, world, cases, solve and verify are
+    one judge call each, so the count barely moves with the case count —
+    only the size of two of the calls does.
+    """
+    try:
+        n = max(1, min(int((args or {}).get('cases') or 12), 25))
+    except (TypeError, ValueError):
+        n = 12
+    return (f'About 5 judge-model calls for up to {n} cases, billed to the '
+            "user's key. Everything arrives as drafts.")
+
+
+#: Tools whose approval card carries a computed note under the sentence.
+_APPROVAL_NOTES = {
+    'generate_eval_world': _world_cost_note,
+}
+
+
+def _approval_note(name: str, args: Mapping[str, Any] | None) -> str:
+    try:
+        fn = _APPROVAL_NOTES.get(name or '')
+        return fn(args) if fn else ''
+    except Exception:  # noqa: BLE001 - a note must not break the card
+        return ''
+
+
 def describe_call(
     name: str, args: Mapping[str, Any] | None = None, *, server: str = '',
     label: str = '',
@@ -226,7 +259,6 @@ def describe_call(
 
     if decoded is not None:
         from .permissions import strip_encoded_digest
-
         tool = strip_encoded_digest(decoded[1])
         phrase = _humanise(tool)
         title = f'{phrase} · {server}' if server else phrase
@@ -243,6 +275,10 @@ def describe_call(
         title = f'{who} · {title}'
         first = sentence[:1].lower() + sentence[1:] if sentence else sentence
         sentence = f'{who} wants to {first}'
+
+    note = _approval_note(raw_name, args)
+    if note:
+        sentence = f'{sentence} {note}'
 
     return {
         'title': title,

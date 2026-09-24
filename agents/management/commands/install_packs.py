@@ -1,7 +1,7 @@
 """
 Install curated subagent packs for users from the server shell.
 
-Packs are code (`agents/gallery.py::PACKS`), not DB rows — the deployment DB
+Packs are code (`agents/gallery/`, `PACKS`), not DB rows — the deployment DB
 only holds each user's installs (`SubAgent.template_slug`). Copy the updated
 `Backend/` + frontend build to the server, then run e.g.::
 
@@ -13,7 +13,9 @@ Idempotent: a template already installed for a user (matched on
 the same rule `POST /api/orchestrator/templates/install-pack/` follows.
 Templates with required requirements are skipped as `needs setup` rather
 than installed half-configured, for the same reason the endpoint refuses
-them. Use `--dry-run` to see what would happen without writing anything.
+them. Templates holding a grant whose engine is `none` on this server are
+skipped as `engine unavailable` rather than installed unable to run.
+Use `--dry-run` to see what would happen without writing anything.
 """
 from __future__ import annotations
 
@@ -36,6 +38,7 @@ def _fake_request(user):
 def _install_slug(user, slug: str, *, dry_run: bool = False) -> str:
     """Install one template for one user. Returns installed|already|setup|invalid."""
     from agents.views.agents import AgentSerializer
+    from agents.views.capabilities import unavailable_grants
 
     if SubAgent.objects.filter(user=user, template_slug=slug).exists():
         return "already installed"
@@ -45,6 +48,10 @@ def _install_slug(user, slug: str, *, dry_run: bool = False) -> str:
     requirements = entry.get("requirements") or []
     if [r for r in requirements if not r.get("optional")]:
         return "needs setup"
+    if unavailable_grants(entry.get("config")):
+        # Same honesty rule as the HTTP install: an agent whose engine is
+        # `none` on this server would arrive unable to run.
+        return "engine unavailable"
     config = dict(entry["config"])
     serializer = AgentSerializer(
         data=config, context={"request": _fake_request(user)}

@@ -175,11 +175,13 @@ graders split (some passed, some failed), when an `llm_judge` score lands in
 grader is most likely to be wrong, and it is the only policy whose review cost
 does not grow with the size of the suite.
 
-An `unsure` verdict is recorded, not refused: it leaves the grader's verdict
-standing and sets `agreed_with_graders = NULL`, so an honest "I cannot tell"
-does not drag the agreement figure down. An errored case cannot be reviewed at
-all — there is no answer to have an opinion about, and letting one in would
-dilute agreement with verdicts on outages.
+For a graded result, an `unsure` verdict is recorded, not refused: it leaves the
+grader's verdict standing and sets `agreed_with_graders = NULL`, so an honest
+"I cannot tell" does not drag the agreement figure down. An errored or skipped
+case has no answer to judge, so new ones are never queued. A legacy pending row
+stays visible as **Dismiss** (`unsure`); that deletes the result, its eval-only
+trace and its hidden attempt files, then re-settles the run instead of returning
+400 or recording a verdict on an outage.
 
 **One notification per run, never one per result.** A 200-case suite under `all`
 would otherwise deliver 200 notifications for a single sitting's work — the same
@@ -270,7 +272,7 @@ GET    /api/eval/suites/                      list + per-suite health counts
 POST   /api/eval/suites/
 GET    /api/eval/suites/{id}/                 suite + its cases
 PATCH  /api/eval/suites/{id}/
-DELETE /api/eval/suites/{id}/
+DELETE /api/eval/suites/{id}/                delete suite, sweeps, eval traces + attempt files
 GET    /api/eval/suites/{id}/cases/
 POST   /api/eval/suites/{id}/cases/           graders validated here (judge-never-alone)
 GET    /api/eval/cases/{id}/
@@ -281,9 +283,10 @@ POST   /api/eval/suites/from-template/        clone a starter (template, name?, 
 POST   /api/eval/suites/{id}/run/             202 + run_id
 GET    /api/eval/runs/                        sweep history
 GET    /api/eval/runs/{run_id}/               sweep + results + grades + reviews + flags + 0-100
+DELETE /api/eval/runs/{run_id}/               delete finished sweep + eval traces + attempt files
 POST   /api/eval/runs/{run_id}/cancel/
 GET    /api/eval/reviews/pending/             the review queue, oldest first
-POST   /api/eval/results/{id}/review/         a verdict
+POST   /api/eval/results/{id}/review/         a verdict; dismisses legacy errored results
 GET    /api/eval/agents/{id}/scorecard/       per-suite scores over time (score + score_100)
 ```
 

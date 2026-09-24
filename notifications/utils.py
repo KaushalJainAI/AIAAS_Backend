@@ -55,6 +55,12 @@ def send_notification_email(notification):
                 exc,
             )
 
+    # The locmem backend is only ever the test backend: sending inline keeps
+    # the write inside the test case, so no daemon thread outlives it (which
+    # used to log `module 'django.core.mail' has no attribute 'outbox'`).
+    if 'locmem' in (getattr(settings, 'EMAIL_BACKEND', '') or ''):
+        send()
+        return
     threading.Thread(target=send, daemon=True).start()
 
 

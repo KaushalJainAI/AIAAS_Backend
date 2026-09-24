@@ -22,7 +22,18 @@ urlpatterns = [
     path('starter-kits/', views.starter_kits, name='starter_kits'),
     path('suites/<int:suite_id>/', views.suite_detail, name='suite_detail'),
     path('suites/<int:suite_id>/cases/', views.case_list, name='case_list'),
+    path('suites/<int:suite_id>/generate/', views.suite_generate, name='suite_generate'),
+    path('suites/<int:suite_id>/import-runs/', views.suite_import_runs, name='suite_import_runs'),
+    path('suites/<int:suite_id>/drafts/', views.suite_review_drafts, name='suite_review_drafts'),
     path('cases/<int:case_id>/', views.case_detail, name='case_detail'),
+
+    # Worlds — the fake situations a suite's cases share. Generated, never
+    # hand-written; accepted on the Evals page only.
+    path('suites/<int:suite_id>/world/', views.suite_world, name='suite_world'),
+    path('suites/<int:suite_id>/world/generate/', views.suite_world_generate,
+         name='suite_world_generate'),
+    path('worlds/<int:world_id>/accept/', views.world_accept, name='world_accept'),
+    path('worlds/<int:world_id>/', views.world_detail, name='world_detail'),
 
     # Sweeps
     path('suites/<int:suite_id>/run/', views.suite_run, name='suite_run'),

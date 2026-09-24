@@ -110,6 +110,13 @@ def needs_review(policy: str, *, auto_passed, score: float,
 
 def apply_policy(result, suite, *, rng: random.Random | None = None) -> None:
     """Set `review_state` on a freshly graded result. Does not save."""
+    if getattr(result, 'status', None) in ('error', 'skipped'):
+        # The agent never answered (or never ran): there is nothing for a
+        # person to judge, and queueing it leaves a row `submit_review`
+        # must refuse — stuck in the queue for ever with no way out.
+        result.review_state = 'not_required'
+        result.review_reason = ''
+        return
     queue, reason = needs_review(
         result.run.supervision,
         auto_passed=result.auto_passed,
@@ -274,4 +281,6 @@ def notify_reviewer(run) -> None:
             'suite_id': suite.id,
             'pending': run.pending_review_count,
         },
+        # Email belongs to the digest alone; the Inbox row is the ping.
+        send_email=False,
     )

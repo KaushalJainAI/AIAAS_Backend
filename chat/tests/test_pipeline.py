@@ -275,6 +275,27 @@ class ChatTurnTests(TestCase):
 
         self.assertIn("deep_research", seen)
 
+    def test_slash_search_searches_when_commands_are_registered(self):
+        # Whether `/search` resolves through the legacy prefix or the slash
+        # command registry depends on which command modules happen to be
+        # imported — i.e. on test order. Both paths must seed the search, so
+        # force the registered path here (importing registers `/search`,
+        # which is the state the full suite always reaches first).
+        import chat.commands.web  # noqa: F401 — registration side effect
+
+        seen: list[str] = []
+
+        async def fake_tool(name, args, context):
+            seen.append(name)
+            return json.dumps({"type": "search_results", "text": "Found it.",
+                               "sources": [{"url": "http://a", "title": "A"}]})
+
+        with patch("llm.access.stream", text_stream("Answer.")), \
+             patch("chat.tools.execute_tool", fake_tool):
+            self._run("/search rust release date", Recorder())
+
+        self.assertIn("web_search", seen)
+
     def test_web_search_also_fills_the_image_panel(self):
         # A Perplexity-style answer with an empty visual panel reads as broken.
         async def fake_tool(name, args, context):

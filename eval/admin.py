@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import EvalCase, EvalResult, EvalReview, EvalRun, EvalSuite
+from .models import EvalCase, EvalResult, EvalReview, EvalRun, EvalSuite, EvalWorld
 
 
 class EvalCaseInline(admin.TabularInline):
@@ -24,6 +24,13 @@ class EvalCaseAdmin(admin.ModelAdmin):
     list_display = ['__str__', 'suite', 'order', 'weight', 'is_active']
     list_filter = ['is_active', 'suite']
     search_fields = ['name', 'goal', 'reference']
+
+
+@admin.register(EvalWorld)
+class EvalWorldAdmin(admin.ModelAdmin):
+    list_display = ['__str__', 'suite', 'version', 'status', 'updated_at']
+    list_filter = ['status', 'suite']
+    readonly_fields = ['created_at', 'updated_at']
 
 
 class EvalResultInline(admin.TabularInline):

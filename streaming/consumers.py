@@ -19,14 +19,15 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.utils import timezone
+
+from core.realtime.consumers import SocketThreadConsumer
 
 logger = logging.getLogger(__name__)
 
 
-class ExecutionConsumer(AsyncWebsocketConsumer):
+class ExecutionConsumer(SocketThreadConsumer):
     """
     WebSocket consumer for execution updates and HITL.
     
@@ -387,7 +388,7 @@ class ExecutionConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps(data))
 
 
-class HITLNotificationConsumer(AsyncWebsocketConsumer):
+class HITLNotificationConsumer(SocketThreadConsumer):
     """
     Dedicated consumer for HITL notifications.
     

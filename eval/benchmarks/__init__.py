@@ -3,7 +3,7 @@ The benchmark: practical tasks that say whether this system actually works.
 
 `eval/` is the engine (suites, graders, sweeps, human review). This package is
 the *content* — the questions worth asking it — and lives in code, not rows, for
-the reason `agents/gallery.py` gives about templates: a row seeded by a
+the reason `agents/gallery/` gives about templates: a row seeded by a
 migration drifts from the validator that checks it, while a dict in a file is
 checked by a test on every run.
 

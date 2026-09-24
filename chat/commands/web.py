@@ -31,6 +31,14 @@ async def search_command(call: CommandCall, ctx: CommandContext) -> CommandResul
             + ". One search round, then answer with inline sources — this is "
               "the quick lookup, not deep research. Say what you could not verify."
         ),
+        # Pinned, not merely suggested: choosing `/search` is the user
+        # stating the tool should run, so `_seed_intent_tool` runs it before
+        # the model's first turn (the `_INTENT_SEED_TOOL` contract). Without
+        # this, a resolved `/search` only narrowed the toolbox while the
+        # legacy unregistered path seeded — so the turn searched or not
+        # depending on which command modules happened to be imported, i.e. on
+        # test order. `/research` already pins its intent for the same reason.
+        intent="search",
         tool_pin=("web_search",),
     )
 

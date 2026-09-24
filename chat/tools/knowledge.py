@@ -75,6 +75,11 @@ async def list_knowledge_bases(args: Dict, context: Dict) -> str:
                 # names and ids of corpora it may not search, which it will then
                 # try, and report the refusals to whoever reads the run.
                 rows = rows.filter(id__in=scope)
+            # Hidden eval corpora (`.eval/…`) never list: they are working
+            # data for the eval harness, and an agent that discovers one by
+            # browsing learns what is being tested. Eval runs reach theirs
+            # through `kb_scope`, never through here.
+            rows = rows.exclude(name__startswith='.eval/')
             kbs = rows.values(
                 'id', 'name', 'description', 'backend', 'doc_count', 'vector_count',
                 'index_size_bytes', 'is_default', 'embedding_model',

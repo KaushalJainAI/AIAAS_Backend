@@ -77,3 +77,21 @@ def spawn(
     """
     loop = asyncio.get_running_loop()
     return loop.create_task(_detached(coro), name=name, context=contextvars.Context())
+
+
+async def release_db() -> None:
+    """Hand this thread's DB connection back to the pool before a long wait.
+
+    A `spawn()`ed task keeps its pooled connection until it *ends*, including
+    the minutes it spends waiting on something that is not the database — a
+    model call, a stream, a sleep, a worker. With the pool, closing returns it
+    (because `CONN_MAX_AGE=0`, `close_if_unusable_or_obsolete` always closes),
+    and the next query takes one back in microseconds.
+
+    Must be awaited from the task that opened the connection — thread-sensitive
+    `sync_to_async` runs on that task's own thread, which is the thread whose
+    connection Django keyed. Never call inside `transaction.atomic()`: Django
+    will not close there, and a transaction held across a model call would be
+    worse than the connection it was trying to free.
+    """
+    await sync_to_async(close_old_connections)()

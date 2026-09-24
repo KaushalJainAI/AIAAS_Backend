@@ -1,10 +1,11 @@
 """
-Celery entry point for the trigger sweep.
+Celery entry points for the orchestrator sweeps.
 
-A thin wrapper, exactly like `notifications/tasks.py`: all behaviour lives in
-`sweep.run_trigger_sweep` so `manage.py run_due_triggers` does the same thing
-without a broker. Local dev has no Redis, and a beat-only scheduler fails by
-never firing — which looks identical to "nothing was due".
+Thin wrappers, exactly like `notifications/tasks.py`: all behaviour lives
+beside the sweep (`sweep`, `recovery`, `chat.turn.prune`) so each is also
+runnable as a management command without a broker. Local dev has no Redis,
+and a beat-only scheduler fails by never firing — which looks identical to
+"nothing was due".
 """
 
 import logging
@@ -49,4 +50,23 @@ def recover_runs():
         return {**tally, 'eval': eval_tally}
     except Exception as exc:
         logger.exception('Run recovery sweep failed: %s', exc)
+        raise
+
+
+@shared_task(name='orchestrator.prune_chat_checkpoints', ignore_result=True)
+def prune_chat_checkpoints():
+    """Delete old chat checkpoints beyond the latest few per thread.
+
+    Scheduled by Celery beat on the recovery cadence, and runnable as
+    `manage.py prune_chat_checkpoints` — see chat/turn/prune.py. No-op on
+    anything but the Postgres saver.
+    """
+    from asgiref.sync import async_to_sync
+
+    from chat.turn.prune import prune_chat_checkpoints as _prune
+
+    try:
+        return async_to_sync(_prune)()
+    except Exception as exc:
+        logger.exception('Chat checkpoint prune failed: %s', exc)
         raise

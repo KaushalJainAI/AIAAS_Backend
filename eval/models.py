@@ -97,6 +97,13 @@ class EvalSuite(models.Model):
     )
 
     # -- Execution --
+    #: What an eval run does with a call that would have paused for approval
+    #: under the agent's own autonomy. Either way it is recorded as an intent
+    #: and nothing waits: `run` executes it for real (the default — the run
+    #: carries on as if approved), `block` declines it, for suites proving the
+    #: gate fires, where running the call is exactly what must not happen.
+    GATED_CALL_CHOICES = [('run', 'Record and run'), ('block', 'Record and block')]
+    gated_calls = models.CharField(max_length=8, choices=GATED_CALL_CHOICES, default='run')
     concurrency = models.IntegerField(
         default=2, validators=[MinValueValidator(1)],
         help_text='Cases run in parallel. Capped by EVAL_MAX_CONCURRENCY.',
@@ -170,6 +177,11 @@ class EvalCase(models.Model):
     weight = models.FloatField(default=1.0, help_text='Relative weight in the suite score')
     tags = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
+    #: The world version this case was built for (`EvalWorld.version`). Null
+    #: for cases predating worlds — they run on whatever the live world is.
+    #: A case whose version is not the live one is stale: kept, listed, and
+    #: never swept until the world is regenerated around it or it is rebuilt.
+    world_version = models.IntegerField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -187,9 +199,76 @@ class EvalCase(models.Model):
         return self.name or f'Case {self.pk}'
 
 
+class EvalWorld(models.Model):
+    """One fake situation a suite's cases share (`docs/EVAL_ENVIRONMENTS_PLAN.md`).
+
+    The judge invents a scenario, plants ground-truth `facts`, and builds
+    `fixtures` containing exactly those facts; cases are then written *about*
+    the world with expected answers pointing at the facts. It belongs to a
+    **suite, not a case**: one world with 12 cases is cheaper to build and lets
+    cases refer to each other's data.
+
+    A regenerated world is a **new version**, never an edit: runs name the
+    version they used (`EvalRun.world_version`) and cases name the version
+    they were built for (`EvalCase.world_version`), so scores from different
+    worlds are never compared as if they were the same. Regenerating
+    invalidates the old version's cases — they stay on their version rather
+    than being deleted, because deleting them would rewrite what old sweeps
+    scored.
+
+    `status` is `draft` until a person accepts it **on the Evals page only** —
+    the same provisional-until-asked rule as generated cases. A sweep runs
+    only accepted cases on an accepted world.
+    """
+
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('accepted', 'Accepted'),
+    ]
+
+    suite = models.ForeignKey(EvalSuite, on_delete=models.CASCADE, related_name='worlds')
+    #: Regenerations increment; the suite's live world is its newest `accepted`.
+    version = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=8, choices=STATUS_CHOICES, default='draft')
+
+    #: "Acme Tools, 40 staff, Q3 close in progress" — shown to the reviewer.
+    brief = models.TextField(blank=True)
+    #: Which surfaces exist: `{"files": true, "mail": true, ...}`. Only the
+    #: surfaces the suite agent's grants can reach are ever built.
+    surfaces = models.JSONField(default=dict, blank=True)
+    #: The data itself, per surface (size-capped; see `eval/environment.py`).
+    #: Files: `{path: text}`. Mail: `{messages: [...], labels: [...]}`.
+    #: Calendar: `{events: [...]}`. Drive: `{files: [...], sheets: {...}}`.
+    #: KB: `{documents: [{name, text}]}`. Web: `{pages: [...], results: {...}}`.
+    fixtures = models.JSONField(default=dict, blank=True)
+    #: The ground truth the judge planted, as `[{"key": ..., "statement": ...}]`.
+    #: Every expected answer points at entries here rather than guessing anew.
+    facts = models.JSONField(default=list, blank=True)
+
+    created_by_model = models.CharField(max_length=200, blank=True)
+    cost_usd = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Eval world'
+        verbose_name_plural = 'Eval worlds'
+        ordering = ['suite', 'version']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['suite', 'version'], name='unique_world_version_per_suite'),
+        ]
+        indexes = [
+            models.Index(fields=['suite', '-version']),
+        ]
+
+    def __str__(self):
+        return f'{self.suite_id} world v{self.version} ({self.status})'
+
+
 class EvalRun(models.Model):
     """One sweep of a suite against one agent."""
-
     STATUS_CHOICES = [
         ('pending', 'Pending'),
         ('running', 'Running'),
@@ -257,6 +336,10 @@ class EvalRun(models.Model):
         choices=[('agent', 'Agent'), ('bare', 'Bare model')],
         default='agent',
     )
+    #: The `EvalWorld.version` this sweep ran on, or null for suites with no
+    #: world. Recorded so scores from different worlds are never compared as
+    #: if they were the same.
+    world_version = models.IntegerField(null=True, blank=True)
 
     error_message = models.TextField(blank=True)
     notes = models.TextField(blank=True)
@@ -354,6 +437,15 @@ class EvalResult(models.Model):
         null=True, blank=True, validators=[MinValueValidator(0)],
     )
     error_message = models.TextField(blank=True)
+    #: What the run wanted from a person — approvals it would have paused for
+    #: and `ask_user` questions (`agents.agent.runtime.collect_intents`). An
+    #: eval never pauses; this is where the pause it would have made is kept.
+    intents = models.JSONField(default=list, blank=True)
+    #: What the agent changed in the eval world: emails sent, events created
+    #: or deleted, files written, drive cells updated (`environment.snapshot`).
+    #: The "what changed" panel reads this, so a reviewer sees what the agent
+    #: *did*, not only what it said.
+    env_changes = models.JSONField(default=dict, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

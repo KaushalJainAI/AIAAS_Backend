@@ -19,10 +19,13 @@ urlpatterns = [
 
     # Documents — KB is internal (one implicit Default KB per user, no CRUD views)
     path('documents/', views.document_list, name='document_list'),
+    path('documents/new/', views.document_new, name='document_new'),
     path('documents/<int:document_id>/', views.document_detail, name='document_detail'),
     path('documents/<int:document_id>/share/', views.document_share, name='document_share'),
     path('documents/<int:document_id>/download/', views.document_download, name='document_download'),
     path('documents/<int:document_id>/content/', views.document_content, name='document_content'),
+    path('documents/<int:document_id>/office/', views.document_office, name='document_office'),
+    path('documents/<int:document_id>/copy/', views.document_copy, name='document_copy'),
 
     # Dashboards — live tiles bound to sources (see dashboard_views.py).
     path('dashboards/', dashboard_views.dashboard_list, name='dashboard_list'),

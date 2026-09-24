@@ -13,7 +13,7 @@ happy path:
 
 Idempotent: removes only this user's rows in these apps first.
 
-Run:  python manage.py shell < seed_improve.py
+Run:  python manage.py shell < scripts/seed_improve.py
 """
 from datetime import timedelta
 

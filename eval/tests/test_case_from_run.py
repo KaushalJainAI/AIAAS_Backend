@@ -33,6 +33,11 @@ class CaseFromRunTests(TestCase):
         self.assertEqual(case.graders, [])
         self.assertIn('from-run', case.tags)
         self.assertIn(str(log.execution_id), case.tags)
+        # A model's words are a draft until reviewed, even when a person
+        # pressed the button.
+        self.assertFalse(case.is_active)
+        self.assertIn('needs-review', case.tags)
+        self.assertTrue(r1.data['draft'])
         # Runtime keys stripped; goal lifted out.
         self.assertNotIn('thread_id', case.input_data)
         self.assertNotIn('_secret', case.input_data)

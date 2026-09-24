@@ -72,8 +72,19 @@ class ReminderToolTests(TestCase):
         self.assertEqual(ScheduledNotification.objects.count(), 0)
 
     def test_naive_time_is_read_in_the_users_timezone(self):
+        # A hardcoded wall-clock time passes in the morning and fails in the
+        # afternoon (past times are refused), so the "naive" input is built
+        # relative to now: two hours ahead in the user's own timezone, with
+        # the offset dropped — which is exactly what a naive time is.
+        from zoneinfo import ZoneInfo
+
+        from notifications.reminders import get_preferences
+
+        zone = ZoneInfo(get_preferences(self.user).effective_timezone)
+        naive = (timezone.now() + timedelta(hours=2)).astimezone(zone)
+        naive = naive.replace(tzinfo=None)
         out = self.call('schedule_notification', {
-            'title': 'T', 'message': 'M', 'run_at': '2026-09-24T09:00:00'})
+            'title': 'T', 'message': 'M', 'run_at': naive.isoformat()})
         self.assertTrue(out['scheduled'])
         row = ScheduledNotification.objects.get(user=self.user)
         self.assertTrue(row.next_run_at.tzinfo is not None)

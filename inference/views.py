@@ -52,7 +52,7 @@ _SHARED_MODES = ['shared_read', 'shared_write']
 _UNFILTERED = object()
 
 
-def _owned_documents(user, folder=_UNFILTERED):
+def _owned_documents(user, folder=_UNFILTERED, types=None):
     """The caller's documents, optionally narrowed to one folder.
 
     `folder` defaults to the `_UNFILTERED` sentinel rather than None, because
@@ -63,8 +63,16 @@ def _owned_documents(user, folder=_UNFILTERED):
     qs = (Document.objects.filter(user=user)
           .select_related('user', 'knowledge_base', 'folder')
           .order_by('-created_at'))
+    # The hidden eval tree never lists: fixture documents are working data
+    # for the eval harness, not the owner's files (see
+    # `filesystem.EVAL_ROOT_NAME`). Id-addressed reads still work.
+    hidden = fs.eval_subtree_ids(user)
+    if hidden:
+        qs = qs.exclude(folder_id__in=hidden)
     if folder is not _UNFILTERED:
         qs = qs.filter(folder=folder)
+    if types:
+        qs = qs.filter(file_type__in=types)
     return qs
 
 
@@ -75,7 +83,7 @@ def _shared_documents():
 
 def _wants_cursor_page(params) -> bool:
     return any(k in params for k in
-               ('limit', 'cursor', 'my_cursor', 'public_cursor', 'scope'))
+               ('limit', 'cursor', 'my_cursor', 'public_cursor', 'scope', 'types'))
 
 
 def _requested_limit(params) -> int:
@@ -102,6 +110,19 @@ def _legacy_page(user, folder=_UNFILTERED) -> dict:
     }
 
 
+def _requested_types(params) -> list[str] | None:
+    """`types=csv,xlsx` narrows the caller's own files to those file types.
+
+    What the Apps launcher asks for: "every spreadsheet I have, wherever it
+    is". Filtering in the browser meant paging the whole library to find them.
+    """
+    raw = params.get('types')
+    if not raw:
+        return None
+    types = [t.strip().lower() for t in str(raw).split(',') if t.strip()]
+    return types[:20] or None
+
+
 def _cursor_page(user, params, folder=_UNFILTERED) -> dict:
     """The keyset-paginated shape.
 
@@ -116,7 +137,8 @@ def _cursor_page(user, params, folder=_UNFILTERED) -> dict:
 
     my_page = public_page = None
     if scope != 'public':
-        my_page = paginate_keyset(_owned_documents(user, folder), limit=limit, cursor=my_cursor)
+        my_page = paginate_keyset(_owned_documents(user, folder, _requested_types(params)),
+                                  limit=limit, cursor=my_cursor)
     if scope != 'personal':
         public_page = paginate_keyset(
             _shared_documents(), limit=limit,
@@ -245,23 +267,56 @@ async def document_list(request):
     return Response(DocumentSerializer(doc).data, status=201)
 
 
-@api_view(['GET', 'DELETE'])
+def _readable_document(user, document_id: int) -> Document:
+    """The caller's own document, or one shared into the public library.
+
+    Reading is wider than writing on purpose: the Documents page lists the
+    public library, and a listed file that 404s when opened is the preview
+    failing for reasons the reader cannot see. Every write stays owner-only.
+    """
+    from django.db.models import Q
+
+    return get_object_or_404(
+        Document.objects.select_related('user', 'knowledge_base', 'folder'),
+        Q(user=user) | Q(sharing_mode__in=_SHARED_MODES),
+        id=document_id,
+    )
+
+
+def _owned_document(user, document_id: int) -> Document:
+    return get_object_or_404(
+        Document.objects.select_related('user', 'knowledge_base', 'folder'),
+        id=document_id, user=user,
+    )
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 async def document_detail(request, document_id: int):
-    doc = await sync_to_async(
-        lambda: get_object_or_404(
-            Document.objects.select_related('user', 'knowledge_base'),
-            id=document_id, user=request.user,
-        )
-    )()
-
     if request.method == 'GET':
+        doc = await sync_to_async(_readable_document)(request.user, document_id)
         # Serialize in a sync context: the serializer touches obj.user /
         # obj.knowledge_base, which would trigger a lazy DB query from this
         # async view and raise SynchronousOnlyOperation.
         return Response(await sync_to_async(lambda: DocumentSerializer(doc).data)())
 
-    # DELETE — to the recycle bin, not out of existence. The row keeps its
+    doc = await sync_to_async(_owned_document)(request.user, document_id)
+
+    if request.method == 'PATCH':
+        # Rename -- the one metadata change the file browser needs. Moving is
+        # `fs/move/`, which already handles files and folders in one request.
+        from . import office_edit
+
+        def _rename():
+            office_edit.rename(doc, request.data.get('name'))
+            return DocumentSerializer(doc).data
+
+        try:
+            return Response(await sync_to_async(_rename)())
+        except office_edit.EditError as exc:
+            return Response({'error': str(exc)}, status=exc.status)
+
+    # DELETE -- to the recycle bin, not out of existence. The row keeps its
     # `content_text` and its file, so restore is just a re-ingest through the
     # ordinary upload door; `recycle.trash` drops the vectors immediately,
     # because a file the user can no longer see must not keep answering RAG
@@ -309,8 +364,12 @@ async def document_content(request, document_id: int):
             status=400,
         )
 
+    from . import office_edit
+
     expected = request.headers.get('If-Match') or request.data.get('expected_updated_at')
-    if expected and doc.updated_at.isoformat() != expected:
+    # Compared as instants: DRF writes UTC as `Z`, `isoformat()` as `+00:00`,
+    # and a string compare refused every save the browser ever sent.
+    if office_edit.is_stale(doc, expected):
         return Response(
             {'error': 'This file changed since you opened it. Re-open it and re-apply your change.',
              'updated_at': doc.updated_at.isoformat()},
@@ -318,10 +377,7 @@ async def document_content(request, document_id: int):
         )
 
     def _save():
-        doc.content_text = content
-        doc.file_size = len(content.encode('utf-8'))
-        doc.status = 'stored'
-        doc.save(update_fields=['content_text', 'file_size', 'status', 'updated_at'])
+        office_edit.save_text(doc, content)
         return DocumentSerializer(doc).data
 
     return Response(await sync_to_async(_save)())
@@ -492,7 +548,7 @@ async def document_download(request, document_id: int):
     # so existing Export flows keep forcing a save. Ownership is checked by
     # the `user=` lookup either way.
     inline = request.query_params.get('inline') == '1'
-    doc = await sync_to_async(get_object_or_404)(Document, id=document_id, user=request.user)
+    doc = await sync_to_async(_readable_document)(request.user, document_id)
     if doc.file and await sync_to_async(_servable)(doc):
         try:
             return FileResponse(doc.file.open('rb'), as_attachment=not inline, filename=doc.name)
@@ -500,3 +556,97 @@ async def document_download(request, document_id: int):
             pass
     buffer = BytesIO(doc.content_text.encode('utf-8'))
     return FileResponse(buffer, as_attachment=not inline, filename=doc.name)
+
+
+# =============================================================================
+# The productivity apps -- new files and office edits (inference/office_edit.py)
+# =============================================================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def document_new(request):
+    """Create a blank file (or a text file with `content`) in a folder.
+
+    Body: `{name, folder_id?, content?}`. The extension decides the type; a
+    taken name becomes `name (2).ext`. Not an upload, so nothing is indexed.
+    """
+    from . import office_edit
+
+    try:
+        folder = await sync_to_async(fs.resolve_folder)(
+            request.user, request.data.get('folder_id'))
+    except fs.FolderNotFound as exc:
+        return Response({'error': str(exc)}, status=404)
+
+    def _create():
+        doc = office_edit.create(request.user, request.data.get('name'), folder,
+                                 request.data.get('content') or '')
+        return DocumentSerializer(doc).data
+
+    try:
+        return Response(await sync_to_async(_create)(), status=201)
+    except office_edit.EditError as exc:
+        return Response({'error': str(exc)}, status=exc.status)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+async def document_office(request, document_id: int):
+    """Basic edits to an office file.
+
+    GET (xlsx): every sheet's cells, formulas as their source.
+    POST: `{set_cells?, append_rows?, sheet?}` for a workbook, or `{spec}` for
+    a deck or Word file made in this workspace. Both take `expected_updated_at`
+    (or `If-Match`) and answer 412 when the file changed since it was opened.
+    """
+    from . import office_edit
+
+    if request.method == 'GET':
+        doc = await sync_to_async(_readable_document)(request.user, document_id)
+        try:
+            return Response(await sync_to_async(office_edit.workbook_grid)(doc))
+        except office_edit.EditError as exc:
+            return Response({'error': str(exc)}, status=exc.status)
+
+    doc = await sync_to_async(_owned_document)(request.user, document_id)
+    expected = request.headers.get('If-Match') or request.data.get('expected_updated_at')
+    if office_edit.is_stale(doc, expected):
+        return Response(
+            {'error': 'This file changed since you opened it. Re-open it and re-apply your change.',
+             'updated_at': doc.updated_at.isoformat()},
+            status=412,
+        )
+
+    def _apply():
+        if 'spec' in request.data:
+            office_edit.edit_spec(doc, request.data.get('spec'))
+        else:
+            office_edit.edit_workbook(doc, request.data)
+        return DocumentSerializer(doc).data
+
+    try:
+        return Response(await sync_to_async(_apply)())
+    except office_edit.EditError as exc:
+        return Response({'error': str(exc)}, status=exc.status)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def document_copy(request, document_id: int):
+    """Duplicate one of the caller's files into `folder_id` (absent = root)."""
+    from . import office_edit
+
+    doc = await sync_to_async(_owned_document)(request.user, document_id)
+    try:
+        folder = await sync_to_async(fs.resolve_folder)(
+            request.user, request.data.get('folder_id'))
+    except fs.FolderNotFound as exc:
+        return Response({'error': str(exc)}, status=404)
+
+    def _copy():
+        return DocumentSerializer(office_edit.copy(doc, folder)).data
+
+    try:
+        return Response(await sync_to_async(_copy)(), status=201)
+    except office_edit.EditError as exc:
+        return Response({'error': str(exc)}, status=exc.status)

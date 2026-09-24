@@ -20,6 +20,8 @@ from typing import Any, Dict
 
 from .registry import tool
 
+from workflow_backend.background import release_db
+
 logger = logging.getLogger(__name__)
 
 #: Tools that write a project file. A task whose worker can reach any of
@@ -618,6 +620,11 @@ async def wait_tasks(args: Dict, context: Dict) -> str:
                     return json.dumps(_report(records, events or _collect_events(records)))
                 if all(r.done.is_set() for r in records):
                     return json.dumps(_report(records, _collect_events(records)))
+                # The wait below is on worker events, not the database. Hand
+                # the lead's pooled connection back each lap, or a lead waiting
+                # on workers pins one for the whole delegation (G1). The status
+                # refresh above re-takes one per lap in microseconds.
+                await release_db()
                 try:
                     await asyncio.wait(
                         [asyncio.ensure_future(r.done.wait()) for r in records

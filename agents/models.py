@@ -535,7 +535,7 @@ class SharedAgent(models.Model):
     """One user's agent, published for others to install.
 
     **This one is a table, and the curated gallery is not.** The distinction is
-    not taste: `agents/gallery.py` is written by us and changes when we edit a
+    not taste: `agents/gallery/` is written by us and changes when we edit a
     file, while this is written by users, at runtime, and carries facts that
     only exist once it is published — who published it, when, how many people
     installed it, and whether it is still listed. None of that has anywhere to
