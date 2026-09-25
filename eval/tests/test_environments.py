@@ -565,8 +565,9 @@ class GenerateWorldTests(TestCase):
                 expect_state={'files': {'summary.md': f'Q3: {expected}\n'}},
                 graders=[{'type': 'file_contains', 'path': 'summary.md',
                           'value': expected}])]}),
-            json.dumps({'answers': [expected]}),
-            json.dumps({'verdicts': [{'agree': True, 'reason': 'same value'}]}),
+            json.dumps({'answers': [{'id': 'c0', 'answer': expected}]}),
+            json.dumps({'verdicts': [{'id': 'c0', 'agree': True,
+                                      'reason': 'same value'}]}),
         ]
 
     def test_full_pipeline_offline(self):
@@ -581,7 +582,8 @@ class GenerateWorldTests(TestCase):
 
     def test_blind_disagreement_drops_the_case(self):
         replies = self._replies()
-        replies[-1] = json.dumps({'verdicts': [{'agree': False, 'reason': 'no'}]})
+        replies[-1] = json.dumps({'verdicts': [{'id': 'c0', 'agree': False,
+                                                'reason': 'no'}]})
         with patch('eval.generator._judge_call', _judge_replies(*replies)):
             out = async_to_sync(generate_world)(
                 self.agent, user_id=self.user.id, cases=1)
@@ -595,12 +597,42 @@ class GenerateWorldTests(TestCase):
                 async_to_sync(generate_world)(self.agent, user_id=self.user.id)
         self.assertIn('planted facts', str(ctx.exception))
 
-    def test_agent_without_files_is_refused(self):
-        agent = _agent(self.user, 'NoFiles', tool_grants={'webSearch': True},
+    def test_agent_with_nothing_to_simulate_is_refused(self):
+        from eval.generator import WorldNotPossible
+
+        agent = _agent(self.user, 'Bare', tool_grants={},
                        sandbox={'fileAccess': 'none'})
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(WorldNotPossible) as ctx:
             async_to_sync(generate_world)(agent, user_id=self.user.id)
         self.assertIn('file access', str(ctx.exception))
+
+    def test_answers_are_matched_by_id_not_position(self):
+        # The solver answers the case under the wrong id first and skips the
+        # real one: under positional matching the verdict would land on c0.
+        replies = self._replies()
+        replies[-2] = json.dumps({'answers': [{'id': 'c9', 'answer': '412300'}]})
+        with patch('eval.generator._judge_call', _judge_replies(*replies[:-1])):
+            out = async_to_sync(generate_world)(
+                self.agent, user_id=self.user.id, cases=1)
+        self.assertEqual(out['cases'], [])
+        self.assertTrue(any('disagreed' in r for r in out['rejected']))
+
+    def test_web_only_agent_gets_a_world_without_files(self):
+        agent = _agent(self.user, 'Researcher', tool_grants={'webSearch': True},
+                       sandbox={'fileAccess': 'none'})
+        page = {'url': 'https://acme.test/pricing', 'title': 'Pricing',
+                'text': 'Pro plan is 412300 a year. INV-1043. Priya. Friday. 10100.'}
+        replies = self._replies(files={})
+        replies[1] = json.dumps({'files': {}, 'web': {
+            'pages': [page], 'results': {'acme pricing': [page['url']]}}})
+        replies[2] = json.dumps({'cases': [dict(
+            name='Price?', category='normal', goal='What does Pro cost?',
+            input_data={}, facts_used=['q3'], expected='412300',
+            graders=[{'type': 'contains', 'value': '412300'}])]})
+        with patch('eval.generator._judge_call', _judge_replies(*replies)):
+            out = async_to_sync(generate_world)(agent, user_id=self.user.id, cases=1)
+        self.assertEqual(out['fixtures']['files'], {})
+        self.assertEqual(len(out['cases']), 1, out['rejected'])
 
 
 # ---------------------------------------------------------------- review API

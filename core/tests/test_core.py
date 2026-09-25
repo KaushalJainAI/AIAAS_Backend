@@ -14,7 +14,7 @@ from rest_framework.test import APIClient
 from core.models import PasswordOTP
 from core.safety.security import InputSanitizer, SanitizationResult
 from core.http.throttling import (
-    CompileThrottle, ExecuteThrottle, StreamThrottle, ChatThrottle
+    CompileThrottle, StreamThrottle
 )
 
 
@@ -81,14 +81,15 @@ class TestInputSanitizer(TestCase):
             result = self.sanitizer.sanitize(text)
             self.assertFalse(result.is_safe, f"Should block: {text}")
     
-    def test_length_limit_enforced(self):
-        """Input exceeding max length should be truncated."""
+    def test_long_input_is_flagged_not_cut(self):
+        """Past the scan limit a message is flagged, never silently shortened."""
         sanitizer = InputSanitizer(max_length=100)
         long_input = "a" * 200
-        
+
         result = sanitizer.sanitize(long_input)
-        
-        self.assertEqual(len(result.sanitized_text), 100)
+
+        self.assertEqual(result.sanitized_text, long_input)
+        self.assertTrue(result.is_safe)
         self.assertTrue(any(v.pattern_name == 'input_too_long' for v in result.violations))
     
     def test_empty_input(self):
@@ -136,22 +137,6 @@ class TestTierBasedThrottling(TestCase):
         self.assertEqual(throttle.tier_rates['free'], '10/minute')
         self.assertEqual(throttle.tier_rates['pro'], '100/minute')
         self.assertIsNone(throttle.tier_rates['enterprise'])
-    
-    def test_execute_throttle_rates(self):
-        """ExecuteThrottle should have correct tier rates."""
-        throttle = ExecuteThrottle()
-        
-        self.assertEqual(throttle.tier_rates['free'], '5/minute')
-        self.assertEqual(throttle.tier_rates['pro'], '50/minute')
-        self.assertEqual(throttle.tier_rates['enterprise'], '200/minute')
-    
-    def test_chat_throttle_rates(self):
-        """ChatThrottle should have correct tier rates."""
-        throttle = ChatThrottle()
-        
-        self.assertEqual(throttle.tier_rates['free'], '20/hour')
-        self.assertEqual(throttle.tier_rates['pro'], '200/hour')
-        self.assertEqual(throttle.tier_rates['enterprise'], '1000/hour')
     
     def test_stream_connection_limits(self):
         """StreamThrottle should have correct connection limits."""

@@ -24,7 +24,9 @@ from __future__ import annotations
 from typing import Any
 
 #: Name prefix for every world KB. Hidden the way `/.eval/` is: listings
-#: exclude it, id-addressed reads keep working.
+#: exclude it, id-addressed reads keep working. A literal, not an import —
+#: nothing in `eval/` imports a sibling app at module scope — and pinned to
+#: `inference.models.HIDDEN_KB_PREFIX` by a test.
 KB_NAME_PREFIX = '.eval/'
 
 
@@ -121,8 +123,9 @@ def drop_suite_kbs(user, suite_id: int) -> None:
 
 
 def is_hidden_kb(name: str) -> bool:
-    """Whether a KB name is a hidden world corpus. The one predicate every
-    listing uses, so "hidden" cannot drift between call sites."""
+    """Whether a KB name is a hidden world corpus. Listings outside `eval/`
+    use `inference.models.visible_knowledge_bases`, built on the same
+    prefix, so "hidden" cannot drift between call sites."""
     return str(name or '').startswith(KB_NAME_PREFIX)
 
 

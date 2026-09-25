@@ -859,9 +859,18 @@ def suite_world(request, suite_id: int):
     suite = get_object_or_404(EvalSuite, id=suite_id, user=request.user)
     live = live_world(suite)
     draft = (suite.worlds.filter(status='draft').order_by('-version').first())
+    # A generation running in the background, or the newest one that failed
+    # (only when nothing newer superseded it): what the page shows instead of
+    # a spinner that never resolves.
+    pending = (suite.worlds.filter(status__in=('generating', 'failed'))
+               .order_by('-version').first())
+    newest = suite.worlds.order_by('-version').first()
+    if pending is not None and newest is not None and pending.pk != newest.pk:
+        pending = None
     return Response({
         'live': _world_payload(live) if live is not None else None,
         'draft': _world_payload(draft) if draft is not None else None,
+        'pending': _world_payload(pending) if pending is not None else None,
         'versions': list(suite.worlds.order_by('-version')
                          .values_list('version', flat=True)),
     })
@@ -878,7 +887,11 @@ def world_detail(request, world_id: int):
     world = get_object_or_404(EvalWorld, id=world_id, suite__user=request.user)
     if request.method == 'GET':
         return Response(_world_payload(world))
-    if world.status != 'draft':
+    if world.status == 'generating':
+        return Response(
+            {'error': 'This world is still being generated.'},
+            status=status.HTTP_409_CONFLICT)
+    if world.status == 'accepted':
         return Response(
             {'error': 'Accepted worlds are kept as history. Regenerate instead.'},
             status=status.HTTP_400_BAD_REQUEST)
@@ -912,23 +925,26 @@ def world_accept(request, world_id: int):
     return Response(_world_payload(world))
 
 
-@extend_schema(responses={201: OpenApiTypes.OBJECT},
-               description="Judge-build a world and its cases. Drafts only.")
+@extend_schema(responses={202: OpenApiTypes.OBJECT},
+               description="Start judge-building a world and its cases. Drafts only.")
 @async_api_view(['POST'])
 @permission_classes([IsAuthenticated])
 async def suite_world_generate(request, suite_id: int):
-    """Body: `{"focus": "...", "cases": 12}`. Mints a new world version plus
-    case drafts built for it — nothing is accepted and nothing scores until
-    the Evals page says so.
+    """Body: `{"focus": "...", "cases": 12}`. **202** with a `generating`
+    world; the judge builds it in the background and the row becomes
+    `draft` (with case drafts) or `failed` (with the reason), and the owner
+    is notified either way. Poll `GET suites/{id}/world/`.
 
-    The judge calls are billed to the caller's key like any judge call: a
-    missing credential answers 402 naming the fix, not an empty world.
+    Refused up front, while the caller is listening: an agent with nothing a
+    world can hold (400), no judge credential (402, naming the fix), a
+    generation already running (409).
     """
     from asgiref.sync import sync_to_async
 
     from llm.access import LLMUserActionable
 
-    from .generator import generate_world
+    from . import api as _api
+    from .generator import WorldNotPossible
 
     suite = await EvalSuite.objects.select_related('subagent').filter(
         id=suite_id, user=request.user).afirst()
@@ -942,29 +958,14 @@ async def suite_world_generate(request, suite_id: int):
     except (TypeError, ValueError):
         return Response({'error': 'cases must be a number'}, status=status.HTTP_400_BAD_REQUEST)
     try:
-        out = await generate_world(
-            suite.subagent, user_id=request.user.id,
-            focus=str(request.data.get('focus') or ''), cases=count)
+        world = await _api.start_world_generation(
+            suite, request.user, focus=str(request.data.get('focus') or ''),
+            cases=count)
+    except WorldNotPossible as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     except LLMUserActionable as exc:
         return Response({'error': str(exc)}, status=status.HTTP_402_PAYMENT_REQUIRED)
-    except ValueError as exc:
-        return Response({'error': f'The generator reply could not be used: {exc}'},
-                        status=status.HTTP_502_BAD_GATEWAY)
-    except Exception as exc:  # noqa: BLE001 - provider down
-        logger.warning('[Eval] world generation failed: %s', exc)
-        return Response({'error': f'Generation failed: {exc}'},
-                        status=status.HTTP_502_BAD_GATEWAY)
-
-    def save():
-        from . import api as _api
-
-        return _api.save_generated_world(suite, out)
-
-    world, saved = await sync_to_async(save)()
-    data = await sync_to_async(lambda: EvalCaseSerializer(saved, many=True).data)()
-    return Response({
-        'world': await sync_to_async(_world_payload)(world),
-        'cases': data,
-        'rejected': out['rejected'], 'tokens': out['tokens'],
-        'cost_usd': out['cost_usd'], 'model': out['model'],
-    }, status=status.HTTP_201_CREATED)
+    except _api.WorldGenerationBusy as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+    return Response({'world': await sync_to_async(_world_payload)(world)},
+                    status=status.HTTP_202_ACCEPTED)

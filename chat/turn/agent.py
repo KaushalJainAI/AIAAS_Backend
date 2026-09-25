@@ -352,6 +352,14 @@ class TurnContext:
     #: Inbox, start the reminder ladder for a test, and end the case as an error.
     record_intents: str = ""
 
+    #: Whether anyone can answer an `ask_user` question during this run. True
+    #: for chat, and for agent runs someone started or supervises (the manual
+    #: Run button, a chat, an orchestrator that can answer through
+    #: `answer_subagent`); False for schedules and triggers, where a paused
+    #: question would wait for nobody. When False the question is recorded
+    #: and the model proceeds on its stated assumption.
+    can_ask: bool = True
+
     #: What started the run (`chat` | `orchestrator` | `trigger` | `api` |
     #: `eval`). Tools that are safe in a watched chat turn but not from a
     #: schedule read it — `publish_page` above `link` visibility refuses an
@@ -1378,6 +1386,87 @@ async def _require_approval(call: ToolCall, turn: TurnContext, meta: dict) -> No
     interrupt(f"Permission required for {call.name}")
 
 
+async def _require_answer(call: ToolCall, spec: dict, turn: TurnContext) -> None:
+    """Pause the graph until the person answers an `ask_user` question.
+
+    The same stop as an approval — `interrupt()`, answered from outside the
+    graph (`answer_question`) so the answer survives the rollback — with a
+    different frame: the chat draws a question card, and an agent run's
+    observer (`agents/agent/stream.py`) files a `clarification` row in the
+    Inbox. Chat also leaves a notification, as it does for approvals, because a
+    question asked while the tab is in the background is otherwise invisible.
+    """
+    logger.info("[Tools] Pausing for an answer to %s", call.id)
+    if not turn.approval_queue:
+        try:
+            from asgiref.sync import sync_to_async
+            from django.contrib.auth import get_user_model
+            from notifications.utils import create_notification
+
+            @sync_to_async
+            def notify() -> None:
+                create_notification(
+                    user=get_user_model().objects.get(id=turn.user_id),
+                    type="hitl_request",
+                    title="A question for you",
+                    message=spec["question"],
+                    data={"session_id": turn.session_id,
+                          "action_url": f"/ai-chat?session={turn.session_id}"},
+                    send_email=False,
+                )
+
+            await notify()
+        except Exception:  # noqa: BLE001
+            logger.exception("[Tools] Question notification failed")
+
+    await turn.sink(Event.ASK_QUESTION, {"call_id": call.id, "tool": call.name, **spec})
+    interrupt(f"Question for the user ({call.id})")
+
+
+#: `answer_question`'s problem when nothing is waiting — a stale card, a row
+#: from before questions paused. Callers close such a request rather than
+#: report an error the person cannot act on.
+NO_PAUSED_QUESTION = "That question is no longer waiting for an answer."
+
+
+async def answer_question(thread_id: str, call_id: str, answer: Any) -> tuple[bool, str]:
+    """Record the person's answer so the paused run resumes past its question.
+
+    Checked against the question the run actually asked (read from the
+    checkpoint, never from the client), so a card, the Inbox and a manager
+    answering its worker all meet the same rule. Returns (recorded, problem).
+    """
+    from chat.tools.ask import QUESTION_TOOLS, normalise_answer, question_spec
+
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    snapshot = await get_graph().aget_state(config)
+    if not snapshot.values:
+        return False, NO_PAUSED_QUESTION
+
+    pending = None
+    for message in reversed(snapshot.values.get("messages", [])):
+        if isinstance(message, AIMessage) and message.tool_calls:
+            pending = next((c for c in message.tool_calls if c.get("id") == call_id), None)
+            break
+    if pending is None or pending.get("name") not in QUESTION_TOOLS:
+        return False, NO_PAUSED_QUESTION
+
+    spec, problem = question_spec(pending.get("args") or {})
+    if spec is None:
+        return False, problem
+    value, problem = normalise_answer(spec, answer)
+    if value is None:
+        return False, problem
+
+    meta = dict(snapshot.values.get("metadata", {}))
+    answers = dict(meta.get("question_answers", {}) or {})
+    answers[call_id] = value
+    meta["question_answers"] = answers
+    await get_graph().aupdate_state(config, {"metadata": meta})
+    logger.info("[HITL] Answered question %s on thread %s", call_id, thread_id)
+    return True, ""
+
+
 async def _record_approval_intent(call: ToolCall, meta: dict, iteration: int) -> None:
     """Note that this call would have paused for a human, and let it run.
 
@@ -1404,6 +1493,13 @@ async def _record_approval_intent(call: ToolCall, meta: dict, iteration: int) ->
 def _refusal_text(name: str, reason: str) -> str:
     """What the model is told when the user declines a call it asked for."""
     reason = (reason or "").strip()
+    from chat.tools.ask import QUESTION_TOOLS
+
+    if name in QUESTION_TOOLS:
+        return (
+            "The user skipped this question. Proceed on your stated assumption "
+            "and do not ask it again; say in your answer what you assumed."
+        )
     base = f"The user declined to run {name}."
     if reason:
         base = f"{base} Reason: {reason}"
@@ -1482,6 +1578,31 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # None in unit tests that build a bare TurnContext.
         "sink": turn.sink,
     }
+    # Provenance, recomputed per batch because each batch adds tool results.
+    # `known_urls` is every URL someone other than the model wrote — the user,
+    # the agent's author, an earlier tool result — so the read tools can refuse
+    # a URL the model composed to carry data out (`core/safety/provenance.py`).
+    # `tainted_by` names the first tool whose result this turn reads like
+    # orders to an AI; the `auto` reviewer then stops allowing irreversible
+    # calls without a human. Only third-party text is scanned for that — the
+    # user's own message is the principal, not an injection.
+    from core.safety import provenance
+
+    tool_texts = [
+        (message.name or "tool", message.content if isinstance(message.content, str)
+         else str(message.content))
+        for message in state["messages"] if isinstance(message, ToolMessage)
+    ]
+    tool_context["known_urls"] = frozenset(provenance.urls_in(
+        [turn.user_text, turn.system_message]
+        + [str(entry.get("content") or "") for entry in turn.history
+           if isinstance(entry, dict)]
+        + [text for _, text in tool_texts]
+    ))
+    tool_context["tainted_by"] = next(
+        (name for name, text in tool_texts if provenance.instruction_shaped(text)),
+        None,
+    )
     # Per-call, filled in just before dispatch below. A tool that starts other
     # runs (`invoke_subagent`, `run_agent`) needs to name the step that invoked
     # it, so the worker's log can point back at the exact tool call — and
@@ -1491,7 +1612,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         if turn.sensitive_tools is not None
         else frozenset(tool_registry.SENSITIVE_TOOLS)
     )
-    dispatch = turn.tool_dispatch or tool_registry.execute_tool
+    dispatch = turn.tool_dispatch or tool_registry.execute_chat_tool
     policy = turn.approval_policy or permissions.default_policy
 
     # A user watching the run may have loosened (or tightened) how much it asks
@@ -1544,9 +1665,21 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     # this pass for the whole batch, and asking the policy again could turn
     # an answer the user just gave into a second approval card.
     approved = set(meta.get("approved_tool_calls", []) or [])
+    answers = dict(meta.get("question_answers", {}) or {})
+    from chat.tools.ask import QUESTION_TOOLS, question_spec
+    from chat.tools.agents import SUBAGENT_ANSWER_TOOL, subagent_answer_needs_user
 
     async def _gated(call: ToolCall) -> bool:
         if call.id in rejected or call.id in approved:
+            return False
+        # A question is not an approval: it pauses below on its own terms, in
+        # every mode, and asking permission to ask would be two cards for one.
+        if call.name in QUESTION_TOOLS:
+            return False
+        # A manager answering its worker: questions and refusals are its own
+        # call in any mode; only letting the worker *act* can need the boss.
+        if call.name == SUBAGENT_ANSWER_TOOL and not await subagent_answer_needs_user(
+                call.arguments, tool_context):
             return False
         # Two gates, checked cheapest first. The name list carries reasoning
         # about tools we wrote; the policy inspects calls nobody could have
@@ -1561,6 +1694,16 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
 
     gates = await asyncio.gather(*(_gated(call) for call in calls))
     for call, gated in zip(calls, gates):
+        if (call.name in QUESTION_TOOLS and call.id not in answers
+                and call.id not in rejected and turn.can_ask
+                and not turn.record_intents):
+            spec, _problem = question_spec(call.arguments)
+            # A malformed question is not drawn: the tool answers with the
+            # problem and the model re-asks. A card nobody can fill in is
+            # worse than no card.
+            if spec is not None:
+                await _require_answer(call, spec, turn)
+            continue
         if gated:
             if turn.record_intents:
                 await _record_approval_intent(call, meta, iteration)
@@ -1577,6 +1720,20 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     # Arguments, trace entries and the AGENT_TRACE frames are all built here,
     # before anything is dispatched, so what the UI is told never depends on
     # which tool happens to finish first.
+    # When the person answered a manager's `answer_subagent` card, their answer
+    # *is* the decision, whatever the model proposed: Approve lets the worker
+    # act, Deny refuses it. A denied card is therefore still dispatched — as a
+    # refusal — because a worker left waiting on an unanswered question pauses
+    # for ever.
+    decided: dict[str, tuple[str, str]] = {}
+    for call in calls:
+        if call.name != SUBAGENT_ANSWER_TOOL:
+            continue
+        if call.id in rejected:
+            decided[call.id] = ("reject", rejected.pop(call.id) or "The user declined.")
+        elif call.id in approved:
+            decided[call.id] = ("approve", "")
+
     planned: list[tuple[Any, dict]] = []
     for call in calls:
         refusal = rejected.get(call.id)
@@ -1597,6 +1754,11 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         arguments = dict(call.arguments)
         if call.name == "web_search" and not arguments.get("query"):
             arguments["query"] = turn.user_text
+        if call.id in decided:
+            decision, reason = decided[call.id]
+            arguments["decision"] = decision
+            if reason:
+                arguments["reason"] = reason
 
         entry = {"tool": call.name, "args": arguments, "iteration": iteration,
                  "thought": reasoning, "summary": reasoning, "call_id": call.id}
@@ -1623,7 +1785,12 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # the field a concurrent sibling would overwrite — and
         # `invoke_subagent` reads it to record which tool call spawned a
         # worker, so a race there misattributes whole runs.
-        ctx = {**tool_context, "call_id": call.id}
+        ctx = {**tool_context, "call_id": call.id,
+               # The person's answer to an `ask_user` card, and whether a
+               # manager's decision about its worker came from the person.
+               "answered": call.id in answers,
+               "user_answer": answers.get(call.id),
+               "decided_by_user": call.id in decided}
         started = time.monotonic()
         try:
             async with asyncio.timeout(TOOL_CALL_TIMEOUT):
@@ -2144,7 +2311,7 @@ async def run_tool_eagerly(
 
     try:
         async with asyncio.timeout(TOOL_CALL_TIMEOUT):
-            output = await tool_registry.execute_tool(
+            output = await tool_registry.execute_chat_tool(
                 name, arguments,
                 {"user_id": turn.user_id, "session_id": turn.session_id,
                  "turn_id": turn.turn_id},

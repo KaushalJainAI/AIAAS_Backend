@@ -58,13 +58,21 @@ class XlsxValueTests(SimpleTestCase):
         self.assertEqual(office_files.cell(wb, 'Calc', 'A3'), 2.0)
         self.assertEqual(office_files.cell(wb, 'Calc', 'A4'), 529)
 
-    def test_anything_but_arithmetic_is_refused_not_run(self):
+    def test_anything_outside_the_language_is_refused_not_run(self):
         wb = office_files.workbook(book([['North', 10]]))
-        for formula in ('=__import__("os").getcwd()', '=A1.__class__', '=VLOOKUP(A2,A1:B3,2)',
-                        '="text"', '=[x for x in A2:A3]'):
+        for formula in ('=__import__("os").getcwd()', '=A1.__class__',
+                        '=POWER(A2,2)', '=[x for x in A2:A3]', '=A1()'):
             with self.subTest(formula=formula):
                 with self.assertRaises(office_files.FormulaError):
                     office_files.evaluate(wb, 'Summary', formula)
+
+    def test_the_grown_language_evaluates(self):
+        # VLOOKUP and text used to be refused with the rest; they are part of
+        # the language now (`inference/formulas.py`), so they evaluate.
+        wb = office_files.workbook(book([['North', 10]]))
+        self.assertEqual(office_files.evaluate(wb, 'Summary', '="text"'), 'text')
+        self.assertEqual(
+            office_files.evaluate(wb, 'Summary', '=VLOOKUP("North",A2:B2,2)'), 10)
 
 
 class FileTypeTests(SimpleTestCase):

@@ -241,18 +241,6 @@ def _download_from_s3(s3_key: str, local_path: Path) -> bool:
         return False
 
 
-def _delete_from_s3(s3_key: str) -> bool:
-    if not _s3_configured():
-        return False
-    try:
-        client = _get_s3_client()
-        client.delete_object(Bucket=settings.AWS_STORAGE_BUCKET_NAME, Key=s3_key)
-        return True
-    except Exception as e:
-        logger.error(f"S3 delete failed for {s3_key}: {e}")
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Search result
 # ---------------------------------------------------------------------------
@@ -476,30 +464,6 @@ class HNSWKnowledgeBase:
     async def _embed_texts(self, texts: list[str], batch_size: int = 32) -> list[np.ndarray]:
         """Batch-embed a list of texts (runs encoding in a worker thread)."""
         return await asyncio.to_thread(self._embedder.encode, texts, batch_size, 'passage')
-
-    # Public aliases for compatibility. These ensure the embedder is loaded
-    # first: on a fresh worker `_embedder` is None until `initialize()` runs,
-    # and callers like the skills/templates services embed directly without
-    # having searched first, so without this guard the first embed crashes with
-    # AttributeError — swallowed by a bare thread and seen only as an empty
-    # inbox / an intermittent 500.
-    async def embed_text(self, text: str) -> np.ndarray:
-        self._op_begin()
-        try:
-            if not self._initialized:
-                await self.initialize()
-            return await self._embed_text(text)
-        finally:
-            self._op_end()
-
-    async def embed_texts(self, texts: list[str], batch_size: int = 32) -> list[np.ndarray]:
-        self._op_begin()
-        try:
-            if not self._initialized:
-                await self.initialize()
-            return await self._embed_texts(texts, batch_size)
-        finally:
-            self._op_end()
 
     async def embed_query(self, query: str) -> np.ndarray:
         """Embed a question once so several KBs can be searched with one vector."""
@@ -966,11 +930,6 @@ def sync_kb_stats(kb_model_id: int, hnsw: 'HNSWKnowledgeBase | None' = None) -> 
         updates['vector_count'] = hnsw.ntotal
         updates['index_size_bytes'] = hnsw.index_size_bytes
     KnowledgeBase.objects.filter(id=kb_model_id).update(**updates)
-
-
-async def update_kb_stats(kb_model_id: int, hnsw: HNSWKnowledgeBase):
-    """Async wrapper over `sync_kb_stats` for callers already on a loop."""
-    await sync_to_async(sync_kb_stats)(kb_model_id, hnsw)
 
 
 # ---------------------------------------------------------------------------

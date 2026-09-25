@@ -65,6 +65,35 @@ def _live_sync(user_id: int | None) -> dict[str, int]:
     return live
 
 
+def _server_ids_sync(user_id: int | None) -> dict[str, int]:
+    from .client import _visible_servers_queryset
+
+    if not user_id:
+        return {}
+    ids: dict[str, int] = {}
+    for server_id, slug in (_visible_servers_queryset(user_id, enabled_only=False)
+                            .filter(type=NATIVE_TYPE)
+                            .values_list("id", "icon_slug")):
+        if slug:
+            ids.setdefault(slug, server_id)
+    return ids
+
+
+async def native_server_ids(user_id: int | None) -> dict[str, int]:
+    """`icon_slug -> server id` for every native card, live or not.
+
+    For an eval world, whose simulated connector tools need no card switched
+    on and no credential — but must still be judged against the agent's
+    connector *scope*, which is keyed by these ids. A failure answers "none",
+    so a scoped tool is refused rather than let through unchecked.
+    """
+    try:
+        return await sync_to_async(_server_ids_sync)(user_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not resolve native server ids for user %s", user_id, exc_info=True)
+        return {}
+
+
 async def live_native_connectors(user_id: int | None) -> dict[str, int]:
     """`icon_slug -> server id` for every native card live for this user.
 

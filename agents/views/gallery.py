@@ -45,7 +45,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from inference.models import KnowledgeBase
+from inference.models import visible_knowledge_bases
 from logs import revisions
 from skills.models import Skill
 
@@ -103,7 +103,7 @@ def _candidates(user) -> dict[str, list[dict]]:
         'knowledge_base': [
             {'id': kb.id, 'label': kb.name, 'doc_count': kb.doc_count,
              'backend': kb.backend}
-            for kb in KnowledgeBase.objects.filter(user=user).order_by('name')
+            for kb in visible_knowledge_bases(user).order_by('name')
         ],
         'skill': [
             {'id': s.id, 'label': s.title}

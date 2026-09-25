@@ -33,11 +33,6 @@ from .registry import tool
 
 logger = logging.getLogger(__name__)
 
-#: Chunk size for the streamed read. The cap is checked as it accumulates, so a
-#: server that lies about Content-Length cannot make this hold more than one
-#: chunk past the limit.
-_CHUNK = 64 * 1024
-
 #: MIME → extension, for a URL that ends in nothing useful.
 _EXT_BY_MIME = {
     'application/pdf': 'pdf',
@@ -67,23 +62,22 @@ def _name_for(url: str, mime: str, given: str) -> str:
 
 
 def _fetch(url: str) -> tuple[bytes, str]:
-    """The bytes at `url` and its MIME type, size-capped as it streams."""
-    import requests
+    """The bytes at `url` and its MIME type, size-capped, every hop guarded.
 
-    with requests.get(url, timeout=60, stream=True,
-                      headers={'User-Agent': 'Mozilla/5.0 (compatible; AIAAS)'}) as resp:
-        resp.raise_for_status()
-        mime = (resp.headers.get('Content-Type') or '').split(';')[0].strip().lower()
-        chunks, size = [], 0
-        for chunk in resp.iter_content(_CHUNK):
-            size += len(chunk)
-            if size > AGENT_FILE_BINARY_BYTES:
-                raise ValueError(
-                    f'That file is over the '
-                    f'{AGENT_FILE_BINARY_BYTES // 1_048_576} MB limit.'
-                )
-            chunks.append(chunk)
-    return b''.join(chunks), mime
+    Was `requests.get`, which follows redirects without re-checking them, so
+    the SSRF check above covered only the first URL (N1).
+    """
+    from core.safety.net import FetchTooLarge, UnsafeURLError, fetch_file
+
+    try:
+        return fetch_file(url, timeout=60, max_bytes=AGENT_FILE_BINARY_BYTES,
+                          user_agent='Mozilla/5.0 (compatible; AIAAS)')
+    except FetchTooLarge as exc:
+        raise ValueError(
+            f'That file is over the {AGENT_FILE_BINARY_BYTES // 1_048_576} MB limit.'
+        ) from exc
+    except UnsafeURLError as exc:
+        raise ValueError(f'That link redirects somewhere it may not: {exc}') from exc
 
 
 @tool({
@@ -124,6 +118,11 @@ async def download_file(args: Dict, context: Dict) -> str:
         return json.dumps({'error': 'There is no file workspace here to download into.'})
 
     url = str(args.get('url') or '').strip()
+    from core.safety.provenance import refusal_for
+
+    refusal = refusal_for(url, context)
+    if refusal:
+        return json.dumps({'error': refusal})
     ok, reason = await validate_url_async(url)
     if not ok:
         return json.dumps({'error': reason})

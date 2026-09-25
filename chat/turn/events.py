@@ -45,6 +45,10 @@ class Event(StrEnum):
     #: same file updates its entry rather than adding one.
     FILES_UPDATE = "files_update"
     ASK_PERMISSION = "ask_permission"
+    #: The run paused on `ask_user`: a structured question (choice, number,
+    #: text) the chat draws as a card. Answered by a resumed turn carrying
+    #: `answer_tool_call` + `answer`, or skipped through `reject_tool_call`.
+    ASK_QUESTION = "ask_question"
     ERROR = "error"
     DONE = "done"
     #: A delegated agent run started by `/agent`: status, todos, files and a

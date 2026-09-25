@@ -50,20 +50,6 @@ _BLOCKED_HOSTNAMES = {
     'kubernetes.default.svc.cluster.local',
 }
 
-# Response headers that must not be handed back into workflow data. A workflow
-# stores its node output in the DB and shows it in the UI, so echoing these
-# copies someone's session cookie or bearer token into both.
-_SENSITIVE_RESPONSE_HEADERS = {
-    'set-cookie',
-    'authorization',
-    'proxy-authorization',
-    'www-authenticate',
-    'proxy-authenticate',
-    'x-api-key',
-    'x-auth-token',
-    'x-amz-security-token',
-}
-
 
 class UnsafeURLError(ValueError):
     """Raised when a URL points somewhere a user-supplied URL must not reach."""
@@ -270,15 +256,29 @@ def fetch_url(url: str, *, timeout: int = 10, max_bytes: int = MAX_FETCH_BYTES) 
         return response.read(max_bytes)
 
 
-def redact_headers(headers) -> dict[str, str]:
-    """
-    Copy response headers, replacing sensitive values with a marker.
+class FetchTooLarge(ValueError):
+    """The body was over the caller's limit; nothing was kept."""
 
-    The names are kept: knowing that a Set-Cookie came back is often exactly what
-    someone is debugging, and dropping the key entirely makes it look as though
-    the server never sent one.
+
+def fetch_file(url: str, *, timeout: int = 60, max_bytes: int,
+               user_agent: str = _FETCH_USER_AGENT) -> tuple[bytes, str]:
+    """The bytes at `url` and its MIME type, every redirect hop guarded.
+
+    For callers that keep what they fetch (downloads, generated media), where
+    a silently truncated file is worse than an error, so an oversized body
+    raises `FetchTooLarge` instead of being cut. `requests.get` was used for
+    these and follows redirects unchecked: a public URL that 302s to
+    169.254.169.254 put instance metadata in the user's files (N1,
+    docs/SECURITY_REVIEW_FIX_PLAN.md).
     """
-    out: dict[str, str] = {}
-    for key, value in dict(headers).items():
-        out[key] = '[redacted]' if key.lower() in _SENSITIVE_RESPONSE_HEADERS else value
-    return out
+    assert_url_safe(url)
+    opener = urllib.request.build_opener(_ValidatingRedirectHandler)
+    request = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    with opener.open(request, timeout=timeout) as response:
+        mime = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        data = response.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise FetchTooLarge(f"over the {max_bytes // 1_048_576} MB limit")
+    return data, mime
+
+

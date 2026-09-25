@@ -1190,7 +1190,6 @@ class MCPClientManager:
         return _serialise_tool_result(result)
 
 
-
 def _serialise_tool_result(result: CallToolResult) -> Any:
     """Translate MCP CallToolResult content blocks into JSON-safe Python."""
     parts: list[Any] = []
@@ -1218,23 +1217,6 @@ def _serialise_tool_result(result: CallToolResult) -> Any:
     if len(parts) == 1:
         return parts[0]
     return parts
-
-
-async def drain_pool() -> None:
-    """
-    Close all pooled sessions and clear the pool.
-
-    Call this on process shutdown (e.g. Django AppConfig.ready teardown or
-    a test fixture) to cleanly terminate stdio subprocesses and SSE streams.
-    """
-    keys = list(_pool.keys())
-    for key in keys:
-        await _evict(key)
-    _creation_locks.clear()
-    _failures.clear()
-    # `_evict` releases each key as it closes; this clears anything left by a
-    # worker that never made it into the pool.
-    supervisor.reset()
 
 
 def _visible_servers_queryset(user_id: int | None, enabled_only: bool = True):

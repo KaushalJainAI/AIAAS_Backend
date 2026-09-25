@@ -67,14 +67,16 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # even with the grant on. The grant says "may touch files at all"; the
     # scope says "which files".
     'fileOps': ('list_files', 'find_files', 'read_file', 'write_file',
-                'edit_file', 'make_directory', 'delete_file'),
+                'edit_file', 'make_directory', 'delete_file',
+                'file_versions', 'restore_file_version', 'export_file',
+                'edit_document', 'edit_deck'),
     # Decks, workbooks and Word files rendered from a spec (`chat/tools/office`).
     # A grant of its own rather than part of `fileOps`, because "may produce a
     # presentation" and "may rewrite my documents" are different things to
     # hand out. It still needs a file scope to save into — `fileAccess` says
     # where, exactly as for `fileOps`, and with no scope it is withheld.
     'office': ('render_deck', 'render_workbook', 'render_document', 'render_pdf',
-               'edit_workbook', 'render_diagram'),
+               'edit_workbook', 'read_workbook', 'render_diagram'),
     # Generated images (`chat/tools/media.py`). Its own grant because it
     # spends the user's money per call, and saved into the file scope, so it
     # needs `fileAccess` exactly as `office` does.
@@ -123,7 +125,8 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # fans out to other agents is one holding this grant, so composition is
     # checked by the same mechanism as every other capability instead of by a
     # second code path that could disagree with it.
-    'subAgents': ('invoke_subagent', 'search_agents',
+    # `answer_subagent` is how a manager answers a worker that stopped to ask.
+    'subAgents': ('invoke_subagent', 'search_agents', 'answer_subagent',
                   'start_tasks', 'wait_tasks', 'task_status',
                   'steer_task', 'stop_task', 'revert_task'),
     # MCP tools are resolved per-user at runtime rather than named here, so the
@@ -494,9 +497,21 @@ class AgentToolbox:
         slug = connector_of(name)
         if slug is None:
             return True, ''
-        server_id = (await self.native_live()).get(slug)
-        if server_id is None:
-            return False, 'that connection (it is switched off or not connected)'
+        if self.environment is not None and self.environment.simulates(name):
+            # An eval world answers this tool from fixtures, so no card needs
+            # to be live and no credential held — but the agent's connector
+            # scope still applies. Skipping it evaluated a stronger agent than
+            # the one that runs: "Gmail, read-only" could send, and an agent
+            # scoped to one connector got every simulated one.
+            from mcp_integration.native import native_server_ids
+
+            server_id = (await native_server_ids(self.user_id)).get(slug)
+            if server_id is None:
+                return False, 'that connection'
+        else:
+            server_id = (await self.native_live()).get(slug)
+            if server_id is None:
+                return False, 'that connection (it is switched off or not connected)'
         if self.mcp_scope is None:
             return True, ''
         if not self.mcp_scope.native_tool_allowed(server_id, name):
@@ -535,12 +550,9 @@ class AgentToolbox:
         from chat.tools.registry import connector_of
 
         for name in [n for n in allowed if connector_of(n) is not None]:
-            # Simulated in the eval world: offered without a live card or a
-            # credential, because the call never reaches the real connector —
-            # `dispatch` answers it from the fixtures. Asking for a live
-            # connection here would hide every simulated tool from the run.
-            if self.environment is not None and self.environment.simulates(name):
-                continue
+            # In an eval world a simulated tool needs no live card, but it
+            # still passes the connector scope — `native_call_allowed` handles
+            # both cases.
             if not (await self.native_call_allowed(name))[0]:
                 allowed.discard(name)
 
@@ -583,14 +595,6 @@ class AgentToolbox:
         Checked here and not only at advertising time: the model can name a tool
         it was never offered, and "we didn't mention it" is not access control.
         """
-        # Simulated first, before grants, scopes and credentials: inside an
-        # eval world these names name fixtures, not services, and nothing
-        # below this line may decide about them — least of all the live-card
-        # check, which would refuse every simulated call for having no real
-        # connection behind it.
-        if self.environment is not None and self.environment.simulates(name):
-            return await self.environment.run_simulated(name, args, context)
-
         from mcp_integration.tool_provider import is_mcp_tool
 
         if is_mcp_tool(name):
@@ -621,6 +625,13 @@ class AgentToolbox:
         permitted, refusal = await self.native_call_allowed(name)
         if not permitted:
             return _denied(name, refusal)
+
+        # Simulated last, after every check a real call passes: grants, the
+        # per-tool deny, the withheld set and the connector scope. Only the
+        # live-card check is waived (inside `native_call_allowed`) — the call
+        # names fixtures, never the real service.
+        if self.environment is not None and self.environment.simulates(name):
+            return await self.environment.run_simulated(name, args, context)
 
         from chat.tools import execute_tool
         return await execute_tool(name, args, context)
@@ -2112,6 +2123,10 @@ async def run_agent(agent, goal: str, *, user, sink=None,
               # An eval has nobody to answer a pause, so a gated call is
               # recorded as an intent and then runs (see `TurnContext`).
               record_intents=(gated_calls if caller == 'eval' else ''),
+              # Someone can answer an `ask_user` question unless the run was
+              # started by a schedule or trigger: the chat that started it,
+              # the manager that delegated it, or the person at the Run button.
+              can_ask=caller not in ('trigger', 'eval'),
               # A worker is one level deeper than whoever asked for it, and the
               # counter is what stops delegation multiplying without bound.
               depth=depth,

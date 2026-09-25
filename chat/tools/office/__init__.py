@@ -11,10 +11,11 @@ Three properties are shared, and they are why these tools can run without
 asking in chat (unlike `write_file`):
 
 * **They only create.** A name that is taken becomes `name (2).ext`;
-  replacing needs `overwrite: true`, and even then the old file goes to the
-  recycle bin rather than being written over (`vfs.write_binary`). So the
-  effect is `reversible` in the autonomy ladder's sense — nothing done here is
-  beyond the user's own undo.
+  replacing needs `overwrite: true`, and even then the file is replaced in
+  place (same id) after keeping what it held as a version
+  (`vfs.write_binary`, `inference/versions.py`). So the effect is
+  `reversible` in the autonomy ladder's sense — nothing done here is beyond
+  the user's own undo.
 * **They go through the caller's `FileScope`**, like every other file tool:
   `requires="files"` withholds them where there is no scope, images are read
   through the same walk, and the write is checked against the same prefix.
@@ -58,8 +59,8 @@ _PATH = {
 _OVERWRITE = {
     'type': 'boolean',
     'description': (
-        'Replace a file already at this path (it goes to the recycle bin). '
-        'Without this, a taken name is saved as "name (2)".'
+        'Replace a file already at this path (what it held becomes a version '
+        'in its history). Without this, a taken name is saved as "name (2)".'
     ),
 }
 
@@ -529,11 +530,13 @@ async def render_pdf(args: Dict, context: Dict) -> str:
     'function': {
         'name': 'edit_workbook',
         'description': (
-            'Add rows to, or set cells in, a workbook that already exists, '
-            'keeping everything else — other sheets, formatting, charts and the '
-            'formulas you do not touch. Prefer this over render_workbook for any '
-            'change to an existing file: re-rendering means re-typing every row '
-            'you did not mean to change. Values starting with "=" are formulas.'
+            'Change a workbook that already exists, keeping everything else — '
+            'other sheets, charts and the formulas you do not touch. Prefer '
+            'this over render_workbook for any change to an existing file: '
+            're-rendering means re-typing every row you did not mean to '
+            'change. Values starting with "=" are formulas. Structural edits '
+            'run first, so set_cells coordinates refer to the sheet after any '
+            'insert/delete in the same call.'
         ),
         'parameters': {
             'type': 'object',
@@ -557,6 +560,71 @@ async def render_pdf(args: Dict, context: Dict) -> str:
                         'required': ['cell', 'value'],
                         'additionalProperties': False,
                     },
+                },
+                'insert_rows': {
+                    'type': 'object',
+                    'description': 'Insert blank rows mid-sheet; formulas pointing past them shift along.',
+                    'properties': {
+                        'row': {'type': 'integer', 'description': '1-based row to insert at.'},
+                        'count': {'type': 'integer', 'description': 'How many (default 1).'},
+                    },
+                    'required': ['row'],
+                    'additionalProperties': False,
+                },
+                'delete_rows': {
+                    'type': 'object',
+                    'description': 'Delete rows mid-sheet; references into them become #REF! loudly.',
+                    'properties': {
+                        'row': {'type': 'integer', 'description': '1-based first row to delete.'},
+                        'count': {'type': 'integer', 'description': 'How many (default 1).'},
+                    },
+                    'required': ['row'],
+                    'additionalProperties': False,
+                },
+                'insert_cols': {
+                    'type': 'object',
+                    'description': 'Insert blank columns mid-sheet; formulas shift along.',
+                    'properties': {
+                        'col': {'type': 'string', 'description': 'Column like C (or 3).'},
+                        'count': {'type': 'integer', 'description': 'How many (default 1).'},
+                    },
+                    'required': ['col'],
+                    'additionalProperties': False,
+                },
+                'delete_cols': {
+                    'type': 'object',
+                    'description': 'Delete columns mid-sheet.',
+                    'properties': {
+                        'col': {'type': 'string', 'description': 'Column like C (or 3).'},
+                        'count': {'type': 'integer', 'description': 'How many (default 1).'},
+                    },
+                    'required': ['col'],
+                    'additionalProperties': False,
+                },
+                'format': {
+                    'type': 'object',
+                    'description': 'Paint one range.',
+                    'properties': {
+                        'range': {'type': 'string', 'description': 'A range like A1:B2.'},
+                        'style': {
+                            'type': 'object',
+                            'description': 'bold, italic, wrap (true/false); font_size, font_name, '
+                                           'font_color (#rrggbb), fill (#rrggbb), number_format; '
+                                           'alignment (left/center/right/justify/top/bottom/middle); '
+                                           'border {top/right/bottom/left: thin/medium/…}.',
+                        },
+                    },
+                    'required': ['range', 'style'],
+                    'additionalProperties': False,
+                },
+                'freeze': {
+                    'type': ['string', 'null'],
+                    'description': 'Freeze rows above and columns left of a cell like B2 (null unfreezes).',
+                },
+                'widths': {
+                    'type': 'object',
+                    'description': 'Column widths, e.g. {"A": 20}.',
+                    'additionalProperties': {'type': 'number'},
                 },
             },
             'required': ['path'],
@@ -601,6 +669,119 @@ def _workbook_text(data: bytes) -> str:
     from inference.utils import extract_xlsx_text
 
     return extract_xlsx_text(io.BytesIO(data))
+
+
+# ---------------------------------------------------------------------------
+# read_workbook — values plus formulas, for reading before editing
+# ---------------------------------------------------------------------------
+
+@tool({
+    'type': 'function',
+    'function': {
+        'name': 'read_workbook',
+        'description': (
+            'Read a sheet of a workbook that already exists: every cell as its '
+            'calculated value, with the formula beside it wherever one is '
+            'stored. Read before edit_workbook rather than guessing what is '
+            'in the file. Values starting with "=" in the formulas are live '
+            'formulas; a value of null with no formula is an empty cell.'
+        ),
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'path': {'type': 'string', 'description': 'The .xlsx to read.'},
+                'sheet': {'type': 'string', 'description': 'Sheet name. Defaults to the first.'},
+                'range': {'type': 'string', 'description': 'A range like A1:D20. Defaults to the used area.'},
+            },
+            'required': ['path'],
+            'additionalProperties': False,
+        },
+    },
+}, requires='files', effect='read', parallel=True)
+async def read_workbook(args: Dict, context: Dict) -> str:
+    async def run(scope):
+        from inference.vfs import VfsError, read_binary
+
+        path = str(args.get('path') or '').strip()
+        if not path.lower().endswith('.xlsx'):
+            return json.dumps({'error': 'read_workbook reads .xlsx files; give the path of one.'})
+        try:
+            data = await sync_to_async(read_binary)(scope, path)
+        except VfsError as exc:
+            return json.dumps({'error': str(exc)})
+        try:
+            result = await sync_to_async(_read_sheet, thread_sensitive=False)(
+                data, args.get('sheet'), args.get('range'))
+        except SpecError as exc:
+            return json.dumps({'error': str(exc)})
+        return json.dumps(result, default=str)
+
+    scope = context.get('file_scope')
+    if scope is None:
+        return json.dumps({'error': 'There is no file workspace here.'})
+    try:
+        return await run(scope)
+    except Exception:
+        logger.exception('[Office] read_workbook failed')
+        return json.dumps({'error': 'The workbook could not be read.'})
+
+
+def _read_sheet(data: bytes, sheet: Any, cell_range: Any) -> dict:
+    """One sheet's cells as values plus formulas, optionally clipped to a range."""
+    import re
+
+    from inference import formulas
+
+    wb = formulas.workbook(data)
+    try:
+        name = str(sheet or '').strip() or wb.sheetnames[0]
+        if name not in wb.sheetnames:
+            raise SpecError(f'No sheet called {name!r}. This workbook has: {", ".join(wb.sheetnames)}.')
+        ws = wb[name]
+        if cell_range:
+            bounds = str(cell_range).strip().upper()
+            if not re.fullmatch(r'\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}'
+                                r'(:\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})?', bounds):
+                raise SpecError(f'range {bounds!r} is not like A1:D20.')
+            # Clipped to the used area: `ws[...]` creates a cell object per
+            # coordinate, and A1:XFD9999999 would create billions of them.
+            from openpyxl.utils.cell import range_boundaries
+
+            c1, r1, c2, r2 = range_boundaries(bounds.replace('$', ''))
+            cells = ws.iter_rows(min_row=r1, max_row=min(r2 or r1, ws.max_row or 0),
+                                 min_col=c1, max_col=min(c2 or c1, ws.max_column or 0))
+        else:
+            cells = ws.iter_rows(min_row=1, max_row=ws.max_row or 0,
+                                 max_col=ws.max_column or 0)
+        rows: list[list] = []
+        formula_rows: list[list] = []
+        for row in cells:
+            cells_in_row = row if isinstance(row, tuple) else (row,)
+            values: list = []
+            formulae: list = []
+            for cell in cells_in_row:
+                raw = cell.value
+                if isinstance(raw, str) and raw.startswith('='):
+                    try:
+                        values.append(formulas.cell(wb, name, cell.coordinate))
+                    except formulas.FormulaError:
+                        values.append(None)
+                    formulae.append(raw)
+                else:
+                    values.append(raw)
+                    formulae.append(None)
+            while values and values[-1] is None and formulae[-1] is None:
+                values.pop()
+                formulae.pop()
+            rows.append([formulas.json_value(v) for v in values])
+            formula_rows.append(formulae)
+        while rows and not any(rows[-1]):
+            rows.pop()
+            formula_rows.pop()
+        return {'sheet': name, 'sheets': wb.sheetnames,
+                'values': rows, 'formulas': formula_rows}
+    finally:
+        wb.close()
 
 
 # ---------------------------------------------------------------------------
@@ -689,4 +870,4 @@ async def render_diagram(args: Dict, context: Dict) -> str:
 
 
 OFFICE_TOOLS = ('render_deck', 'render_workbook', 'render_document', 'render_pdf',
-                'edit_workbook', 'render_diagram')
+                'edit_workbook', 'read_workbook', 'render_diagram')

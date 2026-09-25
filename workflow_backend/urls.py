@@ -3,7 +3,7 @@ URL configuration for workflow_backend project.
 """
 from django.contrib import admin
 from django.urls import path, include
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from rest_framework.permissions import IsAdminUser
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
@@ -13,7 +13,23 @@ def health_check(request):
     return JsonResponse({'status': 'healthy', 'service': 'workflow-backend'})
 
 
+def admin_login(request, extra_context=None):
+    """The admin sign-in, with the same 5/minute limit as the API login.
+
+    `/admin/` is proxied publicly, and DRF's throttles never reach Django's
+    own admin view, so a superuser password could be guessed at full speed
+    (N6, docs/SECURITY_REVIEW_FIX_PLAN.md). Only a POST is an attempt.
+    """
+    from core.views import LoginRateThrottle
+
+    if request.method == 'POST' and not LoginRateThrottle().allow_request(request, None):
+        return HttpResponse('Too many sign-in attempts. Wait a minute.', status=429)
+    return admin.site.login(request, extra_context)
+
+
 urlpatterns = [
+    # Before `admin.site.urls`, so it wins the match (N6).
+    path('admin/login/', admin_login, name='admin-login'),
     path('admin/', admin.site.urls),
 
     # Health check

@@ -23,7 +23,7 @@ import logging
 from django.db.models.signals import post_delete
 from django.dispatch import receiver
 
-from .models import Document, KnowledgeBase
+from .models import Document, DocumentVersion, KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
@@ -61,3 +61,13 @@ def recount_kb(kb_id) -> None:
 def recount_kb_documents(sender, instance: Document, **kwargs) -> None:
     """Recount the owning KB after a document row is permanently deleted."""
     recount_kb(instance.knowledge_base_id)
+
+
+@receiver(post_delete, sender=DocumentVersion, dispatch_uid='inference.drop_version_blob')
+def drop_version_blob(sender, instance: DocumentVersion, **kwargs) -> None:
+    """A pruned or purged version takes its stored bytes with it."""
+    if instance.file:
+        try:
+            instance.file.delete(save=False)
+        except Exception:  # noqa: BLE001 — an orphaned blob is not worth a failed delete
+            logger.warning('Could not delete version blob %s', instance.file.name, exc_info=True)

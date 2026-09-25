@@ -22,7 +22,6 @@ from llm.handlers.llm_base import (
     ReasoningSplitter,
     coerce_reasoning_text,
     iter_sse_chunks,
-    split_think_tags,
 )
 
 
@@ -50,111 +49,6 @@ def _sse(*payloads):
 
 def _delta(**delta):
     return {"choices": [{"delta": delta}]}
-
-
-class SplitThinkTagsTests(SimpleTestCase):
-    def test_plain_text_is_content(self):
-        events, in_thinking = split_think_tags("hello", False)
-        self.assertEqual(events, [("content", "hello")])
-        self.assertFalse(in_thinking)
-
-    def test_open_tag_emits_prefix_once(self):
-        """The regression that motivated this module: prefix was emitted 3x."""
-        events, in_thinking = split_think_tags("answer<think>because", False)
-        self.assertEqual(
-            events, [("content", "answer"), ("thinking", "because")]
-        )
-        self.assertTrue(in_thinking)
-
-    def test_state_carries_across_chunks(self):
-        events, state = split_think_tags("a<think>reason", False)
-        self.assertTrue(state)
-        events2, state2 = split_think_tags("ing more", state)
-        self.assertEqual(events2, [("thinking", "ing more")])
-        self.assertTrue(state2)
-        events3, state3 = split_think_tags("done</think>final", state2)
-        self.assertEqual(
-            events3, [("thinking", "done"), ("content", "final")]
-        )
-        self.assertFalse(state3)
-
-    def test_complete_block_in_one_chunk(self):
-        events, state = split_think_tags("a<think>b</think>c", False)
-        self.assertEqual(
-            events,
-            [("content", "a"), ("thinking", "b"), ("content", "c")],
-        )
-        self.assertFalse(state)
-
-    def test_multiple_blocks_in_one_chunk(self):
-        """The old splitter handled at most one tag pair per chunk."""
-        events, state = split_think_tags("a<think>b</think>c<think>d</think>e", False)
-        self.assertEqual(
-            events,
-            [
-                ("content", "a"),
-                ("thinking", "b"),
-                ("content", "c"),
-                ("thinking", "d"),
-                ("content", "e"),
-            ],
-        )
-        self.assertFalse(state)
-
-    def test_empty_segments_are_not_emitted(self):
-        events, _ = split_think_tags("<think>x</think>", False)
-        self.assertEqual(events, [("thinking", "x")])
-
-
-class ReasoningVocabularyTests(SimpleTestCase):
-    """One endpoint serves several models, so all three tag styles must work."""
-
-    def test_thinking_and_reasoning_tags_are_recognised(self):
-        for open_, close in (("<thinking>", "</thinking>"),
-                             ("<reasoning>", "</reasoning>")):
-            with self.subTest(tag=open_):
-                events, state = split_think_tags(f"a{open_}b{close}c", False)
-                self.assertEqual(
-                    events,
-                    [("content", "a"), ("thinking", "b"), ("content", "c")],
-                )
-                self.assertFalse(state)
-
-    def test_earliest_tag_wins_when_styles_are_mixed(self):
-        events, _ = split_think_tags("a<think>b</think>c<thinking>d</thinking>e", False)
-        self.assertEqual(
-            events,
-            [
-                ("content", "a"), ("thinking", "b"), ("content", "c"),
-                ("thinking", "d"), ("content", "e"),
-            ],
-        )
-
-
-class OrphanCloseTagTests(SimpleTestCase):
-    """
-    R1-distill chat templates prefill `<think>` into the prompt, so the model's
-    output starts inside reasoning and only ever emits the closing tag.
-    """
-
-    def test_close_without_open_is_reasoning_not_answer(self):
-        events, state = split_think_tags("weighing it up</think>The answer.", False)
-        self.assertEqual(
-            events,
-            [("thinking", "weighing it up"), ("content", "The answer.")],
-        )
-        self.assertFalse(state)
-
-    def test_stray_tag_never_reaches_the_user(self):
-        events, _ = split_think_tags("reasoning</think>answer", False)
-        for _, text in events:
-            self.assertNotIn("</think>", text)
-
-    def test_close_after_real_content_is_treated_as_prose(self):
-        """A model writing *about* tags must not have its answer reclassified."""
-        splitter = ReasoningSplitter()
-        self.assertEqual(splitter.feed("You close it with "), [("content", "You close it with ")])
-        self.assertEqual(splitter.feed("</think> like so."), [("content", " like so.")])
 
 
 class TornTagTests(SimpleTestCase):

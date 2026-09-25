@@ -505,7 +505,17 @@ class AgentSerializer(serializers.Serializer):
         return tags
 
     def validate_knowledgeBases(self, value):
-        return self._owned_ids(KnowledgeBase, value, 'knowledge base')
+        # Hidden eval corpora are the user's rows but not theirs to pick: a
+        # real agent attached to one would answer from fake test data.
+        from inference.models import HIDDEN_KB_PREFIX
+
+        value = self._owned_ids(KnowledgeBase, value, 'knowledge base')
+        hidden = set(KnowledgeBase.objects.filter(
+            id__in=value, name__startswith=HIDDEN_KB_PREFIX).values_list('id', flat=True))
+        if hidden:
+            raise serializers.ValidationError(
+                f"No such knowledge base: {', '.join(map(str, sorted(hidden)))}.")
+        return value
 
     def validate_skills(self, value):
         return self._owned_ids(Skill, value, 'skill')

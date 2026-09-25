@@ -104,12 +104,18 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "AVAILABLE_TOOLS",
+    "CHAT_AUTHORING_TOOLS",
+    "CHAT_DELEGATION_TOOLS",
+    "CHAT_ORCHESTRATOR_EXTRA",
+    "ORCHESTRATOR_REFUSAL",
     "READ_ONLY_TOOLS",
     "SENSITIVE_TOOLS",
     "Tool",
     "all_tools",
+    "chat_orchestrator_allowed",
     "disabled_tools_for",
     "effect_of",
+    "execute_chat_tool",
     "execute_tool",
     "get",
     "get_available_tools",
@@ -156,6 +162,80 @@ SENSITIVE_TOOLS: List[str] = sensitive_names()
 #: bin. Collapsing them into one flag is what would force the middle rungs of
 #: the autonomy ladder to guess.
 READ_ONLY_TOOLS: frozenset[str] = names_with_effect("read")
+
+#: Chat is the orchestrator and cannot be configured like a subagent, so it
+#: holds only basic tools — everything else lives in subagents the user
+#: configures explicitly. Decentralised orchestration (2026-09-25): the chat
+#: turn reads, plans and delegates; a worker's *actions* still meet its own
+#: gates at run time.
+#:
+#: What that means concretely: `get_available_tools` (chat's toolbox) offers
+#: `effect="read"` tools, `ALWAYS_AVAILABLE`-style infrastructure, and the
+#: names below — delegation, authoring, memory and missions. Anything else
+#: (file writes, sends, publishes, renders, browser acts, ...) is withheld
+#: here and refused in `execute_tool`, with a message telling the model to
+#: delegate to a specialist via files rather than retrying.
+#:
+#: Delegation: how the manager reaches its workers. `search_agents` to find
+#: them, `run_agent` / `invoke_subagent` to run them, `get_agent_run` to check
+#: a long run, `answer_subagent` to answer one that stopped to ask, and the
+#: detached `start_tasks` / `wait_tasks` / `task_status` / `steer_task` /
+#: `stop_task` / `revert_task` trio the coding lead uses.
+CHAT_DELEGATION_TOOLS: frozenset[str] = frozenset({
+    'search_agents', 'run_agent', 'get_agent_run', 'invoke_subagent',
+    'answer_subagent', 'start_tasks', 'wait_tasks', 'task_status',
+    'steer_task', 'stop_task', 'revert_task',
+})
+
+#: Authoring: building the team is the manager's job. Chat-only, through
+#: `AgentSerializer`, so the ownership checks still bound what it writes.
+CHAT_AUTHORING_TOOLS: frozenset[str] = frozenset({
+    'create_agent', 'update_agent',
+})
+
+#: The rest of the orchestrator's extra set beyond reads and infrastructure:
+#: durable facts about the person (agents read memory but cannot write it, so
+#: dropping these from chat would make memory read-only for everyone), and
+#: `start_mission` (`mission_status` / `complete_mission` / `report_progress`
+#: are already `ALWAYS_AVAILABLE`; starting the mission is orchestration).
+CHAT_ORCHESTRATOR_EXTRA: frozenset[str] = frozenset(
+    set(CHAT_DELEGATION_TOOLS)
+    | set(CHAT_AUTHORING_TOOLS)
+    | {'remember_about_user', 'forget_about_user', 'start_mission'}
+)
+
+#: What the model is told when it reaches for a tool the orchestrator withholds.
+ORCHESTRATOR_REFUSAL = (
+    'Not available in this chat turn: the orchestrator reads, plans and delegates, '
+    'and critical actions live in subagents. Use search_agents to find a specialist '
+    '(Analyst, Slides, Writer, or one you built), hand it the job with run_agent or '
+    'invoke_subagent passing findings via files, and report back what it produced. '
+    'Do not retry this tool directly.'
+)
+
+
+def chat_orchestrator_allowed(name: str) -> bool:
+    """Whether the chat orchestrator may call `name` at all.
+
+    Read tools, infrastructure (`ALWAYS_AVAILABLE`-style names are all read or
+    own-state) and the explicit extra set above. Everything else — including
+    every MCP tool whose name does not claim to read — is for a configured
+    subagent. Unknown names fail closed: an MCP tool never appears here.
+    """
+    from agents.agent.runtime import ALWAYS_AVAILABLE, RETRIEVAL_TOOLS
+
+    if name in CHAT_ORCHESTRATOR_EXTRA:
+        return True
+    if name in ALWAYS_AVAILABLE or name in RETRIEVAL_TOOLS:
+        return True
+    try:
+        from .registry import effect_of
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return effect_of(name) == 'read'
+    except Exception:  # noqa: BLE001
+        return False
 
 #: Tools that may be dispatched at the same time as their siblings in one turn,
 #: declared per tool via `@tool(..., parallel=True)`.
@@ -308,9 +388,14 @@ async def get_available_tools(
     file_scope: Any = None,
 ) -> List[Dict[str, Any]]:
     """
-    Return the full tool list for this user: built-in tools whose requirements
-    are met, plus any MCP tools the user has enabled. Safe to call on every
-    agent turn (MCP tool lists are cached in Redis).
+    Return the orchestrator's tool list for this user: built-in tools it may
+    hold whose requirements are met, plus the read-only MCP half.
+
+    Chat is the orchestrator and cannot be configured like a subagent, so it
+    holds only basic tools — reads, infrastructure, delegation, authoring,
+    memory and missions (`chat_orchestrator_allowed`). Critical actions live
+    in subagents the user configures explicitly. Safe to call on every agent
+    turn (MCP tool lists are cached in Redis).
 
     `mcp_memo` is scratch space belonging to one turn. Given one, the MCP half
     of the list is resolved on the first call and reused on every later call
@@ -330,6 +415,12 @@ async def get_available_tools(
     tools: List[Dict[str, Any]] = []
     for entry in all_tools():
         if entry.name in disabled:
+            continue
+        if not chat_orchestrator_allowed(entry.name):
+            # Decentralised orchestration: critical tools live in subagents,
+            # not in the unconfigurable orchestrator. Withheld rather than
+            # left to refuse at call time, for the usual reason — an
+            # advertised tool the model plans around and then cannot run.
             continue
         if entry.connector is not None and entry.connector not in live:
             # The card is off, or the user has not connected the account it
@@ -360,16 +451,73 @@ async def get_available_tools(
         # would cost the run every connector it has for the rest of the turn.
         return tools
 
+    # Orchestrator holds read-only MCP tools; writes live in subagents. The
+    # name is a third party's claim, so this only ever narrows — a write
+    # misnamed as a read still meets the approval gate at dispatch.
+    mcp_tools = [
+        d for d in mcp_tools
+        if isinstance(d, dict)
+        and _mcp_name_reads(d.get('function', {}).get('name', ''))
+    ]
+
     if mcp_memo is not None:
         mcp_memo[_MCP_MEMO_KEY] = mcp_tools
     tools.extend(mcp_tools)
     return tools
 
 
+def _mcp_name_reads(func_name: str) -> bool:
+    """Whether an encoded MCP tool name claims to only read. Fails closed."""
+    try:
+        from mcp_integration.tool_provider import decode_tool_name
+
+        from .permissions import looks_read_only, strip_encoded_digest
+
+        decoded = decode_tool_name(func_name)
+        original = (
+            strip_encoded_digest(decoded[1]) if decoded is not None else func_name
+        )
+        return looks_read_only(original)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def execute_chat_tool(
+    func_name: str, args: Dict[str, Any], context: Dict[str, Any]
+) -> str:
+    """`execute_tool` behind the orchestrator's scope — chat's dispatcher.
+
+    The scope is re-checked here and not only when advertising, because a model
+    that saw a tool earlier in the transcript will call one it was not offered
+    this turn. It is a separate door from `execute_tool` on purpose:
+    `AgentToolbox.dispatch` ends in `execute_tool` after its own grant checks,
+    and a subagent is exactly where the writes, sends and renders now live —
+    putting this check in the shared dispatcher refuses every one of them.
+    """
+    try:
+        from mcp_integration.tool_provider import is_mcp_tool
+
+        is_mcp = is_mcp_tool(func_name)
+    except Exception:  # noqa: BLE001
+        is_mcp = False
+
+    if is_mcp:
+        if not _mcp_name_reads(func_name):
+            return f"Error: {ORCHESTRATOR_REFUSAL}"
+    elif get(func_name) is not None and not chat_orchestrator_allowed(func_name):
+        return f"Error: {ORCHESTRATOR_REFUSAL}"
+    return await execute_tool(func_name, args, context)
+
+
 async def execute_tool(
     func_name: str, args: Dict[str, Any], context: Dict[str, Any]
 ) -> str:
-    """Execute a tool by name and return its string response."""
+    """Execute a tool by name and return its string response.
+
+    Unscoped: shared by the agent toolbox (after its grant checks) and the
+    direct `/execute-tool/` endpoint. Chat's model dispatches through
+    `execute_chat_tool`, which adds the orchestrator's scope.
+    """
     # Deliberately two try blocks. Wrapping the *import* and the dispatch
     # together meant any failure inside mcp_integration — an import error, a
     # misconfigured app — returned "Error executing MCP tool web_search" for

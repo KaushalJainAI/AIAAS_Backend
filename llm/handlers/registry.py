@@ -61,10 +61,6 @@ class ProviderRegistry:
 
         self._handlers[node_type] = handler_class
 
-    def unregister(self, node_type: str) -> None:
-        """Remove a handler from registry"""
-        self._handlers.pop(node_type, None)
-
     def get_handler(self, node_type: str) -> BaseNodeHandler:
         """
         Get an instance of a handler by node type.

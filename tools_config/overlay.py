@@ -66,13 +66,6 @@ def invalidate(user_id: int) -> None:
     cache.delete(_cache_key(user_id))
 
 
-def disabled_names(user_id: int | None) -> frozenset[str]:
-    """Tools this user has switched off. Absent row means on."""
-    return frozenset(
-        name for name, row in overlay(user_id).items() if not row.get('enabled', True)
-    )
-
-
 async def adisabled_names(user_id: int | None) -> frozenset[str]:
     rows = await aoverlay(user_id)
     return frozenset(

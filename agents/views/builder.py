@@ -585,7 +585,7 @@ class Catalogue:
 @sync_to_async
 def _catalogue(user) -> Catalogue:
     from agents.models import SubAgent
-    from inference.models import KnowledgeBase
+    from inference.models import visible_knowledge_bases
     from mcp_integration.client import _visible_servers_queryset
     from skills.models import Skill
 
@@ -603,7 +603,7 @@ def _catalogue(user) -> Catalogue:
     ]
     knowledge_bases = [
         {'id': kb.id, 'label': kb.name, 'backend': kb.backend}
-        for kb in KnowledgeBase.objects.filter(user=user).only(
+        for kb in visible_knowledge_bases(user).only(
             'id', 'name', 'backend')[:50]
     ]
     skills = [

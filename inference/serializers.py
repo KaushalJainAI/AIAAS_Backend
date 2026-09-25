@@ -36,6 +36,12 @@ class KnowledgeBaseSerializer(serializers.ModelSerializer):
         value = (value or '').strip()
         if not value:
             raise serializers.ValidationError('A knowledge base needs a name.')
+        from .models import HIDDEN_KB_PREFIX
+
+        if value.startswith(HIDDEN_KB_PREFIX):
+            # Reserved for eval worlds, which every listing hides.
+            raise serializers.ValidationError(
+                f"Names starting with '{HIDDEN_KB_PREFIX}' are reserved.")
         # The (user, name) uniqueness lives in a Meta constraint, which DRF's
         # UniqueValidator never sees — without this a duplicate became a 500.
         request = self.context.get('request')

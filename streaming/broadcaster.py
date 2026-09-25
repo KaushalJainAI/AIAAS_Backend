@@ -488,26 +488,6 @@ class SSEBroadcaster:
             }
         )
     
-    async def progress_update(
-        self,
-        execution_id: str,
-        current_node: int,
-        total_nodes: int,
-        message: str = ''
-    ):
-        """Send progress update event."""
-        await self.send_event(
-            execution_id,
-            self.EVENT_PROGRESS,
-            {
-                'current': current_node,
-                'total': total_nodes,
-                'percentage': int((current_node / total_nodes) * 100) if total_nodes > 0 else 0,
-                'message': message,
-            }
-        )
-
-
 # Singleton broadcaster instance
 _broadcaster: Optional[SSEBroadcaster] = None
 

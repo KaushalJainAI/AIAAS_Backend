@@ -138,6 +138,11 @@ class TurnRequest:
     #: `agent_reject` exists to close for agent runs.
     reject_tool_call: str | None = None
     reject_reason: str = ""
+    #: The person's answer to an `ask_user` card: the question's call id and
+    #: the value (option text, list of options, number or sentence). Checked
+    #: against the question the run asked, not trusted from the client.
+    answer_tool_call: str | None = None
+    answer: Any = None
     regenerate_of: int | None = None
     #: A slash command the client resolved through the palette
     #: (`TurnRequest.command = {"name", "args", "text"}`). The backend
@@ -150,9 +155,13 @@ class TurnRequest:
         """Read a request body, rejecting anything unusable up front."""
         approval = (payload.get("approve_tool_call") or "").strip() or None
         rejection = (payload.get("reject_tool_call") or "").strip() or None
+        answering = (payload.get("answer_tool_call") or "").strip() or None
         content = (payload.get("content") or "").strip()
-        if not content and not approval and not rejection:
+        if not content and not approval and not rejection and not answering:
             raise TurnError("A message is required.")
+        answer = payload.get("answer") if answering else None
+        if answering and not isinstance(answer, (str, int, float, list)):
+            raise TurnError("An answer is required.")
 
         requested = (payload.get("intent") or "").strip().lower()
         reference = payload.get("reference")
@@ -186,6 +195,8 @@ class TurnRequest:
                 (payload.get("approval_scope") or "").strip().lower()
                 if approval is not None else ""
             ),
+            answer_tool_call=answering,
+            answer=answer,
             reject_tool_call=rejection,
             reject_reason=(
                 str(payload.get("reject_reason") or "").strip()[:500]
@@ -867,7 +878,14 @@ async def run_chat_turn(
     phases.mark("sync_choice")
 
     thread_id = _thread_id(session)
-    if request.approve_tool_call:
+    if request.answer_tool_call:
+        recorded, problem = await agent.answer_question(
+            thread_id, request.answer_tool_call, request.answer)
+        if not recorded:
+            # Before anything streams: the card is still on screen and the
+            # person can fix the answer.
+            raise TurnError(problem)
+    elif request.approve_tool_call:
         await agent.approve_tool_call(
             thread_id, request.approve_tool_call,
             remember=request.remember_approval,
@@ -903,7 +921,8 @@ async def run_chat_turn(
     )
     user_message = (
         await ChatMessage.objects.filter(session=session, role="user").alast()
-        if (request.approve_tool_call or request.reject_tool_call) else None
+        if (request.approve_tool_call or request.reject_tool_call
+            or request.answer_tool_call) else None
     ) or await ChatMessage.objects.acreate(
         session=session, role="user",
         content=question or "[Approved tool call]", message_type="chat",
@@ -1026,6 +1045,19 @@ async def run_chat_turn(
     _auto_policy = _reviewer.auto_policy(
         user_text=reviewer_text(past, question), provider=provider, model=model,
     )
+    _approval_modes = {
+        'ask': (frozenset(_sensitive_names()), _permissions.default_policy),
+        'review': (frozenset(
+            t['function']['name'] for t in _schemas()
+        ), _permissions.default_policy),
+        'auto': (frozenset(), _auto_policy),
+    }
+    # The session's own mode decides the gate set from the first batch. It
+    # used to reach `tools_node` only through a mid-run switch: a chat saved
+    # as `auto` still gated every sensitive tool by name on a fresh turn (or
+    # after a restart emptied the steering slots), so the reviewer — and the
+    # manager answering its workers — never got a say.
+    _session_gate = _approval_modes.get(session_autonomy)
 
     turn = TurnContext(
         file_scope=file_scope,
@@ -1047,17 +1079,13 @@ async def run_chat_turn(
             session_key=str(session.id), file_scope=file_scope,
         )} if session_autonomy == 'plan' else {}),
         **({'approval_policy': _auto_policy} if session_autonomy == 'auto' else {}),
+        **({'sensitive_tools': _session_gate[0]}
+           if _session_gate is not None and session_autonomy != 'ask' else {}),
         **((await _command_toolbox(
             command_resolution, user=user, session=session,
             file_scope=file_scope,
         )) if command_resolution is not None else {}),
-        approval_modes={
-            'ask': (frozenset(_sensitive_names()), _permissions.default_policy),
-            'review': (frozenset(
-                t['function']['name'] for t in _schemas()
-            ), _permissions.default_policy),
-            'auto': (frozenset(), _auto_policy),
-        },
+        approval_modes=_approval_modes,
     )
 
     # A command that starts a run directly (`/agent`): the typed command is

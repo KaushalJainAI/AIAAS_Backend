@@ -370,20 +370,30 @@ class OfficeAvailabilityTests(SimpleTestCase):
                   for t in async_to_sync(get_available_tools)(None, file_scope=object())}
         for name in OFFICE_TOOLS:
             self.assertNotIn(name, bare)
-            self.assertIn(name, scoped)
+            # Chat is the orchestrator: it may read a workbook, but rendering
+            # and editing office files is a subagent's job (the `office` grant).
+            if name == 'read_workbook':
+                self.assertIn(name, scoped)
+            else:
+                self.assertNotIn(name, scoped)
 
     def test_they_create_rather_than_destroy(self):
         # Why they run without asking in chat: nothing they do is beyond the
-        # user's own undo (renamed on collision, overwrite goes to the bin).
+        # user's own undo (renamed on collision, overwrite keeps a version).
         #
         # `edit_workbook` is the exception and asks first, because it is the
         # one that changes a file the user already has rather than adding one:
-        # the undo is a restore from the bin, not "ignore the new file".
+        # the undo is a restore from history, not "ignore the new file".
+        # `read_workbook` reads, so it is `read` and never asks.
         for name in OFFICE_TOOLS:
             tool = registered(name)
             with self.subTest(tool=name):
-                self.assertEqual(tool.effect, 'reversible')
-                self.assertEqual(tool.sensitive, name == 'edit_workbook')
+                if name == 'read_workbook':
+                    self.assertEqual(tool.effect, 'read')
+                    self.assertFalse(tool.sensitive)
+                else:
+                    self.assertEqual(tool.effect, 'reversible')
+                    self.assertEqual(tool.sensitive, name == 'edit_workbook')
 
     def test_the_office_grant_unlocks_them_and_needs_a_scope(self):
         from agents.agent.runtime import GRANT_TOOLS, AgentToolbox
@@ -397,9 +407,12 @@ class OfficeAvailabilityTests(SimpleTestCase):
         # And it is not a back door to the rest of the file tools.
         self.assertNotIn('write_file', with_scope)
 
-    def test_plan_mode_withholds_them(self):
+    def test_plan_mode_withholds_the_writers(self):
         from agents.agent.runtime import AgentToolbox
 
         box = AgentToolbox(grants={'office': True}, user_id=1, file_scope=object(),
                            read_only=True)
-        self.assertFalse(set(OFFICE_TOOLS) & box.allowed_names)
+        # Plan mode withholds the mutating tools, but a read is still a read:
+        # `read_workbook` stays offered exactly like `read_file`.
+        self.assertFalse(set(OFFICE_TOOLS) - {'read_workbook'} & box.allowed_names)
+        self.assertIn('read_workbook', box.allowed_names)

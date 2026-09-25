@@ -12,8 +12,8 @@ the tool schema:
 
 * an agent run cannot reach these tools at all, so a delegating agent cannot
   mint a worker holding grants it was itself refused;
-* the call is `sensitive`, so a person approves the configuration — grants
-  included — before anything is written.
+* it runs without an approval card — the orchestrator staffs its own team
+  (2026-09-25) — so the serializer's ownership checks are the whole gate.
 """
 from __future__ import annotations
 
@@ -212,14 +212,14 @@ class ContainmentTests(TestCase):
         self.assertIn("not", out.lower())
         self.assertEqual(SubAgent.objects.count(), 0)
 
-    def test_they_are_sensitive_so_a_person_approves_the_grants(self):
-        """The model proposes capabilities; a person grants them.
-
-        That is what makes model-chosen grants acceptable at all, and it reuses
-        the existing approval gate rather than inventing a second confirmation
-        flow that could disagree with it.
+    def test_they_run_without_asking(self):
+        """Staffing the team is the manager's job (user decision, 2026-09-25):
+        the orchestrator creates and edits agents without an approval card.
+        The serializer's ownership checks and the chat-only wall still bound it.
         """
         from chat.tools import SENSITIVE_TOOLS
+        from chat.tools.registry import effect_of
 
-        self.assertIn("create_agent", SENSITIVE_TOOLS)
-        self.assertIn("update_agent", SENSITIVE_TOOLS)
+        self.assertNotIn("create_agent", SENSITIVE_TOOLS)
+        self.assertNotIn("update_agent", SENSITIVE_TOOLS)
+        self.assertEqual(effect_of("create_agent"), "reversible")

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from django.test import SimpleTestCase
 
-from chat.turn.extraction import extract_text_tool_calls, split_text_tool_calls
+from chat.turn.extraction import split_text_tool_calls
 from llm.access import StreamAccumulator, to_tool_calls
 from chat.turn.agent import _parse_follow_ups
 
@@ -107,20 +107,20 @@ class TextToolCallFallbackTests(SimpleTestCase):
     """
 
     def test_delimited_call(self):
-        calls = extract_text_tool_calls(
+        calls = split_text_tool_calls(
             '[TOOL_CALL]{"tool": "web_search", "args": {"query": "python"}}[/TOOL_CALL]'
-        )
+        )[0]
         self.assertEqual(calls[0].name, "web_search")
         self.assertEqual(calls[0].arguments, {"query": "python"})
 
     def test_bare_json_object(self):
-        calls = extract_text_tool_calls(
+        calls = split_text_tool_calls(
             'Sure, let me look.\n{"name": "web_search", "arguments": {"query": "x"}}'
-        )
+        )[0]
         self.assertEqual(calls[0].name, "web_search")
 
     def test_inline_arguments_without_a_nested_key(self):
-        calls = extract_text_tool_calls('{"tool": "web_search", "query": "inline"}')
+        calls = split_text_tool_calls('{"tool": "web_search", "query": "inline"}')[0]
         self.assertEqual(calls[0].arguments, {"query": "inline"})
 
     def test_raw_syntax_is_removed_from_the_message(self):
@@ -133,12 +133,12 @@ class TextToolCallFallbackTests(SimpleTestCase):
         self.assertNotIn("TOOL_CALL", cleaned)
 
     def test_ordinary_prose_is_not_a_tool_call(self):
-        self.assertEqual(extract_text_tool_calls("Here is the answer."), ())
+        self.assertEqual(split_text_tool_calls("Here is the answer.")[0], ())
 
     def test_json_that_is_not_a_call_is_left_alone(self):
         # A model explaining a JSON payload must not be read as calling a tool.
         self.assertEqual(
-            extract_text_tool_calls('Config: {"timeout": 30, "retries": 2}'), ()
+            split_text_tool_calls('Config: {"timeout": 30, "retries": 2}')[0], ()
         )
 
     def test_a_json_answer_is_not_a_call_to_a_tool_nobody_offered(self):
@@ -155,7 +155,7 @@ class TextToolCallFallbackTests(SimpleTestCase):
         self.assertEqual(calls[0].name, "web_search")
 
     def test_empty_input(self):
-        self.assertEqual(extract_text_tool_calls(""), ())
+        self.assertEqual(split_text_tool_calls("")[0], ())
         self.assertEqual(split_text_tool_calls(""), ((), ""))
 
 

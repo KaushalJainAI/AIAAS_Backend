@@ -16,9 +16,7 @@ import re
 from typing import Dict, NamedTuple
 
 from workflow_backend.thresholds import (
-    HISTORY_SEARCH_MAX_MATCHES,
     HISTORY_SEARCH_SNIPPET_CHARS,
-    HISTORY_SEARCH_MAX_TOTAL_CHARS,
     HISTORY_SEARCH_MAX_PATTERN_LEN,
     HISTORY_SEARCH_SCAN_LIMIT,
 )
@@ -26,11 +24,6 @@ from workflow_backend.thresholds import (
 from .registry import tool
 
 from tools_config.overlay import alimit
-
-from tools_config.settings_schema import (
-    _HISTORY_MAX_MATCHES,
-    _HISTORY_MAX_TOTAL_CHARS,
-)
 
 
 class _Hit(NamedTuple):

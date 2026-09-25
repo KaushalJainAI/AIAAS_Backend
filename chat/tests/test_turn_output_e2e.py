@@ -163,11 +163,12 @@ class TurnOutputTests(TestCase):
 
     # ── files ────────────────────────────────────────────────────────────────
 
-    def test_chat_can_write_a_file_into_the_users_tree(self):
-        """The whole point of `vfs.chat_scope`, end to end.
+    def test_chat_is_refused_a_file_write_and_told_to_delegate(self):
+        """Chat is the orchestrator (2026-09-25): writes live in subagents.
 
-        Asserts against the database rather than the tool's return value: the
-        tool could report success while writing nowhere the user can find.
+        Through the real graph with chat's default dispatcher, so this fails if
+        the scope check ever drops out of `execute_chat_tool`. Asserts against
+        the database too: a refusal that still wrote would pass on the message.
         """
         from asgiref.sync import sync_to_async
 
@@ -176,20 +177,22 @@ class TurnOutputTests(TestCase):
 
         scope = async_to_sync(sync_to_async(chat_scope))(self.user)
 
-        # `write_file` is in `SENSITIVE_TOOLS`, so a real chat turn pauses for
-        # approval first — asserted on its own below. Cleared here so this test
-        # measures the write path rather than the approval path.
-        self._run([
-            ("write_file", {"path": "/Chat/summary.md", "content": "# Notes\nhello"}),
-        ], thread="file-1", file_scope=scope, sensitive=frozenset())
+        # Approval cleared so this measures dispatch, not the approval path —
+        # a model that names the tool anyway must still be refused.
+        import chat.tools as tool_registry
 
-        doc = Document.objects.filter(user=self.user, name="summary.md").first()
-        self.assertIsNotNone(doc, "nothing was written to the user's tree")
-        self.assertIn("hello", doc.content_text)
-        # Under /Chat/, not loose at the root and not inside /Agents/.
-        self.assertEqual(doc.folder.name, "Chat")
-        # `status='stored'` — a write is never a silent embedding bill.
-        self.assertEqual(doc.status, "stored")
+        real = tool_registry.execute_tool
+        with patch.object(tool_registry, "execute_tool", wraps=real) as shared:
+            self._run([
+                ("write_file", {"path": "/Chat/summary.md", "content": "# Notes\nhello"}),
+            ], thread="file-1", file_scope=scope, sensitive=frozenset())
+
+        self.assertFalse(
+            Document.objects.filter(user=self.user, name="summary.md").exists(),
+            "the orchestrator wrote a file it should have delegated",
+        )
+        # Refused at chat's own door, before the shared dispatcher agents use.
+        shared.assert_not_called()
 
     def test_writing_a_file_pauses_for_approval_in_chat(self):
         """Deliberate, and worth pinning because it is easy to "fix" wrongly.

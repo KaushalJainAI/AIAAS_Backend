@@ -106,44 +106,49 @@ async def sweep_once(now=None) -> dict:
     counting are the same `prepare` / `record_*` the sync path uses — the two
     callers differ in waiting, never in rules.
     """
-    from agents.agent.runtime import AgentRunRefused, start_agent_run
-    from agents.sweep import (
-        Launch,
-        due_triggers,
-        prepare,
-        record_failure,
-        record_started,
-    )
+    from agents.sweep import due_triggers
 
     now = now or timezone.now()
     triggers = await sync_to_async(lambda: list(due_triggers(now)))()
     counts: dict = {}
     for trigger in triggers:
-        step = await sync_to_async(prepare)(trigger, now)
-        if not isinstance(step, Launch):
-            counts[step] = counts.get(step, 0) + 1
-            continue
-        try:
-            execution_id = await start_agent_run(
-                trigger.subagent, step.goal, user=trigger.subagent.user,
-                trigger_type='schedule', caller='trigger',
-            )
-        except AgentRunRefused as exc:
-            await sync_to_async(record_failure)(trigger, now, 'refused', str(exc))
-            counts['refused'] = counts.get('refused', 0) + 1
-            continue
-        except Exception as exc:  # noqa: BLE001
-            logger.exception('[Scheduler] Trigger %s failed to start', trigger.id)
-            await sync_to_async(record_failure)(
-                trigger, now, 'failed', f'{type(exc).__name__}: {exc}')
-            counts['failed'] = counts.get('failed', 0) + 1
-            continue
-        await sync_to_async(record_started)(trigger, now, execution_id)
-        counts['fired'] = counts.get('fired', 0) + 1
+        outcome = await launch(trigger, now)
+        counts[outcome] = counts.get(outcome, 0) + 1
     if counts:
         logger.info('[Scheduler] %s',
                     ', '.join(f'{v} {k}' for k, v in sorted(counts.items())))
     return counts
+
+
+async def launch(trigger, now=None, *, trigger_type: str = 'schedule') -> str:
+    """Gate one trigger and start its run detached; return the outcome word.
+
+    The one place a trigger becomes a run without waiting for it -- the
+    scheduler loop and the event receivers (e.g. `workspaces.views`) share it,
+    so an event cannot skip the gating a schedule gets.
+    """
+    from agents.agent.runtime import AgentRunRefused, start_agent_run
+    from agents.sweep import Launch, prepare, record_failure, record_started
+
+    now = now or timezone.now()
+    step = await sync_to_async(prepare)(trigger, now)
+    if not isinstance(step, Launch):
+        return step
+    try:
+        execution_id = await start_agent_run(
+            trigger.subagent, step.goal, user=trigger.subagent.user,
+            trigger_type=trigger_type, caller='trigger',
+        )
+    except AgentRunRefused as exc:
+        await sync_to_async(record_failure)(trigger, now, 'refused', str(exc))
+        return 'refused'
+    except Exception as exc:  # noqa: BLE001
+        logger.exception('[Scheduler] Trigger %s failed to start', trigger.id)
+        await sync_to_async(record_failure)(
+            trigger, now, 'failed', f'{type(exc).__name__}: {exc}')
+        return 'failed'
+    await sync_to_async(record_started)(trigger, now, execution_id)
+    return 'fired'
 
 
 async def run_forever() -> None:

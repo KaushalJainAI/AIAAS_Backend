@@ -108,7 +108,7 @@ def static_check(
     tool_name: str,
     args: dict,
     user_text: str = '',
-    tainted: bool = False,
+    tainted: bool | str = False,
     seen_hosts: Any = (),
 ) -> tuple[bool, str] | None:
     """The no-model half: returns (allow, reason) or None to ask the judge.
@@ -116,9 +116,18 @@ def static_check(
     Anything this refuses is refused without spending a model call. Anything
     it does not decide goes to the judge — returning None is "ask the model",
     never "allow".
+
+    `tainted` is the name of the tool whose result this turn read like orders
+    to an AI (`tools_node` sets it from `core/safety/provenance.py`), or True.
+    Once a turn has been exposed, the judge's own inputs — the user's words
+    and the plan — may already be steered, so no call is waved through.
     """
     if tainted:
-        return False, 'The call carries text shaped like instructions from a tool result.'
+        source = f'A {tainted} result' if isinstance(tainted, str) else 'A tool result'
+        return False, (
+            f'{source} this turn contained text addressed to an AI, so auto mode '
+            'asks before anything irreversible for the rest of the turn.'
+        )
     if tool_name in SPENDY_TOOLS:
         return False, f'{tool_name} spends money per call; the user approves each one.'
     if tool_name == 'publish_page':
@@ -229,7 +238,7 @@ async def review(
     user_text: str = '',
     todos: Any = (),
     context: dict | None = None,
-    tainted: bool = False,
+    tainted: bool | str = False,
     seen_hosts: Any = (),
     judge: Callable[..., Any] | None = None,
     provider: str = '',
@@ -317,6 +326,18 @@ def auto_policy(
             return name
 
     async def policy(name: str, args: dict, context: dict) -> bool:
+        from chat.tools.agents import SUBAGENT_ANSWER_TOOL
+
+        if name == SUBAGENT_ANSWER_TOOL:
+            # The manager deciding for its worker: no judge — in `auto` the
+            # orchestrator *is* the judge — but the floor still holds.
+            verdict = await subagent_floor(args, context, user_text=user_text)
+            audits[_key(name, args)] = {
+                'mode': 'auto', 'verdict': 'ask' if verdict else 'allow',
+                'reason': verdict or 'The orchestrator decided for its worker.',
+                'reviewed_by': 'rules' if verdict else 'orchestrator',
+            }
+            return bool(verdict)
         if name in ask_names or await permissions.default_policy(name, args, context):
             # One verdict per call. `tools_node` passes the call id, and a
             # resumed node (after an approval) re-runs this for the whole
@@ -355,6 +376,7 @@ def auto_policy(
                     user_text=user_text,
                     todos=live_todos if live_todos is not None else todos,
                     context=context,
+                    tainted=context.get('tainted_by') or False,
                     provider=(context.get('provider', '') if isinstance(context, dict) else '') or provider,
                     model=model,
                     user_id=context.get('user_id'),
@@ -369,6 +391,34 @@ def auto_policy(
 
     policy.audits = audits  # type: ignore[attr-defined]
     return policy
+
+
+async def subagent_floor(args: dict, context: dict, *, user_text: str = '') -> str:
+    """Why letting a worker act still needs the person under `auto`, or ''.
+
+    The same no-model rules `static_check` applies to the chat's own calls,
+    applied to the worker's pending call: in `auto` the manager may approve
+    whatever `auto` could have run on its own, and nothing it could not — a
+    spend, a publish above `link`, a recipient the user never named, a first
+    browser submit, or a turn that has read instruction-shaped text.
+    """
+    from chat.tools.agents import _pending_row
+
+    row = await _pending_row(str((args or {}).get('execution_id') or ''),
+                             str((args or {}).get('call_id') or ''),
+                             (context or {}).get('user_id'))
+    if row is None or row.request_type == 'clarification':
+        return ''
+    if str((args or {}).get('decision') or '').strip().lower() == 'reject':
+        return ''
+    ctx = row.context_data or {}
+    verdict = static_check(
+        tool_name=str(ctx.get('tool') or ''), args=ctx.get('args') or {},
+        user_text=user_text, tainted=(context or {}).get('tainted_by') or False,
+    )
+    if verdict is not None and verdict[0] is False:
+        return f"The worker's request needs you: {verdict[1]}"
+    return ''
 
 
 def audit_for(policy: Any, name: str, args: dict) -> dict[str, Any] | None:

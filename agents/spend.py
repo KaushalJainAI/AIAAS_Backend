@@ -70,18 +70,6 @@ def rupees_for_usd(usd: Decimal | float | str | None) -> int:
     return int(inr.to_integral_value(rounding=ROUND_CEILING))
 
 
-def spend_rupees(*, cost_usd, cost_source: str, tokens: int | None) -> int:
-    """One run's spend, preferring what it recorded over what we can guess.
-
-    The fallback is the point: a model missing from the price registry must not
-    make its runs free, or the cap silently stops applying to exactly the
-    models nobody has got around to pricing.
-    """
-    if cost_source in PRICED_SOURCES and cost_usd:
-        return rupees_for_usd(cost_usd)
-    return rupees_for(tokens)
-
-
 def aggregate_rupees(queryset) -> int:
     """Total rupee spend across an `ExecutionLog` queryset.
 

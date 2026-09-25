@@ -467,6 +467,7 @@ def _execution_row(execution: ExecutionLog) -> dict[str, Any]:
         "status": execution.status,
         "trigger_type": execution.trigger_type,
         "caller": execution.caller,
+        "mission_id": execution.mission_id,
         "depth": execution.depth,
         "is_delegated": execution.parent_step_id is not None,
         "duration_ms": execution.duration_ms,

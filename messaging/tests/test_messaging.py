@@ -190,17 +190,65 @@ class WebhookTests(TestCase):
              'hub.challenge': 'CHAL'})
         self.assertEqual(response.content, b'CHAL')
 
-    def test_a_whatsapp_message_is_parsed(self):
+    @override_settings(WHATSAPP_APP_SECRET='meta')
+    def test_a_signed_whatsapp_message_is_parsed(self):
         wa = MessagingAccount.objects.create(
             user=self.user, channel='whatsapp', label='biz')
-        body = {'entry': [{'changes': [{'value': {
-            'messages': [{'from': '+91111', 'text': {'body': 'price?'}}]}}]}]}
+        body = json.dumps({'entry': [{'changes': [{'value': {
+            'messages': [{'from': '+91111', 'text': {'body': 'price?'}}]}}]}]}).encode()
+        sig = 'sha256=' + hmac.new(b'meta', body, hashlib.sha256).hexdigest()
         response = self.client.post(
             reverse('messaging:message_hook', args=['whatsapp', wa.secret]),
-            data=json.dumps(body), content_type='application/json')
+            data=body, content_type='application/json',
+            HTTP_X_HUB_SIGNATURE_256=sig)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(InboundMessage.objects.filter(
             user=self.user, sender='+91111').exists())
+
+    @override_settings(WHATSAPP_APP_SECRET='meta')
+    def test_an_unsigned_whatsapp_message_is_a_404(self):
+        """N4: the path secret alone is not a signature."""
+        wa = MessagingAccount.objects.create(
+            user=self.user, channel='whatsapp', label='biz')
+        body = {'entry': [{'changes': [{'value': {
+            'messages': [{'from': '+91111', 'text': {'body': 'refund me'}}]}}]}]}
+        response = self.client.post(
+            reverse('messaging:message_hook', args=['whatsapp', wa.secret]),
+            data=json.dumps(body), content_type='application/json')
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(InboundMessage.objects.exists())
+
+    @override_settings(TWILIO_AUTH_TOKEN='twil')
+    def test_a_signed_twilio_sms_is_stored_and_a_forged_one_is_not(self):
+        import base64
+        import os
+        from urllib.parse import urlencode
+
+        sms = MessagingAccount.objects.create(user=self.user, channel='sms', label='num')
+        path = reverse('messaging:message_hook', args=['sms', sms.secret])
+        params = {'From': '+15550001', 'Body': 'hello'}
+        with mock.patch.dict(os.environ, {'PUBLIC_URL': 'https://app.example'}):
+            payload = 'https://app.example' + path + ''.join(
+                k + v for k, v in sorted(params.items()))
+            sig = base64.b64encode(hmac.new(b'twil', payload.encode(),
+                                            hashlib.sha1).digest()).decode()
+            forged = self.client.post(path, data=urlencode(params),
+                                      content_type='application/x-www-form-urlencoded',
+                                      HTTP_X_TWILIO_SIGNATURE='bad')
+            ok = self.client.post(path, data=urlencode(params),
+                                  content_type='application/x-www-form-urlencoded',
+                                  HTTP_X_TWILIO_SIGNATURE=sig)
+        self.assertEqual(forged.status_code, 404)
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(InboundMessage.objects.get(channel='sms').sender, '+15550001')
+
+    def test_teams_inbound_is_refused_until_it_can_be_verified(self):
+        teams = MessagingAccount.objects.create(user=self.user, channel='teams', label='t')
+        response = self.client.post(
+            reverse('messaging:message_hook', args=['teams', teams.secret]),
+            data=json.dumps({'text': 'hi', 'from': {'id': 'x'}}),
+            content_type='application/json')
+        self.assertEqual(response.status_code, 404)
 
 class RetentionTests(TestCase):
     def test_old_inbound_is_purged_outbound_stays(self):

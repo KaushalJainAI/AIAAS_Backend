@@ -142,9 +142,13 @@ def save_cases(suite, cases: list[dict[str, Any]], *, drafts: bool = True,
     Each case: `{name?, goal, input_data?, reference?, graders?, tags?}`.
     Graders are validated through the same registry the runner dispatches
     through (`GraderError` on unknown). Orders continue past the suite's
-    existing cases; every row is stamped with the live world version (or
-    the override a fresh world draft passes), so generation-time cases
-    belong to the world they were built for. The suite cap bounds the
+    existing cases. Only a world generation passes `world_version`: those
+    cases were built for that world and run inside it. Everything else here
+    — run imports, "save as case", `add_eval_case`, `/eval`, config-only
+    drafts — is about the agent's real situation, not the world, so it is
+    saved with no version and runs outside the world (stamping it would
+    confine a "summarise my Q3 report" case to fake files, and make it go
+    stale the moment the world is regenerated). The suite cap bounds the
     write, never silently truncates it: rows past the room are not created,
     and the caller reports how many landed.
     """
@@ -152,14 +156,11 @@ def save_cases(suite, cases: list[dict[str, Any]], *, drafts: bool = True,
 
     from workflow_backend.thresholds import EVAL_MAX_CASES_PER_SUITE
 
-    from .environment import case_world_version
     from .generator import DRAFT_TAG
     from .models import EvalCase
 
     room = max(0, EVAL_MAX_CASES_PER_SUITE - suite.cases.count())
     start = (suite.cases.aggregate(m=Max('order'))['m'] or 0) + 1
-    if world_version is None:
-        world_version = case_world_version(suite)
     rows = []
     for offset, draft in enumerate(cases[:room]):
         validated = graders.validate_case_graders(draft.get('graders') or [])
@@ -179,26 +180,52 @@ def save_cases(suite, cases: list[dict[str, Any]], *, drafts: bool = True,
     return rows
 
 
-def save_generated_world(suite, out: dict[str, Any]):
-    """Persist a `generate_world` result as a draft world + draft cases.
+class WorldGenerationBusy(Exception):
+    """A world for this suite is already being generated."""
 
-    Shared by the HTTP view and the chat tool, so both mint versions the
-    same way: the next version number, `draft` status, and case drafts on
-    that version through `save_cases` (which stamps and validates them).
-    Sync ORM.
-    """
+
+#: A `generating` row older than this belongs to a process that died; the
+#: recovery sweep marks it `failed`. Generation is ~5 judge calls, so this
+#: is generous rather than tight.
+WORLD_GENERATION_STALE_MINUTES = 30
+
+
+def _mint_world(suite, **fields):
+    """The next world version for `suite`. Sync ORM."""
     from django.db.models import Max
 
     from .models import EvalWorld
 
     version = (suite.worlds.aggregate(m=Max('version'))['m'] or 0) + 1
-    world = EvalWorld.objects.create(
-        suite=suite, version=version, status='draft',
-        brief=out.get('brief', ''), surfaces=out.get('surfaces') or {},
-        fixtures=out.get('fixtures') or {}, facts=out.get('facts') or [],
-        created_by_model=out.get('model') or '',
-        cost_usd=out.get('cost_usd'),
-    )
+    return EvalWorld.objects.create(suite=suite, version=version, **fields)
+
+
+def save_generated_world(suite, out: dict[str, Any]):
+    """Persist a `generate_world` result as a new draft world + draft cases.
+
+    Kept for callers holding a finished result (tests, scripts); the HTTP
+    view and the chat tool go through `start_world_generation`, which mints
+    the row first and fills it in the background. Sync ORM.
+    """
+    world = _mint_world(suite, status='generating')
+    return fill_generated_world(world, out)
+
+
+def fill_generated_world(world, out: dict[str, Any]):
+    """Write a finished generation into its row: fixtures, facts, and the
+    case drafts on that version (through `save_cases`, which validates
+    them). The row becomes `draft`. Sync ORM."""
+    world.status = 'draft'
+    world.error_message = ''
+    world.brief = out.get('brief', '')
+    world.surfaces = out.get('surfaces') or {}
+    world.fixtures = out.get('fixtures') or {}
+    world.facts = out.get('facts') or []
+    world.created_by_model = out.get('model') or ''
+    world.cost_usd = out.get('cost_usd')
+    world.rejected = list(out.get('rejected') or [])[:100]
+    world.save()
+    suite = world.suite
     tagged = []
     for case in out.get('cases') or []:
         entry = dict(case)
@@ -207,6 +234,129 @@ def save_generated_world(suite, out: dict[str, Any]):
         tagged.append(entry)
     saved = save_cases(suite, tagged, drafts=True, world_version=world.version)
     return world, saved
+
+
+async def start_world_generation(suite, user, *, focus: str = '', cases: int = 12):
+    """Mint a `generating` world and build it in the background.
+
+    Five or so reasoning-model calls outlast an HTTP request (the frontend
+    gives up at five minutes), and a request dropped mid-generation paid for
+    the calls and kept nothing. So only what can fail fast happens here —
+    the agent has something a world can hold, the judge is payable, no
+    generation is already running — and the rest is a detached task that
+    leaves the row `draft` or `failed` and tells the owner either way.
+
+    Raises `generator.WorldNotPossible` (a 400 about the agent),
+    `llm.access.LLMUserActionable` (402, no judge credential) and
+    `WorldGenerationBusy` (409). Returns the `generating` row.
+    """
+    from asgiref.sync import sync_to_async
+    from django.conf import settings
+
+    from llm import access as llm
+    from workflow_backend.background import spawn
+
+    from .generator import (
+        DEFAULT_GENERATED, MAX_GENERATED, WorldNotPossible,
+        connector_slugs_in_scope, surfaces_for_agent,
+    )
+
+    agent = suite.subagent
+    scoped = await sync_to_async(connector_slugs_in_scope)(agent)
+    if not any(v is True for v in surfaces_for_agent(agent, scoped).values()):
+        raise WorldNotPossible(
+            'This agent has nothing a generated world can hold: give it file '
+            'access, a knowledge base, web search or a Google connector '
+            '(Gmail, Calendar, Drive) first.')
+    await llm.preflight(
+        provider=getattr(settings, 'EVAL_JUDGE_PROVIDER', 'openrouter'),
+        model=getattr(settings, 'EVAL_JUDGE_MODEL', ''), user_id=user.id)
+
+    count = max(1, min(int(cases or DEFAULT_GENERATED), MAX_GENERATED))
+
+    def mint():
+        from django.db import transaction
+
+        with transaction.atomic():
+            if suite.worlds.filter(status='generating').exists():
+                raise WorldGenerationBusy(
+                    'A world for this suite is already being generated.')
+            return _mint_world(suite, status='generating',
+                               focus=(focus or '')[:500], requested_cases=count)
+
+    world = await sync_to_async(mint)()
+    spawn(_generate_into(world.id, user.id), name=f'eval-world-{world.id}')
+    return world
+
+
+async def _generate_into(world_id: int, user_id: int) -> None:
+    """The background half of `start_world_generation`. Never raises."""
+    import logging
+
+    from asgiref.sync import sync_to_async
+
+    from .generator import generate_world
+    from .models import EvalWorld
+
+    log = logging.getLogger(__name__)
+    world = await EvalWorld.objects.select_related('suite__subagent').filter(
+        id=world_id).afirst()
+    if world is None:
+        return
+    suite = world.suite
+    try:
+        out = await generate_world(suite.subagent, user_id=user_id,
+                                   focus=world.focus, cases=world.requested_cases)
+        _, saved = await sync_to_async(fill_generated_world)(world, out)
+        title = f'Test world ready for "{suite.name}"'
+        message = (f'{len(saved)} draft case(s) are waiting for review on the '
+                   f'Evals page. Nothing scores until you accept them.')
+    except Exception as exc:  # noqa: BLE001 - recorded on the row, never lost
+        log.warning('[Eval] world %s generation failed: %s', world_id, exc)
+        world.status = 'failed'
+        world.error_message = str(exc)[:2000] or exc.__class__.__name__
+        await sync_to_async(world.save)(update_fields=['status', 'error_message', 'updated_at'])
+        title = f'Test world for "{suite.name}" failed'
+        message = world.error_message[:500]
+    await _notify_owner(user_id, title, message)
+
+
+async def _notify_owner(user_id: int, title: str, message: str) -> None:
+    """One notification pointing at `/evals`. Best effort."""
+    from asgiref.sync import sync_to_async
+
+    def work():
+        from django.contrib.auth import get_user_model
+
+        from notifications.utils import create_notification
+
+        user = get_user_model().objects.filter(id=user_id).first()
+        if user is not None:
+            create_notification(user, 'agent_update', title, message,
+                                data={'action_url': '/evals'}, send_email=False)
+
+    try:
+        await sync_to_async(work)()
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning('[Eval] world notification failed',
+                                            exc_info=True)
+
+
+def fail_stale_world_generations(now=None) -> int:
+    """Mark `generating` rows whose process died as `failed`. Sync ORM;
+    called by `eval/recovery.py` alongside the orphaned-sweep check."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from .models import EvalWorld
+
+    cutoff = (now or timezone.now()) - timedelta(minutes=WORLD_GENERATION_STALE_MINUTES)
+    return EvalWorld.objects.filter(status='generating', updated_at__lt=cutoff).update(
+        status='failed',
+        error_message='Generation was interrupted (the server restarted). Try again.',
+        updated_at=timezone.now())
 
 
 def list_graders() -> list[dict[str, Any]]:
@@ -299,7 +449,8 @@ __all__ = [
     'agent_scorecard', 'review_queue', 'reviewable_result', 'run_page',
     'run_with_results', 'suite_health', 'baseline_for',
     # writes (model-derived cases + generated worlds; drafts by default)
-    'save_cases', 'save_generated_world',
+    'save_cases', 'save_generated_world', 'fill_generated_world',
+    'start_world_generation', 'WorldGenerationBusy', 'fail_stale_world_generations',
     # starter kits (user datasets + orchestrator)
     'starter_kit_list', 'recommended_kits_for', 'clone_starter_kit',
 ]

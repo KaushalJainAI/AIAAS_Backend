@@ -56,7 +56,9 @@ class AvailabilityTests(SimpleTestCase):
     @override_settings(**REMOTE)
     def test_offered_once_configured(self):
         offered = {t['function']['name'] for t in async_to_sync(get_available_tools)(None)}
-        self.assertTrue({'browse_page', 'browser_act'} <= offered)
+        # Chat reads pages; acting on one is a subagent's job (the grant test below).
+        self.assertIn('browse_page', offered)
+        self.assertNotIn('browser_act', offered)
 
     def test_reading_is_free_and_acting_is_gated(self):
         self.assertEqual(get('browse_page').effect, 'read')

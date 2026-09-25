@@ -35,6 +35,7 @@ from rest_framework.response import Response
 from workflow_backend.thresholds import PUBLISHED_PAGE_LIST_LIMIT
 
 from .models import PublishedPage
+from .utils import harden_file_response
 
 logger = logging.getLogger(__name__)
 
@@ -225,10 +226,9 @@ def public_page_download(request, slug: str):
     if page is None or not page.file:
         return _public_response({'error': 'Not found.'}, status_code=404)
     inline = request.query_params.get('inline') == '1'
-    response = FileResponse(page.file.open('rb'), as_attachment=not inline,
-                            filename=page.file_name or 'file')
-    response['Content-Security-Policy'] = CSP_HEADER
-    return response
+    return harden_file_response(FileResponse(
+        page.file.open('rb'), as_attachment=not inline,
+        filename=page.file_name or 'file'))
 
 
 @api_view(['GET'])
@@ -239,5 +239,6 @@ def page_download(request, slug: str):
         return Response({'error': 'Not found.'},
                         status=status.HTTP_404_NOT_FOUND)
     inline = request.query_params.get('inline') == '1'
-    return FileResponse(page.file.open('rb'), as_attachment=not inline,
-                        filename=page.file_name or 'file')
+    return harden_file_response(FileResponse(
+        page.file.open('rb'), as_attachment=not inline,
+        filename=page.file_name or 'file'))

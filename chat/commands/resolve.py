@@ -594,25 +594,6 @@ async def resolve_line(
     return cmd, args, remaining
 
 
-def parse_command_payload(payload: Any) -> dict[str, Any] | None:
-    """Read `TurnRequest.command` off a request body, or None when absent."""
-    if not isinstance(payload, dict):
-        return None
-    raw = payload.get("command")
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise CommandError("'command' must be an object.")
-    name = str(raw.get("name") or "").strip().lower().lstrip("/")
-    if not name:
-        raise CommandError("The command has no name.")
-    args = raw.get("args") or {}
-    if not isinstance(args, dict):
-        raise CommandError("The command args must be an object.")
-    text = str(raw.get("text") or "")
-    return {"name": name, "args": args, "text": text}
-
-
 def command_json(payload: Any) -> str:
     """Stable JSON for `metadata.command`, so regenerate replays the same call."""
     return json.dumps(payload or {}, sort_keys=True, default=str)

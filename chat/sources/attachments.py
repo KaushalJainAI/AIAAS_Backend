@@ -67,6 +67,10 @@ def extract_pptx_text(data: bytes) -> str:
     except ImportError:
         return "[PPTX extraction needs python-pptx: pip install python-pptx]"
 
+    from inference.utils import zip_within_budget
+
+    if not zip_within_budget(io.BytesIO(data)):
+        return ""
     try:
         return "\n\n".join(
             shape.text

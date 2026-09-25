@@ -340,16 +340,17 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 # ==================== API Key Serializers ====================
 
 class APIKeySerializer(serializers.ModelSerializer):
-    """API key management - key visible only on creation"""
-    key = serializers.CharField(read_only=True)
-    
+    """API key management. The key itself is never readable here: only its
+    hash is stored, and the plaintext is returned once by create/rotate (S6).
+    This serializer used to list `key` and return it on every read."""
+
     class Meta:
         model = APIKey
         fields = [
-            'id', 'name', 'key', 'key_prefix', 'is_active',
+            'id', 'name', 'key_prefix', 'is_active',
             'expires_at', 'last_used_at', 'created_at'
         ]
-        read_only_fields = ['id', 'key', 'key_prefix', 'last_used_at', 'created_at']
+        read_only_fields = ['id', 'key_prefix', 'last_used_at', 'created_at']
 
 
 class APIKeyCreateSerializer(serializers.ModelSerializer):
@@ -357,8 +358,8 @@ class APIKeyCreateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = APIKey
-        fields = ['id', 'name', 'key', 'key_prefix', 'expires_at', 'created_at']
-        read_only_fields = ['id', 'key', 'key_prefix', 'created_at']
+        fields = ['id', 'name', 'key_prefix', 'expires_at', 'created_at']
+        read_only_fields = ['id', 'key_prefix', 'created_at']
 
 
 # ==================== Usage Serializers ====================

@@ -19,7 +19,7 @@ from . import filesystem as fs
 from . import recycle
 from .models import Document, KnowledgeBase
 from .engine import KnowledgeBaseUnavailable, get_hnsw_kb, get_rag_pipeline
-from .utils import normalize_file_type, validate_file_upload
+from .utils import harden_file_response, normalize_file_type, validate_file_upload
 from .serializers import (
     DocumentSerializer, DocumentListSerializer,
     RagSearchSerializer, RagQuerySerializer,
@@ -265,6 +265,65 @@ async def document_list(request):
     ).start()
 
     return Response(DocumentSerializer(doc).data, status=201)
+
+
+def _search_page(request) -> dict:
+    from . import search as doc_search
+
+    params = request.query_params
+    scope = 'public' if params.get('scope') == 'public' else 'personal'
+    folder = doc_search.EVERYWHERE
+    if scope == 'personal' and params.get('folder_id') not in (None, ''):
+        folder = fs.resolve_folder(request.user, params.get('folder_id'))
+
+    found = doc_search.search(
+        request.user, params.get('q', ''), folder=folder, scope=scope,
+        types=_requested_types(params),
+        limit=params.get('limit', doc_search.DEFAULT_LIMIT),
+    )
+
+    def rows(docs):
+        out = DocumentListSerializer(docs, many=True).data
+        for row in out:
+            row['matched_in'] = found['matched_in'].get(row['id'])
+            row['snippet'] = found['snippets'].get(row['id'])
+            if row['id'] in found['scores']:
+                row['score'] = found['scores'][row['id']]
+        return out
+
+    exact, fuzzy = rows(found['exact']), rows(found['fuzzy'])
+    folders = [
+        {'id': f.id, 'name': f.name, 'parent_id': f.parent_id,
+         'location': fs.name_path(f.parent) if f.parent_id else '/',
+         'updated_at': f.updated_at, 'matched_in': how}
+        for f, how in found['folders']
+    ]
+    return {
+        'query': found['query'],
+        'exact': exact,
+        'fuzzy': fuzzy,
+        'folders': folders,
+        'count': len(exact) + len(fuzzy),
+        'truncated': found['truncated'],
+        'note': ('More files match than are shown. Keep typing to narrow it down.'
+                 if found['truncated'] else None),
+    }
+
+
+@extend_schema(responses={200: OpenApiTypes.OBJECT, 404: OpenApiTypes.OBJECT})
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def document_search(request):
+    """Search the caller's files by name and contents, with close matches by
+    name when nothing matches exactly. See `inference/search.py`.
+
+    A query under two characters answers 200 with nothing, never 400 — the
+    caller is a search box being typed into.
+    """
+    try:
+        return Response(await sync_to_async(_search_page)(request))
+    except fs.FolderNotFound as exc:
+        return Response({'error': str(exc)}, status=404)
 
 
 def _readable_document(user, document_id: int) -> Document:
@@ -549,13 +608,18 @@ async def document_download(request, document_id: int):
     # the `user=` lookup either way.
     inline = request.query_params.get('inline') == '1'
     doc = await sync_to_async(_readable_document)(request.user, document_id)
+    # A pending office draft renders first: the download is the file, and the
+    # file is what the draft is still building.
+    from . import drafts
+
+    doc = await sync_to_async(drafts.ensure_rendered)(doc)
     if doc.file and await sync_to_async(_servable)(doc):
         try:
-            return FileResponse(doc.file.open('rb'), as_attachment=not inline, filename=doc.name)
+            return harden_file_response(FileResponse(doc.file.open('rb'), as_attachment=not inline, filename=doc.name))
         except Exception:
             pass
     buffer = BytesIO(doc.content_text.encode('utf-8'))
-    return FileResponse(buffer, as_attachment=not inline, filename=doc.name)
+    return harden_file_response(FileResponse(buffer, as_attachment=not inline, filename=doc.name))
 
 
 # =============================================================================
@@ -603,6 +667,11 @@ async def document_office(request, document_id: int):
 
     if request.method == 'GET':
         doc = await sync_to_async(_readable_document)(request.user, document_id)
+        # A pending office draft renders first: the grid is the file, and the
+        # file is what the draft is still building.
+        from . import drafts
+
+        doc = await sync_to_async(drafts.ensure_rendered)(doc)
         try:
             return Response(await sync_to_async(office_edit.workbook_grid)(doc))
         except office_edit.EditError as exc:
@@ -632,6 +701,159 @@ async def document_office(request, document_id: int):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+async def document_import(request, document_id: int):
+    """Convert an uploaded Word/PowerPoint file into an editable one.
+
+    Best effort and labelled as a conversion; the original upload stays
+    version 1, extracted images are saved beside the document, and the
+    response says what was lost. Takes `expected_updated_at` / `If-Match`
+    like a save and answers 412 when stale.
+    """
+    from . import importers, office_edit
+
+    doc = await sync_to_async(_owned_document)(request.user, document_id)
+    expected = request.headers.get('If-Match') or request.data.get('expected_updated_at')
+    if office_edit.is_stale(doc, expected):
+        return Response(
+            {'error': 'This file changed since you opened it. Reload it, then convert.',
+             'updated_at': doc.updated_at.isoformat()},
+            status=412,
+        )
+
+    def _convert():
+        from .serializers import DocumentSerializer
+
+        result = importers.import_upload(doc)
+        return {**DocumentSerializer(doc).data, **result}
+
+    try:
+        return Response(await sync_to_async(_convert)())
+    except importers.ImportError_ as exc:
+        return Response({'error': str(exc)}, status=exc.status)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def document_asset(request, document_id: int):
+    """An image the file's spec embeds, through the owner's read-only scope.
+
+    Only paths the spec itself names are served — this is how an editor shows
+    its own figures, not a general image proxy.
+    """
+    from django.http import Http404
+
+    from . import vfs as vfs_mod
+
+    doc = await sync_to_async(_readable_document)(request.user, document_id)
+    path = request.query_params.get('path')
+    spec = (doc.metadata or {}).get('spec') or {}
+
+    from chat.tools.office import deck as deck_tool
+    from chat.tools.office import document as document_tool
+
+    if doc.file_type == 'pptx':
+        allowed = set(deck_tool.image_paths(spec))
+    elif doc.file_type == 'docx':
+        allowed = set(document_tool.image_paths(spec))
+    else:
+        allowed = set()
+    if not path or path not in allowed:
+        raise Http404()
+    ext = (path.rsplit('.', 1)[-1].lower() if '.' in path else '')
+    mime = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+            'gif': 'image/gif', 'bmp': 'image/bmp', 'webp': 'image/webp'}.get(ext)
+    if mime is None:
+        # Raster images only. Anything else (an SVG above all) would be
+        # served inline on the API origin, where its script runs as us.
+        raise Http404()
+
+    def _load():
+        scope = vfs_mod.build_scope(doc.user, 'readonly')
+        return vfs_mod.read_image(scope, path)
+
+    try:
+        data, _shown = await sync_to_async(_load)()
+    except vfs_mod.VfsError:
+        raise Http404()
+    response = FileResponse(BytesIO(data), filename=path.rsplit('/', 1)[-1],
+                            content_type=mime)
+    return harden_file_response(response)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def document_images(request, document_id: int):
+    """Save an image beside the document, for embedding in it (owner only).
+
+    Multipart `file`; answers the spec path to store. The file browser shows
+    these like any other image — they are ordinary files that happen to sit
+    next to the document that embeds them.
+    """
+    from django.core.files.uploadedfile import UploadedFile
+
+    from . import filesystem as fs
+    from . import vfs as vfs_mod
+    from .utils import normalize_file_type
+
+    doc = await sync_to_async(_owned_document)(request.user, document_id)
+    upload = request.FILES.get('file')
+    if not isinstance(upload, UploadedFile):
+        return Response({'error': 'Send the image as multipart `file`.'}, status=400)
+    if normalize_file_type(upload.name, upload.content_type) != 'image':
+        return Response({'error': f'{upload.name} is not an image.'}, status=400)
+
+    def _store():
+        scope = vfs_mod.build_scope(request.user, 'full')
+        folder = fs.name_path(doc.folder)
+        path = f'{folder}/{upload.name}' if folder != '/' else f'/{upload.name}'
+        return vfs_mod.write_binary(scope, path, upload.read())
+
+    try:
+        result = await sync_to_async(_store)()
+    except vfs_mod.VfsError as exc:
+        return Response({'error': str(exc)}, status=400)
+    return Response({'path': result['path']}, status=201)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def document_preview_image(request, document_id: int):
+    """A browser-proof PNG for a TIFF/BMP/HEIC image (Phase F).
+
+    Readable by whoever may read the file. The download stays the original;
+    this is only what the preview shows.
+    """
+    from . import previews
+
+    doc = await sync_to_async(_readable_document)(request.user, document_id)
+    try:
+        data, mime = await sync_to_async(previews.preview_image)(doc)
+    except previews.PreviewError as exc:
+        return Response({'error': str(exc)}, status=exc.status)
+    return harden_file_response(
+        FileResponse(BytesIO(data), filename=f'{doc.name}.png', content_type=mime))
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def document_archive(request, document_id: int):
+    """The files inside a zip archive: name, size and date each (Phase F).
+
+    Readable by whoever may read the file. Entries are listed, never served —
+    no route serves a zip entry's bytes.
+    """
+    from . import previews
+
+    doc = await sync_to_async(_readable_document)(request.user, document_id)
+    try:
+        listing = await sync_to_async(previews.archive_listing)(doc)
+    except previews.PreviewError as exc:
+        return Response({'error': str(exc)}, status=exc.status)
+    return Response(listing)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 async def document_copy(request, document_id: int):
     """Duplicate one of the caller's files into `folder_id` (absent = root)."""
     from . import office_edit
@@ -644,9 +866,158 @@ async def document_copy(request, document_id: int):
         return Response({'error': str(exc)}, status=404)
 
     def _copy():
-        return DocumentSerializer(office_edit.copy(doc, folder)).data
+        from . import drafts
+
+        # A pending office draft renders first: the copy is the file, and the
+        # file is what the draft is still building.
+        return DocumentSerializer(office_edit.copy(drafts.ensure_rendered(doc), folder)).data
 
     try:
         return Response(await sync_to_async(_copy)(), status=201)
     except office_edit.EditError as exc:
         return Response({'error': str(exc)}, status=exc.status)
+
+
+# =============================================================================
+# Version history and export (inference/versions.py, inference/export.py)
+# =============================================================================
+
+def _owned_version(user, document_id: int, version_id: int):
+    from .models import DocumentVersion
+
+    return get_object_or_404(
+        DocumentVersion.objects.select_related('document'),
+        id=version_id, document_id=document_id, document__user=user,
+    )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def document_versions(request, document_id: int):
+    """What the file held before each overwrite, newest first (owner only)."""
+    from . import versions
+
+    doc = await sync_to_async(_owned_document)(request.user, document_id)
+    return Response({'versions': await sync_to_async(versions.listing)(doc)})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def document_version_download(request, document_id: int, version_id: int):
+    from . import versions
+
+    version = await sync_to_async(_owned_version)(request.user, document_id, version_id)
+    data = await sync_to_async(versions.version_bytes)(version)
+    inline = request.query_params.get('inline') == '1'
+    return harden_file_response(FileResponse(BytesIO(data), as_attachment=not inline, filename=version.name))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def document_version_restore(request, document_id: int, version_id: int):
+    """Put a version back. Takes `expected_updated_at` / `If-Match` like a save."""
+    from . import office_edit, versions
+
+    version = await sync_to_async(_owned_version)(request.user, document_id, version_id)
+    doc = await sync_to_async(_owned_document)(request.user, document_id)
+    expected = request.headers.get('If-Match') or request.data.get('expected_updated_at')
+    if office_edit.is_stale(doc, expected):
+        return Response(
+            {'error': 'This file changed since you opened it. Reload it, then restore.',
+             'updated_at': doc.updated_at.isoformat()},
+            status=412,
+        )
+
+    def _restore():
+        return DocumentSerializer(versions.restore(doc, version)).data
+
+    try:
+        return Response(await sync_to_async(_restore)())
+    except office_edit.EditError as exc:
+        return Response({'error': str(exc)}, status=exc.status)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+async def document_draft(request, document_id: int):
+    """Park an office autosave cheaply: `{spec}` for a deck / Word file made
+    here, `{grid: {sheets}}` for a workbook. Stores the editor state at once
+    (`metadata.draft`) and rebuilds the real bytes after
+    `DRAFT_RENDER_QUIET_SECONDS` of quiet — or sooner on any read that needs
+    them (`ensure_rendered`). Takes `expected_updated_at` / `If-Match` like a
+    save and answers 412 when stale.
+    """
+    import asyncio
+
+    from workflow_backend.background import spawn
+
+    from . import drafts
+
+    doc = await sync_to_async(_owned_document)(request.user, document_id)
+    expected = request.headers.get('If-Match') or request.data.get('expected_updated_at')
+
+    def _save():
+        from .serializers import DocumentSerializer
+
+        _doc, stamp = drafts.save_draft(doc, request.data, expected)
+        return DocumentSerializer(_doc).data, stamp
+
+    try:
+        data, stamp = await sync_to_async(_save)()
+    except drafts.DraftError as exc:
+        if exc.status == 412:
+            return Response(
+                {'error': str(exc), 'updated_at': doc.updated_at.isoformat()},
+                status=412,
+            )
+        return Response({'error': str(exc)}, status=exc.status)
+
+    async def _render_after_quiet(doc_id: int, seen: str):
+        await asyncio.sleep(drafts._limits())
+        await sync_to_async(drafts.maybe_render_draft)(doc_id, seen)
+
+    try:
+        spawn(_render_after_quiet(document_id, stamp))
+    except RuntimeError:
+        # No running loop (a sync caller): the draft still renders on the
+        # next read that needs the bytes.
+        pass
+    return Response(data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+async def document_export(request, document_id: int):
+    """The file in another format: `?to=pdf|docx|md|txt|csv|xlsx`.
+
+    Readable by whoever may read the file. Without `to` it answers the formats
+    this file offers, which is what the File menu renders. Not `?format=`:
+    DRF reserves that name for content negotiation and answers 404 on it
+    before the view runs.
+    """
+    from . import drafts, export
+
+    doc = await sync_to_async(_readable_document)(request.user, document_id)
+    # A pending office draft renders first: the export is the file, and the
+    # file is what the draft is still building.
+    doc = await sync_to_async(drafts.ensure_rendered)(doc)
+    fmt = request.query_params.get('to')
+    if not fmt:
+        return Response({'formats': list(export.formats_for(doc))})
+    def _build():
+        # Off the shared sync thread (a PDF render is slow), so the connection
+        # this pool thread opens is closed here — nothing else ever would, and
+        # each one held would be a slot gone from the 10-connection pool.
+        from django.db import connections
+
+        try:
+            return export.build(doc, fmt)
+        finally:
+            connections.close_all()
+
+    try:
+        data, name, mime = await sync_to_async(_build, thread_sensitive=False)()
+    except export.ExportError as exc:
+        return Response({'error': str(exc)}, status=exc.status)
+    return harden_file_response(
+        FileResponse(BytesIO(data), as_attachment=True, filename=name, content_type=mime))

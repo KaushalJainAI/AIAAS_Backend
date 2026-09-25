@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
@@ -37,10 +37,45 @@ _BOLD = re.compile(r'\*\*(.+?)\*\*')
 _ITALIC = re.compile(r'(?<!\*)\*([^*\s][^*]*?)\*(?!\*)')
 
 
+def _escape(text: str) -> str:
+    return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 def _rich(text: str) -> str:
-    escaped = (str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+    escaped = _escape(text)
     escaped = _BOLD.sub(r'<b>\1</b>', escaped)
     return _ITALIC.sub(r'<i>\1</i>', escaped)
+
+
+def _rich_runs(runs: list) -> str:
+    """Typed runs to reportlab markup. Run text is literal (no markers)."""
+    parts = []
+    for run in runs:
+        body = _escape(run.get('text', ''))
+        if run.get('code'):
+            body = f'<font face="Courier">{body}</font>'
+        if run.get('bold'):
+            body = f'<b>{body}</b>'
+        if run.get('italic'):
+            body = f'<i>{body}</i>'
+        if run.get('underline'):
+            body = f'<u>{body}</u>'
+        if run.get('strike'):
+            body = f'<strike>{body}</strike>'
+        if run.get('link'):
+            body = f'<a href="{_escape(run["link"])}">{body}</a>'
+        parts.append(body)
+    return ''.join(parts)
+
+
+def _rich_block(block: dict) -> str:
+    return _rich_runs(block['runs']) if block.get('runs') is not None else _rich(block.get('text', ''))
+
+
+def _rich_item(item) -> str:
+    if isinstance(item, dict):
+        return _rich_block(item)
+    return _rich(str(item))
 
 
 def _styles(theme) -> dict[str, ParagraphStyle]:
@@ -116,6 +151,17 @@ def _chart_as_table(block: dict, styles: dict, theme) -> list:
     ]
 
 
+_ALIGNMENTS = {'left': TA_LEFT, 'center': TA_CENTER,
+               'right': TA_RIGHT, 'justify': TA_JUSTIFY}
+
+
+def _aligned(base: ParagraphStyle, align: str | None) -> ParagraphStyle:
+    if not align or align == 'left':
+        return base
+    return ParagraphStyle(f'{base.name}-{align}', parent=base,
+                          alignment=_ALIGNMENTS[align])
+
+
 def render(spec: dict, images: dict[str, bytes]) -> bytes:
     """The PDF's bytes, from a `document.validate`d spec."""
     theme = THEMES[spec['theme']]
@@ -126,15 +172,17 @@ def render(spec: dict, images: dict[str, bytes]) -> bytes:
 
     for block in spec['blocks']:
         kind = block['type']
+        align = block.get('align')
         if kind == 'heading':
-            story.append(Paragraph(_rich(block['text']), styles[f'h{block["level"]}']))
+            story.append(Paragraph(_rich_block(block),
+                                   _aligned(styles[f'h{block["level"]}'], align)))
         elif kind == 'paragraph':
-            story.append(Paragraph(_rich(block['text']), styles['body']))
+            story.append(Paragraph(_rich_block(block), _aligned(styles['body'], align)))
         elif kind == 'quote':
-            story.append(Paragraph(_rich(block['text']), styles['quote']))
+            story.append(Paragraph(_rich_block(block), _aligned(styles['quote'], align)))
         elif kind in ('bullets', 'numbered'):
             story.append(ListFlowable(
-                [ListItem(Paragraph(_rich(item), styles['body']), leftIndent=14)
+                [ListItem(Paragraph(_rich_item(item), styles['body']), leftIndent=14)
                  for item in block['items']],
                 bulletType='bullet' if kind == 'bullets' else '1',
                 bulletFontSize=8, leftIndent=14,

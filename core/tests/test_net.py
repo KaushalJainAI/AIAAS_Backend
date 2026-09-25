@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from django.test import SimpleTestCase
 
-from core.safety.net import check_egress, redact_headers, validate_url
+from core.safety.net import check_egress, validate_url
 
 
 class SsrfValidationTests(SimpleTestCase):
@@ -52,28 +52,6 @@ class SsrfValidationTests(SimpleTestCase):
     def test_hostname_only_no_scheme_is_rejected(self):
         ok, _ = validate_url("example.com/path")
         self.assertFalse(ok)
-
-
-class HeaderRedactionTests(SimpleTestCase):
-    def test_sensitive_headers_are_masked(self):
-        out = redact_headers({
-            "Set-Cookie": "session=secret",
-            "Authorization": "Bearer abc",
-            "X-Api-Key": "k",
-            "Content-Type": "application/json",
-        })
-        self.assertEqual(out["Set-Cookie"], "[redacted]")
-        self.assertEqual(out["Authorization"], "[redacted]")
-        self.assertEqual(out["X-Api-Key"], "[redacted]")
-        self.assertEqual(out["Content-Type"], "application/json")
-
-    def test_key_is_kept_so_its_presence_is_still_visible(self):
-        # Dropping the key would make it look like the server never sent one,
-        # which is misleading when that is the thing being debugged.
-        self.assertIn("Set-Cookie", redact_headers({"Set-Cookie": "x"}))
-
-    def test_matching_is_case_insensitive(self):
-        self.assertEqual(redact_headers({"sEt-CooKie": "x"})["sEt-CooKie"], "[redacted]")
 
 
 class EgressGuardTests(SimpleTestCase):

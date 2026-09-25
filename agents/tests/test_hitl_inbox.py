@@ -176,8 +176,9 @@ class RowsThatCannotResumeTests(InboxResponseTestCase):
         self.assertEqual(row.status, 'approved')
 
     def test_a_clarification_answer_is_recorded_and_not_dispatched(self):
-        """An answer to a question is not a decision about a tool call, so
-        there is nothing to write into the checkpoint for it."""
+        """A question row with no paused run behind it (one from before
+        `ask_user` paused runs) closes as answered, with nothing to resume.
+        A live one resumes — see `test_questions.py`."""
         row = self.request()
         row.request_type = 'clarification'
         row.save(update_fields=['request_type'])

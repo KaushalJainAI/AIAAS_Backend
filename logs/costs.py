@@ -65,8 +65,3 @@ def record(
         return None
 
 
-def total_inr(queryset) -> int:
-    """Sum of `amount_inr` over a `CostEntry` queryset. Zero rows is zero."""
-    from django.db.models import Sum
-
-    return int(queryset.aggregate(total=Sum('amount_inr'))['total'] or 0)

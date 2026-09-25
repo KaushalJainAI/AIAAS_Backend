@@ -15,7 +15,8 @@ keeps a plan and a notebook file (`/Agents/<name>/missions/<id>/NOTES.md`).
 | `tasks.py` | Celery entry |
 | `urls.py` | `/api/missions/`: create, list, pause, resume, cancel |
 
-Start one from chat with `/goal`, or from the `/missions` page in the web app
-(`src/pages/Missions.tsx`, through `src/api/missions.ts`).
+Start one from chat with `/goal`, or from the Missions section at the top of
+the Activity page in the web app (`src/pages/Runs.tsx`, through
+`src/api/missions.ts`). `/missions` redirects to `/runs`.
 
 Management command: `run_missions`.

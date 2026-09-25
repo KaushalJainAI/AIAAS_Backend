@@ -110,9 +110,27 @@ async def respond_to_hitl(request, request_id: str):
                 reason=str(message or value or ''),
                 user_id=request.user.id,
             )
+        elif hitl_request.request_type == 'clarification' and action == 'skip':
+            # Skipping an `ask_user` question: the run carries on with the
+            # assumption it stated, exactly as a skip on the chat card does.
+            resumable = await reject_tool_call(
+                thread_id, call_id, reason='skipped', user_id=request.user.id)
+        elif hitl_request.request_type == 'clarification':
+            # An `ask_user` question: the answer goes into the checkpoint,
+            # checked against the question the run asked, and the run resumes
+            # with it as the tool's result.
+            from chat.turn.agent import NO_PAUSED_QUESTION, answer_question
+
+            recorded, problem = await answer_question(thread_id, call_id, value)
+            if not recorded and problem == NO_PAUSED_QUESTION:
+                # Nothing is paused on it (a row from before questions paused
+                # a run): close it as answered, with nothing to resume.
+                resumable = False
+            elif not recorded:
+                return Response({'error': problem}, status=400)
         else:
-            # An answer to a clarification is not a tool decision; there is
-            # nothing to write into the checkpoint for it.
+            # Any other answer is not a tool decision; there is nothing to
+            # write into the checkpoint for it.
             resumable = False
 
     hitl_request.status = resolution

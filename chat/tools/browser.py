@@ -110,6 +110,11 @@ async def browse_page(args: Dict, context: Dict) -> str:
     from browsing.engine import BrowserError, run
 
     url = str(args.get('url') or '').strip()
+    from core.safety.provenance import refusal_for
+
+    refusal = refusal_for(url, context)
+    if refusal:
+        return json.dumps({'error': refusal})
     try:
         page = await run(
             url, screenshot=bool(args.get('screenshot')),

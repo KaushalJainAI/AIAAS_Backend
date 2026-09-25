@@ -49,6 +49,10 @@ def check(sql: str, *, write: bool = False) -> str:
              if str(t.ttype).startswith('Token.Name')]
     if not keyed:
         raise SqlRefused('That is not a SQL statement this tool runs.')
+    # sqlparse tokenises PRAGMA as a *name*, so the keyword scan below misses
+    # it; the leading word is checked on its own (N7).
+    if flat and str(flat[0]).upper() in ('PRAGMA', 'ATTACH', 'DETACH'):
+        raise SqlRefused(f'`{str(flat[0]).upper()}` reaches outside the query.')
     if not write and keyed[0] not in READ_FIRST:
         raise SqlRefused(
             f'`{keyed[0]}` does not read. query_sql runs SELECT / WITH / '
@@ -58,7 +62,10 @@ def check(sql: str, *, write: bool = False) -> str:
     # approves the statement shown, not a smuggled second act.
     hit = next((w for w in keyed if w in (
         'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE', 'COPY',
-        'VACUUM', 'CALL', 'DO', 'LISTEN', 'NOTIFY', 'SECURITY')), None)
+        'VACUUM', 'CALL', 'DO', 'LISTEN', 'NOTIFY', 'SECURITY',
+        # SQLite: ATTACH opens (or creates) any file the server can reach, and
+        # PRAGMA can switch `query_only` back off (N7).
+        'ATTACH', 'DETACH', 'PRAGMA')), None)
     if hit:
         raise SqlRefused(f'`{hit}` is schema or server work, not data work.')
     # Function calls are names, not keywords — but a name cannot smuggle

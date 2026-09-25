@@ -463,13 +463,6 @@ class HITLNotificationConsumer(SocketThreadConsumer):
         except json.JSONDecodeError:
             await self.send_json({'type': 'error', 'error': 'Invalid JSON'})
     
-    async def hitl_new_request(self, event):
-        """Handle new HITL request notification."""
-        await self.send_json({
-            'type': 'new_request',
-            'data': event.get('request', {})
-        })
-
     async def hitl_reminder(self, event):
         """
         Escalation / hourly / digest nudge.
@@ -545,45 +538,3 @@ class HITLNotificationConsumer(SocketThreadConsumer):
         await self.send(text_data=json.dumps(data))
 
 
-# Helper function to send HITL request to user via WebSocket
-async def send_hitl_request_to_user(user_id: int, request_data: dict):
-    """
-    Send HITL request notification to user.
-    
-    Args:
-        user_id: User to notify
-        request_data: HITL request details
-    """
-    from channels.layers import get_channel_layer
-    
-    channel_layer = get_channel_layer()
-    if channel_layer:
-        await channel_layer.group_send(
-            f"hitl_{user_id}",
-            {
-                'type': 'hitl.new_request',
-                'request': request_data,
-            }
-        )
-
-
-# Helper function to broadcast execution event
-async def broadcast_execution_event(execution_id: str, event_data: dict):
-    """
-    Broadcast execution event to all subscribers.
-    
-    Args:
-        execution_id: Execution UUID
-        event_data: Event details
-    """
-    from channels.layers import get_channel_layer
-    
-    channel_layer = get_channel_layer()
-    if channel_layer:
-        await channel_layer.group_send(
-            f"execution_{execution_id}",
-            {
-                'type': 'execution.event',
-                'event': event_data,
-            }
-        )

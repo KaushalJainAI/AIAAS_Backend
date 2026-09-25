@@ -15,7 +15,7 @@ from asgiref.sync import iscoroutinefunction, markcoroutinefunction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils.functional import SimpleLazyObject, empty
 
-from core.safety.security import get_sanitizer, SecurityViolation
+from core.safety.security import USER_NOTICE, get_sanitizer, SecurityViolation
 from .throttling import get_throttle_headers
 
 logger = logging.getLogger(__name__)
@@ -186,42 +186,32 @@ class InputSanitizationMiddleware(HybridMiddleware):
         if not isinstance(body, dict):
             return None
 
-        # Sanitize relevant fields
+        # Check the relevant fields. The body is never rewritten: a message is
+        # either refused whole or reaches the view exactly as typed.
         sanitizer = get_sanitizer()
         violations = []
-        modified = False
 
         for field in self.SANITIZE_FIELDS:
             if field in body and isinstance(body[field], str):
-                result = sanitizer.sanitize(body[field])
+                violations.extend(sanitizer.sanitize(body[field]).violations)
 
-                if result.violations:
-                    violations.extend(result.violations)
+        blocked = [v for v in violations if v.action_taken == 'blocked']
 
-                if result.was_modified:
-                    body[field] = result.sanitized_text
-                    modified = True
-
-        # Check for critical violations
-        critical_violations = [
-            v for v in violations
-            if v.severity == 'critical' and v.action_taken == 'blocked'
-        ]
-
-        if critical_violations and self.BLOCK_ON_VIOLATION:
+        if blocked and self.BLOCK_ON_VIOLATION:
+            # Refused before the view runs, so the message is never saved and
+            # never enters the conversation history: the next message the user
+            # sends is answered as if this one had not been typed. The client
+            # reads `code` to take the message back out of the transcript.
+            #
             # Logged in `process_response`, which is handed the user id: the
             # lazy `request.user` cannot be read here in async mode.
-            request._blocked_violations = critical_violations
+            request._blocked_violations = blocked
             return JsonResponse({
-                'error': 'Request blocked due to security policy violation',
+                'error': USER_NOTICE,
+                'message': USER_NOTICE,
                 'code': 'SECURITY_VIOLATION',
-                'details': 'Input contains prohibited content patterns'
+                'saved': False,
             }, status=400)
-
-        # Store sanitized body for view
-        if modified:
-            request._sanitized_body = json.dumps(body).encode('utf-8')
-            request._body = request._sanitized_body
 
         # Store violations for logging
         if violations:

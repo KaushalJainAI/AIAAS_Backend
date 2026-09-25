@@ -330,9 +330,10 @@ async def create_eval_suite(args: Dict, context: Dict) -> str:
             "about it: the judge invents a situation, plants facts, builds "
             "fixtures holding them, and writes cases with known answers. "
             "About 5 judge-model calls for up to 25 cases, billed to the "
-            "user's key. Everything arrives as DRAFTS — nothing scores until "
-            "the owner accepts the world and its cases on the Evals page, so "
-            "reply with that link afterwards, never with a score."
+            "user's key. It runs in the background (a few minutes) and the "
+            "user is notified when it is ready. Everything arrives as DRAFTS — "
+            "nothing scores until the owner accepts the world and its cases "
+            "on the Evals page, so reply with that link, never with a score."
         ),
         "parameters": {
             "type": "object",
@@ -364,35 +365,23 @@ async def generate_eval_world(args: Dict, context: Dict) -> str:
         return json.dumps({'error': 'Point the suite at an agent first.'})
     try:
         from eval import api as evals
-        from eval.generator import generate_world
+        from eval.generator import WorldNotPossible
         from llm.access import LLMUserActionable
-        out = await generate_world(
-            suite.subagent, user_id=user.id,
-            focus=str(args.get('focus') or ''),
+        world = await evals.start_world_generation(
+            suite, user, focus=str(args.get('focus') or ''),
             cases=int(args.get('cases') or 12))
-    except LLMUserActionable as exc:
+    except (WorldNotPossible, LLMUserActionable, evals.WorldGenerationBusy) as exc:
         return json.dumps({'error': str(exc)})
-    except ValueError as exc:
-        return json.dumps({'error': f'The generator reply could not be used: {exc}'})
-    except Exception as exc:  # noqa: BLE001 - provider down
-        logger.warning('[EvalManager] world generation failed: %s', exc)
-        return json.dumps({'error': f'Generation failed: {exc}'})
-
-    def save():
-        return evals.save_generated_world(suite, out)
-
-    try:
-        world, saved = await sync_to_async(save)()
+    except (TypeError, ValueError):
+        return json.dumps({'error': 'cases must be a number.'})
     except Exception as exc:  # noqa: BLE001
-        logger.exception('[EvalManager] world save failed')
-        return json.dumps({'error': f'Could not save the world: {exc}'})
+        logger.exception('[EvalManager] world generation could not start')
+        return json.dumps({'error': f'Could not start generation: {exc}'})
     return json.dumps({
-        'world_id': world.id, 'version': world.version,
-        'brief': world.brief,
-        'cases': len(saved), 'rejected': out['rejected'],
-        'cost_usd': out['cost_usd'],
-        'review': ('Nothing scores until review: accept the world, then its '
-                   'cases, on the Evals page.'),
+        'world_id': world.id, 'version': world.version, 'status': 'generating',
+        'review': ('Generating in the background — the user gets a '
+                   'notification when it is ready. Nothing scores until the '
+                   'world and its cases are accepted on the Evals page (/evals).'),
     })
 
 

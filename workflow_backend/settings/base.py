@@ -178,6 +178,10 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_spectacular',
     'rest_framework_simplejwt',
+    # Without this app `BLACKLIST_AFTER_ROTATION` is a silent no-op: simplejwt
+    # catches the AttributeError and a rotated refresh token stays usable for
+    # its whole 30 days (S11, docs/SECURITY_REVIEW_FIX_PLAN.md).
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'channels',
     'django.contrib.sites',
@@ -364,6 +368,10 @@ MESSAGING_RETENTION_DAYS = int(os.environ.get('MESSAGING_RETENTION_DAYS', '90'))
 # and SMS DLT registration take days to weeks and must not block the code.
 SLACK_SIGNING_SECRET = os.environ.get('SLACK_SIGNING_SECRET', '')
 WHATSAPP_VERIFY_TOKEN = os.environ.get('WHATSAPP_VERIFY_TOKEN', '')
+# Inbound signature secrets (N4). Unset means that channel's webhook refuses
+# everything, the same fail-closed rule as SLACK_SIGNING_SECRET.
+WHATSAPP_APP_SECRET = os.environ.get('WHATSAPP_APP_SECRET', '')
+TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
 # SMS route: none | msg91 | twilio. MSG91 for India (needs DLT sender and
 # template ids on the connection); Twilio is not wired yet.
 SMS_ENGINE = os.environ.get('SMS_ENGINE', 'none')
@@ -433,8 +441,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'core.auth.query_param_jwt.QueryParamJWTAuthentication',
+        # Header-only JWT that also honours `tokens_valid_after` (S2). The
+        # `?token=` query-param authenticator was removed (S3): the web app
+        # never used it, and a token in a URL lands in logs and Referer.
+        'core.auth.revocation.RevocableJWTAuthentication',
         'core.auth.authentication.APIKeyAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
@@ -512,7 +522,8 @@ SIMPLE_JWT = {
     # about request churn, not about staying logged in — 24h keeps a day's
     # worth of turns on one token. The refresh lifetime *is* the "logout
     # time": 30 days means a monthly visitor is still signed in. Rotation
-    # stays on, so a stolen refresh token is single-use.
+    # stays on, so a stolen refresh token is single-use -- which is only true
+    # because `token_blacklist` is installed (it was not until 2026-09-25).
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,

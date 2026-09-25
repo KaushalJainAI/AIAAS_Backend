@@ -143,41 +143,6 @@ class BroadcasterChannelsPathTests(SimpleTestCase):
         self.assertEqual(q.qsize(), 1)
 
 
-class ProgressUpdateTests(SimpleTestCase):
-    _original_channel_layer_property = SSEBroadcaster.channel_layer
-
-    def tearDown(self):
-        SSEBroadcaster.channel_layer = type(self).__dict__['_original_channel_layer_property']
-
-    def test_percentage_zero_when_no_total(self):
-        b = SSEBroadcaster()
-        b._channel_layer = None
-        type(b).channel_layer = property(lambda s: None)
-        SSEBroadcaster._subscribers = {}
-
-        async def scenario():
-            q = await b.subscribe("e-prog")
-            await b.progress_update("e-prog", current_node=0, total_nodes=0)
-            return await asyncio.wait_for(q.get(), timeout=1.0)
-
-        ev = _run(scenario())
-        self.assertEqual(ev.data["percentage"], 0)
-
-    def test_percentage_calculated(self):
-        b = SSEBroadcaster()
-        b._channel_layer = None
-        type(b).channel_layer = property(lambda s: None)
-        SSEBroadcaster._subscribers = {}
-
-        async def scenario():
-            q = await b.subscribe("e-prog2")
-            await b.progress_update("e-prog2", current_node=3, total_nodes=10)
-            return await asyncio.wait_for(q.get(), timeout=1.0)
-
-        ev = _run(scenario())
-        self.assertEqual(ev.data["percentage"], 30)
-
-
 class WorkflowQueuedTests(SimpleTestCase):
     """`workflow_queued` is the before to `workflow_start`'s after."""
 

@@ -104,10 +104,16 @@ _BUILTIN_PHRASES = {
     'execute_python': 'Run Python code',
     'generate_image': 'Generate an image (this costs money)',
     'download_file': 'Download a file from the web',
+    'edit_deck': 'Change a presentation',
+    'edit_document': 'Change a Word file',
     'edit_workbook': 'Change a spreadsheet',
+    'export_file': 'Save a file in another format',
     'extract_data': 'Extract fields from documents',
+    'file_versions': 'List the earlier versions of a file',
     'notify_user': 'Send you a notification',
+    'read_workbook': 'Read a spreadsheet',
     'render_pdf': 'Create a PDF',
+    'restore_file_version': 'Restore an earlier version of a file',
     'render_diagram': 'Draw a diagram',
     'send_email': 'Send an email',
     'remember_about_user': 'Remember something about you',
@@ -289,6 +295,42 @@ def describe_call(
     }
 
 
+async def _describe_worker_request(args: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The card for a manager's `answer_subagent`: the *worker's* request.
+
+    What the person is deciding is whether the worker may act, so the card
+    shows the worker's own call as it was rendered when it paused — never the
+    manager's tool name and a pair of ids.
+    """
+    try:
+        # The card is built for the call being paused on, which is the
+        # person's own; ownership is re-checked by the tool at dispatch.
+        from agents.models import HITLRequest
+
+        row = await (HITLRequest.objects
+                     .filter(execution__execution_id=str(args.get('execution_id') or ''),
+                             node_id=str(args.get('call_id') or ''), status='pending')
+                     .select_related('execution__subagent').afirst())
+    except Exception:  # noqa: BLE001 — fall back to the generic card
+        return None
+    if row is None:
+        return None
+    ctx = row.context_data or {}
+    worker = ctx.get('detail') or {}
+    agent = getattr(row.execution.subagent, 'name', '') or 'The agent'
+    sentence = worker.get('sentence') or row.message or 'Take an action.'
+    if ' wants to ' not in sentence:
+        # A labelled worker's sentence already names who is asking.
+        sentence = f'{agent} wants to {sentence[:1].lower() + sentence[1:]}'
+    return {
+        'title': f"{agent} · {worker.get('title') or 'wants to act'}",
+        'sentence': f'{sentence} Allow it?',
+        'server': worker.get('server', ''),
+        'tool': str(ctx.get('tool') or 'answer_subagent'),
+        'fields': list(worker.get('fields') or []),
+    }
+
+
 async def describe_call_async(
     name: str, args: Mapping[str, Any] | None = None, *, label: str = '',
 ) -> dict[str, Any]:
@@ -300,6 +342,11 @@ async def describe_call_async(
     one indexed read against a run that is waiting on a human, so it is free
     where it is used and would be a per-call cost anywhere else.
     """
+    if name == 'answer_subagent':
+        described = await _describe_worker_request(args or {})
+        if described is not None:
+            return described
+
     server = ''
     try:
         from .permissions import _server_for

@@ -499,11 +499,6 @@ class ConnectorSupervisor:
                 logger.debug("Reaped %d connector process(es) for %s", killed, key)
         return set(entry.pids)
 
-    def pids_for(self, key: Any) -> set[int]:
-        with self._lock:
-            entry = self._live.get(key)
-            return set(entry.pids) if entry else set()
-
     def snapshot(self) -> dict[str, Any]:
         """What the budget currently believes. For the debug endpoint and tests."""
         with self._lock:

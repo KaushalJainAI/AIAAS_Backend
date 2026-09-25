@@ -9,7 +9,7 @@ tool_provider  — encode/decode round-trip, is_mcp_tool, descriptor shape,
                  get_openai_tool_descriptors (skip bad servers)
 client         — _serialise_tool_result, list_tools (cache hit / miss, single
                  resolution), call_tool (success + isError), access control,
-                 drain_pool, get_servers_for_user
+                 get_servers_for_user
 models         — __str__, unique_together enforcement
 """
 from __future__ import annotations
@@ -30,7 +30,6 @@ from django.test import SimpleTestCase, TestCase
 from mcp_integration.client import (
     MCPClientManager,
     _serialise_tool_result,
-    drain_pool,
     get_servers_for_user,
     _pool,
 )
@@ -556,32 +555,6 @@ class ClientManagerCallToolTests(SimpleTestCase):
                     _run(MCPClientManager(1, user=5).call_tool("search", {}))
 
         mock_creds.assert_called_once()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# drain_pool
-# ─────────────────────────────────────────────────────────────────────────────
-
-class DrainPoolTests(SimpleTestCase):
-    def test_drain_clears_pool(self):
-        # Inject a fake entry directly into the module-level pool. A pooled
-        # session is closed through its worker, not through the exit stack
-        # directly: the worker is the task that opened it, and an anyio task
-        # group may only be exited by that task.
-        fake_worker = AsyncMock()
-        fake_entry = MagicMock()
-        fake_entry.worker = fake_worker
-        _pool[(999, 1)] = fake_entry
-
-        _run(drain_pool())
-
-        self.assertNotIn((999, 1), _pool)
-        fake_worker.close.assert_awaited_once()
-
-    def test_drain_is_idempotent(self):
-        # Already empty pool — must not raise
-        _run(drain_pool())
-        _run(drain_pool())
 
 
 # ─────────────────────────────────────────────────────────────────────────────

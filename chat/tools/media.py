@@ -76,22 +76,21 @@ def _image_bytes(url: str) -> tuple[bytes, str]:
     if not (url or '').startswith('https://'):
         raise MediaError('The image service returned no usable image.')
 
-    import requests
+    from core.safety.net import FetchTooLarge, UnsafeURLError, fetch_file
 
-    # A provider-hosted result. Streamed with a byte cap so a misbehaving host
-    # cannot make this process hold an arbitrarily large body.
-    with requests.get(url, timeout=60, stream=True) as resp:
-        resp.raise_for_status()
-        mime = (resp.headers.get('Content-Type') or 'image/png').split(';')[0].strip().lower()
-        if not mime.startswith('image/'):
-            raise MediaError('The image service returned something that is not an image.')
-        chunks, size = [], 0
-        for chunk in resp.iter_content(64 * 1024):
-            size += len(chunk)
-            if size > AGENT_FILE_BINARY_BYTES:
-                raise MediaError('The generated image is too large to keep.')
-            chunks.append(chunk)
-    return b''.join(chunks), _EXT.get(mime, 'png')
+    # A provider-hosted result, byte-capped, with every redirect hop checked:
+    # the URL is the provider's to choose, so it is not a reason to let it
+    # point this server at its own network (N8).
+    try:
+        data, mime = fetch_file(url, timeout=60, max_bytes=AGENT_FILE_BINARY_BYTES)
+    except FetchTooLarge as exc:
+        raise MediaError('The generated image is too large to keep.') from exc
+    except UnsafeURLError as exc:
+        raise MediaError('The image service returned an unusable link.') from exc
+    mime = mime or 'image/png'
+    if not mime.startswith('image/'):
+        raise MediaError('The image service returned something that is not an image.')
+    return data, _EXT.get(mime, 'png')
 
 
 def _slug(prompt: str) -> str:

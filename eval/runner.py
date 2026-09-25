@@ -108,22 +108,42 @@ def open_run(suite, agent, user, notes: str = '', *, mode: str = 'agent'):
     )
 
 
+_UNSET = object()
+
+
 @sync_to_async
-def _active_cases(suite) -> list:
+def _pinned_world(run, suite):
+    """The world this sweep runs in: the version `open_run` recorded, loaded
+    once. Every case uses this row, so accepting a new world mid-sweep can
+    neither move the remaining cases onto it nor mix two versions under the
+    one `EvalRun.world_version` the scorecard reports."""
+    from .models import EvalWorld
+
+    version = getattr(run, 'world_version', None)
+    if version is None:
+        return None
+    return EvalWorld.objects.filter(suite=suite, version=version).first()
+
+
+@sync_to_async
+def _active_cases(suite, world=_UNSET) -> list:
     """Cases this sweep will run: active, and built for the live world.
 
     A case whose `world_version` is not the live world's is stale — kept and
     listed, never swept — because regenerating the world invalidates the
-    cases built on the old one. Cases predating worlds (`world_version`
-    null) run on whatever the live world is.
+    cases built on the old one. Cases with no `world_version` (run imports,
+    config-only drafts, cases predating worlds) are kept and run outside the
+    world (`environment.for_attempt`). `world` is the sweep's pinned world;
+    omitted, the live one is looked up (the pre-flight count).
     """
     from .environment import live_world
 
     cases = list(suite.cases.filter(is_active=True).order_by('order', 'id'))
-    try:
-        world = live_world(suite)
-    except Exception:  # noqa: BLE001
-        world = None
+    if world is _UNSET:
+        try:
+            world = live_world(suite)
+        except Exception:  # noqa: BLE001
+            world = None
     if world is None:
         return cases
     return [c for c in cases
@@ -247,7 +267,8 @@ def _finish(run, *, status: str | None = None, error: str = '', tokens: int = 0)
     return run
 
 
-async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) -> int:
+async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event,
+                    world=None) -> int:
     """Execute and grade one case. Returns the tokens it spent."""
     from agents.agent.runtime import AgentRunRefused, run_agent
     from llm.access import LLMUserActionable
@@ -286,7 +307,8 @@ async def _run_case(run, suite, case, agent, user, sem, abort: asyncio.Event) ->
         # scopes, simulated dispatch, fresh fixtures. No world means the run
         # behaves exactly as today.
         from . import environment as envmod
-        env = await sync_to_async(envmod.for_attempt)(user, agent, suite, case)
+        env = (await sync_to_async(envmod.for_attempt)(user, agent, suite, case, world)
+               if world is not None else None)
         try:
             # Reset inside the semaphore and the try: a fixture that fails to
             # write is this case's error, and two attempts at the same case
@@ -487,7 +509,8 @@ async def sweep(run, suite, agent, user, *, case_ids: list[int] | None = None,
     creating rows. `mode='bare'` runs the platform-tax control (Phase 8): one
     bare model call per case, no agent, no `ExecutionLog`.
     """
-    cases = await _active_cases(suite)
+    world = await _pinned_world(run, suite)
+    cases = await _active_cases(suite, world)
     if case_ids is not None:
         wanted = set(case_ids)
         cases = [c for c in cases if c.pk in wanted]
@@ -507,7 +530,7 @@ async def sweep(run, suite, agent, user, *, case_ids: list[int] | None = None,
         # A sequential `await` per case would make `suite.concurrency` a lie —
         # which it was, in the first cut of this file.
         outcomes = await asyncio.gather(
-            *(_run_case(run, suite, case, agent, user, sem, abort)
+            *(_run_case(run, suite, case, agent, user, sem, abort, world)
               for case in cases),
             return_exceptions=True,
         )

@@ -22,7 +22,7 @@ from django.test import TestCase, override_settings
 from agents.spend import aggregate_rupees
 from agents.models import SubAgent
 from inference import vfs
-from logs.costs import record, total_inr
+from logs.costs import record
 from logs.models import CostEntry, ExecutionLog
 
 User = get_user_model()
@@ -39,7 +39,6 @@ class LedgerRecordTests(TestCase):
         self.assertEqual(CostEntry.objects.count(), 1)
         row = CostEntry.objects.get()
         self.assertEqual((row.kind, row.amount_inr, row.estimated), ('sms', 5, False))
-        self.assertEqual(total_inr(CostEntry.objects.all()), 5)
 
     def test_zero_is_not_a_charge(self):
         self.assertIsNone(record(user=self.user, kind='sms', amount_inr=0))

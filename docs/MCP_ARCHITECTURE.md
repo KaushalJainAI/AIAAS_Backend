@@ -161,6 +161,12 @@ is excluded from `get_openai_tool_descriptors` (or every tool would be offered
 twice as `mcp__` names), `list_tools` answers from the registry, and `_session`
 refuses it outright.
 
+Since 2026-09-25 chat (the orchestrator) is offered only the **read** half of
+connectors — native tools with `effect="read"`, MCP tools whose names pass
+`looks_read_only` — and refuses the rest in `execute_chat_tool`. Sending,
+creating and deleting through a connector is a subagent's job, under its
+`connectors` scope. See CLAUDE.md, "Chat is the orchestrator".
+
 The four no-credential utility rows (Filesystem, Fetch, Memory, Sequential
 Thinking) were disabled in the same migration as duplicates of built-ins.
 `MCP_ALLOW_STDIO` (False in `settings/deployment.py`) refuses stdio rows at save

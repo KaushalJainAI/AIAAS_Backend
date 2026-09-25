@@ -140,11 +140,6 @@ class UserGroupConsumer(SocketThreadConsumer):
     async def send_error(self, message: str) -> None:
         await self.send_json({"type": "error", "message": message})
 
-    async def cache_scoped(self, key: str, value: Any, timeout: int = 3600) -> None:
-        """Write a per-user cache entry. Async, so it cannot block the loop."""
-        from django.core.cache import cache
-        await cache.aset(f"{key}_{self.user_id}", value, timeout=timeout)
-
     # ── overridable ──
 
     async def on_connect(self) -> None:

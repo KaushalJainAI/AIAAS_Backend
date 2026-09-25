@@ -11,7 +11,6 @@ from django.utils import timezone
 from llm.models import AIProvider, AIModel
 from llm.providers import SUPPORTED_PROVIDERS
 from llm.effort import (
-    ALL as EFFORT_ALL,
     STANDARD as EFFORT_STANDARD,
     TOGGLEABLE as EFFORT_TOGGLEABLE,
     WITH_MINIMAL as EFFORT_WITH_MINIMAL,

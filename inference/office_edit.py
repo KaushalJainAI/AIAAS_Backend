@@ -12,8 +12,9 @@ tools rather than invented here:
   A deck or a Word file is edited as its stored *spec* and re-rendered by
   `deck.render` / `document.render`, because python-pptx cannot faithfully
   round-trip arbitrary edits to a file it did not lay out. An uploaded
-  `.docx`/`.pptx` has no spec, so it is **read-only here and says so** —
-  editing its extracted text would save something that is not the file.
+  `.docx`/`.pptx` has no spec until `inference/importers.py` converts it
+  (best effort, original kept as version 1) — editing its extracted text
+  would save something that is not the file.
 * **Bytes are replaced in place and the old bytes removed after the row
   commits** — the other order leaves a row pointing at nothing, which
   downloads as a 500 (the rule `vfs.write_binary` follows).
@@ -33,6 +34,7 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
+from . import formulas
 from .models import Document
 from .utils import TEXT_FILE_TYPES
 
@@ -67,7 +69,17 @@ def extension(name: str) -> str:
 
 
 def is_stale(doc: Document, expected: str | None) -> bool:
-    """True when the caller opened an older version than the one stored."""
+    """True when the caller opened an older version than the one stored.
+
+    One exception, shared by every guarded write: the background render of
+    the caller's own draft (`inference/drafts.py`) moves `updated_at` under
+    an app that has not seen it. That render leaves `metadata.last_render =
+    {base, updated}`, and an etag equal to `base` is still fresh while
+    `updated_at` still equals `updated` — any other write since moves
+    `updated_at` on and closes the door. Checked here rather than in the
+    draft view alone, or a Ctrl+S, restore or import after a render is a 412
+    nobody caused.
+    """
     if not expected:
         return False
     when = parse_datetime(str(expected).strip())
@@ -75,7 +87,15 @@ def is_stale(doc: Document, expected: str | None) -> bool:
         # Unparseable is treated as stale: a guard that waves through what it
         # cannot read is not a guard.
         return True
-    return when != doc.updated_at
+    if when == doc.updated_at:
+        return False
+    last = (doc.metadata or {}).get('last_render')
+    if not isinstance(last, dict):
+        return True
+    base = parse_datetime(str(last.get('base') or ''))
+    updated = parse_datetime(str(last.get('updated') or ''))
+    return not (base is not None and updated is not None
+                and when == base and doc.updated_at == updated)
 
 
 def _taken(user, folder, name: str, exclude_id: int | None = None) -> bool:
@@ -125,8 +145,13 @@ def rename(doc: Document, raw_name: Any) -> Document:
         return doc
     if _taken(doc.user, doc.folder, name, exclude_id=doc.id):
         raise EditError(f'There is already a file called {name} here.', 409)
+    # A rename is not a content change, so `updated_at` — the etag every open
+    # editor guards its saves with — stays put. Moving it made the next
+    # autosave of the file being renamed a 412 nobody caused. A queryset
+    # update, because `save()` stamps `auto_now` on the instance even when the
+    # column is left out of `update_fields`.
+    Document.objects.filter(id=doc.id).update(name=name)
     doc.name = name
-    doc.save(update_fields=['name', 'updated_at'])
     return doc
 
 
@@ -134,11 +159,35 @@ def rename(doc: Document, raw_name: Any) -> Document:
 # Replacing bytes
 # ---------------------------------------------------------------------------
 
+class DraftSuperseded(Exception):
+    """A draft render found a newer draft (or a real write) under it."""
+
+
 def replace_bytes(doc: Document, data: bytes, *, text: str | None = None,
-                  spec: dict | None = None) -> Document:
-    """Swap the stored file for `data`; drop the old bytes once the row commits."""
+                  spec: dict | None = None, version_source: str | None = 'app',
+                  render_of: str | None = None) -> Document:
+    """Swap the stored file for `data`; drop the old bytes once the row commits.
+
+    What the file held is kept as a version first (`inference/versions.py`);
+    `version_source=None` is for a caller that already took one (a restore).
+
+    A real overwrite also clears a pending office draft (`inference/drafts.py`):
+    the bytes just replaced whatever the draft was building on, so rendering
+    it afterwards would clobber this write.
+
+    `render_of` is set by the draft render alone: the `saved_at` of the draft
+    it rendered. Under the row lock, the write goes ahead only if that draft
+    is still the stored one — a draft saved while the render ran is newer
+    than these bytes, and wiping it would lose the edit and 412 the app's
+    next save. The render also leaves `last_render` in the same transaction
+    (see `is_stale`), so there is no moment where the app's etag is refused.
+    """
     from workflow_backend.thresholds import DOCUMENT_EXTRACT_CAP
 
+    if version_source:
+        from . import versions
+
+        versions.snapshot(doc, version_source)
     old_name = doc.file.name if doc.file else ''
     storage = doc.file.storage
     doc.file.save(doc.name, ContentFile(bytes(data)), save=False)
@@ -147,12 +196,31 @@ def replace_bytes(doc: Document, data: bytes, *, text: str | None = None,
     if text is not None:
         doc.content_text = text[:DOCUMENT_EXTRACT_CAP]
         fields.append('content_text')
-    if spec is not None:
-        doc.metadata = {**(doc.metadata or {}), 'spec': spec}
-        fields.append('metadata')
     try:
         with transaction.atomic():
+            base = None
+            if render_of is not None:
+                current = (Document.objects.select_for_update()
+                           .filter(id=doc.id).values('metadata', 'updated_at').first())
+                draft = ((current or {}).get('metadata') or {}).get('draft')
+                if not isinstance(draft, dict) or draft.get('saved_at') != render_of:
+                    raise DraftSuperseded()
+                doc.metadata = current['metadata']
+                base = current['updated_at']
+            metadata = dict(doc.metadata or {})
+            for key in ('draft', 'draft_error', 'last_render'):
+                metadata.pop(key, None)
+            if spec is not None:
+                metadata['spec'] = spec
+            if metadata != (doc.metadata or {}):
+                doc.metadata = metadata
+                fields.append('metadata')
             doc.save(update_fields=fields)
+            if base is not None:
+                doc.metadata = {**metadata, 'last_render': {
+                    'base': base.isoformat(), 'updated': doc.updated_at.isoformat()}}
+                # `update` skips `auto_now`: `updated_at` stays the render's.
+                Document.objects.filter(id=doc.id).update(metadata=doc.metadata)
     except Exception:
         doc.file.delete(save=False)
         raise
@@ -164,7 +232,7 @@ def replace_bytes(doc: Document, data: bytes, *, text: str | None = None,
     return doc
 
 
-def save_text(doc: Document, content: str) -> Document:
+def save_text(doc: Document, content: str, *, version_source: str = 'app') -> Document:
     """A text file's new contents, written to *both* places a reader looks.
 
     An uploaded `.md` keeps its bytes in `file`, and `document_download` serves
@@ -172,10 +240,21 @@ def save_text(doc: Document, content: str) -> Document:
     column saved an edit that no preview or download ever showed.
     """
     if doc.file:
-        return replace_bytes(doc, content.encode('utf-8'), text=content)
+        return replace_bytes(doc, content.encode('utf-8'), text=content,
+                             version_source=version_source)
+    from . import versions
+
+    versions.snapshot(doc, version_source)
     doc.content_text = content
     doc.file_size = len(content.encode('utf-8'))
-    doc.save(update_fields=['content_text', 'file_size', 'updated_at'])
+    fields = ['content_text', 'file_size', 'updated_at']
+    metadata = dict(doc.metadata or {})
+    for key in ('draft', 'draft_error', 'last_render'):
+        metadata.pop(key, None)
+    if metadata != (doc.metadata or {}):
+        doc.metadata = metadata
+        fields.append('metadata')
+    doc.save(update_fields=fields)
     return doc
 
 
@@ -198,7 +277,12 @@ def _cell_out(value: Any) -> Any:
 
 
 def workbook_grid(doc: Document) -> dict:
-    """Every sheet as a grid of raw values — formulas as their `=` source."""
+    """Every sheet as a grid of raw values — formulas as their `=` source.
+
+    `values` rides beside `rows` with each formula calculated
+    (`inference/formulas.py`; unevaluable stays None): the preview and the
+    app show numbers, not the text of the formula that makes them.
+    """
     import openpyxl
 
     if doc.file_type != 'xlsx':
@@ -210,25 +294,43 @@ def workbook_grid(doc: Document) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise EditError(f'This file could not be opened as a workbook ({exc}).') from exc
 
-    sheets = []
-    for ws in book.worksheets:
-        max_row, max_col = ws.max_row or 0, ws.max_column or 0
-        rows = []
-        for row in ws.iter_rows(min_row=1, max_row=min(max_row, GRID_MAX_ROWS),
-                                max_col=min(max_col, GRID_MAX_COLS), values_only=True):
-            rows.append([_cell_out(v) for v in row])
-        # Trailing empty rows are formatting, not data.
-        while rows and all(v in (None, '') for v in rows[-1]):
-            rows.pop()
-        sheets.append({
-            'name': ws.title,
-            'rows': rows,
-            'row_count': max_row,
-            'col_count': max_col,
-            'truncated': max_row > GRID_MAX_ROWS or max_col > GRID_MAX_COLS,
-        })
-    book.close()
-    return {'sheets': sheets, 'updated_at': doc.updated_at}
+    try:
+        sheets = []
+        for ws in book.worksheets:
+            max_row, max_col = ws.max_row or 0, ws.max_column or 0
+            rows = []
+            values = []
+            for row in ws.iter_rows(min_row=1, max_row=min(max_row, GRID_MAX_ROWS),
+                                    max_col=min(max_col, GRID_MAX_COLS)):
+                raw = [_cell_out(c.value) for c in row]
+                rows.append(raw)
+                values.append([_calculated(book, ws.title, c) for c in row])
+            # Trailing empty rows are formatting, not data.
+            while rows and all(v in (None, '') for v in rows[-1]):
+                rows.pop()
+                values.pop()
+            sheets.append({
+                'name': ws.title,
+                'rows': rows,
+                'values': values,
+                'row_count': max_row,
+                'col_count': max_col,
+                'truncated': max_row > GRID_MAX_ROWS or max_col > GRID_MAX_COLS,
+            })
+        return {'sheets': sheets, 'updated_at': doc.updated_at}
+    finally:
+        book.close()
+
+
+def _calculated(book, sheet: str, cell) -> Any:
+    """A cell for the `values` grid: formulas computed, the rest as stored."""
+    raw = cell.value
+    if isinstance(raw, str) and raw.startswith('='):
+        try:
+            return formulas.json_value(formulas.cell(book, sheet, cell.coordinate))
+        except formulas.FormulaError:
+            return None
+    return formulas.json_value(_cell_out(raw))
 
 
 def edit_workbook(doc: Document, payload: dict) -> Document:
@@ -274,7 +376,8 @@ def _images_for(doc: Document, paths: list[str]) -> dict[str, bytes]:
         ) from exc
 
 
-def edit_spec(doc: Document, raw: Any) -> Document:
+def edit_spec(doc: Document, raw: Any, *, version_source: str = 'app',
+              render_of: str | None = None) -> Document:
     from chat.tools.office import deck, document
     from chat.tools.office.spec import SpecError
 
@@ -296,7 +399,8 @@ def edit_spec(doc: Document, raw: Any) -> Document:
             spec = deck.validate({'title': raw.get('title', stored.get('title')),
                                   'theme': theme, 'slides': raw.get('slides')})
             data = deck.render(spec, _images_for(doc, deck.image_paths(spec)))
-            return replace_bytes(doc, data, text=deck.extract_text(spec), spec=deck.preview(spec))
+            return replace_bytes(doc, data, text=deck.extract_text(spec), spec=deck.preview(spec),
+                                 version_source=version_source, render_of=render_of)
 
         spec = document.validate({
             'title': raw.get('title', stored.get('title')),
@@ -306,7 +410,8 @@ def edit_spec(doc: Document, raw: Any) -> Document:
         })
         data = document.render(spec, _images_for(doc, document.image_paths(spec)))
         return replace_bytes(doc, data, text=document.extract_text(spec),
-                             spec=document.preview(spec))
+                             spec=document.preview(spec), version_source=version_source,
+                             render_of=render_of)
     except SpecError as exc:
         raise EditError(str(exc)) from exc
 

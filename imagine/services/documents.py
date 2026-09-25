@@ -35,7 +35,6 @@ import threading
 import time
 from typing import Optional
 
-import requests
 from django.core.files.base import ContentFile
 
 logger = logging.getLogger(__name__)
@@ -182,10 +181,13 @@ def _persist_one(generation, output_url: str, index: int, total: int) -> Optiona
                 return None
         else:
             try:
-                resp = requests.get(output_url, timeout=60, stream=False)
-                resp.raise_for_status()
-                mime = resp.headers.get("Content-Type", "") or ""
-                file_bytes = resp.content
+                # Every redirect hop is SSRF-checked and the body is capped:
+                # the provider chooses this URL, not us (N8).
+                from core.safety.net import fetch_file
+                from workflow_backend.thresholds import MAX_DOCUMENT_SIZE
+
+                file_bytes, mime = fetch_file(output_url, timeout=60,
+                                              max_bytes=MAX_DOCUMENT_SIZE)
                 if not file_bytes:
                     logger.warning("Empty bytes fetched for generation %s from %s", generation.id, output_url[:80])
                     return None

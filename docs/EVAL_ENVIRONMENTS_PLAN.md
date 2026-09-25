@@ -1,7 +1,12 @@
 # Evaluation environments — the plan
 
 **Status:** E-1–E-5 built 2026-09-24; E-6 (paid proof runs) still needs the
-user's go-ahead. Only Phase 0 existed before this change.
+user's go-ahead. Only Phase 0 existed before this change. Review fixes
+2026-09-25: simulated tools obey the connector scope and per-tool deny,
+account-touching tools are withheld (`notify_user` simulated), hidden KBs
+never reach a picker, non-world cases run outside the world, sweeps pin
+their world, blind answers match by id, generation runs in the background,
+and worlds no longer require file access (see CLAUDE.md for the detail).
 **Supersedes:** the "no fixtures" rule in `eval/generator.py` (see §1.3).
 **Related:** `EVALUATION.md` (how eval works today), `EVALUATION_PRODUCTION_PLAN.md`
 (the implemented production plan), `eval/workspace.py` (per-case folders, the seed

@@ -332,3 +332,198 @@ async def find_files(args: Dict, context: Dict) -> str:
     if not limit:
         limit = await alimit(context, "find_files", "maxEntries")
     return await _run(context, vfs.find, args.get("query") or "", limit=limit)
+
+
+@tool({
+    "type": "function",
+    "function": {
+        "name": "file_versions",
+        "description": (
+            "List the earlier versions of a file: every overwrite — by the user "
+            "in an app, by an agent, or by a restore — keeps what the file held "
+            "before it. Use this before restore_file_version, or to answer "
+            "'what did this say yesterday'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File whose history to list, relative to your workspace root.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+}, requires="files", parallel=True, effect="read")
+async def file_versions(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    return await _run(context, vfs.file_versions, args.get("path") or "")
+
+
+@tool({
+    "type": "function",
+    "function": {
+        "name": "restore_file_version",
+        "description": (
+            "Put an earlier version of a file back, from file_versions. The "
+            "current contents are kept as a version first, so a restore can "
+            "itself be undone. Works for every file type, including decks, "
+            "workbooks and Word files."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File to restore, relative to your workspace root.",
+                },
+                "version_id": {
+                    "type": "integer",
+                    "description": "The version_id file_versions listed.",
+                },
+            },
+            "required": ["path", "version_id"],
+            "additionalProperties": False,
+        },
+    },
+}, requires="files", sensitive=True, effect="reversible")
+async def restore_file_version(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    if _scope(context) is None:
+        return _no_scope()
+    try:
+        version_id = int(args.get("version_id"))
+    except (TypeError, ValueError):
+        return json.dumps({"error": "version_id must be the number file_versions listed."})
+    return await _run(context, vfs.restore_file_version, args.get("path") or "", version_id)
+
+
+@tool({
+    "type": "function",
+    "function": {
+        "name": "export_file",
+        "description": (
+            "Save a file in another format beside it, without changing the "
+            "original: a Word file, Markdown or text as PDF; Markdown or text "
+            "as Word; a Word file as Markdown or text; a deck as PDF; a "
+            "workbook as CSV; a CSV as a workbook. Never overwrites — a taken "
+            "name becomes 'name (2).ext' and the result names the real path. "
+            "Use this rather than re-rendering a file to change its format."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File to export, relative to your workspace root.",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["pdf", "docx", "md", "txt", "csv", "xlsx"],
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Where to save it. Defaults to the same folder and name with the new extension.",
+                },
+            },
+            "required": ["path", "format"],
+            "additionalProperties": False,
+        },
+    },
+}, requires="files", effect="reversible")
+async def export_file(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    return await _run(
+        context, vfs.export_file, args.get("path") or "", args.get("format") or "",
+        target=args.get("target") or "",
+    )
+
+
+@tool({
+    "type": "function",
+    "function": {
+        "name": "edit_document",
+        "description": (
+            "Change a Word file block by block: insert, replace or delete "
+            "blocks by 0-based index, or find and replace text. Works on "
+            "uploads too — an uploaded file is converted to an editable "
+            "document first (its original stays in version history). The "
+            "current contents are kept as a version, so this can be undone. "
+            "Blocks are objects like {type: paragraph, text} — read the file "
+            "first to see their indices."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Word file to edit, relative to your workspace root.",
+                },
+                "ops": {
+                    "type": "array",
+                    "description": "Edits: {op: insert|replace|delete|find_replace, "
+                                   "index, blocks, count, find, replace, replace_all}.",
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["path", "ops"],
+            "additionalProperties": False,
+        },
+    },
+}, requires="files", sensitive=True, effect="reversible")
+async def edit_document(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    if _scope(context) is None:
+        return _no_scope()
+    ops = args.get("ops")
+    if not isinstance(ops, list):
+        return json.dumps({"error": "ops must be a list of edits."})
+    return await _run(context, vfs.edit_document, args.get("path") or "", ops)
+
+
+@tool({
+    "type": "function",
+    "function": {
+        "name": "edit_deck",
+        "description": (
+            "Change a deck slide by slide: add, remove, move or duplicate "
+            "slides, or set a slide's fields. Works on uploads too — an "
+            "uploaded deck is converted to an editable one first (its "
+            "original stays in version history). The current contents are "
+            "kept as a version, so this can be undone. Slides are 0-based; "
+            "read the file first to see them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Deck to edit, relative to your workspace root.",
+                },
+                "ops": {
+                    "type": "array",
+                    "description": "Edits: {op: add|remove|move|duplicate|set, "
+                                   "index, to, slide, fields}.",
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["path", "ops"],
+            "additionalProperties": False,
+        },
+    },
+}, requires="files", sensitive=True, effect="reversible")
+async def edit_deck(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    if _scope(context) is None:
+        return _no_scope()
+    ops = args.get("ops")
+    if not isinstance(ops, list):
+        return json.dumps({"error": "ops must be a list of edits."})
+    return await _run(context, vfs.edit_deck, args.get("path") or "", ops)

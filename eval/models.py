@@ -221,7 +221,13 @@ class EvalWorld(models.Model):
     only accepted cases on an accepted world.
     """
 
+    #: `generating` while the judge builds it in the background (a world is
+    #: five or so reasoning-model calls — too long to hold a request open);
+    #: `failed` if that did not produce a usable world, with the reason in
+    #: `error_message`. Neither is ever live: `live_world` reads `accepted`.
     STATUS_CHOICES = [
+        ('generating', 'Generating'),
+        ('failed', 'Failed'),
         ('draft', 'Draft'),
         ('accepted', 'Accepted'),
     ]
@@ -229,7 +235,14 @@ class EvalWorld(models.Model):
     suite = models.ForeignKey(EvalSuite, on_delete=models.CASCADE, related_name='worlds')
     #: Regenerations increment; the suite's live world is its newest `accepted`.
     version = models.PositiveIntegerField(default=1)
-    status = models.CharField(max_length=8, choices=STATUS_CHOICES, default='draft')
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='draft')
+    #: Why generation failed, in words the Evals page shows. Blank otherwise.
+    error_message = models.TextField(blank=True)
+    #: What the generation was asked for, kept so "retry" repeats it.
+    focus = models.CharField(max_length=500, blank=True)
+    requested_cases = models.PositiveIntegerField(default=12)
+    #: Cases the pipeline threw out, with reasons — shown beside the drafts.
+    rejected = models.JSONField(default=list, blank=True)
 
     #: "Acme Tools, 40 staff, Q3 close in progress" — shown to the reviewer.
     brief = models.TextField(blank=True)

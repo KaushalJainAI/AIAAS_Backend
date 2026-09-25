@@ -3,6 +3,7 @@ from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
+import hashlib
 import secrets
 
 
@@ -160,6 +161,18 @@ class UserProfile(models.Model):
     #: missions needs one button that stops everything. Null means not paused.
     paused_until = models.DateTimeField(null=True, blank=True)
 
+    # Account security (2026-09-25, `docs/SECURITY_REVIEW_FIX_PLAN.md`)
+    #: When this account's email was last *proven* — by Google sign-in, a
+    #: password reset or an email change, each of which reached the inbox.
+    #: Signup does not set it. Null on a password account is what lets Google
+    #: sign-in tell "the owner added a password" from "someone registered this
+    #: address before its owner did" (S1).
+    email_verified_at = models.DateTimeField(null=True, blank=True)
+    #: Every JWT issued before this instant is refused (`core/auth/revocation.py`).
+    #: Set on password change/reset, email change and S1 linking, so a stolen
+    #: token does not outlive the password it was stolen under.
+    tokens_valid_after = models.DateTimeField(null=True, blank=True)
+
     # Appearance
     THEME_CHOICES = [
         ('light', 'Light'),
@@ -192,11 +205,6 @@ class UserProfile(models.Model):
 
     def __str__(self):
         return f"{self.user.username} ({self.tier})"
-
-    @property
-    def is_enterprise(self):
-        """Check if user has enterprise tier"""
-        return self.tier == 'enterprise'
 
     @property
     def has_credits(self):
@@ -260,12 +268,30 @@ class APIKey(models.Model):
     def __str__(self):
         return f"{self.name} ({self.key_prefix}...)"
 
+    #: The plaintext of a key minted in this process, readable once by the view
+    #: that created it. Never stored: `key` holds only the SHA-256, so a copy
+    #: of the database is not a set of working credentials (S6).
+    plaintext: str | None = None
+
     def save(self, *args, **kwargs):
         if not self.key:
-            # Generate a secure random key
-            self.key = secrets.token_urlsafe(48)
-            self.key_prefix = self.key[:8]
+            self.set_new_key()
         super().save(*args, **kwargs)
+
+    def set_new_key(self) -> str:
+        """Mint a key, keep its hash, and return the plaintext (shown once)."""
+        raw = self.generate_key()
+        self.key = self.hash_key(raw)
+        self.key_prefix = raw[:8]
+        self.plaintext = raw
+        return raw
+
+    @staticmethod
+    def hash_key(raw: str) -> str:
+        # A key is 48 random bytes, so an unsalted fast hash is right here: a
+        # salt or a slow KDF defends low-entropy secrets, and would make the
+        # lookup a scan instead of one indexed equality.
+        return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
     @classmethod
     def generate_key(cls):
@@ -340,12 +366,6 @@ class UsageTracking(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.date}"
-
-    @property
-    def total_requests(self):
-        """Total number of API requests for this day"""
-        return self.compile_count + self.execute_count + self.chat_count
-
 
 class PasswordOTP(models.Model):
     """One-time email verification code for password reset/change flows."""

@@ -33,6 +33,10 @@ def _agent(user, name='Analyst'):
         guardrails={'autonomy': 'ask'}, prompt='You close books.')
 
 
+async def _finish(coro):
+    return await coro
+
+
 def _suite(user, agent, name='Close'):
     return EvalSuite.objects.create(user=user, name=name, subagent=agent)
 
@@ -73,14 +77,18 @@ class SaveCasesTests(TestCase):
                 'graders': [{'type': 'llm_judge', 'rubric': 'good?'}]}],
                 drafts=True)
 
-    def test_orders_continue_and_world_stamps(self):
+    def test_orders_continue_and_only_world_generations_stamp(self):
         EvalCase.objects.create(suite=self.suite, goal='old', order=7)
-        world = EvalWorld.objects.create(
+        EvalWorld.objects.create(
             suite=self.suite, version=1, status='accepted', brief='b')
+        # An import or an added case is about the agent's real situation: no
+        # version, so it runs outside the world and never goes stale.
         rows = evals.save_cases(self.suite, [{'goal': 'new'}], drafts=True)
         self.assertEqual(rows[0].order, 8)
-        self.assertEqual(rows[0].world_version, 1)
-        self.assertEqual(world.version, 1)
+        self.assertIsNone(rows[0].world_version)
+        built = evals.save_cases(self.suite, [{'goal': 'w'}], drafts=True,
+                                 world_version=1)
+        self.assertEqual(built[0].world_version, 1)
 
 
 class AddCaseToolTests(TestCase):
@@ -145,7 +153,17 @@ class GenerateWorldToolTests(TestCase):
         return json.loads(async_to_sync(generate_eval_world)(
             args, {'user_id': self.user.id}))
 
-    def test_saves_world_and_case_drafts(self):
+    def _start(self, generate, **args):
+        """Call the tool, then run the background task it spawned to the end."""
+        spawned = []
+        with patch('workflow_backend.background.spawn',
+                   side_effect=lambda coro, **k: spawned.append(coro)),                 patch('eval.generator.generate_world', side_effect=generate):
+            out = self._call(**args)
+            for coro in spawned:
+                async_to_sync(_finish)(coro)
+        return out
+
+    def test_starts_in_background_then_saves_drafts(self):
         out_payload = {
             'brief': 'Acme close.', 'facts': [], 'surfaces': {'files': True},
             'fixtures': {'files': {'n.md': 'x'}}, 'model': 'judge',
@@ -154,26 +172,42 @@ class GenerateWorldToolTests(TestCase):
                            graders=[{'type': 'no_error'}])],
             'rejected': [], 'tokens': 10, 'cost_usd': None,
         }
-        with patch('eval.generator.generate_world',
-                   return_value=out_payload) as gen:
-            async def fake(*a, **k):
-                return out_payload
-            gen.side_effect = fake
-            out = self._call(suite_id=self.suite.id, focus='close', cases=3)
+
+        async def fake(*a, **k):
+            return out_payload
+
+        out = self._start(fake, suite_id=self.suite.id, focus='close', cases=3)
         self.assertEqual(out['version'], 1)
-        self.assertEqual(out['cases'], 1)
+        self.assertEqual(out['status'], 'generating')
         self.assertIn('Evals', out['review'])
         world = EvalWorld.objects.get(pk=out['world_id'])
         self.assertEqual(world.status, 'draft')
+        self.assertEqual((world.focus, world.requested_cases), ('close', 3))
         case = EvalCase.objects.get(suite=self.suite)
         self.assertFalse(case.is_active)
         self.assertEqual(case.world_version, 1)
 
-    def test_judge_failure_is_an_error_string(self):
-        with patch('eval.generator.generate_world',
-                   side_effect=ValueError('no JSON')):
-            out = self._call(suite_id=self.suite.id)
-        self.assertIn('error', out)
+    def test_judge_failure_marks_the_world_failed(self):
+        async def broken(*a, **k):
+            raise ValueError('no JSON')
+
+        out = self._start(broken, suite_id=self.suite.id)
+        world = EvalWorld.objects.get(pk=out['world_id'])
+        self.assertEqual(world.status, 'failed')
+        self.assertIn('no JSON', world.error_message)
+        self.assertFalse(EvalCase.objects.exists())
+
+    def test_second_generation_while_one_runs_is_refused(self):
+        EvalWorld.objects.create(suite=self.suite, version=1, status='generating')
+        out = self._call(suite_id=self.suite.id)
+        self.assertIn('already being generated', out['error'])
+
+    def test_agent_with_nothing_to_simulate_is_refused_up_front(self):
+        self.agent.tool_grants = {}
+        self.agent.sandbox = {'fileAccess': 'none'}
+        self.agent.save()
+        out = self._call(suite_id=self.suite.id)
+        self.assertIn('nothing a generated world can hold', out['error'])
         self.assertFalse(EvalWorld.objects.exists())
 
 

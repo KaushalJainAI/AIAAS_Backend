@@ -71,11 +71,6 @@ def _as_tool_call(payload: dict[str, Any], index: int) -> ToolCall | None:
     return ToolCall(id=f"text_call_{index}", name=name.strip(), arguments=arguments)
 
 
-def extract_text_tool_calls(text: str) -> tuple[ToolCall, ...]:
-    """Parse tool calls a model wrote into its message text."""
-    return tuple(call for call, _ in _find(text))
-
-
 def split_text_tool_calls(
     text: str, allowed: Collection[str] | None = None,
 ) -> tuple[tuple[ToolCall, ...], str]:

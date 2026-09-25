@@ -37,6 +37,9 @@ BLOCK_TYPES = ('heading', 'paragraph', 'bullets', 'numbered', 'table', 'quote',
 #: Documents are read on white and printed, so the dark theme is not offered.
 DOC_THEMES = ('clean', 'bold')
 
+#: Paragraph and heading alignment.
+ALIGNMENTS = ('left', 'center', 'right', 'justify')
+
 MAX_BLOCKS = 300
 TITLE_CHARS = 200
 HEADING_CHARS = 200
@@ -47,6 +50,8 @@ TABLE_COLS = 12
 TABLE_ROWS = 200
 CELL_CHARS = 500
 CAPTION_CHARS = 300
+RUN_TEXT_CHARS = 6000
+LINK_CHARS = 500
 
 _INLINE = re.compile(r'(\*\*.+?\*\*|\*[^*\s][^*]*?\*)')
 
@@ -71,17 +76,77 @@ def validate(args: dict, *, max_blocks: int = MAX_BLOCKS) -> dict:
     return {'title': title, 'subtitle': subtitle, 'theme': theme, 'blocks': blocks}
 
 
+def _run(raw: Any, where: str) -> dict:
+    """One inline run: text with its own bold/italic/underline/strike/code/link.
+
+    The text is *not* stripped, unlike every other string field: edge spaces
+    are what separate one run from the next, and stripping them glues runs
+    together.
+    """
+    if not isinstance(raw, dict):
+        raise SpecError(f'{where} must be an object with text.')
+    value = raw.get('text')
+    if not isinstance(value, str) or not value:
+        raise SpecError(f'{where} text is required.')
+    if len(value) > RUN_TEXT_CHARS:
+        raise SpecError(f'{where} text has {len(value)} characters; the limit is {RUN_TEXT_CHARS}.')
+    run: dict[str, Any] = {'text': value}
+    for flag in ('bold', 'italic', 'underline', 'strike', 'code'):
+        if flag in raw:
+            if not isinstance(raw[flag], bool):
+                raise SpecError(f'{where} {flag} must be true or false.')
+            if raw[flag]:
+                run[flag] = True
+    if raw.get('link') not in (None, ''):
+        run['link'] = text(raw.get('link'), f'{where} link', LINK_CHARS)
+    return run
+
+
+def _runs_or_text(raw: dict, where: str, limit: int) -> dict:
+    """`runs` when given (validated), else the legacy marker `text`."""
+    if raw.get('runs') is not None:
+        runs = [ _run(r, f'{where} run {n}')
+                 for n, r in enumerate(items(raw.get('runs'), f'{where} runs', LIST_ITEMS),
+                                       1)]
+        if not runs:
+            raise SpecError(f'{where} runs must hold at least one run.')
+        return {'runs': runs}
+    return {'text': text(raw.get('text'), where, limit, required=True)}
+
+
+def _align(raw: dict) -> str:
+    align = str(raw.get('align') or 'left').lower()
+    if align not in ALIGNMENTS:
+        raise SpecError(f'align must be one of {list(ALIGNMENTS)}.')
+    return align
+
+
+def _item(raw: Any, n: int) -> Any:
+    """A list item: a marker string, or an object with text/runs like a paragraph."""
+    if isinstance(raw, str):
+        return text(raw, 'item', ITEM_CHARS, required=True)
+    if isinstance(raw, dict):
+        if raw.get('runs') is not None:
+            return {'runs': [_run(r, f'item {n} run {m}')
+                             for m, r in enumerate(
+                                 items(raw.get('runs'), f'item {n} runs', 20), 1)]}
+        return {'text': text(raw.get('text'), 'item', ITEM_CHARS, required=True)}
+    raise SpecError(f'item {n} must be text or an object with text.')
+
+
 def _block(raw: dict, kind: str) -> dict:
     b: dict[str, Any] = {'type': kind}
     if kind == 'heading':
-        b['text'] = text(raw.get('text'), 'text', HEADING_CHARS, required=True)
         level = raw.get('level', 1)
         b['level'] = level if level in (1, 2, 3) else 1
+        b.update(_runs_or_text(raw, 'text', HEADING_CHARS))
+        b['align'] = _align(raw)
     elif kind in ('paragraph', 'quote'):
-        b['text'] = text(raw.get('text'), 'text', PARAGRAPH_CHARS, required=True)
+        b.update(_runs_or_text(raw, 'text', PARAGRAPH_CHARS))
+        b['align'] = _align(raw)
     elif kind in ('bullets', 'numbered'):
-        b['items'] = [text(i, 'item', ITEM_CHARS, required=True)
-                      for i in items(raw.get('items'), 'items', LIST_ITEMS, required=True)]
+        b['items'] = [_item(i, n) for n, i in
+                      enumerate(items(raw.get('items'), 'items', LIST_ITEMS, required=True), 1)]
     elif kind == 'table':
         columns = [text(c, 'column header', CELL_CHARS, required=True)
                    for c in items(raw.get('columns'), 'columns', TABLE_COLS, required=True)]
@@ -181,23 +246,100 @@ def _inline(paragraph, body: str) -> None:
             paragraph.add_run(part)
 
 
+def _preserve(shaped) -> None:
+    """Keep edge spaces: without `xml:space="preserve"` Word trims every run
+    that starts or ends in a space, gluing runs together."""
+    from docx.oxml.ns import qn
+
+    shaped._r.set(qn('xml:space'), 'preserve')
+
+
+def _inline_runs(paragraph, runs: list) -> None:
+    """Typed runs into `paragraph` — what TipTap and the importer produce."""
+    for run in runs:
+        if run.get('link'):
+            _add_link(paragraph, run['link'], run)
+        else:
+            shaped = paragraph.add_run(run.get('text', ''))
+            _style_run(shaped, run)
+            _preserve(shaped)
+
+
+def _style_run(shaped, run: dict) -> None:
+    shaped.bold = bool(run.get('bold'))
+    shaped.italic = bool(run.get('italic'))
+    shaped.underline = bool(run.get('underline'))
+    shaped.font.strike = bool(run.get('strike'))
+    if run.get('code'):
+        shaped.font.name = 'Consolas'
+
+
+def _add_link(paragraph, url: str, run: dict) -> None:
+    """A hyperlink run: python-docx has no paragraph.add_hyperlink, so the
+    relationship and element are built by hand (the documented recipe)."""
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    part = paragraph.part
+    r_id = part.relate_to(url, RT.HYPERLINK, is_external=True)
+    element = OxmlElement('w:hyperlink')
+    element.set(qn('r:id'), r_id)
+    fresh = OxmlElement('w:r')
+    element.append(fresh)
+    paragraph._p.append(element)
+    from docx.text.run import Run
+
+    shaped = Run(fresh, paragraph)
+    _style_run(shaped, run)
+    shaped.text = run.get('text', '')
+    _preserve(shaped)
+    shaped.font.color.rgb = _rgb('0563C1')
+
+
+def _aligned(paragraph, align: str):
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    paragraph.alignment = {'left': WD_ALIGN_PARAGRAPH.LEFT,
+                           'center': WD_ALIGN_PARAGRAPH.CENTER,
+                           'right': WD_ALIGN_PARAGRAPH.RIGHT,
+                           'justify': WD_ALIGN_PARAGRAPH.JUSTIFY}[align]
+
+
+def _render_text(paragraph, block) -> None:
+    """A block's words, whether stored as runs or as marker text."""
+    if block.get('runs') is not None:
+        _inline_runs(paragraph, block['runs'])
+    else:
+        _inline(paragraph, block.get('text', ''))
+    if block.get('align') and block['align'] != 'left':
+        _aligned(paragraph, block['align'])
+
+
+def _render_item(paragraph, item: Any) -> None:
+    if isinstance(item, dict):
+        _render_text(paragraph, item)
+    else:
+        _inline(paragraph, item)
+
+
 def _heading(doc, b, theme, images):
-    _inline(doc.add_paragraph(style=f'Heading {b["level"]}'), b['text'])
+    _render_text(doc.add_paragraph(style=f'Heading {b["level"]}'), b)
 
 
 def _paragraph(doc, b, theme, images):
-    _inline(doc.add_paragraph(), b['text'])
+    _render_text(doc.add_paragraph(), b)
 
 
 def _list(doc, b, theme, images):
     style = 'List Bullet' if b['type'] == 'bullets' else 'List Number'
     for item in b['items']:
-        _inline(doc.add_paragraph(style=style), item)
+        _render_item(doc.add_paragraph(style=style), item)
 
 
 def _quote(doc, b, theme, images):
     p = doc.add_paragraph(style='Quote')
-    _inline(p, b['text'])
+    _render_text(p, b)
 
 
 def _page_break(doc, b, theme, images):
@@ -305,6 +447,32 @@ def preview(spec: dict) -> dict:
     return {'kind': 'document', 'accent': t.accent, **spec}
 
 
+def _runs_markdown(runs: list) -> str:
+    """Runs back to marker text: bold/italic keep their markers, links keep
+    their target, and the rest travels as plain words."""
+    parts = []
+    for run in runs:
+        body = run.get('text', '')
+        if run.get('bold'):
+            body = f'**{body}**'
+        if run.get('italic'):
+            body = f'*{body}*'
+        if run.get('link'):
+            body = f'[{body}]({run["link"]})'
+        parts.append(body)
+    return ''.join(parts)
+
+
+def _text_of(block: dict) -> str:
+    if block.get('runs') is not None:
+        return _runs_markdown(block['runs'])
+    return block.get('text', '')
+
+
+def _item_text(item: Any) -> str:
+    return _text_of(item) if isinstance(item, dict) else str(item)
+
+
 def extract_text(spec: dict) -> str:
     out = [spec['title']]
     if spec['subtitle']:
@@ -313,11 +481,11 @@ def extract_text(spec: dict) -> str:
     for b in spec['blocks']:
         kind = b['type']
         if kind == 'heading':
-            out.append('#' * b['level'] + ' ' + b['text'])
+            out.append('#' * b['level'] + ' ' + _text_of(b))
         elif kind in ('paragraph', 'quote'):
-            out.append(('> ' if kind == 'quote' else '') + b['text'])
+            out.append(('> ' if kind == 'quote' else '') + _text_of(b))
         elif kind in ('bullets', 'numbered'):
-            out.extend(f'{"-" if kind == "bullets" else f"{i}."} {item}'
+            out.extend(f'{"-" if kind == "bullets" else f"{i}."} {_item_text(item)}'
                        for i, item in enumerate(b['items'], 1))
         elif kind == 'table':
             out.append(' | '.join(b['columns']))

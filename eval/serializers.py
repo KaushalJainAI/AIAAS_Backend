@@ -32,6 +32,7 @@ class EvalWorldSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'suite', 'version', 'status', 'brief', 'surfaces',
             'fixtures', 'facts', 'created_by_model', 'cost_usd',
+            'error_message', 'focus', 'requested_cases', 'rejected',
             'case_count', 'is_live', 'created_at', 'updated_at',
         ]
         read_only_fields = fields

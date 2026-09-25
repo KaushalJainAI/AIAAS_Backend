@@ -3,9 +3,10 @@ Binary files in the virtual filesystem (`vfs.write_binary`, `vfs.read_image`).
 
 The properties defended here are the ones the render tools lean on to run
 without asking: a render never destroys a file (a taken name is renamed, and
-an explicit overwrite goes through the recycle bin), it is confined by the same
-scope as every other write, and the text it leaves behind is what keeps search
-and reading working on a file whose bytes they cannot read.
+an explicit overwrite replaces the file in place — same id — after keeping
+what it held as a version), it is confined by the same scope as every other
+write, and the text it leaves behind is what keeps search and reading working
+on a file whose bytes they cannot read.
 """
 from __future__ import annotations
 
@@ -65,14 +66,24 @@ class WriteBinaryTests(BinaryTestCase):
         # The original is untouched.
         self.assertEqual(Document.objects.get(id=first['document_id']).content_text, 'one')
 
-    def test_overwrite_sends_the_old_file_to_the_recycle_bin(self):
+    def test_overwrite_replaces_in_place_and_keeps_a_version(self):
+        # In place rather than trash-and-recreate (2026-09-25): a new id pulled
+        # the file out from under anyone who had it open in an app. The old
+        # bytes are restorable through version history, not the recycle bin.
+        from inference.models import DocumentVersion
+
         first = vfs.write_binary(self.chat, '/Chat/q3.pptx', PPTX, text='one')
         second = vfs.write_binary(self.chat, '/Chat/q3.pptx', PPTX, text='two', overwrite=True)
         self.assertEqual(second['path'], '/Chat/q3.pptx')
         self.assertTrue(second['replaced'])
         self.assertFalse(second['created'])
-        old = Document._base_manager.get(id=first['document_id'])
-        self.assertIsNotNone(old.deleted_at)  # restorable, not gone
+        self.assertEqual(second['document_id'], first['document_id'])
+        doc = Document.objects.get(id=first['document_id'])
+        self.assertIsNone(doc.deleted_at)
+        self.assertEqual(doc.content_text, 'two')
+        version = DocumentVersion.objects.get(document_id=doc.id)
+        self.assertEqual(version.content_text, 'one')
+        self.assertEqual(version.source, 'agent')
 
     def test_writes_are_confined_to_the_scope(self):
         with self.assertRaises(vfs.VfsError):

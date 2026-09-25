@@ -45,9 +45,9 @@ Full design: [`docs/CHAT_AGENT.md`](../docs/CHAT_AGENT.md).
 |---|---|
 | `web.py`, `fetch.py`, `browser.py` | Web search, reading pages, downloading files, driving a browser |
 | `knowledge.py` | Searching your knowledge bases |
-| `files.py` | Reading and writing your files (`inference/vfs.py`) |
+| `files.py` | Reading and writing your files (`inference/vfs.py`): versions, restore, export, block/slide edits |
 | `sandbox.py` | Running Python (`execute_python`, `run_python_on_files`) |
-| `office/` | Making `.pptx`, `.xlsx`, `.docx`, `.pdf` and diagrams from a description |
+| `office/` | Making `.pptx`, `.xlsx`, `.docx`, `.pdf` and diagrams from a description; reading and editing workbooks (`read_workbook`, `edit_workbook`) |
 | `charts.py`, `artifacts.py`, `dashboards.py`, `publish.py` | Drawing charts, HTML snippets, dashboards, shareable pages |
 | `google/`, `notion.py` | Gmail, Drive, Sheets, Calendar, Docs, Notion |
 | `messaging/`, `talk.py` | Slack, WhatsApp, Teams, SMS, Telegram |
@@ -60,14 +60,15 @@ Full design: [`docs/CHAT_AGENT.md`](../docs/CHAT_AGENT.md).
 | `permissions.py` | Decides which call needs approval |
 | `describe.py` | Turns a tool call into a sentence a person can read on an approval card |
 | `tool_output.py` | Caps huge tool results and stores the rest |
-| `__init__.py` | Imports every tool file (that is what registers them) and picks which tools a turn is offered |
+| `__init__.py` | Imports every tool file (that is what registers them) and picks which tools a turn is offered. Chat gets only reads plus delegation, agent-building, memory and missions (`chat_orchestrator_allowed`); chat's calls go through `execute_chat_tool`, agents' through `execute_tool` |
 
 ## How to add a tool
 
 See "Common jobs" in [`START_HERE.md`](../../START_HERE.md#9-common-jobs-step-by-step).
 In short: `@tool({...})` on an `async def f(args, context) -> str`, import the
 file in `tools/__init__.py`, and add the name to `GRANT_TOOLS` in
-`agents/agent/runtime.py` if agents should get it.
+`agents/agent/runtime.py` if agents should get it. Chat only gets tools with
+`effect="read"`: anything that writes, sends or spends is an agent's job.
 
 ## Watch out for
 

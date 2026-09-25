@@ -78,6 +78,16 @@ async def sweep_orphaned_eval_runs(limit: int = 20) -> dict:
                 logger.warning('[EvalRecovery] Closed orphaned sweep %s', run.run_id)
         except Exception:  # noqa: BLE001
             logger.exception('[EvalRecovery] Could not close sweep %s', run.run_id)
+    # World generations run detached too, and die with their process the same
+    # way: a row left `generating` for ever would also block every retry.
+    try:
+        from asgiref.sync import sync_to_async
+
+        from .api import fail_stale_world_generations
+
+        tally['worlds_failed'] = await sync_to_async(fail_stale_world_generations)()
+    except Exception:  # noqa: BLE001
+        logger.exception('[EvalRecovery] Could not close stale world generations')
     return tally
 
 

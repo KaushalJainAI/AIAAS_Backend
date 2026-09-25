@@ -116,7 +116,7 @@ def _get_json(client: httpx.Client, url: str, *, what: str) -> dict[str, Any] | 
                               headers={"Accept": "application/json"})
     except httpx.HTTPError as exc:
         raise MCPOAuthError(f"Could not reach {what}: {exc}") from exc
-    if response.status_code == 404:
+    if response.status_code == 404 or 300 <= response.status_code < 400:
         return None
     if response.status_code >= 400:
         raise MCPOAuthError(
@@ -145,7 +145,11 @@ def discover(resource_url: str) -> ServerMetadata:
     origin = _origin(resource_url)
     path = urlparse(resource_url).path.rstrip("/")
 
-    with httpx.Client(follow_redirects=True) as client:
+    # No redirects: `_guard` checks the URL we ask for, and a redirect would
+    # land somewhere it never saw -- with the first 200 characters of the
+    # answer echoed back in `_get_json`'s error (N3). A discovery document
+    # that has moved is a 3xx, which `_get_json` reports as missing.
+    with httpx.Client(follow_redirects=False) as client:
         # RFC 9728 puts the resource document under a path-suffixed well-known.
         # The unsuffixed form is the fallback for servers mounted at the root.
         resource_doc = None

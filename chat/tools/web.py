@@ -14,6 +14,7 @@ import logging
 
 from typing import Any, Dict
 
+from core.safety import provenance
 from core.safety.net import UnsafeURLError, fetch_url
 
 from workflow_backend.thresholds import (
@@ -262,6 +263,10 @@ async def read_url(args: Dict, context: Dict) -> str:
     url = args.get("url", "")
     if not url:
         return "Error: Missing URL"
+    # A GET is a send: a URL the model composed may carry this conversation out.
+    refusal = provenance.refusal_for(url, context)
+    if refusal:
+        return json.dumps({"error": refusal})
     try:
         # `fetch_url` validates every redirect hop, not just this URL, and
         # runs in a thread because urllib blocks — called inline it stalls
@@ -415,6 +420,9 @@ async def scrape_webpage(args: Dict, context: Dict) -> str:
     # silently answer the wrong question.
     if isinstance(extract_types, str):
         extract_types = [extract_types]
+    refusal = provenance.refusal_for(url, context)
+    if refusal:
+        return json.dumps({"status": "error", "error": refusal})
     try:
         html_bytes = await asyncio.to_thread(fetch_url, url, timeout=15)
     except UnsafeURLError as e:

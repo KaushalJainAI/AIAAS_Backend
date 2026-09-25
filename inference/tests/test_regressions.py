@@ -289,8 +289,8 @@ class DocxExtractionTests(TestCase):
 
 class KBStatsFollowDeletionTests(APITestCase):
     """
-    `_sync_kb_stats` ran on ingest only, and `engine.update_kb_stats` — written
-    for the other end — had zero callers. `chat/tools/knowledge.py` reports
+    `_sync_kb_stats` ran on ingest only, and the stats updater written for the
+    other end had zero callers (since deleted). `chat/tools/knowledge.py` reports
     `doc_count` to the agent, so the model was told an emptied KB still held
     documents.
     """

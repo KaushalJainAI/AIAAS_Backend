@@ -83,6 +83,100 @@ AGENT_ANSWER_CHAR_LIMIT = 20_000
 #: Statuses past which polling a run is pointless.
 _TERMINAL_RUN_STATUSES = {'cancelled', 'failed', 'completed', 'timeout'}
 
+#: The manager's tool for answering a worker that stopped to ask.
+SUBAGENT_ANSWER_TOOL = "answer_subagent"
+
+#: What a manager is told when a worker stops. The human is the boss, the
+#: orchestrator the manager, the subagents the workhorses: a worker's request
+#: comes to the manager, who answers it here — and only letting a worker *act*
+#: can need the boss.
+PAUSED_MESSAGE = (
+    "The agent stopped to ask something — see `waiting_on`. Answer each item "
+    "with answer_subagent (execution_id + call_id). For a question, give the "
+    "answer if you know it from the conversation; if only the user knows, ask "
+    "them with ask_user first, then pass their answer on. For an approval, "
+    "decide approve or reject; when the user must decide, they are shown a "
+    "card and their answer is used. Do not start the agent again."
+)
+
+
+async def pending_requests(execution_ids: list[str]) -> list[dict[str, Any]]:
+    """What paused runs are waiting on, in a form a manager can act on.
+
+    Read from the `HITLRequest` rows the runs opened when they paused, which
+    already carry the rendered sentence and, for a question, its spec — so a
+    manager sees the worker's request exactly as the Inbox would show it.
+    """
+    from asgiref.sync import sync_to_async
+    from agents.models import HITLRequest
+
+    ids = [str(e) for e in execution_ids if e]
+    if not ids:
+        return []
+
+    @sync_to_async
+    def _read() -> list[dict[str, Any]]:
+        out = []
+        for row in (HITLRequest.objects
+                    .filter(execution__execution_id__in=ids, status='pending')
+                    .select_related('execution__subagent')
+                    .order_by('created_at')[:20]):
+            ctx = row.context_data or {}
+            detail = ctx.get('detail') or {}
+            item = {
+                "execution_id": str(row.execution.execution_id),
+                "call_id": row.node_id,
+                "agent": getattr(row.execution.subagent, 'name', '') or '',
+                "kind": 'question' if row.request_type == 'clarification' else 'approval',
+            }
+            if item["kind"] == 'question':
+                item["question"] = ctx.get('question') or {}
+            else:
+                item["tool"] = ctx.get('tool', '')
+                item["request"] = detail.get('sentence') or row.message
+            out.append(item)
+        return out
+
+    try:
+        return await _read()
+    except Exception:  # noqa: BLE001 — a status report must not fail the call
+        logger.exception("Could not read what %s is waiting on", ids)
+        return []
+
+
+async def _pending_row(execution_id: str, call_id: str, user_id: Any):
+    """The open request `answer_subagent` names, owned by this user, or None."""
+    from agents.models import HITLRequest
+
+    if not execution_id or not call_id or not user_id:
+        return None
+    try:
+        return await (HITLRequest.objects
+                      .filter(execution__execution_id=execution_id, node_id=call_id,
+                              user_id=user_id, status='pending')
+                      .select_related('execution__subagent').afirst())
+    except (ValueError, ValidationError):
+        return None
+
+
+async def subagent_answer_needs_user(args: Dict, context: Dict) -> bool:
+    """Whether a manager's `answer_subagent` call may need the person.
+
+    Answering a worker's question, or refusing its request, is the manager's
+    own call in every mode — a manager may always say no, and a question is not
+    a side effect. Only *letting a worker act* can need the boss: that returns
+    True here and then meets the usual gates (Ask mode shows the card; Auto
+    lets the manager decide, under the same floor Auto keeps for its own calls
+    — `reviewer.subagent_floor`). An unknown request needs nobody: the tool
+    answers with the error.
+    """
+    if str((args or {}).get("decision") or "").strip().lower() == "reject":
+        return False
+    row = await _pending_row(str((args or {}).get("execution_id") or ""),
+                             str((args or {}).get("call_id") or ""),
+                             (context or {}).get("user_id"))
+    return row is not None and row.request_type != 'clarification'
+
 
 async def _await_agent_run(execution_id: str, wait_seconds: int,
                            answer_chars: int = _AGENT_ANSWER_CHARS) -> Dict[str, Any]:
@@ -105,10 +199,8 @@ async def _await_agent_run(execution_id: str, wait_seconds: int,
         if row["status"] == "paused":
             return {
                 "status": "paused",
-                "message": (
-                    "The agent paused for human approval of one of its own tool "
-                    "calls. It resumes from the agent's run view, not from here."
-                ),
+                "waiting_on": await pending_requests([execution_id]),
+                "message": PAUSED_MESSAGE,
             }
         if asyncio.get_running_loop().time() >= deadline:
             return {
@@ -494,6 +586,121 @@ async def get_agent_run(args: Dict, context: Dict) -> str:
 @tool({
     "type": "function",
     "function": {
+        "name": SUBAGENT_ANSWER_TOOL,
+        "description": (
+            "Answer an agent you started that stopped to ask something (listed "
+            "under `waiting_on` by run_agent, get_agent_run or invoke_subagent). "
+            "For a question pass `answer` — an option's exact text, a number, or "
+            "a sentence; if only the user knows, ask them with ask_user first. "
+            "For an approval pass `decision`: approve lets the agent run that "
+            "call, reject refuses it (give a `reason` it can act on). Rejecting "
+            "and answering questions are yours to decide; approving may be "
+            "shown to the user, whose answer then stands. The agent resumes and "
+            "its result, or its next request, comes back."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "execution_id": {"type": "string", "description": "The paused run's execution_id."},
+                "call_id": {"type": "string", "description": "The request's call_id from waiting_on."},
+                "decision": {"type": "string", "enum": ["approve", "reject"],
+                             "description": "For an approval."},
+                "answer": {
+                    "description": "For a question: the option text, a list of options, a number or a sentence.",
+                    "anyOf": [{"type": "string"}, {"type": "number"},
+                              {"type": "array", "items": {"type": "string"}}],
+                },
+                "reason": {"type": "string", "description": "Why, for a rejection. The agent reads it."},
+                "wait_seconds": {"type": "integer",
+                                 "description": "How long to wait for the resumed run (default 60, max 90)."},
+            },
+            "required": ["execution_id", "call_id"],
+            "additionalProperties": False,
+        },
+    },
+}, sensitive=True, effect="irreversible")
+async def answer_subagent(args: Dict, context: Dict) -> str:
+    """Answer a paused worker and resume it — the manager's half of HITL.
+
+    Goes through the same three steps as the Inbox and the approve/reject
+    views — record the decision in the checkpoint, close the queue row, resume
+    on the original execution id — because a second way to answer is a second
+    place for ownership and the resume to drift apart.
+    """
+    from agents.agent.hitl import resolve_request
+    from agents.agent.runtime import resume_agent_run
+    from chat.turn.agent import answer_question, approve_tool_call, reject_tool_call
+
+    user_id = context.get("user_id")
+    execution_id = str(args.get("execution_id") or "").strip()
+    call_id = str(args.get("call_id") or "").strip()
+    row = await _pending_row(execution_id, call_id, user_id)
+    if row is None:
+        return json.dumps({"error": (
+            "Nothing is waiting under that execution_id and call_id — it may "
+            "already be answered. Call get_agent_run to see where the run is."
+        )})
+    log = row.execution
+    agent = log.subagent
+    thread_id = log.thread_id or (row.context_data or {}).get("thread_id") or ""
+    if agent is None or not thread_id:
+        return json.dumps({"error": "That run can no longer be resumed."})
+
+    try:
+        wait = int(args.get("wait_seconds", AGENT_RUN_DEFAULT_WAIT))
+    except (TypeError, ValueError):
+        wait = AGENT_RUN_DEFAULT_WAIT
+    wait = max(0, min(wait, AGENT_RUN_MAX_WAIT))
+    decided_by = "user" if context.get("decided_by_user") else "orchestrator"
+
+    if row.request_type == 'clarification':
+        if args.get("answer") in (None, "", []):
+            return json.dumps({"error": "This is a question: pass `answer`."})
+        recorded, problem = await answer_question(thread_id, call_id, args.get("answer"))
+        if not recorded:
+            return json.dumps({"error": f"The answer was not accepted: {problem}"})
+        outcome_label, status = "answered", "answered"
+    else:
+        decision = str(args.get("decision") or "").strip().lower()
+        if decision not in ("approve", "reject"):
+            return json.dumps({"error": "This is an approval: pass decision approve or reject."})
+        if decision == "approve":
+            await approve_tool_call(thread_id, call_id, scope="once",
+                                    session_key=thread_id, user_id=user_id)
+            outcome_label, status = "approved", "approved"
+        else:
+            reason = str(args.get("reason") or "").strip()[:500]
+            await reject_tool_call(thread_id, call_id, reason=reason, user_id=user_id)
+            outcome_label, status = "rejected", "rejected"
+
+    await resolve_request(thread_id=thread_id, call_id=call_id, user_id=user_id,
+                          status=status)
+    user = await _user(user_id)
+    if user is None:
+        return json.dumps({"error": "User not found."})
+    resumed = await resume_agent_run(agent, user=user, thread_id=thread_id)
+    if resumed is None:
+        return json.dumps({"error": "The decision was recorded but the run could not be resumed."})
+
+    outcome = await _await_agent_run(resumed, wait)
+    return json.dumps({
+        "type": "agent_run", "agent_id": agent.id, "agent_name": agent.name,
+        "execution_id": resumed, "request": outcome_label, "decided_by": decided_by,
+        **outcome,
+    })
+
+
+async def _user(user_id: Any):
+    from django.contrib.auth import get_user_model
+
+    if not user_id:
+        return None
+    return await get_user_model().objects.filter(id=user_id).afirst()
+
+
+@tool({
+    "type": "function",
+    "function": {
         "name": "invoke_subagent",
         "description": (
             "Delegate work to the user's specialised agents and wait for their "
@@ -761,8 +968,12 @@ async def invoke_subagent(args: Dict, context: Dict) -> str:
         context=context,
     )
 
+    # A worker that stopped to ask came back with no answer; say what it is
+    # waiting on, so the manager can answer it rather than read an empty slot.
+    waiting = await pending_requests([w.execution_id for w in fanout.results])
     return json.dumps({
         "type": "subagent_fanout",
         "agent": worker_agent.name,
         **fanout.as_dict(),
+        **({"waiting_on": waiting, "message": PAUSED_MESSAGE} if waiting else {}),
     })

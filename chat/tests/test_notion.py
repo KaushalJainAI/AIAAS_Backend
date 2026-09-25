@@ -212,7 +212,8 @@ class CardGovernanceTests(TestCase):
         self.assertIn('notion_search', offered)
         self.assertIn('notion_read_page', offered)
         self.assertIn('notion_query_database', offered)
-        self.assertIn('notion_create_page', offered)
+        # Chat is the orchestrator: it reads the card, a subagent writes to it.
+        self.assertNotIn('notion_create_page', offered)
 
     def test_switching_the_card_off_withdraws_its_tools(self):
         connect_notion(self.user)

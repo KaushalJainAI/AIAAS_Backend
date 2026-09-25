@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 async def open_request(execution_log, *, call_id: str, tool: str,
                        message: str, options: list | None = None,
                        title: str = '', detail: dict | None = None,
-                       args: dict | None = None) -> None:
+                       args: dict | None = None,
+                       request_type: str = 'approval',
+                       question: dict | None = None) -> None:
     """Record a paused tool call so it can be answered from the Inbox.
 
     `title` and `detail` come from `chat.tools.describe`; `args` is kept raw in
@@ -60,7 +62,9 @@ async def open_request(execution_log, *, call_id: str, tool: str,
             node_id=call_id,
             defaults={
                 'user_id': execution_log.user_id,
-                'request_type': 'approval',
+                # `clarification` for an `ask_user` question: answered with a
+                # value (Inbox, or a manager's `answer_subagent`), not a verdict.
+                'request_type': request_type,
                 'title': (title or f'Approve {tool}?')[:200],
                 'message': message,
                 'options': options or [
@@ -77,6 +81,9 @@ async def open_request(execution_log, *, call_id: str, tool: str,
                     # paused, not as the catalogue looks today.
                     'detail': detail or {},
                     'args': args or {},
+                    # The question as asked (kind, options, bounds), so every
+                    # door that answers it draws and checks the same thing.
+                    **({'question': question} if question else {}),
                     # The two things answering it needs. `agents/{id}/approve/`
                     # is keyed on the thread, not on the execution, so a queue
                     # entry that did not carry it could be read and not acted

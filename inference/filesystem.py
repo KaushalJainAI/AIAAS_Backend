@@ -293,6 +293,24 @@ def children(user, parent: Folder | None):
     return qs.order_by('name')
 
 
+def folders_beneath(user, folder: Folder | None):
+    """Live folders of `user` beneath `folder`, excluding it; None is the
+    whole tree. `folder` must already have come from `resolve_folder`.
+
+    The search endpoint lists folders by name, and the choke-point rule keeps
+    `Folder.objects` inside this module — so the queryset is built here and
+    filtered further by the caller. The hidden eval tree is excluded, the
+    same blindness every user-facing listing keeps.
+    """
+    qs = Folder.objects.filter(user=user)
+    hidden = eval_subtree_ids(user)
+    if hidden:
+        qs = qs.exclude(pk__in=hidden)
+    if folder is not None:
+        qs = qs.filter(path__startswith=folder.path).exclude(pk=folder.pk)
+    return qs
+
+
 def eval_root(user) -> Folder | None:
     """The user's hidden eval tree, if it exists yet. One indexed lookup."""
     return Folder.objects.filter(

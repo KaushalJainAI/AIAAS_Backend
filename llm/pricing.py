@@ -173,28 +173,6 @@ def cost_for_usage(
     ), "estimated"
 
 
-def estimate_cost_for_model(
-    model_value: str,
-    *,
-    input_tokens: int = 0,
-    output_tokens: int = 0,
-    cached_input_tokens: int = 0,
-) -> Decimal:
-    """Cost one call by model id. Returns 0 for unknown/local models.
-
-    Kept for callers that hold loose token counts rather than a `TokenUsage`.
-    `cost_for_usage` is the better door: it reports *why* a cost is zero, which
-    this signature has no way to express.
-    """
-    usage = TokenUsage(
-        input=max(0, int(input_tokens or 0) - int(cached_input_tokens or 0)),
-        output=int(output_tokens or 0),
-        cached_read=int(cached_input_tokens or 0),
-    )
-    cost, _source = cost_for_usage(model_value, usage)
-    return cost
-
-
 def combine_sources(sources) -> CostSource:
     """The honest source for a total assembled from several calls.
 

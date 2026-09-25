@@ -54,6 +54,14 @@ MAX_WORLD_PAGES = 25
 #: past the reviewer or blow up every attempt's context.
 MAX_FIXTURE_FILE_CHARS = 50_000
 
+#: The `ALWAYS_AVAILABLE` tools an eval world keeps: they touch only the
+#: run's own state (plan, chart, clock, question). Everything else in that
+#: list reads or writes the owner's real account and is withheld.
+EVAL_SAFE_ALWAYS = frozenset({
+    'get_current_time', 'update_todos', 'render_chart', 'render_dashboard',
+    'ask_user',
+})
+
 #: Surfaces, in build order. Later phases add their simulator + graders; the
 #: files surface needs neither (real vfs rows) and the KB surface needs only
 #: confinement (real hidden KB rows).
@@ -459,11 +467,13 @@ class EvalEnvironment:
         tool that refuses on every call is worse than one never offered, and
         a tool that reaches a real service is an eval that sends real email.
         """
-        from agents.agent.runtime import (
-            ALWAYS_AVAILABLE, GRANT_TOOLS, RETRIEVAL_TOOLS,
-        )
+        from agents.agent.runtime import GRANT_TOOLS, RETRIEVAL_TOOLS
 
-        keep = set(ALWAYS_AVAILABLE) | set(RETRIEVAL_TOOLS)
+        # Not all of `ALWAYS_AVAILABLE`: the rest of it reaches the owner's
+        # real account — reminders it can create or cancel, dashboards it
+        # saves, runs and schedules it reads — and none of that has a fake
+        # version. `notify_user` stays because it is simulated (`NotifySim`).
+        keep = set(EVAL_SAFE_ALWAYS) | set(RETRIEVAL_TOOLS)
         for grant in ('fileOps', 'office', 'codeExecution'):
             keep.update(GRANT_TOOLS[grant])
         if self.kb is not None:
@@ -484,7 +494,9 @@ class EvalEnvironment:
         real rows, not simulations."""
         fixtures = self.world.fixtures or {}
         surfaces = self.world.surfaces or {}
-        sims: dict[str, Any] = {}
+        # In every world: the owner's notification feed, recorded not sent.
+        from .sim.notify import NotifySim
+        sims: dict[str, Any] = {'notify': NotifySim()}
         # Exactly `True`: `"pending"` is a grant with no builder yet, and a
         # simulator for it does not exist — attempting the import would fail
         # the attempt for a surface nobody promised.
@@ -527,13 +539,20 @@ class EvalEnvironment:
             return {}
 
 
-def for_attempt(user, agent, suite, case) -> EvalEnvironment | None:
+def for_attempt(user, agent, suite, case, world=None) -> EvalEnvironment | None:
     """The environment one case attempt runs in, or None for legacy suites.
 
-    None when the suite has no accepted world: the run behaves exactly as
-    today. Sync ORM; the runner wraps it.
+    None when the suite has no accepted world, or when the case was not built
+    for one (`world_version` null — run imports, config-only drafts, cases
+    predating worlds): those describe the agent's real situation and run
+    exactly as they did before worlds. `world` is the sweep's pinned world
+    (`runner.run_suite`), so accepting a new version mid-sweep cannot move
+    the remaining cases onto it; left None it is looked up. Sync ORM.
     """
-    world = live_world(suite)
+    if case is not None and getattr(case, 'world_version', None) is None:
+        return None
+    if world is None:
+        world = live_world(suite)
     if world is None:
         return None
     return EvalEnvironment(user=user, agent=agent, suite=suite, world=world)

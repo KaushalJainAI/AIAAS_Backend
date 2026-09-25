@@ -25,7 +25,8 @@ may be in a KB, independently. Moving a file between folders never re-indexes it
 | Model | What it is |
 |---|---|
 | `Folder` | A folder. `folder=NULL` on a document means "at the root" (there is no root row) |
-| `Document` | A file: its bytes, extracted text (`content_text`), folder, KB, `deleted_at` if in the bin |
+| `Document` | A file: its bytes, extracted text (`content_text`), folder, KB, `deleted_at` if in the bin. `metadata.spec` is the editable structure for office files; `metadata.draft` a parked autosave |
+| `DocumentVersion` | What a file held before an overwrite (bytes/text plus spec), per source coalesced, capped at 25 |
 | `KnowledgeBase` | A searchable set of documents. `backend` says how it is searched |
 | `DocumentChunk`, `IndexedTerm` | Pieces of documents for vector search, and words for keyword search |
 | `ExtractionSchema`, `ExtractedRow` | "Pull these fields out of these files", and the rows that came out |
@@ -46,14 +47,20 @@ filters them out, so ordinary queries never see the bin.
 | `recycle.py` | Trash, restore, and the sweep that deletes for good |
 | `engine.py` | The vector index (HNSW) behind semantic search |
 | `backends/` | The four ways a KB can be searched: `vector`, `fulltext` (keywords), `hybrid` (both), `raw` (no search, just read) |
-| `utils.py` | Reading text out of uploaded files (PDF, Word, Excel...) |
+| `utils.py` | Reading text out of uploaded files (PDF, Word, Excel, OpenDocument, RTF, email...) |
 | `tasks.py` | Background jobs: turning an upload into chunks and embeddings |
 | `reindex.py`, `migration_tasks.py` | Re-indexing after the embedding model changes |
-| `signals.py` | Keeps each KB's document count right |
+| `signals.py` | Keeps each KB's document count right; version blobs die with their rows |
 | `extraction.py`, `extraction_views.py`, `extraction_urls.py` | The extraction engine and its API (served at `/api/extraction/`) |
 | `pages.py`, `page_views.py` | Publishing and serving hosted pages |
 | `dashboard_views.py` | Dashboards |
 | `office_edit.py` | Creating and editing files from the in-browser apps |
+| `versions.py` | Version history: snapshot before every overwrite, restore, prune |
+| `export.py`, `text_blocks.py` | Exporting to other formats (Word↔PDF/Markdown, deck→PDF, workbook↔CSV) |
+| `drafts.py` | Office autosaves parked cheaply, rendered after quiet or on read |
+| `sheets.py`, `formulas.py` | Workbooks as Univer snapshots and back; the shared formula evaluator |
+| `importers.py` | Uploaded Word/PowerPoint files converted to editable specs |
+| `previews.py` | Image conversion (TIFF/BMP/HEIC→PNG) and zip listings |
 
 ## Safety rules
 
@@ -67,9 +74,12 @@ Search design: [`docs/RAG_STRATEGY.md`](../docs/RAG_STRATEGY.md).
 
 ## Management commands
 
-`purge_recycle_bin`, `reindex_all`, `run_extraction`.
+`purge_recycle_bin`, `reindex_all`, `run_extraction`, `retype_documents`
+(repairs rows the old file-type vocabulary mistyped).
 
 ## Tests
 
 `inference/tests/`: `test_filesystem.py`, `test_vfs.py`, `test_recycle.py`,
-`test_chat_files.py`, `test_file_types.py`.
+`test_chat_files.py`, `test_file_types.py`, `test_versions.py`,
+`test_drafts.py`, `test_sheets.py`, `test_formulas.py`, `test_import.py`,
+`test_previews.py`.

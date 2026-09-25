@@ -468,7 +468,9 @@ class FileToolsAreGatedByAScopeTests(SimpleTestCase):
     """
 
     FILE_TOOLS = ["list_files", "find_files", "read_file", "write_file",
-                  "edit_file", "make_directory", "delete_file"]
+                  "edit_file", "make_directory", "delete_file",
+                  "file_versions", "restore_file_version", "export_file",
+                  "edit_document", "edit_deck"]
 
     def test_not_offered_without_a_scope(self):
         # `requires="files"` is unmet for a caller that brought none — which is
@@ -488,12 +490,22 @@ class FileToolsAreGatedByAScopeTests(SimpleTestCase):
         the only symptom would be an assistant explaining it cannot save a file
         while holding a scope that says it can.
         """
+        from chat.tools.registry import effect_of
+
         offered = {
             t["function"]["name"]
             for t in async_to_sync(get_available_tools)(None, file_scope=object())
         }
-        for name in self.FILE_TOOLS:
+        # Chat is the orchestrator: the read half is offered with a scope, the
+        # writes are a subagent's (`fileOps`). Both halves must be non-empty,
+        # or this passes with the tools dead in one direction.
+        reads = [n for n in self.FILE_TOOLS if effect_of(n) == "read"]
+        writes = [n for n in self.FILE_TOOLS if effect_of(n) != "read"]
+        self.assertTrue(reads and writes)
+        for name in reads:
             self.assertIn(name, offered)
+        for name in writes:
+            self.assertNotIn(name, offered)
 
     def test_refuse_without_a_scope(self):
         # Reachable through `execute_tool` — they are ordinary registrations —

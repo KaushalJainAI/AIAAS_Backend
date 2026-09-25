@@ -151,6 +151,8 @@ class AgentRunStream:
                 await self._tool_started(payload)
             elif event == Event.ASK_PERMISSION:
                 await self._approval_requested(payload)
+            elif event == Event.ASK_QUESTION:
+                await self._question_asked(payload)
             elif event == Event.ERROR:
                 await self._run_failed(payload)
         except Exception:  # noqa: BLE001 — a broken stream must not fail the run
@@ -250,6 +252,35 @@ class AgentRunStream:
             options=[{'label': 'Approve', 'value': 'approve'},
                      {'label': 'Reject', 'value': 'reject'}],
             detail=detail,
+        )
+
+    async def _question_asked(self, payload: dict[str, Any]) -> None:
+        """File an `ask_user` question as a `clarification` row.
+
+        Same two channels as an approval: the row is what the Inbox lists and
+        what a manager's `answer_subagent` resolves; the socket frame reaches
+        whoever is watching now. Options ride as `{label, value}` so the Inbox
+        can offer them as buttons without knowing the question's kind.
+        """
+        call_id = payload.get('call_id', '')
+        question = {k: v for k, v in payload.items() if k not in ('call_id', 'tool')}
+        text = str(question.get('question') or 'The agent has a question.')
+        label = _worker_label(self._log)
+        title = f'{label} asks' if label else 'The agent has a question'
+        options = [{'label': o, 'value': o} for o in question.get('options') or []]
+
+        from .hitl import open_request
+
+        await open_request(
+            self._log, call_id=call_id, tool=str(payload.get('tool') or 'ask_user'),
+            message=text, title=title, options=options,
+            request_type='clarification', question=question,
+            detail={'title': title, 'sentence': text, 'server': '', 'tool': 'ask_user',
+                    'fields': []},
+        )
+        await self._broadcaster.hitl_request(
+            self.execution_id, request_id=call_id, request_type='clarification',
+            title=title, message=text, options=options, detail={'question': question},
         )
 
     async def _run_failed(self, payload: dict[str, Any]) -> None:

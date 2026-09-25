@@ -51,6 +51,7 @@ Useful for the "why". The code is the source of truth where they differ.
 
 | Doc | Status |
 |---|---|
+| [OFFICE_SUITE_PLAN.md](OFFICE_SUITE_PLAN.md) | Planned 2026-09-25, paused: apps as full applications (Univer, TipTap, CodeMirror), versions, export, agent file tools, previews for every file type; part of Phase A backend written but uncommitted |
 | [CONCURRENCY_LAG_FIX_PLAN.md](CONCURRENCY_LAG_FIX_PLAN.md) | Phases 0–1 built 2026-09-24, the rest not |
 | [CUSTOM_TOOLS_PLAN.md](CUSTOM_TOOLS_PLAN.md) | Approved, being built: user-made tools |
 | [RUN_VISIBILITY_AND_REMINDERS_PLAN.md](RUN_VISIBILITY_AND_REMINDERS_PLAN.md) | Approved, being built |

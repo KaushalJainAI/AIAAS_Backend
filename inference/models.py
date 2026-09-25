@@ -140,6 +140,23 @@ class Folder(models.Model):
         return [int(part) for part in self.path.strip('/').split('/') if part][:-1]
 
 
+#: Name prefix of the hidden knowledge bases eval worlds keep
+#: (`eval/kb_world.py`). Defined here, beside the model, so every listing
+#: outside `eval/` can hide them without importing that app.
+HIDDEN_KB_PREFIX = '.eval/'
+
+
+def visible_knowledge_bases(user):
+    """The user's knowledge bases a person or a real agent may see and pick.
+
+    Every listing and every picker goes through this: an eval world's corpus
+    is fake test data, and a builder that offered it could attach it to a
+    real agent. Id-addressed reads (the eval run's own `kb_scope`) still work.
+    """
+    return KnowledgeBase.objects.filter(user=user).exclude(
+        name__startswith=HIDDEN_KB_PREFIX)
+
+
 class KnowledgeBase(models.Model):
     """
     A named, persistent knowledge base owned by a user.
@@ -265,6 +282,21 @@ class Document(models.Model):
         ('image', 'Image'),
         ('video', 'Video'),
         ('audio', 'Audio'),
+        # Old Office binaries (Phase F): the new-format libraries cannot read
+        # them, so they ride their own types rather than failing inside the
+        # `docx` / `xlsx` / `pptx` code. Conversion needs LibreOffice, i.e.
+        # the 2 GB server; noted as a follow-up, not built.
+        ('doc_legacy', 'Word 97–2003'),
+        ('xls_legacy', 'Excel 97–2003'),
+        ('ppt_legacy', 'PowerPoint 97–2003'),
+        # OpenDocument, rich text, archives and email: extracted for search
+        # and previewed as text or a listing.
+        ('odt', 'OpenDocument Text'),
+        ('ods', 'OpenDocument Spreadsheet'),
+        ('odp', 'OpenDocument Presentation'),
+        ('rtf', 'Rich Text'),
+        ('zip', 'Zip Archive'),
+        ('eml', 'Email'),
         # A format we keep but have no reader for yet: downloadable, and
         # readable by `execute_python` through `run_python_on_files`.
         ('other', 'Other'),
@@ -451,6 +483,47 @@ class Document(models.Model):
     def is_indexed(self):
         """Check if document has been indexed"""
         return self.status == 'indexed'
+
+
+def document_version_path(instance, filename: str) -> str:
+    """``users/<owner id>/versions/<uuid><ext>`` — server-derived, as uploads are."""
+    import os
+    ext = os.path.splitext(filename or '')[1][:12].lower()
+    return f'users/{instance.document.user_id}/versions/{uuid.uuid4().hex}{ext}'
+
+
+class DocumentVersion(models.Model):
+    """What a file held before it was overwritten (inference/versions.py).
+
+    Written by every overwrite — an app save, an agent write, a restore — so
+    "the agent rewrote my report" is one click to undo rather than a loss. A
+    version keeps the bytes when the file had bytes, else the text, plus the
+    spec a deck or Word file was drawn from, so restoring one restores the
+    editable file and not only its download.
+    """
+
+    SOURCE_CHOICES = [
+        ('app', 'Edited in an app'),
+        ('agent', 'Written by an agent'),
+        ('restore', 'Before a restore'),
+    ]
+
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='versions')
+    created_at = models.DateTimeField(auto_now_add=True)
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES, default='app')
+    #: The file's name at the time, since a rename is not a version.
+    name = models.CharField(max_length=255)
+    file = models.FileField(upload_to=document_version_path, blank=True, default='')
+    content_text = models.TextField(blank=True, default='')
+    file_size = models.IntegerField(default=0)
+    spec = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [models.Index(fields=['document', '-created_at'])]
+
+    def __str__(self):
+        return f'{self.name} @ {self.created_at:%Y-%m-%d %H:%M}'
 
 
 class DocumentChunk(models.Model):

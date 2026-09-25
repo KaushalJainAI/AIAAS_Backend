@@ -556,6 +556,11 @@ def read_file(scope: FileScope, path: str, *, offset: int = 0,
             f'No such file: {render(scope, parent_parts + [name])}. '
             f'List the directory to see what is there.'
         )
+    # A pending office draft renders first: the text below is the extract of
+    # the bytes, and the bytes are what the draft is still building.
+    from . import drafts
+
+    doc = drafts.ensure_rendered(doc)
 
     window = max(1, min(int(window), AGENT_FILE_READ_CHARS))
     cap = min(limit or window, window)
@@ -613,6 +618,11 @@ def read_binary(scope: FileScope, path: str) -> bytes:
     shown = render(scope, parent_parts + [name])
     if doc is None:
         raise VfsError(f'No such file: {shown}. List the directory to see what is there.')
+    # A pending office draft renders first: this hands our own code the file,
+    # and the file is what the draft is still building.
+    from . import drafts
+
+    doc = drafts.ensure_rendered(doc)
     if not doc.file:
         raise VfsError(
             f'{shown} is a text file, not a stored document with its own bytes.'
@@ -714,9 +724,12 @@ def write_file(scope: FileScope, path: str, content: str, *,
                 f'Appending would make this file {len(text):,} characters, over '
                 f'the {max_chars:,} limit.'
             )
-        doc.content_text = text
-        doc.file_size = len(text.encode('utf-8'))
-        doc.save(update_fields=['content_text', 'file_size', 'updated_at'])
+        # Through the apps' save door: it keeps a version of what the file
+        # held, and writes the bytes too when the file has them — writing only
+        # `content_text` left an uploaded file downloading its old contents.
+        from .office_edit import save_text
+
+        doc = save_text(doc, text, version_source='agent')
         created = False
 
     return {
@@ -742,9 +755,11 @@ def write_binary(scope: FileScope, path: str, data: bytes, *, text: str = '',
 
     **Never overwrites by accident.** A name that is taken becomes
     `name (2).ext` and the real path is returned. `overwrite=True` replaces the
-    old file by *trashing* it, not by writing over it, so the previous version
-    is one restore away in the recycle bin — which is what makes the render
-    tools `reversible` without asking first.
+    file *in place* — same document, same id — after keeping what it held as a
+    version (`inference/versions.py`), so the previous state is one restore
+    away, which is what makes the render tools `reversible` without asking
+    first. In place rather than trash-and-recreate (2026-09-25): a new id
+    pulled the file out from under anyone who had it open in an app.
     """
     parent_parts, raw_name = _split_leaf(scope, path)
     # Before `_make_dirs`, for the reason `write_file` gives.
@@ -753,6 +768,15 @@ def write_binary(scope: FileScope, path: str, data: bytes, *, text: str = '',
     name = safe_name(raw_name)
     if not name:
         raise VfsError(f'"{raw_name}" is not a usable file name.')
+    # Bytes that arrive from outside (a download, an API response) can be a
+    # zip bomb as easily as an upload can (N2).
+    from .utils import OFFICE_ZIP_EXTENSIONS, zip_within_budget
+
+    if _extension(name) in OFFICE_ZIP_EXTENSIONS:
+        import io
+
+        if not zip_within_budget(io.BytesIO(data)):
+            raise VfsError(f'"{name}" expands to far more than its size when opened; it was refused.')
     file_type = BINARY_TYPES.get(_extension(name))
     if file_type is None:
         raise VfsError(
@@ -776,15 +800,11 @@ def write_binary(scope: FileScope, path: str, data: bytes, *, text: str = '',
     folder = _make_dirs(scope, parent_parts)
     requested = name
     existing = _document_in(scope, folder, name)
-    replaced = False
     if existing is not None:
-        if overwrite:
-            from . import recycle
-
-            recycle.trash(scope.user, documents=[existing])
-            replaced = True
-        else:
-            name = _free_name(scope, folder, name)
+        if overwrite and existing.file_type == file_type:
+            return _replace_in_place(scope, parent_parts, existing, data, text, spec)
+        name = _free_name(scope, folder, name)
+    replaced = False
 
     doc = Document(
         user=scope.user,
@@ -819,6 +839,32 @@ def write_binary(scope: FileScope, path: str, data: bytes, *, text: str = '',
         'type': file_type,
         'bytes': len(data),
         'chars': len(doc.content_text),
+    }
+
+
+def _replace_in_place(scope: FileScope, parent_parts: Sequence[str], doc: Document,
+                      data: bytes, text: str, spec: dict | None) -> dict:
+    """`write_binary(overwrite=True)` onto an existing file of the same type."""
+    from . import drafts
+    from .office_edit import replace_bytes
+
+    # A pending office draft renders first, so the version this overwrite
+    # keeps holds the file as the app left it rather than a stale render.
+    doc = drafts.ensure_rendered(doc)
+    doc = replace_bytes(doc, data, text=text or '', spec=spec, version_source='agent')
+    if spec is None and (doc.metadata or {}).get('spec') is not None:
+        # The old spec described the old bytes; the preview would draw them.
+        doc.metadata = {k: v for k, v in doc.metadata.items() if k != 'spec'}
+        doc.save(update_fields=['metadata', 'updated_at'])
+    return {
+        'path': render(scope, list(parent_parts) + [doc.name]),
+        'document_id': doc.id,
+        'created': False,
+        'replaced': True,
+        'renamed': False,
+        'type': doc.file_type,
+        'bytes': len(data),
+        'chars': len(doc.content_text or ''),
     }
 
 
@@ -907,9 +953,9 @@ def edit_file(scope: FileScope, path: str, old_text: str, new_text: str,
             f'the {max_chars:,} limit.'
         )
 
-    doc.content_text = updated
-    doc.file_size = len(updated.encode('utf-8'))
-    doc.save(update_fields=['content_text', 'file_size', 'updated_at'])
+    from .office_edit import save_text
+
+    doc = save_text(doc, updated, version_source='agent')
 
     return {
         'path': render(scope, parent_parts + [name]),
@@ -918,6 +964,307 @@ def edit_file(scope: FileScope, path: str, old_text: str, new_text: str,
         'chars': len(updated),
         'chars_before': len(body),
     }
+
+
+def _existing(scope: FileScope, path: str) -> tuple[list[str], Document]:
+    parent_parts, name = _split_leaf(scope, path)
+    doc = _document_in(scope, _folder_at(scope, parent_parts), name)
+    if doc is None:
+        raise VfsError(
+            f'No such file: {render(scope, parent_parts + [name])}. '
+            f'List the directory to see what is there.'
+        )
+    # A pending office draft renders first, so an export, restore or version
+    # sees the file as the app left it rather than as it last rendered.
+    from . import drafts
+
+    return parent_parts, drafts.ensure_rendered(doc)
+
+
+def file_versions(scope: FileScope, path: str) -> dict:
+    """What a file held before each overwrite (`inference/versions.py`)."""
+    from . import versions
+
+    parent_parts, doc = _existing(scope, path)
+    listed = versions.listing(doc)
+    return {
+        'path': render(scope, parent_parts + [doc.name]),
+        'document_id': doc.id,
+        'versions': [
+            {'version_id': v['id'], 'saved_at': v['created_at'].isoformat(),
+             'by': {'app': 'the user, in an app', 'agent': 'an agent',
+                    'restore': 'before a restore'}.get(v['source'], v['source']),
+             'bytes': v['size']}
+            for v in listed
+        ],
+        'note': ('Each entry is the file as it was *before* that save. '
+                 'restore_file_version puts one back; the current contents '
+                 'become a version themselves, so a restore can be undone.')
+        if listed else 'This file has no earlier versions.',
+    }
+
+
+def restore_file_version(scope: FileScope, path: str, version_id: int) -> dict:
+    from . import versions
+    from .models import DocumentVersion
+    from .office_edit import EditError
+
+    parent_parts, doc = _existing(scope, path)
+    _require_write_at(scope, parent_parts, 'restore')
+    version = DocumentVersion.objects.filter(document=doc, id=version_id).first()
+    if version is None:
+        raise VfsError(
+            f'{doc.name} has no version {version_id}. Call file_versions to list them.'
+        )
+    try:
+        doc = versions.restore(doc, version)
+    except EditError as exc:
+        raise VfsError(str(exc)) from exc
+    return {
+        'path': render(scope, parent_parts + [doc.name]),
+        'document_id': doc.id,
+        'restored_version': version_id,
+        'saved_at': version.created_at.isoformat(),
+    }
+
+
+def export_file(scope: FileScope, path: str, fmt: str, *, target: str = '') -> dict:
+    """Save `path` in another format beside it (or at `target`), never overwriting."""
+    from . import export
+
+    parent_parts, doc = _existing(scope, path)
+    try:
+        data, name, _mime = export.build(doc, fmt)
+    except export.ExportError as exc:
+        raise VfsError(str(exc)) from exc
+    destination = target or render(scope, parent_parts + [name])
+    if (fmt or '').lower().strip('.') in ('md', 'txt', 'csv'):
+        result = write_file(scope, destination, data.decode('utf-8'), overwrite=False)
+    else:
+        result = write_binary(scope, destination, data, text=doc.content_text or '')
+    result['exported_from'] = render(scope, parent_parts + [doc.name])
+    result['format'] = fmt
+    return result
+
+
+def _editable_spec(scope: FileScope, path: str, kinds: tuple[str, ...]) -> tuple[list[str], Document, dict, bool]:
+    """The doc at `path` with its editable spec, importing an upload first.
+
+    Returns (parent_parts, doc, spec, imported): an uploaded Word/PowerPoint
+    file without a spec is converted on demand (the original upload stays
+    version 1), so the tools work on uploads exactly as on files made here.
+    """
+    from . import importers
+
+    parent_parts, doc = _existing(scope, path)
+    _require_write_at(scope, parent_parts, 'edit')
+    if doc.file_type not in kinds:
+        raise VfsError(f'This works on {", ".join(kinds)} files; {doc.name} is a {doc.file_type} file.')
+    spec = (doc.metadata or {}).get('spec')
+    imported = False
+    if not isinstance(spec, dict):
+        try:
+            result = importers.import_upload(doc)
+        except importers.ImportError_ as exc:
+            raise VfsError(str(exc)) from exc
+        doc.refresh_from_db()
+        spec = (doc.metadata or {}).get('spec')
+        imported = True
+        _ = result
+    return parent_parts, doc, spec, imported
+
+
+def edit_document(scope: FileScope, path: str, ops: list) -> dict:
+    """Change a Word file block by block: insert, replace or delete blocks by
+    index, or find/replace text. Saves a version and asks first (sensitive),
+    like `edit_file` one format up."""
+    from chat.tools.office.spec import SpecError
+
+    from . import office_edit
+    from .office_edit import EditError
+
+    if not isinstance(ops, list) or not ops:
+        raise VfsError('Give ops as a non-empty list.')
+    parent_parts, doc, spec, imported = _editable_spec(scope, path, ('docx',))
+    blocks = list(spec.get('blocks') or [])
+    applied: list[str] = []
+    for n, op in enumerate(ops, 1):
+        if not isinstance(op, dict):
+            raise VfsError(f'Op {n} must be an object with op.')
+        kind = op.get('op')
+        if kind == 'insert':
+            index = _block_index(op.get('index'), len(blocks), f'op {n}', insert=True)
+            incoming = op.get('blocks')
+            if not isinstance(incoming, list) or not incoming:
+                raise VfsError(f'Op {n}: insert needs a non-empty blocks list.')
+            blocks[index:index] = incoming
+            applied.append(f'inserted {len(incoming)} block(s) at {index}')
+        elif kind == 'replace':
+            index = _block_index(op.get('index'), len(blocks), f'op {n}')
+            incoming = op.get('blocks')
+            if not isinstance(incoming, list) or not incoming:
+                raise VfsError(f'Op {n}: replace needs a non-empty blocks list.')
+            blocks[index:index + 1] = incoming
+            applied.append(f'replaced block {index}')
+        elif kind == 'delete':
+            index = _block_index(op.get('index'), len(blocks), f'op {n}')
+            count = op.get('count', 1)
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                raise VfsError(f'Op {n}: count must be a whole number.')
+            if count < 1:
+                raise VfsError(f'Op {n}: count must be 1 or more.')
+            removed = min(count, len(blocks) - index)
+            del blocks[index:index + count]
+            applied.append(f'deleted {removed} block(s) at {index}')
+        elif kind == 'find_replace':
+            applied.append(_find_replace(blocks, op, n))
+        else:
+            raise VfsError(f'Op {n}: op must be insert, replace, delete or find_replace.')
+    if not blocks:
+        raise VfsError('That would leave the document with no blocks.')
+    try:
+        doc = office_edit.edit_spec(doc, {'title': spec.get('title'), 'subtitle': spec.get('subtitle'),
+                                          'theme': spec.get('theme'), 'blocks': blocks},
+                                    version_source='agent')
+    except (SpecError, EditError) as exc:
+        raise VfsError(str(exc)) from exc
+    out = {'path': render(scope, parent_parts + [doc.name]), 'document_id': doc.id,
+           'applied': applied}
+    if imported:
+        out['imported_upload'] = True
+    return out
+
+
+def _block_index(raw: object, length: int, where: str, *, insert: bool = False) -> int:
+    try:
+        index = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise VfsError(f'{where}: index must be a whole number.')
+    limit = length if insert else length - 1
+    if not 0 <= index <= limit:
+        raise VfsError(f'{where}: index {raw} is past this document ({length} blocks).')
+    return index
+
+
+def _find_replace(blocks: list, op: dict, n: int) -> str:
+    find = op.get('find')
+    if not isinstance(find, str) or not find:
+        raise VfsError(f'Op {n}: find_replace needs find text.')
+    replace = op.get('replace', '')
+    if not isinstance(replace, str):
+        raise VfsError(f'Op {n}: replace must be text.')
+    replace_all = bool(op.get('replace_all', False))
+    count = 0
+    for block in blocks:
+        for get, set_ in _text_targets(block):
+            text = get()
+            if find not in text:
+                continue
+            if replace_all:
+                count += text.count(find)
+                set_(text.replace(find, replace))
+            else:
+                set_(text.replace(find, replace, 1))
+                return f'replaced 1 occurrence of {find!r}'
+    if not count:
+        raise VfsError(f'Op {n}: {find!r} was not found.')
+    return f'replaced {count} occurrences of {find!r}'
+
+
+def _text_targets(block: dict):
+    """(get, set) pairs for every replaceable string in a block or item."""
+    if isinstance(block.get('text'), str):
+        yield lambda: block['text'], lambda v: block.__setitem__('text', v)
+    for run in block.get('runs') or []:
+        yield lambda r=run: r['text'], lambda v, r=run: r.__setitem__('text', v)
+    items = block.get('items') or []
+    for idx, item in enumerate(items):
+        if isinstance(item, str):
+            yield lambda i=idx: items[i], lambda v, i=idx: items.__setitem__(i, v)
+        elif isinstance(item, dict):
+            if isinstance(item.get('text'), str):
+                yield lambda d=item: d['text'], lambda v, d=item: d.__setitem__('text', v)
+            for run in item.get('runs') or []:
+                yield lambda r=run: r['text'], lambda v, r=run: r.__setitem__('text', v)
+
+
+def edit_deck(scope: FileScope, path: str, ops: list) -> dict:
+    """Change a deck slide by slide: add, remove, move or duplicate slides,
+    or set fields. Saves a version and asks first, like `edit_file`."""
+    from chat.tools.office.spec import SpecError
+
+    from . import office_edit
+    from .office_edit import EditError
+
+    if not isinstance(ops, list) or not ops:
+        raise VfsError('Give ops as a non-empty list.')
+    parent_parts, doc, spec, imported = _editable_spec(scope, path, ('pptx',))
+    slides = list(spec.get('slides') or [])
+    applied: list[str] = []
+    for n, op in enumerate(ops, 1):
+        if not isinstance(op, dict):
+            raise VfsError(f'Op {n} must be an object with op.')
+        kind = op.get('op')
+        if kind == 'add':
+            slide = op.get('slide')
+            if not isinstance(slide, dict):
+                raise VfsError(f'Op {n}: add needs a slide object.')
+            index = op.get('index', len(slides))
+            slides.insert(_slide_index(index, len(slides), f'op {n}', insert=True), slide)
+            applied.append(f'added a slide at {index}')
+        elif kind == 'remove':
+            index = _slide_index(op.get('index'), len(slides), f'op {n}')
+            del slides[index]
+            applied.append(f'removed slide {index}')
+        elif kind == 'move':
+            index = _slide_index(op.get('index'), len(slides), f'op {n}')
+            to = _slide_index(op.get('to'), len(slides), f'op {n}', insert=True)
+            slide = slides.pop(index)
+            slides.insert(min(to, len(slides)), slide)
+            applied.append(f'moved slide {index} to {to}')
+        elif kind == 'duplicate':
+            index = _slide_index(op.get('index'), len(slides), f'op {n}')
+            import copy
+
+            slides.insert(index + 1, copy.deepcopy(slides[index]))
+            applied.append(f'duplicated slide {index}')
+        elif kind == 'set':
+            index = _slide_index(op.get('index'), len(slides), f'op {n}')
+            fields = op.get('fields')
+            if not isinstance(fields, dict) or not fields:
+                raise VfsError(f'Op {n}: set needs a non-empty fields object.')
+            if not isinstance(slides[index], dict):
+                raise VfsError(f'Op {n}: slide {index} is not an object.')
+            slides[index] = {**slides[index], **fields}
+            applied.append(f'updated slide {index}')
+        else:
+            raise VfsError(f'Op {n}: op must be add, remove, move, duplicate or set.')
+    if not slides:
+        raise VfsError('That would leave the deck with no slides.')
+    try:
+        doc = office_edit.edit_spec(doc, {'title': spec.get('title'), 'theme': spec.get('theme'),
+                                          'slides': slides},
+                                    version_source='agent')
+    except (SpecError, EditError) as exc:
+        raise VfsError(str(exc)) from exc
+    out = {'path': render(scope, parent_parts + [doc.name]), 'document_id': doc.id,
+           'applied': applied}
+    if imported:
+        out['imported_upload'] = True
+    return out
+
+
+def _slide_index(raw: object, length: int, where: str, *, insert: bool = False) -> int:
+    try:
+        index = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise VfsError(f'{where}: index must be a whole number.')
+    limit = length if insert else length - 1
+    if not 0 <= index <= limit:
+        raise VfsError(f'{where}: index {raw} is past this deck ({length} slides).')
+    return index
 
 
 def find(scope: FileScope, query: str, *, limit: int = 0) -> dict:

@@ -460,12 +460,6 @@ class HITLRequest(models.Model):
     def __str__(self):
         return f"{self.request_type}: {self.title}"
 
-    @property
-    def is_pending(self):
-        """Check if request is still waiting for response"""
-        return self.status == 'pending'
-
-
 class ConversationMessage(models.Model):
     """
     AI chat conversation history.

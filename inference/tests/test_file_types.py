@@ -58,9 +58,18 @@ class VocabularyTests(TestCase):
 
     def test_an_unknown_binary_is_other_not_text(self):
         # `txt` was the old default, and it is what sent zip noise into the
-        # search index.
-        self.assertEqual(normalize_file_type('archive.zip'), 'other')
+        # search index. (A `.zip` used to be the example here; Phase F gave
+        # archives their own type and listing.)
+        self.assertEqual(normalize_file_type('archive.7z'), 'other')
         self.assertEqual(normalize_file_type('model.parquet'), 'other')
+
+    def test_archives_and_documents_have_their_own_types(self):
+        self.assertEqual(normalize_file_type('archive.zip'), 'zip')
+        self.assertEqual(normalize_file_type('note.eml'), 'eml')
+        self.assertEqual(normalize_file_type('paper.odt'), 'odt')
+        self.assertEqual(normalize_file_type('sheet.ods'), 'ods')
+        self.assertEqual(normalize_file_type('deck.odp'), 'odp')
+        self.assertEqual(normalize_file_type('letter.rtf'), 'rtf')
 
     def test_a_sniffed_text_type_with_no_extension_is_still_text(self):
         self.assertEqual(normalize_file_type('README', 'text/plain'), 'txt')

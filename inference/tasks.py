@@ -10,16 +10,6 @@ from .utils import extract_text_from_file
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, time_limit=600, soft_time_limit=540)
-def process_document_task(self, document_id, kb_id=None):
-    return DocumentIndexingService.process_document(document_id, kb_id=kb_id)
-
-
-@shared_task(bind=True, time_limit=600, soft_time_limit=540)
-def share_document_task(self, document_id, user_id):
-    return DocumentIndexingService.share_document(document_id, user_id)
-
-
 @shared_task(name='inference.sweep_recycle_bin', ignore_result=True)
 def sweep_recycle_bin():
     """Beat entry point for the recycle-bin purge.

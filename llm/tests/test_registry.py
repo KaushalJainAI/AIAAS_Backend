@@ -41,7 +41,7 @@ class RegistryTests(SimpleTestCase):
             self.assertTrue(self.reg.has_handler("dummy_test"))
             self.assertIsInstance(self.reg.get_handler("dummy_test"), _DummyHandler)
         finally:
-            self.reg.unregister("dummy_test")
+            self.reg._handlers.pop("dummy_test", None)
 
     def test_register_blank_node_type_raises(self):
         with self.assertRaises(ValueError):
@@ -50,11 +50,6 @@ class RegistryTests(SimpleTestCase):
     def test_get_unknown_raises_keyerror(self):
         with self.assertRaises(KeyError):
             self.reg.get_handler("__nope__")
-
-    def test_unregister_idempotent(self):
-        # Should not raise if not present.
-        self.reg.unregister("__never_registered__")
-
 
 class RegistryBootstrapTests(SimpleTestCase):
     """`get_registry()` registers exactly the supported provider set."""

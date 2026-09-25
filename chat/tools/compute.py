@@ -30,11 +30,6 @@ EXEC_OUTPUT_CHARS = 20_000
 JOB_LOG_CHARS = 12_000
 
 
-def _no_workspace() -> str:
-    return json.dumps({
-        'error': 'No workspace engine is configured on this platform.'})
-
-
 @tool({
     'type': 'function',
     'function': {

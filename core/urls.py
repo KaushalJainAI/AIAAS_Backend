@@ -7,6 +7,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
+from core.auth.revocation import RevocableTokenRefreshSerializer
+
 from .views import (
     UserRegistrationView,
     CustomTokenObtainPairView,
@@ -43,7 +45,7 @@ urlpatterns = [
     path('auth/register/', UserRegistrationView.as_view(), name='register'),
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='login'),
     path('auth/google/', GoogleLoginView.as_view(), name='google_login'),
-    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/token/refresh/', TokenRefreshView.as_view(serializer_class=RevocableTokenRefreshSerializer), name='token_refresh'),
     path('auth/profile/', UserProfileView.as_view(), name='profile'),
     path('auth/profile/avatar/', AvatarUploadView.as_view(), name='avatar-upload'),
     path('auth/change-password/request-otp/', PasswordChangeOTPRequestView.as_view(), name='change-password-request-otp'),

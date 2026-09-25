@@ -76,6 +76,16 @@ so a long run ends with a partial answer instead of an error.
 
 ## Design choices to keep
 
+**Chat is the manager; agents do the work.** Chat cannot be set up the way an
+agent can (no grants, no scopes), so it holds only basic tools: tools that
+read, plus finding, running, building and answering agents, memory and
+missions (`chat_orchestrator_allowed` in `chat/tools/__init__.py`). Anything
+that writes a file, sends mail, publishes, makes a deck or spends money is
+handed to an agent. The check runs twice: `get_available_tools` does not offer
+the tool, and `execute_chat_tool` refuses it if the model names it anyway.
+Keep that second check out of `execute_tool`: agents use `execute_tool` too,
+and putting it there would stop every agent doing its job.
+
 **The model gets a real transcript.** When the model asks for a tool, that
 request goes back to it as an assistant message with `tool_calls`, and each
 result goes back as a `tool` message with the matching id. An older version

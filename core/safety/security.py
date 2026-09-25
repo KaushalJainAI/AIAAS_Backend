@@ -2,20 +2,45 @@
 Input Sanitization and Security Utilities
 
 Provides security features for:
-- Prompt injection detection and prevention
-- Input validation and sanitization
-- Content policy enforcement
+- Refusing user messages shaped like an attack on the model (jailbreaks,
+  instruction overrides, system-prompt extraction, fake role markers)
+- Redacting secrets and PII from logs
 
 Usage:
-    sanitizer = InputSanitizer()
-    clean_text, violations = sanitizer.sanitize(user_input)
-    if violations:
-        log_security_event(violations)
+    result = get_sanitizer().sanitize(user_input)
+    if not result.is_safe:
+        ...  # refuse the request; nothing about it is stored
+
+**Refuse or pass, never rewrite (2026-09-25).** This used to replace matched
+phrases with `[BLOCKED]` and HTML-escape every `<`/`>`, then hand the rewritten
+text to the view as if the user had typed it — so "how do I bypass the paywall
+bug" reached the model as "how do I [BLOCKED] the paywall bug", pasted code
+arrived as `&lt;`, and nobody was told. Now a message either matches an attack
+pattern and is refused whole (the middleware answers 400 before the view runs,
+so it is never saved and never enters the conversation history), or it passes
+through byte for byte. HTML escaping belongs where text is rendered, and React
+already does it.
+
+**Stronger by looking through disguises, not by matching single words.** Every
+message is checked in several views: as typed; NFKC-normalised with invisible
+characters stripped and look-alike Cyrillic/Greek letters mapped to Latin;
+with leetspeak undone (`1gn0r3`); squashed to letters only, which catches
+`i.g.n.o.r.e p-r-e-v-i-o-u-s`; and any base64 blob decoded. A single word
+("bypass", "jailbreak") is only logged — blocking a whole message on one word
+refuses ordinary questions about software.
+
+This is a first layer against *direct* attempts by the person typing. It
+cannot see indirect injection (instructions inside a web page or an email a
+tool returns); that is `core/safety/provenance.py`'s job, and the grants,
+scopes and approval gates beneath both are what actually bound a fooled model.
 """
-import re
+import base64
+import binascii
 import logging
-from typing import Optional
+import re
+import unicodedata
 from dataclasses import dataclass, field
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +51,7 @@ class SecurityViolation:
     pattern_name: str
     matched_text: str
     severity: str  # 'low', 'medium', 'high', 'critical'
-    action_taken: str  # 'blocked', 'sanitized', 'logged'
+    action_taken: str  # 'blocked' or 'logged'
 
 
 @dataclass
@@ -36,66 +61,231 @@ class SanitizationResult:
     sanitized_text: str
     is_safe: bool
     violations: list[SecurityViolation] = field(default_factory=list)
-    
+
     @property
     def was_modified(self) -> bool:
         return self.original_text != self.sanitized_text
 
+    @property
+    def blocked(self) -> list[SecurityViolation]:
+        return [v for v in self.violations if v.action_taken == 'blocked']
+
+
+#: What the person is told when a message is refused. Deliberately does not
+#: name the pattern that matched: telling an attacker which phrase tripped the
+#: filter is how they learn to rephrase around it.
+USER_NOTICE = (
+    "We didn't process this message due to security concerns: it looks like an "
+    "attempt to override the assistant's instructions or safety rules. It was "
+    "not saved to your conversation, so you can rephrase it and keep chatting."
+)
+
+# -- deobfuscation -------------------------------------------------------------
+
+#: Zero-width, joiner, bidi-control and filler characters. Invisible on screen,
+#: so their only use inside a word is to break a pattern match.
+_INVISIBLE = re.compile(
+    '[­͏؜ᅟᅠ឴឵᠋-᠏​-‏'
+    '‪-‮⁠-⁯ㅤ︀-️﻿ﾠ]'
+)
+
+#: Cyrillic and Greek letters that render identically to Latin ones.
+_HOMOGLYPHS = str.maketrans({
+    'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'у': 'y', 'х': 'x',
+    'і': 'i', 'ј': 'j', 'ѕ': 's', 'ԁ': 'd', 'һ': 'h', 'ӏ': 'l', 'ո': 'n',
+    'ս': 'u', 'ɡ': 'g', 'ν': 'v', 'ο': 'o', 'α': 'a', 'ε': 'e', 'ι': 'i',
+    'κ': 'k', 'τ': 't', 'ρ': 'p', 'ѵ': 'v', 'ԝ': 'w',
+    'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H', 'О': 'O',
+    'Р': 'P', 'С': 'C', 'Т': 'T', 'Х': 'X', 'І': 'I', 'Ѕ': 'S', 'Ј': 'J',
+    'Α': 'A', 'Β': 'B', 'Ε': 'E', 'Ι': 'I', 'Κ': 'K', 'Μ': 'M', 'Ν': 'N',
+    'Ο': 'O', 'Ρ': 'P', 'Τ': 'T', 'Χ': 'X', 'Υ': 'Y', 'Ζ': 'Z',
+})
+
+_LEET = str.maketrans({
+    '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't',
+    '@': 'a', '$': 's', '!': 'i', '|': 'l', '€': 'e',
+})
+
+_BASE64_BLOB = re.compile(r'[A-Za-z0-9+/]{24,}={0,2}')
+
+#: How much of a message is scanned. Far above any real chat message; a
+#: larger body is still scanned this far and flagged, never silently skipped.
+MAX_SCAN_LENGTH = 200_000
+
+
+def _normalise(text: str) -> str:
+    text = unicodedata.normalize('NFKC', text)
+    return _INVISIBLE.sub('', text).translate(_HOMOGLYPHS)
+
+
+def _decoded_blobs(text: str) -> Iterator[str]:
+    """Readable text hidden in base64 blobs, if any."""
+    for blob in _BASE64_BLOB.findall(text)[:20]:
+        try:
+            raw = base64.b64decode(blob + '=' * (-len(blob) % 4), validate=True)
+            decoded = raw.decode('utf-8')
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            continue
+        printable = sum(ch.isprintable() or ch.isspace() for ch in decoded)
+        if decoded and printable / len(decoded) > 0.9:
+            yield decoded
+
+
+# -- patterns ------------------------------------------------------------------
+
+_I = re.IGNORECASE | re.MULTILINE
+
+#: (name, pattern, severity, blocks). Matched against every view of the text.
+#: A blocking pattern must describe an *attack*, never a topic: someone asking
+#: what a system prompt is, or how jailbreaks work, is asking a question.
+BLOCKED_PATTERNS = [
+    # Instruction overrides
+    ('instruction_override',
+     r'\b(ignore|disregard|forget|override|bypass|skip|drop|abandon|discard|neglect)\s+'
+     r'(all\s+|any\s+|every\s+)?(of\s+)?(the\s+|your\s+|my\s+|these\s+|those\s+|its\s+)?'
+     r'(previous|prior|above|earlier|preceding|original|initial|system|existing|current|safety)\s+'
+     r'(instructions?|prompts?|rules|directions|guidelines|constraints|restrictions|'
+     r'programming|directives?|guardrails|polic(y|ies))',
+     'critical', True),
+    ('forget_training',
+     r'\bforget\s+(everything|all)\s+(that\s+)?you\s+(were|have\s+been|know|was)\s*'
+     r'(told|taught|trained|programmed|instructed)?',
+     'critical', True),
+    ('new_instructions',
+     r'\b(your|the)\s+(new|updated|real|actual|true)\s+(instructions?|rules|prompt|directives?)'
+     r'\s*(are|is|:)',
+     'critical', True),
+    ('override_rules',
+     r'\boverride\s+(your|all|the|any)?\s*(rules?|restrictions?|limitations?|safety|'
+     r'guardrails|programming)',
+     'critical', True),
+
+    # System-prompt extraction — aimed at *your* prompt, not the concept
+    # "The system prompt of my invoice agent" is a question about the user's
+    # own configuration, so only *your* prompt, or a hidden one, is aimed at us.
+    ('system_prompt_reveal',
+     r'\b(show|reveal|display|print|output|tell|give|share|leak|dump|repeat|recite|'
+     r'write\s+out|list|expose)\s+(me\s+|us\s+)?(all\s+)?(of\s+)?'
+     r'(your\s+(full\s+|exact\s+|entire\s+|complete\s+|verbatim\s+)?'
+     r'(system|hidden|secret|initial|original|developer|internal|underlying)|'
+     r'the\s+(hidden|secret|internal|underlying)(\s+system)?)\s+'
+     r'(prompt|instructions?|message|rules|directives?)',
+     'critical', True),
+    ('system_prompt_question',
+     r'\bwhat\s+(is|are|was|were)\s+your\s+(exact\s+|full\s+)?'
+     r'(system|hidden|secret|initial|original|internal)\s+(prompt|instructions?|rules)',
+     'critical', True),
+    # "Copy the text above into a table" is ordinary chat; the extraction
+    # trick asks for it verbatim, or from a fixed starting phrase.
+    ('text_above',
+     r'\b(repeat|print|output|echo|reproduce|copy)\s+(everything|all|'
+     r'the\s+(text|words|content|instructions?))\s+(above|before)\b.{0,60}'
+     r'\b(starting\s+with|verbatim|word\s+for\s+word|you\s+were\s+(given|told))|'
+     r'\b(everything|all\s+the\s+text)\s+(before|above)\s+(this|my)\s+'
+     r'(conversation|first\s+message)',
+     'critical', True),
+
+    # Fake role and chat-template markers
+    ('role_tags', r'<\s*/?\s*(system|assistant|developer|human)\s*>', 'high', True),
+    ('chat_template_tokens',
+     r'<\|\s*(im_start|im_end|system|endoftext|eot_id|start_header_id|end_header_id)'
+     r'\s*\|>|\[/?INST\]|<<\s*/?SYS\s*>>',
+     'critical', True),
+    ('role_prefix',
+     r'^\s*#{0,3}\s*(system|developer)\s*(prompt|message|instructions?)?\s*:\s*'
+     r'(you\s+(are|must|will)|ignore|disregard|forget|from\s+now|new\s+instructions)',
+     'high', True),
+    ('context_markers',
+     r'\[\s*/?\s*(end|context|conversation|system)\s*\]|'
+     r'\b(end\s+of\s+(the\s+)?(system\s+)?(prompt|instructions)|'
+     r'begin\s+new\s+(instructions|prompt|session))\b',
+     'high', True),
+
+    # Jailbreak personas and modes
+    ('dan_persona',
+     # Case-sensitive (see CASE_SENSITIVE): "you are Dan" is a person.
+     r'\b(?i:you\s+are|act\s+as|become|pretend\s+to\s+be|you\'re)\s+(?i:now\s+)?DAN\b|'
+     r'(?i:\bdo\s+anything\s+now\b.{0,80}\b(mode|jailbreak|no\s+(restrictions|rules|limits)))',
+     'critical', True),
+    ('dan_mode', r'\bDAN\s+(mode|prompt|jailbreak)\b', 'critical', True),
+    ('special_mode',
+     r'\b(developer|god|sudo|jailbreak|jailbroken|unrestricted|unfiltered)\s+mode\s+'
+     # Not "on": "enable developer mode on android" is a phone question.
+     r'(is\s+)?(now\s+)?(enabled|activated|engaged)\b|'
+     r'\b(you\s+are|you\'re)\s+(now\s+)?(in\s+)?(developer|god|sudo|jailbreak|'
+     r'unrestricted|unfiltered)\s+mode\b|'
+     r'\b(enable|activate|enter|switch\s+(on|to)|turn\s+on)\s+(god|sudo|jailbreak|'
+     r'unrestricted|unfiltered)\s+mode\b',
+     'critical', True),
+    ('unrestricted_persona',
+     r'\b(you\s+(are|will\s+be)|you\'re|act\s+as|pretend\s+(to\s+be|you\s+are)|'
+     r'respond\s+as|behave\s+as|roleplay\s+as)\s+(now\s+)?(an?\s+)?'
+     r'(unrestricted|unfiltered|uncensored|jailbroken|amoral|unaligned|unethical)\b',
+     'critical', True),
+    ('no_restrictions',
+     r'\byou\s+(now\s+)?(have|with)\s+no\s+(restrictions|filters|guidelines|rules|limits|'
+     r'limitations|censorship|ethics|morals|boundaries)\b|'
+     r'\bpretend\s+(that\s+)?(you\s+)?(have|there\s+are)\s+no\s+(rules|restrictions|'
+     r'guidelines|filters|limits)\b|'
+     r'\b(without|ignoring|free\s+(of|from)|bypass(ing)?)\s+(all\s+|any\s+)?(of\s+)?your\s+'
+     r'(restrictions|filters|guidelines|safety|content\s+polic(y|ies)|rules|'
+     r'programming|training|alignment)\b',
+     'critical', True),
+    ('jailbreak_request',
+     r'\bjailbreak\s+(yourself|(the|this|your)\s+(model|ai|assistant|chatbot|llm|'
+     r'safety|filters?|guardrails))\b',
+     'critical', True),
+    ('refusal_suppression',
+     r'\byou\s+(must|will|should|can|may)\s+(never|not)\s+refuse\b|'
+     r'\bnever\s+refuse\s+(any|a|my)\s+(request|question|prompt|instruction)',
+     'high', True),
+
+    # Logged only: a word, not an attack
+    ('jailbreak_keyword', r'\b(jailbreak|jailbroken|bypass)\b', 'medium', False),
+    ('pretend_role',
+     r'(pretend|act|behave)\s+(you\s+are|as\s+if|like)\s+(a\s+)?(different|new|another)',
+     'medium', False),
+    ('base64_payload', r'base64[:\s]+[A-Za-z0-9+/=]{20,}', 'medium', False),
+    ('unicode_escape', r'\\u[0-9a-fA-F]{4}', 'low', False),
+    ('separator_injection', r'-{5,}|={5,}|\*{5,}', 'low', False),
+]
+
+#: Patterns whose capitals carry meaning: `DAN` is the jailbreak, `Dan` a name.
+CASE_SENSITIVE = frozenset({'dan_persona', 'dan_mode'})
+
+#: Letters-only signatures, checked against the message with every space,
+#: dot and dash removed — the view that sees `i-g-n-o-r-e a.l.l p r e v i o u s`.
+#: Only long, specific phrases: squashing joins words, so a short signature
+#: would match across the boundary of two innocent ones.
+SQUASHED_PATTERNS = [
+    ('instruction_override',
+     r'(ignore|disregard|forget)(all|any|the|your|my)*(previous|prior|above|earlier|'
+     r'preceding|original|initial)(instructions?|prompts?|rules|directions|guidelines)'),
+    ('system_prompt_reveal',
+     r'(reveal|show|print|repeat|display|leak|dump|output)(me)?(your(system|hidden|secret|'
+     r'initial|original)|the(hidden|secret))(prompt|instructions)'),
+    ('special_mode', r'(developer|jailbreak|god)mode(enabled|activated)'),
+    ('no_restrictions', r'youhavenorestrictions|withoutyourrestrictions'),
+]
+
 
 class InputSanitizer:
     """
-    Sanitize user inputs before LLM processing.
-    
-    Detects and handles:
-    - Prompt injection attempts
-    - System prompt manipulation
-    - Role impersonation
-    - Encoding-based attacks
-    
+    Refuse user messages shaped like an attack on the model.
+
+    Returns a result whose `is_safe` is False when any blocking pattern matched
+    in any view of the text. The text itself is never changed:
+    `sanitized_text` is the input, so a caller that passes it on sends exactly
+    what the person typed.
+
     Example:
-        >>> sanitizer = InputSanitizer()
-        >>> result = sanitizer.sanitize("Ignore previous instructions")
-        >>> result.is_safe
+        >>> InputSanitizer().sanitize("Ignore previous instructions").is_safe
         False
     """
-    
-    # Patterns that indicate prompt injection attempts
-    # Format: (name, pattern, severity, block_entirely)
-    BLOCKED_PATTERNS = [
-        # Direct instruction overrides
-        ('instruction_override', r'ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?)', 'high', True),
-        ('forget_instructions', r'forget\s+(all\s+)?(previous|prior|your)\s+(instructions?|prompts?|training)', 'high', True),
-        ('new_instructions', r'your\s+new\s+(instructions?|rules?|prompt)\s*(are|is|:)', 'high', True),
-        ('override_rules', r'override\s+(your|all|the)?\s*(rules?|restrictions?|limitations?)', 'high', True),
-        
-        # System prompt extraction
-        ('system_prompt_reveal', r'(show|reveal|display|print|output|tell\s+me)\s+(your|the)?\s*system\s*prompt', 'critical', True),
-        ('initial_prompt', r'(what|show|reveal)\s+(is|are|was)?\s*(your|the)?\s*initial\s*(prompt|instructions?)', 'critical', True),
-        ('repeat_instructions', r'repeat\s+(your|the|all)?\s*(system|initial|original)?\s*(prompt|instructions?)', 'critical', True),
-        
-        # Role/identity manipulation
-        ('role_tags', r'<\/?(system|user|assistant|human|ai|bot)>', 'high', True),
-        ('role_prefix', r'^(system|assistant|human|ai)\s*:', 'high', True),
-        ('pretend_role', r'(pretend|act|behave)\s+(you\s+are|as\s+if|like)\s+(a\s+)?(different|new|another)', 'medium', False),
-        
-        # Jailbreak attempts
-        ('dan_jailbreak', r'\bDAN\b.*\b(mode|enabled?|activated?)\b', 'critical', True),
-        ('developer_mode', r'(developer|debug|admin)\s+mode\s+(enabled?|on|activated?)', 'critical', True),
-        ('jailbreak_keyword', r'\b(jailbreak|jailbroken|bypass)\b', 'high', True),
-        
-        # Encoding attacks
-        ('base64_injection', r'base64[:\s]+[A-Za-z0-9+/=]{20,}', 'medium', False),
-        ('unicode_escape', r'\\u[0-9a-fA-F]{4}', 'low', False),
-        
-        # Context manipulation
-        ('context_end', r'\[\/?(end|context|conversation)\]', 'medium', True),
-        ('separator_injection', r'-{5,}|={5,}|\*{5,}', 'low', False),
-    ]
-    
-    # Maximum allowed input lengths
-    MAX_INPUT_LENGTH = 50000  # 50k characters
-    MAX_MESSAGE_LENGTH = 10000  # 10k for chat messages
-    
+
+    BLOCKED_PATTERNS = BLOCKED_PATTERNS
+    MAX_INPUT_LENGTH = MAX_SCAN_LENGTH
+
     def __init__(
         self,
         max_length: Optional[int] = None,
@@ -103,125 +293,97 @@ class InputSanitizer:
         strict_mode: bool = False
     ):
         """
-        Initialize sanitizer.
-        
         Args:
-            max_length: Override default max input length
-            additional_patterns: Extra patterns to check
-            strict_mode: If True, block on any violation
+            max_length: Override how much of the text is scanned
+            additional_patterns: Extra (name, pattern, severity, blocks) tuples
+            strict_mode: If True, logged-only patterns block too
         """
         self.max_length = max_length or self.MAX_INPUT_LENGTH
         self.strict_mode = strict_mode
-        
-        self.patterns = self.BLOCKED_PATTERNS.copy()
-        if additional_patterns:
-            self.patterns.extend(additional_patterns)
-        
-        # Compile regex patterns for performance
+
+        patterns = list(self.BLOCKED_PATTERNS) + list(additional_patterns or [])
         self._compiled_patterns = [
-            (name, re.compile(pattern, re.IGNORECASE | re.MULTILINE), severity, block)
-            for name, pattern, severity, block in self.patterns
+            (name, re.compile(pattern, re.MULTILINE if name in CASE_SENSITIVE else _I),
+             severity, block)
+            for name, pattern, severity, block in patterns
         ]
-    
+        self._squashed = [(name, re.compile(p)) for name, p in SQUASHED_PATTERNS]
+
+    def _views(self, text: str) -> Iterator[tuple[str, str]]:
+        """(label, text) for every way of reading `text`, without repeats."""
+        seen: set[str] = set()
+
+        def fresh(view: str) -> bool:
+            if view in seen:
+                return False
+            seen.add(view)
+            return True
+
+        normal = _normalise(text)
+        for label, view in (('plain', text), ('normalised', normal),
+                            ('leetspeak', normal.translate(_LEET))):
+            if fresh(view):
+                yield label, view
+        for decoded in _decoded_blobs(normal):
+            decoded = _normalise(decoded)
+            if fresh(decoded):
+                yield 'base64', decoded
+
     def sanitize(self, text: str) -> SanitizationResult:
-        """
-        Sanitize input text.
-        
-        Args:
-            text: Raw user input
-            
-        Returns:
-            SanitizationResult with sanitized text and violations
-        """
+        """Check `text`. The result's `sanitized_text` is always `text`."""
         if not text:
-            return SanitizationResult(
-                original_text='',
-                sanitized_text='',
-                is_safe=True
-            )
-        
-        violations = []
-        sanitized = text
-        is_safe = True
-        
-        # Check length
+            return SanitizationResult(original_text='', sanitized_text='', is_safe=True)
+
+        violations: list[SecurityViolation] = []
+        found: set[str] = set()
+        scanned = text[:self.max_length]
         if len(text) > self.max_length:
             violations.append(SecurityViolation(
-                pattern_name='input_too_long',
-                matched_text=f'Length: {len(text)} > {self.max_length}',
-                severity='medium',
-                action_taken='truncated'
+                pattern_name='input_too_long', matched_text=f'{len(text)} chars',
+                severity='low', action_taken='logged',
             ))
-            sanitized = text[:self.max_length]
-            is_safe = False
-        
-        # Check patterns
-        for name, pattern, severity, should_block in self._compiled_patterns:
-            matches = pattern.findall(sanitized)
-            if matches:
-                matched_text = matches[0] if isinstance(matches[0], str) else str(matches[0])
-                violations.append(SecurityViolation(
-                    pattern_name=name,
-                    matched_text=matched_text[:100],  # Limit length
-                    severity=severity,
-                    action_taken='blocked' if should_block else 'logged'
-                ))
-                
-                if should_block or self.strict_mode:
-                    # Remove the matched content
-                    sanitized = pattern.sub('[BLOCKED]', sanitized)
-                    is_safe = False
-                elif severity in ('high', 'critical'):
-                    is_safe = False
-        
-        # Escape HTML to prevent XSS
-        sanitized = self._escape_html(sanitized)
-        
-        # Log violations
+
+        def add(name: str, matched: str, severity: str, block: bool, label: str):
+            key = name if label == 'plain' else f'{name}+{label}'
+            if name in found:
+                return
+            found.add(name)
+            blocks = block or self.strict_mode
+            violations.append(SecurityViolation(
+                pattern_name=key, matched_text=matched[:100],
+                severity=severity, action_taken='blocked' if blocks else 'logged',
+            ))
+
+        for label, view in self._views(scanned):
+            for name, pattern, severity, block in self._compiled_patterns:
+                # Obfuscation only matters for patterns that block: a disguised
+                # "bypass" is still just a word.
+                if label != 'plain' and not block:
+                    continue
+                match = pattern.search(view)
+                if match:
+                    add(name, match.group(0), severity, block, label)
+
+        squashed = re.sub(r'[^a-z]', '', _normalise(scanned).translate(_LEET).lower())
+        for name, pattern in self._squashed:
+            match = pattern.search(squashed)
+            if match:
+                add(name, match.group(0), 'critical', True, 'squashed')
+
+        is_safe = not any(v.action_taken == 'blocked' for v in violations)
         if violations:
-            self._log_violations(text, violations)
-        
+            self._log_violations(violations)
         return SanitizationResult(
-            original_text=text,
-            sanitized_text=sanitized,
-            is_safe=is_safe,
-            violations=violations
+            original_text=text, sanitized_text=text,
+            is_safe=is_safe, violations=violations,
         )
-    
+
     def is_safe(self, text: str) -> bool:
-        """Quick check if text is safe without full sanitization."""
-        for name, pattern, severity, should_block in self._compiled_patterns:
-            if should_block and pattern.search(text):
-                return False
-        return len(text) <= self.max_length
-    
-    def _escape_html(self, text: str) -> str:
-        """Escape HTML special characters while preserving certain tags."""
-        if not text:
-            return text
-        
-        if '<' not in text and '>' not in text:
-            return text
+        """Whether `text` would pass."""
+        return self.sanitize(text).is_safe
 
-        # Protect <code>, <pre>, <br> (and their variations) while escaping other < and >
-        # Use a single regex with alternation: protected tags are captured in group 1,
-        # while bare < and > are captured in group 2.
-        protected_tag_regex = r'(</?(?:code|pre|br)\s*/?>)|([<>])'
-        
-        def replace(match):
-            # If group 1 matched, it's one of our protected tags - keep it
-            if match.group(1):
-                return match.group(1)
-            # Group 2 matched a raw bracket to escape
-            char = match.group(2)
-            if char == '<':
-                return '&lt;'
-            return '&gt;'
-
-        return re.sub(protected_tag_regex, replace, text, flags=re.IGNORECASE)
-    
-    def _log_violations(self, original: str, violations: list[SecurityViolation]):
-        """Log security violations for audit."""
+    def _log_violations(self, violations: list[SecurityViolation]):
+        """Log pattern names only — never the message, which may be private."""
         for v in violations:
             log_level = {
                 'low': logging.INFO,
@@ -229,7 +391,6 @@ class InputSanitizer:
                 'high': logging.WARNING,
                 'critical': logging.ERROR,
             }.get(v.severity, logging.INFO)
-            
             logger.log(
                 log_level,
                 f"Security violation detected: {v.pattern_name} "
@@ -249,17 +410,6 @@ def get_sanitizer() -> InputSanitizer:
     return _default_sanitizer
 
 
-def sanitize_input(text: str) -> tuple[str, bool]:
-    """
-    Convenience function to sanitize input.
-    
-    Returns:
-        Tuple of (sanitized_text, is_safe)
-    """
-    result = get_sanitizer().sanitize(text)
-    return result.sanitized_text, result.is_safe
-
-
 class SensitiveDataFilter(logging.Filter):
     """
     Logging filter that redacts sensitive data from log records.
@@ -272,7 +422,6 @@ class SensitiveDataFilter(logging.Filter):
             sanitizer = get_log_sanitizer()
             record.msg = sanitizer.sanitize(record.msg, redact_pii=True)
         return True
-
 
 
 # ============================================================

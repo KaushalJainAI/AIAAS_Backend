@@ -18,12 +18,17 @@ agent holding grants it had itself been refused and then delegate to it, which
 turns every grant into a suggestion. The depth and budget bounds on delegation
 would still hold; the permission bounds would not.
 
-**They are `sensitive`, so they pause for approval.** The user sees the whole
-proposed configuration — its grants included — in the approval prompt before
-anything is written, which is what makes "the model chose the capabilities"
-acceptable: it proposed them, a person granted them. This reuses the existing
-gate rather than inventing a confirmation flow, and it means an agent created
-this way went through the same consent step as one built by hand.
+**They run without asking (user decision, 2026-09-25).** They were
+`sensitive`, so every create and edit stopped on an approval card. The product
+is now a hierarchy — the human is the boss, the chat orchestrator the manager,
+subagents the workhorses — and staffing the team is the manager's job, so the
+orchestrator creates and reshapes agents on its own. What still bounds it:
+every write goes through `AgentSerializer` (ownership of knowledge bases,
+connections and delegation targets, schedule ⇄ `allowUnattended` validated as
+a pair); a worker's *actions* still meet its own autonomy and approval gates at
+run time, answered through `answer_subagent`; and the chat-only wall above
+still keeps agent runs from minting agents. `effect="reversible"`: an edit is
+a new revision and a created agent can be deleted.
 """
 from __future__ import annotations
 
@@ -275,12 +280,12 @@ async def _run(context: Dict, config: dict, agent_id: int | None) -> str:
             "work you can simply do now. Ask what it should do, what it needs "
             "access to, and how much it should act on its own before calling "
             "this; a vague brief makes a useless agent. Grant only the "
-            "capabilities the brief needs. The user is shown the whole "
-            "configuration and must approve it before anything is saved."
+            "capabilities the brief needs. It is saved straight away; tell the "
+            "user what you created and what it can reach."
         ),
         "parameters": _config_schema(required=["name", "brief"]),
     },
-}, sensitive=True, effect="reversible")
+}, effect="reversible")
 async def create_agent(args: Dict, context: Dict) -> str:
     return await _run(context, _clean(args), None)
 
@@ -309,7 +314,7 @@ async def create_agent(args: Dict, context: Dict) -> str:
             "additionalProperties": False,
         },
     },
-}, sensitive=True, effect="reversible")
+}, effect="reversible")
 async def update_agent(args: Dict, context: Dict) -> str:
     agent_id = args.get('agent_id')
     try:

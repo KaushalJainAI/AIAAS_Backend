@@ -11,11 +11,18 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 @database_sync_to_async
-def get_user(user_id):
+def get_user(user_id, payload=None):
+    from core.auth.revocation import is_revoked
+
     try:
-        return User.objects.get(id=user_id)
+        user = User.objects.get(id=user_id)
     except User.DoesNotExist:
         return AnonymousUser()
+    # The same cutoff the REST door checks: a socket must not be the one
+    # place a signed-out token still works.
+    if payload is not None and is_revoked(user.pk, payload):
+        return AnonymousUser()
+    return user
 
 class JWTAuthMiddleware:
     """
@@ -52,7 +59,7 @@ class JWTAuthMiddleware:
                 access_token = AccessToken(token)
                 user_id = access_token.payload.get("user_id")
                 # Attach user to scope
-                scope["user"] = await get_user(user_id)
+                scope["user"] = await get_user(user_id, access_token.payload)
                 logger.info(f"WebSocket authenticated user: {scope['user']}")
             except Exception as e:
                 logger.warning(f"WebSocket JWT authentication failed: {e}")

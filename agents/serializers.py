@@ -20,12 +20,13 @@ class HITLRequestSerializer(serializers.ModelSerializer):
     execution_id = serializers.SerializerMethodField()
     workflow_name = serializers.SerializerMethodField()
     detail = serializers.SerializerMethodField()
+    question = serializers.SerializerMethodField()
 
     class Meta:
         model = HITLRequest
         fields = [
             'request_id', 'request_type', 'type', 'title', 'message', 'options',
-            'detail', 'node_id', 'execution_id', 'workflow_name',
+            'detail', 'question', 'node_id', 'execution_id', 'workflow_name',
             'timeout_seconds', 'created_at', 'status', 'response', 'responded_at'
         ]
         read_only_fields = ['request_id', 'created_at']
@@ -40,6 +41,12 @@ class HITLRequestSerializer(serializers.ModelSerializer):
         """
         detail = (obj.context_data or {}).get('detail')
         return detail if isinstance(detail, dict) and detail else None
+
+    def get_question(self, obj):
+        """An `ask_user` question's shape (kind, options, bounds, unit), so the
+        Inbox draws the same card as the chat. None on every other row."""
+        question = (obj.context_data or {}).get('question')
+        return question if isinstance(question, dict) and question else None
 
     def get_execution_id(self, obj):
         return str(obj.execution.execution_id) if obj.execution else None

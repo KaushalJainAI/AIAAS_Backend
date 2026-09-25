@@ -19,7 +19,7 @@ from django.core.mail import send_mail
 from decimal import Decimal
 from datetime import timedelta
 import logging
-import random
+import secrets
 import threading
 import uuid
 
@@ -107,8 +107,54 @@ def _send_password_otp_email(user, otp_code, purpose, recipient=''):
     threading.Thread(target=send, daemon=True).start()
 
 
+def _free_username(User, base: str) -> str:
+    """`base`, or `base<n>` for the smallest free n -- in one query (P3).
+
+    The old loop issued an `exists()` per collision, so the tenth "john"
+    cost ten round trips to sign in.
+    """
+    base = base or 'user'
+    taken = set(User.objects.filter(username__startswith=base)
+                .values_list('username', flat=True))
+    if base not in taken:
+        return base
+    n = 1
+    while f'{base}{n}' in taken:
+        n += 1
+    return f'{base}{n}'
+
+
+def _claim_verified_email(user, profile) -> None:
+    """Record that this account's owner just proved they hold its inbox.
+
+    Signup never verifies an address, so a password account whose email was
+    never proven may have been registered by someone who is not its owner --
+    who would then be sitting inside the owner's account the moment the owner
+    signs in with Google (S1, pre-account takeover). Proving the inbox
+    therefore evicts whoever set that password: it is made unusable and every
+    earlier token revoked. The real owner can set a new one through the
+    forgot-password flow, which reaches the same inbox.
+    """
+    from core.auth.revocation import revoke
+
+    if profile.email_verified_at is None and user.has_usable_password():
+        user.set_unusable_password()
+        user.save(update_fields=['password'])
+        revoke(user)
+    if profile.email_verified_at is None:
+        profile.email_verified_at = django_timezone.now()
+        profile.save(update_fields=['email_verified_at'])
+
+
+def _mark_email_verified(user) -> None:
+    UserProfile.objects.update_or_create(
+        user=user, defaults={'email_verified_at': django_timezone.now()})
+
+
 def _create_password_otp(user, purpose, target_email=''):
-    otp_code = f"{random.randint(100000, 999999)}"
+    # `secrets`, not `random`: Mersenne Twister output is predictable from
+    # enough earlier outputs, and these codes are what reset a password (S7).
+    otp_code = f"{100000 + secrets.randbelow(900000)}"
     PasswordOTP.objects.filter(user=user, purpose=purpose, is_used=False).update(is_used=True)
     PasswordOTP.objects.filter(
         user=user,
@@ -239,39 +285,30 @@ class GoogleLoginView(APIView):
         except Exception:
             return Response({'error': 'Failed to fetch user info'}, status=status.HTTP_400_BAD_REQUEST)
             
-        email = user_info.get('email')
+        email = (user_info.get('email') or '').strip()
         if not email:
             return Response({'error': 'No email found in Google account'}, status=status.HTTP_400_BAD_REQUEST)
-            
-        # 3. Find or Create User
+        # Linking by email is only sound when Google vouches for the address;
+        # an unverified one is just a string someone typed (S1).
+        if user_info.get('email_verified') is not True:
+            return Response({'error': 'Your Google account email is not verified.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # 3. Find or Create User -- case-insensitively, as signup checks.
         User = get_user_model()
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
-            # Create new user
-            username = email.split('@')[0]
-            # Ensure unique username
-            base_username = username
-            counter = 1
-            while User.objects.filter(username=username).exists():
-                username = f"{base_username}{counter}"
-                counter += 1
-                
+        user = User.objects.filter(email__iexact=email).order_by('pk').first()
+        if user is None:
             user = User.objects.create_user(
-                username=username,
+                username=_free_username(User, email.split('@')[0]),
                 email=email,
                 first_name=user_info.get('given_name', ''),
                 last_name=user_info.get('family_name', '')
             )
-            # Create profile
-            UserProfile.objects.create(user=user)
-            
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        _claim_verified_email(user, profile)
+
         # 4. Generate JWT
         refresh = RefreshToken.for_user(user)
-        try:
-             profile = user.profile
-        except UserProfile.DoesNotExist:
-             profile = UserProfile.objects.create(user=user)
 
         return Response({
             'access': str(refresh.access_token),
@@ -343,9 +380,14 @@ class ChangePasswordView(APIView):
         user.save()
         otp_record.verification_token = None
         otp_record.save(update_fields=['verification_token'])
-        
+        # The OTP went to the account's inbox, so the email is now proven; and
+        # every other session ends (S2). This tab gets a fresh pair.
+        _mark_email_verified(user)
+        from core.auth.revocation import fresh_pair, revoke
+
+        revoke(user)
         return Response(
-            {'detail': 'Password updated successfully'},
+            {'detail': 'Password updated successfully', **fresh_pair(user)},
             status=status.HTTP_200_OK
         )
 
@@ -465,7 +507,14 @@ class EmailChangeConfirmView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
         request.user.email = email
         request.user.save(update_fields=['email'])
-        return Response({'detail': 'Email address updated.', 'email': email},
+        # The code reached the new address; and the address is what sign-in and
+        # reset key on, so every other session ends with the old one (S2).
+        _mark_email_verified(request.user)
+        from core.auth.revocation import fresh_pair, revoke
+
+        revoke(request.user)
+        return Response({'detail': 'Email address updated.', 'email': email,
+                         **fresh_pair(request.user)},
                         status=status.HTTP_200_OK)
 
 
@@ -551,6 +600,12 @@ class PasswordResetConfirmView(APIView):
         user.save()
         otp_record.verification_token = None
         otp_record.save(update_fields=['verification_token'])
+        # A reset is how someone locks out whoever has their account, so it
+        # must end every session that exists (S2) -- and the OTP proved the inbox.
+        _mark_email_verified(user)
+        from core.auth.revocation import revoke
+
+        revoke(user)
         return Response({'detail': 'Password has been reset successfully. You can now login.'}, status=status.HTTP_200_OK)
 
 
@@ -583,7 +638,7 @@ class APIKeyViewSet(viewsets.ModelViewSet):
         self.perform_create(serializer)
         
         return Response({
-            'api_key': serializer.instance.key,  # Show full key only on creation
+            'api_key': serializer.instance.plaintext,  # only the hash is stored (S6)
             'message': 'API key created. Save this key - it will not be shown again.',
             'data': APIKeySerializer(serializer.instance).data
         }, status=status.HTTP_201_CREATED)
@@ -604,12 +659,11 @@ class APIKeyRotateView(APIView):
         
         # Generate new key
         old_prefix = api_key.key_prefix
-        api_key.key = APIKey.generate_key()
-        api_key.key_prefix = api_key.key[:8]
+        new_key = api_key.set_new_key()
         api_key.save()
         
         return Response({
-            'new_key': api_key.key,
+            'new_key': new_key,
             'old_prefix': old_prefix,
             'message': 'API key rotated. Save this key - it will not be shown again.'
         }, status=status.HTTP_200_OK)

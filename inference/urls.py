@@ -18,6 +18,7 @@ urlpatterns = [
     path('trash/empty/', folder_views.trash_empty, name='trash_empty'),
 
     # Documents — KB is internal (one implicit Default KB per user, no CRUD views)
+    path('documents/search/', views.document_search, name='document_search'),
     path('documents/', views.document_list, name='document_list'),
     path('documents/new/', views.document_new, name='document_new'),
     path('documents/<int:document_id>/', views.document_detail, name='document_detail'),
@@ -26,6 +27,19 @@ urlpatterns = [
     path('documents/<int:document_id>/content/', views.document_content, name='document_content'),
     path('documents/<int:document_id>/office/', views.document_office, name='document_office'),
     path('documents/<int:document_id>/copy/', views.document_copy, name='document_copy'),
+    path('documents/<int:document_id>/import/', views.document_import, name='document_import'),
+    path('documents/<int:document_id>/asset/', views.document_asset, name='document_asset'),
+    path('documents/<int:document_id>/images/', views.document_images, name='document_images'),
+    path('documents/<int:document_id>/preview-image/', views.document_preview_image,
+         name='document_preview_image'),
+    path('documents/<int:document_id>/archive/', views.document_archive, name='document_archive'),
+    path('documents/<int:document_id>/draft/', views.document_draft, name='document_draft'),
+    path('documents/<int:document_id>/export/', views.document_export, name='document_export'),
+    path('documents/<int:document_id>/versions/', views.document_versions, name='document_versions'),
+    path('documents/<int:document_id>/versions/<int:version_id>/download/',
+         views.document_version_download, name='document_version_download'),
+    path('documents/<int:document_id>/versions/<int:version_id>/restore/',
+         views.document_version_restore, name='document_version_restore'),
 
     # Dashboards — live tiles bound to sources (see dashboard_views.py).
     path('dashboards/', dashboard_views.dashboard_list, name='dashboard_list'),

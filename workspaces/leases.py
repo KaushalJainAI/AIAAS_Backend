@@ -163,17 +163,6 @@ def live_leases(project_id: int):
     return list(CodeLease.objects.filter(project_id=project_id).order_by('acquired_at'))
 
 
-def find_conflict(project_id: int, pattern: str, holder_id=None):
-    """The first live lease overlapping `pattern` held by someone else, or None."""
-    pattern = normalize_pattern(pattern)
-    for lease in live_leases(project_id):
-        if holder_id is not None and lease.holder_id == holder_id:
-            continue
-        if overlaps(lease.pattern, pattern):
-            return lease
-    return None
-
-
 def acquire(project, holder, patterns, holder_label: str = '', task_id: str = ''):
     """Lease every pattern in `patterns` atomically for `holder`.
 

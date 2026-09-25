@@ -144,24 +144,6 @@ class CompileThrottle(TierBasedThrottle):
     }
 
 
-class ExecuteThrottle(TierBasedThrottle):
-    """
-    Rate limiting for workflow execution endpoint.
-    
-    Limits:
-        - Free: 5 executions/minute
-        - Pro: 50 executions/minute
-        - Enterprise: 200 executions/minute
-    """
-    
-    scope = 'execute'
-    tier_rates = {
-        'free': '5/minute',
-        'pro': '50/minute',
-        'enterprise': '200/minute',
-    }
-
-
 class StreamThrottle(TierBasedThrottle):
     """
     Rate limiting for streaming connections.
@@ -240,24 +222,6 @@ class StreamThrottle(TierBasedThrottle):
                 cache.decr(cache_key)
         except ValueError:
             pass
-
-
-class ChatThrottle(TierBasedThrottle):
-    """
-    Rate limiting for AI chat messages.
-    
-    Limits:
-        - Free: 20 messages/hour
-        - Pro: 200 messages/hour
-        - Enterprise: 1000 messages/hour
-    """
-    
-    scope = 'chat'
-    tier_rates = {
-        'free': '20/hour',
-        'pro': '200/hour',
-        'enterprise': '1000/hour',
-    }
 
 
 class LoginThrottle(TestClientExemptMixin, SimpleRateThrottle):

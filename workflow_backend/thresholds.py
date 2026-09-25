@@ -157,6 +157,22 @@ AGENT_FILE_WRITE_CHARS = 200_000
 #: keep real output far below this; it is the backstop for the one input they
 #: do not bound, embedded images.
 AGENT_FILE_BINARY_BYTES = 10 * 1024 * 1024
+#: Versions kept per file (inference/versions.py). Older ones are deleted,
+#: blobs included, when a new one is written.
+FILE_VERSIONS_KEPT = 25
+#: Saves from the same source inside this window make one version, not many:
+#: an autosaving app would otherwise mint a version every two seconds and
+#: push the useful ones out of the cap within a minute.
+FILE_VERSION_COALESCE_SECONDS = 300
+#: A file bigger than this is overwritten without a version. Versions are for
+#: documents people edit; a 200 MB video replaced by another is not one.
+FILE_VERSION_MAX_BYTES = 25 * 1024 * 1024
+#: Quiet after an office draft save before the background task rebuilds the
+#: real bytes (`inference/drafts.py`). Rebuilding a `.docx` / `.pptx` / `.xlsx`
+#: on every autosave is too heavy for the 913 MB box; reads that need the
+#: bytes (download, export, copy, the office grid, agent reads) render sooner
+#: through `ensure_rendered`.
+DRAFT_RENDER_QUIET_SECONDS = 30
 #: Entries (folders + documents) one `list_files` call returns.
 AGENT_FILE_LIST_LIMIT = 200
 #: Root-level folder under which `fileAccess='scoped'` agents get their homes.
@@ -180,8 +196,18 @@ MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # 50MB limit for general uploads
 #: usually wide rather than deep in the part that describes it, and the file
 #: itself stays downloadable for anything past this.
 XLSX_EXTRACT_ROWS = 500
-DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100MB for request payload memory
-FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100MB for file upload memory
+#: A non-file request body (JSON, form fields) Django will hold in memory.
+#: Was 100 MB, so every unauthenticated route -- login, guest chat, the
+#: webhooks -- would hold 100 MB per request on a 913 MB box; the only cap
+#: in front of it was nginx's accidental 1 MB default (N5). File parts of a
+#: multipart upload do not count against this; MAX_DOCUMENT_SIZE bounds them.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024
+#: Above this an uploaded file spools to a temp file instead of RAM.
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+#: Total *uncompressed* size an Office file (a zip) may declare before we
+#: open it. A 1 MB .docx can inflate to a gigabyte of XML, and the extractors
+#: read whole parts into memory (N2). Real documents sit far below this.
+ZIP_UNCOMPRESSED_LIMIT = 200 * 1024 * 1024
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000    # Increase field limit for complex workflows
 
 # ==================== Subprocess & Internal Timeouts ====================

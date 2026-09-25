@@ -71,13 +71,13 @@ class CollectIntentsTests(SimpleTestCase):
         self.assertEqual([i["kind"] for i in intents], ["question", "approval"])
         self.assertEqual(intents[0]["question"], "Which customer?")
 
-    def test_ask_user_is_an_agent_tool_and_not_a_chat_one(self):
+    def test_ask_user_reaches_agents_and_chat(self):
+        """Agents always; chat too since 2026-09-25, where it pauses the turn
+        on a question card instead of recording and moving on."""
         from chat import tools
 
         self.assertIn("ask_user", ALWAYS_AVAILABLE)
-        self.assertEqual(tools.get("ask_user").requires, "agent_run")
-        self.assertFalse(async_to_sync(tools._requirement_met)(
-            "agent_run", 1, True, None))
+        self.assertIsNone(tools.get("ask_user").requires)
 
     def test_ask_user_never_blocks(self):
         from chat.tools.ask import ask_user

@@ -245,20 +245,6 @@ class ReasoningSplitter:
         return [("thinking" if self.in_thinking else "content", text)]
 
 
-def split_think_tags(text: str, in_thinking: bool) -> tuple[list[tuple[str, str]], bool]:
-    """
-    Stateless view of `ReasoningSplitter` for callers that carry only a bool.
-
-    Holds nothing back — a caller with nowhere to keep a partial tag is better
-    served by emitting the text than by losing it — so torn tags are the one
-    improvement it cannot offer. Prefer `ReasoningSplitter` in new code.
-    """
-    splitter = ReasoningSplitter(in_thinking)
-    events = splitter.feed(text)
-    events.extend(splitter.flush())
-    return events, splitter.in_thinking
-
-
 def _stream_error_message(error: Any) -> str:
     """The readable sentence out of an in-band stream error frame."""
     if isinstance(error, str):

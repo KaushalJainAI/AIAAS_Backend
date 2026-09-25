@@ -95,9 +95,3 @@ class AwarenessTests(SimpleTestCase):
         # Drained once: a lead that never waits must not accumulate them.
         self.assertEqual(task_registry.drain_events('lead-thread'), [])
 
-    def test_a_user_edit_is_labelled_you(self):
-        reads.record('worker-thread', 'src/a.ts', 'abc123')
-
-        awareness.notify_user_edit(7, 'src/a.ts')
-
-        self.assertIn('(by you)', steering.take_notices('worker-thread'))

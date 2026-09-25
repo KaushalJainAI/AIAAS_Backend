@@ -11,18 +11,16 @@ the office tools render with, and the ones a user's Office would agree with.
 **Formulas are evaluated, not trusted and not skipped.** xlsxwriter writes
 formulas without cached values, so a grader reading `data_only` values sees
 nothing, and one reading the formula text learns only that *some* formula is
-there. `evaluate` computes the common subset — cell and range references (also
-across sheets), `+ - * / ^`, and SUM / AVERAGE / MIN / MAX / COUNT / ROUND /
-ABS — and anything outside it is reported as not evaluable rather than
-guessed. It evaluates a model-written string inside this process, so the
-expression is parsed to an AST and every node is checked against a closed list
-before anything runs; there are no builtins in its namespace.
+there. `evaluate` (re-exported from `inference/formulas.py`, which grew from
+what was here) computes the common subset, and anything outside it is reported
+as not evaluable rather than guessed. It evaluates a model-written string
+inside this process, so the expression is parsed to an AST and every node is
+checked against a closed list before anything runs; there are no builtins in
+its namespace.
 """
 from __future__ import annotations
 
-import ast
 import io
-import re
 import zipfile
 from typing import Any
 
@@ -127,128 +125,24 @@ def docx_table_rows(data: bytes) -> list[int]:
 
 
 # ---------------------------------------------------------------- xlsx
+#
+# The evaluator lives in `inference/formulas.py` — grown from what was here,
+# so the benchmark grades with the same values the app shows. It is re-exported
+# lazily (module `__getattr__`, below) rather than imported at module scope:
+# nothing in `eval/` imports a sibling app at module scope, so no cycle is
+# possible. `find_row` / `column_letter` stay local: they need no evaluator.
 
-class FormulaError(ValueError):
-    """The formula uses something outside the evaluable subset."""
-
-
-def workbook(data: bytes):
-    import openpyxl
-
-    return openpyxl.load_workbook(io.BytesIO(data))  # formulas, not cached values
-
-
-def has_chart(wb, sheet: str | None = None) -> bool:
-    sheets = [wb[sheet]] if sheet else wb.worksheets
-    return any(getattr(ws, '_charts', None) for ws in sheets)
+_EVALUATOR_NAMES = frozenset({
+    'FormulaError', 'workbook', 'has_chart', 'cell', 'evaluate',
+})
 
 
-_SHEET = r"(?:'(?P<qs>[^']+)'|(?P<s>[A-Za-z_][\w.]*))!"
-_CELL = r'\$?[A-Z]{1,3}\$?\d+'
-#: Both anchored on the left, so `LOG10(` is not read as a reference to `OG10`
-#: and `Data!A1` is not read a second time as a bare `A1`.
-_RANGE_RE = re.compile(rf"(?<![\w.!']){'(?:' + _SHEET + ')'}?(?P<a>{_CELL}):(?P<b>{_CELL})")
-_REF_RE = re.compile(rf"(?<![\w.!']){'(?:' + _SHEET + ')'}?(?P<a>{_CELL})(?![\w(])")
-_FUNCS = {'SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'ROUND', 'ABS'}
-_ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Name, ast.Load,
-                  ast.Constant, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub,
-                  ast.UAdd, ast.List)
+def __getattr__(name: str):
+    if name in _EVALUATOR_NAMES:
+        from inference import formulas
 
-
-def cell(wb, sheet: str, ref: str, _depth: int = 0) -> Any:
-    """A cell's value, evaluating it when it holds a formula."""
-    value = wb[sheet][ref.replace('$', '')].value
-    if isinstance(value, str) and value.startswith('='):
-        return evaluate(wb, sheet, value, _depth + 1)
-    return value
-
-
-def evaluate(wb, sheet: str, formula: str, _depth: int = 0) -> float:
-    if _depth > 30:
-        raise FormulaError('formulas refer to each other too deeply (a cycle?)')
-    body = formula.lstrip('=').strip()
-    refs: list[tuple[str, str, str | None]] = []
-
-    def hold(sheet_name: str, a: str, b: str | None) -> str:
-        refs.append((sheet_name, a, b))
-        return f'__r{len(refs) - 1}'
-
-    def _range(m):
-        return hold(m.group('qs') or m.group('s') or sheet, m.group('a'), m.group('b'))
-
-    def _ref(m):
-        return hold(m.group('qs') or m.group('s') or sheet, m.group('a'), None)
-
-    body = _RANGE_RE.sub(_range, body)
-    body = _REF_RE.sub(_ref, body)
-    body = body.replace('^', '**')
-    try:
-        tree = ast.parse(body, mode='eval')
-    except SyntaxError as exc:
-        raise FormulaError(f'cannot parse {formula!r}') from exc
-    for node in ast.walk(tree):
-        if not isinstance(node, _ALLOWED_NODES):
-            raise FormulaError(f'{formula!r} uses {type(node).__name__}, which is not evaluable here')
-        if isinstance(node, ast.Name) and not (node.id in _FUNCS or node.id.startswith('__r')):
-            raise FormulaError(f'{formula!r} uses {node.id}, which is not evaluable here')
-        if isinstance(node, ast.Call) and not (isinstance(node.func, ast.Name) and node.func.id in _FUNCS):
-            raise FormulaError(f'{formula!r} calls something outside {sorted(_FUNCS)}')
-        if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)):
-            raise FormulaError(f'{formula!r} has a non-numeric constant')
-
-    names: dict[str, Any] = {}
-    for i, (sheet_name, a, b) in enumerate(refs):
-        if sheet_name not in wb.sheetnames:
-            raise FormulaError(f'{formula!r} refers to a sheet that does not exist: {sheet_name}')
-        if b is None:
-            names[f'__r{i}'] = _num(cell(wb, sheet_name, a, _depth))
-        else:
-            ws = wb[sheet_name]
-            names[f'__r{i}'] = [_num(cell(wb, sheet_name, c.coordinate, _depth))
-                                for row in ws[a.replace('$', ''):b.replace('$', '')] for c in row]
-    names.update(_functions())
-    return float(eval(compile(tree, '<formula>', 'eval'), {'__builtins__': {}}, names))  # noqa: S307 — AST-checked above
-
-
-def _num(value: Any) -> float | None:
-    if value is None or value == '':
-        return None
-    if isinstance(value, bool):
-        return float(value)
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return float(str(value).replace(',', ''))
-    except ValueError:
-        return None
-
-
-def _flat(args) -> list[float]:
-    out: list[float] = []
-    for a in args:
-        if isinstance(a, list):
-            out.extend(v for v in a if v is not None)
-        elif a is not None:
-            out.append(a)
-    return out
-
-
-def _functions() -> dict[str, Any]:
-    def average(*a):
-        vals = _flat(a)
-        if not vals:
-            raise FormulaError('AVERAGE of no numbers')
-        return sum(vals) / len(vals)
-
-    return {
-        'SUM': lambda *a: sum(_flat(a)),
-        'AVERAGE': average,
-        'MIN': lambda *a: min(_flat(a)),
-        'MAX': lambda *a: max(_flat(a)),
-        'COUNT': lambda *a: float(len(_flat(a))),
-        'ROUND': lambda x, n=0: round(x, int(n)),
-        'ABS': abs,
-    }
+        return getattr(formulas, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
 def find_row(wb, sheet: str, match: dict[str, Any]) -> int | None:

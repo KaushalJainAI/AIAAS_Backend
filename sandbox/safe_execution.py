@@ -647,17 +647,3 @@ def get_sandbox() -> CodeSandbox:
     return _sandbox
 
 
-def safe_execute(
-    code: str,
-    context: dict | None = None,
-    *,
-    files: dict[str, bytes] | None = None,
-    collect: tuple[str, ...] | list[str] = (),
-) -> dict:
-    """Convenience wrapper around the in-process engine.
-
-    Production code should go through `sandbox.engine.arun_code`, which selects
-    the hardened sidecar when configured. This stays for the in-process path and
-    any synchronous caller.
-    """
-    return get_sandbox().execute(code, context, files=files, collect=collect)

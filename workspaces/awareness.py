@@ -83,16 +83,6 @@ def notify(project_id: int, path: str, *, by_label: str = '',
     return len(threads)
 
 
-def notify_user_edit(project_id: int, path: str) -> int:
-    """A change the *user* made in the editor: every agent that read it hears.
-
-    `by_label = "you"`, so the notice reads as the owner's own edit rather
-    than as another worker's. Called from the file/editor surface (C6); the
-    agent write path calls `notify` instead.
-    """
-    return notify(project_id, path, by_label='you')
-
-
 def _tell_lead(project_id: int, path: str, label: str,
                writer_execution_id: str) -> None:
     """The lead is always told, as a compact event rather than a notice.
