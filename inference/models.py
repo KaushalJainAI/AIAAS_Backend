@@ -885,3 +885,64 @@ class Dashboard(models.Model):
 
     def __str__(self):
         return f'{self.title} ({self.user_id})'
+
+
+class RecentFile(models.Model):
+    """A file the user opened, and where they were in it (inference/recents.py).
+
+    `updated_at` on a document says when it last *changed*; nothing said when
+    it was last *looked at*, so "Recent" could only mean "recently edited" and
+    a file you read every morning never rose to the top. One row per
+    (user, document): reopening moves it up rather than adding a second, and
+    `view_state` is the small bag an app keeps so a file reopens where it was
+    left (a PDF's page and zoom). Rows for trashed or no-longer-readable files
+    are filtered at read time, never trusted from the row.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='recent_files',
+    )
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='recent_opens')
+    #: The app it was last opened in (`docs`, `pdf`, `preview`, ...). The app
+    #: catalogue is frontend code, so this is a label, not a foreign key.
+    app = models.CharField(max_length=32, blank=True, default='')
+    opened_at = models.DateTimeField()
+    open_count = models.PositiveIntegerField(default=1)
+    view_state = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-opened_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'document'], name='inference_recent_user_document_uniq'),
+        ]
+        indexes = [models.Index(fields=['user', '-opened_at'], name='inf_recent_user_opened_idx')]
+
+    def __str__(self):
+        return f'{self.user_id} opened {self.document_id} @ {self.opened_at:%Y-%m-%d %H:%M}'
+
+
+class AppSession(models.Model):
+    """One app's open tabs for one user, so they survive the browser.
+
+    The tab strip lived only in `sessionStorage`, which is per browser tab:
+    close the window and every open file was forgotten. This row is what a new
+    window (or another device) restores from. It holds document *ids* only —
+    names are resolved at read time, so a rename or a trash never leaves a
+    stale label behind.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='app_sessions',
+    )
+    app = models.CharField(max_length=32)
+    tabs = models.JSONField(default=list, blank=True)
+    active = models.IntegerField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'app'], name='inference_appsession_user_app_uniq'),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id}:{self.app} ({len(self.tabs or [])} tabs)'

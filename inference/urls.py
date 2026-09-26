@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import dashboard_views, folder_views, page_views, views
+from . import dashboard_views, folder_views, page_views, recent_views, views
 
 app_name = 'inference'
 
@@ -16,6 +16,11 @@ urlpatterns = [
     path('trash/', folder_views.trash_list, name='trash_list'),
     path('trash/restore/', folder_views.trash_restore, name='trash_restore'),
     path('trash/empty/', folder_views.trash_empty, name='trash_empty'),
+
+    # Recently opened files and saved app tabs (inference/recents.py).
+    path('recent/', recent_views.recent_list, name='recent_list'),
+    path('recent/<int:document_id>/', recent_views.recent_detail, name='recent_detail'),
+    path('app-sessions/<slug:app>/', recent_views.app_session, name='app_session'),
 
     # Documents — KB is internal (one implicit Default KB per user, no CRUD views)
     path('documents/search/', views.document_search, name='document_search'),

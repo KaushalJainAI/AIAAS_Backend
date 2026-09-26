@@ -45,6 +45,7 @@ filters them out, so ordinary queries never see the bin.
 | `filesystem.py` | Folder lookups and moves. Unknown and not-yours ids both give 404 |
 | `vfs.py` | The AI's file system: list, read, write, edit, find, delete, inside a scope |
 | `recycle.py` | Trash, restore, and the sweep that deletes for good |
+| `recents.py` | Recently opened files (`RecentFile`, with each file's saved view position) and saved app tabs (`AppSession`); `recent_views.py` serves them |
 | `engine.py` | The vector index (HNSW) behind semantic search |
 | `backends/` | The four ways a KB can be searched: `vector`, `fulltext` (keywords), `hybrid` (both), `raw` (no search, just read) |
 | `utils.py` | Reading text out of uploaded files (PDF, Word, Excel, OpenDocument, RTF, email...) |
@@ -82,4 +83,4 @@ Search design: [`docs/RAG_STRATEGY.md`](../docs/RAG_STRATEGY.md).
 `inference/tests/`: `test_filesystem.py`, `test_vfs.py`, `test_recycle.py`,
 `test_chat_files.py`, `test_file_types.py`, `test_versions.py`,
 `test_drafts.py`, `test_sheets.py`, `test_formulas.py`, `test_import.py`,
-`test_previews.py`.
+`test_previews.py`, `test_recents.py`.
