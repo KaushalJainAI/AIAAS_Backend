@@ -516,6 +516,6 @@ class FileToolsAreGatedByAScopeTests(SimpleTestCase):
             self.assertIn("no file access", res.lower())
 
     def test_reachable_only_through_the_fileOps_grant(self):
-        from agents.agent.runtime import GRANT_TOOLS
+        from agents.grants import GRANT_TOOLS
 
         self.assertEqual(set(GRANT_TOOLS["fileOps"]), set(self.FILE_TOOLS))

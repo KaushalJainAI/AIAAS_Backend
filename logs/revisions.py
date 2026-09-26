@@ -63,10 +63,10 @@ _LABELS: dict[str, str] = {
 def snapshot(agent) -> dict[str, Any]:
     """The agent's current configuration, as the builder sees it.
 
-    Imported inside the function because `agents.views.agents` imports this
-    module — taking it at module scope would close the cycle.
+    Imported inside the function because `logs` sits below `agents`: this app
+    is loaded before the agent layer, and only this one read needs it.
     """
-    from agents.views.agents import AgentSerializer
+    from agents.config import AgentSerializer
 
     config = AgentSerializer.to_config(agent)
     # Datetimes are not JSON-serialisable and carry no configuration meaning.

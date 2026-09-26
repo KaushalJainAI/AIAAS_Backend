@@ -22,7 +22,7 @@ from agents.views.builder import (
     parse_reply,
     sanitise,
 )
-from agents.views.agents import TOOL_KEYS
+from agents.config import TOOL_KEYS
 from inference.models import KnowledgeBase
 from mcp_integration.models import MCPServer
 
@@ -114,7 +114,7 @@ class SanitiseTests(APITestCase):
     def test_every_grant_the_runtime_knows_can_be_set_and_is_described(self):
         """A tool the runtime hands out but the prompt never mentions is one the
         configuring model can only reach by guessing its name."""
-        from agents.agent.runtime import UNSERVED_GRANTS
+        from agents.grants import UNSERVED_GRANTS
 
         described = {p.split('.', 1)[1] for p in KNOBS if p.startswith('tools.')}
         self.assertEqual(described, TOOL_KEYS - UNSERVED_GRANTS)

@@ -48,7 +48,7 @@ class SubAgentRevision(models.Model):
     """One saved version of an agent's configuration.
 
     The snapshot is the flat `AgentConfig` dict that
-    `agents.views.agents.AgentSerializer.to_config` already produces for the
+    `agents.config.AgentSerializer.to_config` already produces for the
     builder. Reusing it rather than serialising the columns again means a
     revision is diffable and renderable with no second mapping that could drift
     from the one the UI reads.

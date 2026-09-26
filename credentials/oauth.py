@@ -5,6 +5,21 @@ from urllib.parse import urlencode, unquote
 
 logger = logging.getLogger(__name__)
 
+#: Origins an OAuth redirect URI may point back to. Read by both credential
+#: OAuth (`credentials/views.py`) and remote-MCP OAuth
+#: (`mcp_integration/views.py`), which is why it lives here and not in a view.
+ALLOWED_REDIRECT_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+]
+# Extend with CORS origins from settings if available
+try:
+    ALLOWED_REDIRECT_ORIGINS.extend(getattr(settings, 'CORS_ALLOWED_ORIGINS', []))
+except Exception:
+    pass
+
 class GoogleOAuthProvider:
     """
     Handles Google OAuth2 interactions using aiohttp for async support.

@@ -1,40 +1,51 @@
-# sandbox_service — the code-execution sidecar
+# `sandbox_service/`: the container that runs the AI's Python
 
-A standalone, hardened container that runs untrusted, LLM-authored Python for
-the `execute_python` tool. It is **not** part of the Django app and the backend
-never imports it — the backend talks to it over HTTP on an internal network.
+The AI writes Python code, and we have to run it without trusting it. This
+folder is a small, separate program that does that inside a locked-down
+container. It serves the `execute_python` and `run_python_on_files` tools.
 
-See `Backend/docs/SANDBOX_EXECUTION.md` for the full design and threat model.
+It is **not** part of the Django app, and the backend never imports it. The
+backend sends code to it over HTTP, on a private network that only the two of
+them share. The backend side of that conversation is `../sandbox/`.
+
+Full design and threat model: [`docs/SANDBOX_EXECUTION.md`](../docs/SANDBOX_EXECUTION.md).
 
 ## Files
 
-| File | Role |
-|------|------|
-| `server.py` | Stdlib HTTP server. `GET /health`, `POST /execute`. Concurrency-capped. |
-| `executor.py` | Spawns one locked-down subprocess per run (rlimits, own session, killpg on timeout, ephemeral cwd). Importable/testable. |
-| `runner.py` | The in-child harness: applies best-effort seccomp, runs the snippet, emits one JSON envelope. |
-| `Dockerfile` | `python:3.12-slim` + numpy/pandas + pyseccomp, non-root, healthcheck. |
-| `requirements.txt` | Deliberately tiny — this process runs untrusted code. |
+| File | What it does |
+|---|---|
+| `server.py` | A tiny HTTP server with two routes: `GET /health` and `POST /execute`. It runs only a few jobs at once |
+| `executor.py` | Starts a fresh, restricted process for each run: memory and CPU limits, a throwaway working folder, and the whole process group killed on timeout |
+| `runner.py` | The code that runs inside that process. It blocks network sockets where it can, runs the snippet, and prints one JSON result |
+| `Dockerfile` | The container image: Python 3.12 slim, numpy and pandas, running as a non-root user |
+| `requirements.txt` | Kept very small on purpose, because this process runs untrusted code |
 
-## The envelope
+## What a run sends and gets back
 
-Both this service and the backend's in-process fallback return the same shape:
+Send `{"code": "..."}`. To give the code files to read, add
+`"files": {"name": "<base64>"}`. To get files back, add `"collect": ["name"]`.
+
+Every run answers in the same shape. The backend's in-process fallback (for
+local development) answers in this shape too:
 
 ```json
 {"success": true, "result": 42, "output": "stdout…", "stderr": "", "error": null, "timed_out": false}
 ```
 
+When files were collected, the answer also has `files_out`.
+
 ## Running it
 
-Via compose (normal path):
+Normally it starts with everything else:
 
 ```bash
-docker compose up --build            # local
-docker compose -f docker-compose.prod.yml pull sandbox && docker compose -f docker-compose.prod.yml up -d   # ec2 (image built and pushed from a dev machine)
+docker compose up --build                                   # local
+docker compose -f docker-compose.prod.yml pull sandbox \
+  && docker compose -f docker-compose.prod.yml up -d        # production (the image is built and pushed from a dev machine)
 ```
 
-Directly, for a quick check (no Docker; uses the host Python, so no numpy unless
-installed locally):
+For a quick check without Docker (uses your own Python, so numpy only works if
+you have it installed):
 
 ```bash
 cd Backend/sandbox_service && python server.py
@@ -43,13 +54,21 @@ curl -s -XPOST localhost:8100/execute -H 'Content-Type: application/json' -d '{"
 
 ## Tests
 
-```bash
-python Backend/sandbox_service/tests/test_executor.py      # runs the real subprocess
-# or via pytest, which collects it by filename
-```
+`tests/`: `test_executor.py` (runs real processes), `test_files.py` (files in
+and out), `test_concurrency.py`. Run them with `python -m pytest sandbox_service/tests`
+from `Backend/`.
 
-## What confines a run
+## What keeps a run contained
 
-Container (network-none-by-being-internal, `cap_drop: ALL`, read-only root,
-non-root, mem/pids caps) → subprocess (`setrlimit`, own session, killpg) →
-seccomp (blocks sockets). The container is the real boundary; the rest is depth.
+Three layers, from strongest to weakest:
+
+1. **The container.** It has no route to the internet, drops all Linux
+   privileges, has a read-only file system, runs as a non-root user, and has
+   memory and process-count limits. **This is the real wall.** Even code that
+   fully escapes Python lands in a throwaway box with no secrets in it.
+2. **The process.** Each run gets its own process with resource limits, and on
+   timeout the whole process group is killed, not just asked to stop.
+3. **Seccomp.** A kernel filter blocks opening network sockets, where the
+   system supports it.
+
+Layers 2 and 3 are extra depth. If they fail, layer 1 still holds.

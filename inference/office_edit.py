@@ -34,7 +34,7 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
-from . import formulas
+from office import formulas
 from .models import Document
 from .utils import TEXT_FILE_TYPES
 
@@ -280,7 +280,7 @@ def workbook_grid(doc: Document) -> dict:
     """Every sheet as a grid of raw values — formulas as their `=` source.
 
     `values` rides beside `rows` with each formula calculated
-    (`inference/formulas.py`; unevaluable stays None): the preview and the
+    (`office/formulas.py`; unevaluable stays None): the preview and the
     app show numbers, not the text of the formula that makes them.
     """
     import openpyxl
@@ -334,8 +334,8 @@ def _calculated(book, sheet: str, cell) -> Any:
 
 
 def edit_workbook(doc: Document, payload: dict) -> Document:
-    from chat.tools.office import edit
-    from chat.tools.office.spec import SpecError
+    from office import edit
+    from office.spec import SpecError
 
     if doc.file_type != 'xlsx':
         raise EditError('Cell edits apply to .xlsx workbooks.')
@@ -378,8 +378,8 @@ def _images_for(doc: Document, paths: list[str]) -> dict[str, bytes]:
 
 def edit_spec(doc: Document, raw: Any, *, version_source: str = 'app',
               render_of: str | None = None) -> Document:
-    from chat.tools.office import deck, document
-    from chat.tools.office.spec import SpecError
+    from office import deck, document
+    from office.spec import SpecError
 
     stored = (doc.metadata or {}).get('spec')
     if doc.file_type not in ('pptx', 'docx') or not isinstance(stored, dict):
@@ -421,7 +421,7 @@ def edit_spec(doc: Document, raw: Any, *, version_source: str = 'app',
 # ---------------------------------------------------------------------------
 
 def _blank_office(kind: str, title: str) -> tuple[bytes, str, dict]:
-    from chat.tools.office import deck, document, workbook
+    from office import deck, document, workbook
 
     if kind == 'pptx':
         spec = deck.validate({'title': title, 'slides': [

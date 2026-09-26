@@ -18,7 +18,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from agents.models import SubAgent
-from agents.views.agents import AgentSerializer
+from agents.config import AgentSerializer
 from credentials.models import CredentialType
 from datasources.models import ApiConnection, DataConnection, SharedTool
 

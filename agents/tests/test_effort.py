@@ -14,7 +14,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from agents.models import SubAgent
-from agents.views.agents import AgentSerializer
+from agents.config import AgentSerializer
 
 
 class SerializerRoundTripTests(TestCase):

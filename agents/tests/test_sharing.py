@@ -21,7 +21,7 @@ from skills.models import Skill
 
 from agents import publishing
 from agents.models import SharedAgent, SubAgent
-from agents.views.agents import AgentSerializer
+from agents.config import AgentSerializer
 
 
 def curated(name):

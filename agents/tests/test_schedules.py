@@ -494,7 +494,7 @@ class BuilderScheduleOwnershipTests(APITestCase):
         )
 
     def _save_agent(self, **overrides):
-        from agents.views.agents import AgentSerializer
+        from agents.config import AgentSerializer
 
         payload = {
             'name': self.agent.name, 'brief': self.agent.prompt,
@@ -531,7 +531,7 @@ class BuilderScheduleOwnershipTests(APITestCase):
         self.assertEqual(remaining[0].origin, 'manual')
 
     def test_the_builder_field_shows_only_its_own_row(self):
-        from agents.views.agents import AgentSerializer
+        from agents.config import AgentSerializer
 
         Trigger.objects.create(
             subagent=self.agent, mode='schedule', config={'cron': '0 6 * * *'},
@@ -560,7 +560,7 @@ class BuilderScheduleOwnershipTests(APITestCase):
         self.assertEqual(legacy.origin, 'builder')
 
     def test_the_builder_timezone_round_trips(self):
-        from agents.views.agents import AgentSerializer
+        from agents.config import AgentSerializer
 
         self._save_agent(schedule='0 9 * * *', scheduleTimezone='Asia/Kolkata')
         config = AgentSerializer.to_config(self.agent)
@@ -601,7 +601,7 @@ class BuilderScheduleOwnershipTests(APITestCase):
         """The builder no longer sends `schedule` at all — schedules live on
         the Schedules page now. An absent key must not read as "clear it", or
         every builder save deletes the row the editor owns."""
-        from agents.views.agents import AgentSerializer
+        from agents.config import AgentSerializer
 
         self._save_agent(schedule='0 9 * * *', scheduleTimezone='UTC')
         trigger = Trigger.objects.get(

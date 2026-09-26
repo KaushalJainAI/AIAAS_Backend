@@ -13,11 +13,8 @@ from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from agents.agent.runtime import (
-    GRANT_TOOLS,
-    code_projects_for,
-    workspace_egress_for,
-)
+from agents.agent.runtime import code_projects_for, workspace_egress_for
+from agents.grants import GRANT_TOOLS
 from tools_config.overlay import limits
 
 User = get_user_model()
@@ -60,7 +57,7 @@ class EngineGatingTests(TestCase):
         self.assertNotIn('ws_run', names)
 
     def test_mission_caller_is_unattended(self):
-        from agents.agent.runtime import CALLERS, UNATTENDED_CALLERS
+        from agents.grants import CALLERS, UNATTENDED_CALLERS
 
         self.assertIn('mission', CALLERS)
         self.assertIn('mission', UNATTENDED_CALLERS)

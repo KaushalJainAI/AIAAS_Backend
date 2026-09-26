@@ -31,7 +31,7 @@ from workflow_backend.thresholds import (
     CHART_MAX_SERIES_ALL_PAIRS,
 )
 
-from ..charts import KINDS as CHART_KINDS
+from .charts import KINDS as CHART_KINDS
 from .spec import SpecError, choice, items, text
 from .themes import LIGHT_PALETTE
 

@@ -748,8 +748,8 @@ async def document_asset(request, document_id: int):
     path = request.query_params.get('path')
     spec = (doc.metadata or {}).get('spec') or {}
 
-    from chat.tools.office import deck as deck_tool
-    from chat.tools.office import document as document_tool
+    from office import deck as deck_tool
+    from office import document as document_tool
 
     if doc.file_type == 'pptx':
         allowed = set(deck_tool.image_paths(spec))

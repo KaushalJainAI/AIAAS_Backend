@@ -222,7 +222,7 @@ def chat_orchestrator_allowed(name: str) -> bool:
     every MCP tool whose name does not claim to read — is for a configured
     subagent. Unknown names fail closed: an MCP tool never appears here.
     """
-    from agents.agent.runtime import ALWAYS_AVAILABLE, RETRIEVAL_TOOLS
+    from agents.grants import ALWAYS_AVAILABLE, RETRIEVAL_TOOLS
 
     if name in CHAT_ORCHESTRATOR_EXTRA:
         return True

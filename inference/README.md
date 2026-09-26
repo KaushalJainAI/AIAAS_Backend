@@ -9,6 +9,9 @@ Despite the name, this app is mostly about **your stuff**:
   `/reports/q1.md` over your file tree, safely.
 - **Extraction**: pulling structured rows out of documents.
 - **Hosted pages and dashboards**: shareable snapshots and live tiles.
+- **The document apps' backend**: version history, autosave, export, and
+  turning spreadsheets and Word/PowerPoint files into something the in-browser
+  editors (Docs, Sheets, Slides) can edit.
 
 "Folders organise, knowledge bases index." A document has a folder *and*
 may be in a KB, independently. Moving a file between folders never re-indexes it.
@@ -32,6 +35,7 @@ may be in a KB, independently. Moving a file between folders never re-indexes it
 | `ExtractionSchema`, `ExtractedRow` | "Pull these fields out of these files", and the rows that came out |
 | `PublishedPage` | A snapshot shared by link (`/p/<slug>`) |
 | `Dashboard` | Live tiles on the Dashboards page |
+| `RecentFile`, `AppSession` | Files you opened recently (and where you were in each), and the tabs you had open in each document app |
 
 Trashed rows are hidden automatically: the default manager (`LiveManager`)
 filters them out, so ordinary queries never see the bin.
@@ -59,7 +63,7 @@ filters them out, so ordinary queries never see the bin.
 | `versions.py` | Version history: snapshot before every overwrite, restore, prune |
 | `export.py`, `text_blocks.py` | Exporting to other formats (Word↔PDF/Markdown, deck→PDF, workbook↔CSV) |
 | `drafts.py` | Office autosaves parked cheaply, rendered after quiet or on read |
-| `sheets.py`, `formulas.py` | Workbooks as Univer snapshots and back; the shared formula evaluator |
+| `dashboards.py` | The dashboard spec validator, shared with the `save_dashboard` tool |
 | `importers.py` | Uploaded Word/PowerPoint files converted to editable specs |
 | `previews.py` | Image conversion (TIFF/BMP/HEIC→PNG) and zip listings |
 
@@ -82,5 +86,6 @@ Search design: [`docs/RAG_STRATEGY.md`](../docs/RAG_STRATEGY.md).
 
 `inference/tests/`: `test_filesystem.py`, `test_vfs.py`, `test_recycle.py`,
 `test_chat_files.py`, `test_file_types.py`, `test_versions.py`,
-`test_drafts.py`, `test_sheets.py`, `test_formulas.py`, `test_import.py`,
+`test_drafts.py`, `test_sheets.py`, `test_formulas.py` (these two test the
+[`office/`](../office/README.md) library the apps save through), `test_import.py`,
 `test_previews.py`, `test_recents.py`.

@@ -22,7 +22,8 @@ from agents.agent.orchestrator import (
     DelegationRefused,
     check_delegation_payload,
 )
-from agents.agent.runtime import GRANT_TOOLS, build_system_prompt, kb_scope_for
+from agents.agent.runtime import build_system_prompt, kb_scope_for
+from agents.grants import GRANT_TOOLS
 from chat.models import ToolOutput
 from chat.tools.knowledge import (
     keyword_search,

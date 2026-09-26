@@ -309,7 +309,7 @@ def _apply_structural(book, sheet, structural: dict) -> dict:
     Merges come off before anything moves: unmerging afterwards would delete
     the moved cells out from under their stale range.
     """
-    from inference.sheets import remerge, unmerge_all
+    from .sheets import remerge, unmerge_all
 
     report: dict[str, Any] = {}
     ops = [(key, axis) for key, axis in (('insert_rows', 'row'), ('delete_rows', 'row'),

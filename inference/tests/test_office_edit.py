@@ -236,7 +236,7 @@ class CopyTests(OfficeCase):
 
     def test_a_chart_slide_survives_an_edit(self):
         # The stored chart is `build_spec` output; re-validating it must accept it.
-        from chat.tools.office import deck
+        from office import deck
 
         spec = deck.validate({'title': 'T', 'slides': [
             {'layout': 'chart', 'title': 'Sales', 'chart': {

@@ -54,7 +54,7 @@ from agents.triggers import (
     is_valid as cron_is_valid,
     zone_is_valid,
 )
-from agents.views.agents import (
+from agents.config import (
     AUTONOMY,
     FILE_ACCESS,
     MAX_TAGS,
@@ -265,7 +265,7 @@ def _command_classes(value, _cat):
     """Command classes for `commandScope`: test | lint | build | run | install | any."""
     if not isinstance(value, list) or any(not isinstance(t, str) for t in value):
         raise Reject('expected a list like ["test", "lint"]')
-    from agents.agent.runtime import CODE_COMMAND_CLASSES
+    from agents.grants import CODE_COMMAND_CLASSES
 
     cleaned = sorted({str(c or '').strip().lower() for c in value if str(c or '').strip()})
     unknown = sorted(set(cleaned) - set(CODE_COMMAND_CLASSES))

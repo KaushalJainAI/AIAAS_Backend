@@ -4,7 +4,7 @@ Workbooks as Univer snapshots and back.
 The Sheets app edits through Univer (`@univerjs/preset-sheets-core`); the
 file on disk stays a real `.xlsx` that Excel opens. This module translates
 between the two, using openpyxl on the **existing** workbook — like
-`chat/tools/office/edit.py`, anything untouched (charts, images, print
+`office/edit.py`, anything untouched (charts, images, print
 settings, validations) survives the round trip, because openpyxl carries what
 it does not understand through a load/save untouched.
 

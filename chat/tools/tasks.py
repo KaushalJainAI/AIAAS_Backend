@@ -116,7 +116,8 @@ def _normalise_claims(raw: Any) -> list[str]:
 
 def _can_write(worker) -> bool:
     """Whether the worker's toolbox can write a project file."""
-    from agents.agent.runtime import GRANT_TOOLS, tool_scope_for
+    from agents.agent.runtime import tool_scope_for
+    from agents.grants import GRANT_TOOLS
 
     scope = tool_scope_for(worker)
     # `toolScope` is the older axis: empty means everything its grants unlock.

@@ -467,7 +467,7 @@ class EvalEnvironment:
         tool that refuses on every call is worse than one never offered, and
         a tool that reaches a real service is an eval that sends real email.
         """
-        from agents.agent.runtime import GRANT_TOOLS, RETRIEVAL_TOOLS
+        from agents.grants import GRANT_TOOLS, RETRIEVAL_TOOLS
 
         # Not all of `ALWAYS_AVAILABLE`: the rest of it reaches the owner's
         # real account — reminders it can create or cancel, dashboards it

@@ -1,6 +1,6 @@
 """
-Sheets on Univer, phase C backend (`inference/sheets.py`, `formulas.py`,
-`chat/tools/office/edit.py` and the values plumbing).
+Sheets on Univer, phase C backend (`office/sheets.py`, `formulas.py`,
+`office/edit.py` and the values plumbing).
 
 What these pin:
 * a snapshot round trip keeps values, formulas, styles, merges, dimensions,
@@ -24,7 +24,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.test import TestCase, override_settings
 
-from inference import formulas, sheets
+from office import formulas, sheets
 from inference.models import Document
 
 User = get_user_model()
@@ -153,7 +153,7 @@ class SnapshotTests(TestCase):
             sheets.apply_snapshot(_styled_book(), {'sheets': [1, 2]})
 
     def test_charts_survive_a_snapshot_round_trip(self):
-        from chat.tools.office import workbook
+        from office import workbook
 
         spec = workbook.validate({'sheets': [{
             'name': 'S', 'columns': [{'header': 'm'}, {'header': 'v', 'type': 'number'}],
@@ -171,7 +171,7 @@ class SnapshotTests(TestCase):
 
 class StructuralEditTests(TestCase):
     def test_insert_rows_shifts_formulas_and_merges(self):
-        from chat.tools.office import edit
+        from office import edit
 
         data = _styled_book()
         change = edit.validate({'sheet': 'Data', 'insert_rows': {'row': 2, 'count': 1}})
@@ -188,7 +188,7 @@ class StructuralEditTests(TestCase):
             wb.close()
 
     def test_delete_rows_makes_refs_ref_loudly(self):
-        from chat.tools.office import edit
+        from office import edit
 
         data = _styled_book()
         change = edit.validate({'sheet': 'Data', 'delete_rows': {'row': 2, 'count': 1}})
@@ -202,7 +202,7 @@ class StructuralEditTests(TestCase):
             wb.close()
 
     def test_insert_and_delete_cols_shift(self):
-        from chat.tools.office import edit
+        from office import edit
 
         data = _styled_book()
         out, _ = edit.apply(data, edit.validate({'sheet': 'Data', 'insert_cols': {'col': 'A'}}))
@@ -221,7 +221,7 @@ class StructuralEditTests(TestCase):
             wb.close()
 
     def test_format_freeze_and_widths(self):
-        from chat.tools.office import edit
+        from office import edit
 
         data = _styled_book()
         change = edit.validate({
@@ -247,7 +247,7 @@ class StructuralEditTests(TestCase):
             wb.close()
 
     def test_charts_survive_a_cell_edit(self):
-        from chat.tools.office import edit, workbook
+        from office import edit, workbook
 
         spec = workbook.validate({'sheets': [{
             'name': 'S', 'columns': [{'header': 'm'}, {'header': 'v', 'type': 'number'}],
@@ -264,8 +264,8 @@ class StructuralEditTests(TestCase):
             wb.close()
 
     def test_refusals(self):
-        from chat.tools.office import edit
-        from chat.tools.office.spec import SpecError
+        from office import edit
+        from office.spec import SpecError
 
         with self.assertRaises(SpecError):
             edit.validate({'sheet': 'Data', 'insert_rows': {'row': 0}})
@@ -297,7 +297,7 @@ class CalculatedValueTests(TestCase):
         return doc
 
     def test_csv_export_calculates_instead_of_quoting_formulas(self):
-        from chat.tools.office import workbook
+        from office import workbook
         from inference import export
 
         # xlsxwriter stores formulas without cached values: a reader asking
@@ -315,7 +315,7 @@ class CalculatedValueTests(TestCase):
         self.assertNotIn('SUM', body)
 
     def test_the_office_grid_carries_values_beside_formulas(self):
-        from chat.tools.office import workbook
+        from office import workbook
         from inference import office_edit
 
         spec = workbook.validate({'sheets': [{
@@ -333,7 +333,7 @@ class CalculatedValueTests(TestCase):
         self.assertEqual([v for v in total_values if isinstance(v, (int, float))], [2.0, 3.0])
 
     def test_read_workbook_reports_values_and_formulas(self):
-        from chat.tools.office import workbook
+        from office import workbook
         from chat.tools import office as office_tools
 
         spec = workbook.validate({'sheets': [{
@@ -349,7 +349,7 @@ class CalculatedValueTests(TestCase):
         self.assertTrue(any(isinstance(f, str) and f.startswith('=') for f in total_formulas))
 
     def test_a_snapshot_draft_renders(self):
-        from chat.tools.office import workbook
+        from office import workbook
         from inference import drafts, office_edit
 
         spec = workbook.validate({'sheets': [{

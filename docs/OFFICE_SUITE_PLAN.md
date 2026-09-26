@@ -1,9 +1,10 @@
 # Office suite plan: apps that feel like applications
 
-**Status (2026-09-25):** planned. Work is **paused by the user's choice**; this
-file is the hand-off. Part of Phase A's backend was written before the pause
-and sits **uncommitted** in the Backend working tree. See
-[What already exists](#what-already-exists-uncommitted).
+**Status (updated 2026-09-26):** all six phases (A–F) are **built and
+committed**. The rest of this file is the plan as it was written. The
+"paused" and "uncommitted" notes below describe the state before the work
+resumed, and are kept only as history. For how the apps work now, see the
+"apps are applications now" entry in `CLAUDE.md` and `inference/README.md`.
 
 **Decision (user, 2026-09-25):** no external office server. ONLYOFFICE and
 Collabora need 2–4 GB of RAM (production has 913 MB), and ONLYOFFICE is AGPL,

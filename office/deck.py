@@ -37,7 +37,7 @@ from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.oxml.ns import qn
 from pptx.util import Emu, Inches, Pt
 
-from ..charts import ChartError, build_spec
+from .charts import ChartError, build_spec
 from .spec import SpecError, choice, items, text
 from .themes import DEFAULT_THEME, THEME_NAMES, THEMES, Theme
 

@@ -774,7 +774,7 @@ class FileAccessVocabularyTests(TestCase):
     """
 
     def test_every_served_mode_is_accepted_by_the_serializer(self):
-        from agents.views.agents import FILE_ACCESS
+        from agents.config import FILE_ACCESS
 
         served = {vfs.READONLY, vfs.SCOPED, vfs.FULL, vfs.READ_ALL_WRITE_OWN}
 
@@ -784,7 +784,7 @@ class FileAccessVocabularyTests(TestCase):
         )
 
     def test_every_accepted_mode_resolves_to_a_scope_or_is_none(self):
-        from agents.views.agents import FILE_ACCESS
+        from agents.config import FILE_ACCESS
 
         user = User.objects.create_user('vocab', 'v@example.com', 'pw')
 

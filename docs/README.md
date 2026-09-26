@@ -2,8 +2,9 @@
 
 There are about 40 files here. Most are **plans**: notes written before a
 feature was built. They explain *why* things are the way they are, but some
-describe designs that changed later. Read the **reference** docs first. They
-describe how the code works today.
+describe designs that changed later. Read the **reference** docs first,
+because they describe how the code works today. When a plan and the code
+disagree, the code is right.
 
 New to the codebase? Start with [`../../START_HERE.md`](../../START_HERE.md).
 
@@ -46,13 +47,15 @@ Useful for the "why". The code is the source of truth where they differ.
 | [EXTRACTION_MERGE.md](EXTRACTION_MERGE.md) | Done 2026-08-18: `extraction` folded into `inference` |
 | [POSTGRES_PRODUCTION_MIGRATION_PLAN.md](POSTGRES_PRODUCTION_MIGRATION_PLAN.md) | Moving production to PostgreSQL |
 | [GAP_CLOSURE_PLAN.md](GAP_CLOSURE_PLAN.md) | Done 2026-09-24: gaps found in a codebase sweep (email default, pack availability, flaky tests, lint, Memory and Missions pages) |
+| [EVAL_ENVIRONMENTS_PLAN.md](EVAL_ENVIRONMENTS_PLAN.md) | E-1 to E-5 built 2026-09-24: fake test worlds the judge builds, with simulated mail, calendar, drive and web. E-6 (paid proof runs) not done yet |
+| [SECURITY_REVIEW_FIX_PLAN.md](SECURITY_REVIEW_FIX_PLAN.md) | Done 2026-09-25: the whole-project security review and its fixes (sign-in takeover, logging out everywhere, hashed API keys, no tokens in URLs). Not deployed yet |
+| [OFFICE_SUITE_PLAN.md](OFFICE_SUITE_PLAN.md) | All six phases built 2026-09-25: Docs, Sheets and Slides as full-screen apps (TipTap, Univer, CodeMirror), autosave and undo, version history, export, previews for every file type |
+| [CONCURRENCY_LAG_FIX_PLAN.md](CONCURRENCY_LAG_FIX_PLAN.md) | Phases 0–5 built 2026-09-24. Phase 5 only helps after the server is resized; Phase 6 depends on measurements |
 
 ## Plans in progress or not started
 
 | Doc | Status |
 |---|---|
-| [OFFICE_SUITE_PLAN.md](OFFICE_SUITE_PLAN.md) | Planned 2026-09-25, paused: apps as full applications (Univer, TipTap, CodeMirror), versions, export, agent file tools, previews for every file type; part of Phase A backend written but uncommitted |
-| [CONCURRENCY_LAG_FIX_PLAN.md](CONCURRENCY_LAG_FIX_PLAN.md) | Phases 0–1 built 2026-09-24, the rest not |
 | [CUSTOM_TOOLS_PLAN.md](CUSTOM_TOOLS_PLAN.md) | Approved, being built: user-made tools |
 | [RUN_VISIBILITY_AND_REMINDERS_PLAN.md](RUN_VISIBILITY_AND_REMINDERS_PLAN.md) | Approved, being built |
 | [EVAL_EXPANSION_PLAN.md](EVAL_EXPANSION_PLAN.md) | Eval datasets for every agent |
@@ -71,4 +74,4 @@ These describe the old drag-and-drop workflow product, which was removed.
 | [AGENT_WORKFLOW_MERGE_PLAN.md](AGENT_WORKFLOW_MERGE_PLAN.md) | Superseded 2026-08-14 |
 | [AGENT_WORKFLOW_UNIFICATION.md](AGENT_WORKFLOW_UNIFICATION.md) | Never built |
 | [tool_calling_architecture_review.md](tool_calling_architecture_review.md) | An early review; the tool registry has since been rewritten (`chat/tools/registry.py`) |
-| [learnings/](learnings/) | Notes from past performance work |
+| [learnings/](learnings/) | Notes from past performance work on the search index |

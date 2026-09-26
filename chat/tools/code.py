@@ -732,7 +732,7 @@ def _resolve_command(context: Dict, project, cmd: str):
     prefix, not a substring), or the class must be `any`. Unrestricted
     (empty scope) runs anything, as before this field existed.
     """
-    from agents.agent.runtime import CODE_COMMAND_CLASSES
+    from agents.grants import CODE_COMMAND_CLASSES
 
     raw_scope = context.get('command_scope')
     scope = None if raw_scope is None else tuple(

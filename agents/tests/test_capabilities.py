@@ -13,7 +13,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from agents.agent.runtime import GRANT_TOOLS, UNSERVED_GRANTS
+from agents.grants import GRANT_TOOLS, UNSERVED_GRANTS
 
 User = get_user_model()
 

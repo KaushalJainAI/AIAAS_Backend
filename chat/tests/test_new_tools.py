@@ -21,8 +21,8 @@ from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from chat.tools import execute_tool
-from chat.tools.office import diagram, document, edit, pdf, workbook
-from chat.tools.office.spec import SpecError
+from office import diagram, document, edit, pdf, workbook
+from office.spec import SpecError
 from chat.tools.registry import get
 from inference import vfs
 
@@ -219,7 +219,7 @@ class DownloadTests(ScopedToolTestCase):
         fetch.assert_not_called()
 
     def test_it_needs_the_web_grant(self):
-        from agents.agent.runtime import GRANT_TOOLS
+        from agents.grants import GRANT_TOOLS
 
         self.assertIn('download_file', GRANT_TOOLS['scrape'])
 

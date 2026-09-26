@@ -86,7 +86,7 @@ def wizard_questions(request):
 @permission_classes([IsAuthenticated])
 def wizard_propose(request):
     """Proposed AgentConfig for a description + answers. Read-only."""
-    from agents.agent.runtime import AUTONOMY_LADDER, GRANT_TOOLS
+    from agents.grants import AUTONOMY_LADDER, GRANT_TOOLS
 
     description = str((request.data or {}).get('description', '')).strip()
     answers = dict((request.data or {}).get('answers') or {})

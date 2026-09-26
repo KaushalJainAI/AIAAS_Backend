@@ -5,7 +5,7 @@ One table (`FORMATS`) says which formats each type offers, and the apps' File
 menu, the export route and the `export_file` tool all read it, so a format is
 offered exactly where it can be produced.
 
-The renderers are the office tools' own (`chat/tools/office/`), so a Word file
+The renderers are the office tools' own (the `office/` package), so a Word file
 exported as PDF looks like the PDF `render_pdf` would have made from the same
 content — one design system, not a second one for exports.
 """
@@ -94,7 +94,7 @@ def _document_spec(doc: Document) -> dict:
 
 
 def _markdown_of(spec: dict) -> str:
-    from chat.tools.office import document
+    from office import document
 
     return document.extract_text({**spec, 'subtitle': spec.get('subtitle') or ''}).strip() + '\n'
 
@@ -112,11 +112,11 @@ def build(doc: Document, fmt: str) -> tuple[bytes, str, str]:
     if doc.file_type in ('docx', 'md', 'txt'):
         spec = _document_spec(doc)
         if fmt == 'pdf':
-            from chat.tools.office import document, pdf
+            from office import document, pdf
 
             return pdf.render(spec, _images(doc, document.image_paths(spec))), name, MIME['pdf']
         if fmt == 'docx':
-            from chat.tools.office import document
+            from office import document
 
             return document.render(spec, _images(doc, document.image_paths(spec))), name, MIME['docx']
         text = _markdown_of(spec)
@@ -149,13 +149,13 @@ def workbook_csv(doc: Document, sheet: str | None = None) -> bytes:
     """One sheet as CSV — calculated values, not formula text.
 
     Cached values where the file stores them, computed
-    (`inference/formulas.py`) where it does not — a workbook written by
+    (`office/formulas.py`) where it does not — a workbook written by
     xlsxwriter stores formulas without their results. A formula nothing can
     evaluate falls back to its text, which is more useful than an empty cell.
     """
     import openpyxl
 
-    from . import formulas
+    from office import formulas
     from .office_edit import _read_bytes
 
     data = _read_bytes(doc)
@@ -172,7 +172,7 @@ def workbook_csv(doc: Document, sheet: str | None = None) -> bytes:
 
 
 def _csv_cell(book, sheet: str, cell) -> Any:
-    from . import formulas
+    from office import formulas
 
     raw = cell.value
     if isinstance(raw, str) and raw.startswith('='):
@@ -219,7 +219,7 @@ def deck_pdf(doc: Document, spec: dict) -> bytes:
     from reportlab.pdfgen import canvas as pdfcanvas
     from reportlab.platypus import Frame, Paragraph, Table, TableStyle
 
-    from chat.tools.office.pdf import _rich
+    from office.pdf import _rich
 
     W, H = 960, 540  # 16:9 in points
     t = spec.get('theme') or {}

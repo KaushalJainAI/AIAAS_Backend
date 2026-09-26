@@ -185,7 +185,7 @@ class DraftEtagTests(DraftCase):
         self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_a_real_overwrite_closes_the_render_door(self):
-        from chat.tools.office import workbook
+        from office import workbook
 
         doc = self.new('Plan.docx')
         first = self.draft(doc['id'], {'spec': DOC_SPEC}, expected=doc['updated_at'])

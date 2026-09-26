@@ -266,7 +266,7 @@ class ToolExposureTests(TestCase):
     def test_agent_runtime_does_not_inherit_it(self):
         # Phase 1 is chat only. The orchestrator toolbox is grant-driven, and
         # `ask_vision` is in no grant — this asserts it stays that way.
-        from agents.agent.runtime import GRANT_TOOLS
+        from agents.grants import GRANT_TOOLS
 
         granted = {name for names in GRANT_TOOLS.values() for name in names}
         self.assertNotIn("ask_vision", granted)

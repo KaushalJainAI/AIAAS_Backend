@@ -4,7 +4,6 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse
-from django.conf import settings as django_settings
 from django.core import signing
 from django.db import IntegrityError
 from urllib.parse import urlparse
@@ -21,18 +20,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Allowed OAuth redirect URI origins (add production domain)
-ALLOWED_REDIRECT_ORIGINS = [
-    'http://localhost:3000',
-    'http://localhost:5173',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:5173',
-]
-# Extend with CORS origins from settings if available
-try:
-    ALLOWED_REDIRECT_ORIGINS.extend(getattr(django_settings, 'CORS_ALLOWED_ORIGINS', []))
-except Exception:
-    pass
+from .oauth import ALLOWED_REDIRECT_ORIGINS
 
 @extend_schema_view(
     list=extend_schema(

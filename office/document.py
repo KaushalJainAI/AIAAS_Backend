@@ -28,7 +28,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
-from ..charts import ChartError, build_spec
+from .charts import ChartError, build_spec
 from .spec import SpecError, choice, items, text
 from .themes import THEMES, Theme
 

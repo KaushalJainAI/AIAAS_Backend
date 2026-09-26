@@ -148,7 +148,7 @@ def to_shareable(agent) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     dropping it would publish an agent whose corpus vanished, and the author is
     the only person who can say what it should have been.
     """
-    from agents.views.agents import AgentSerializer
+    from agents.config import AgentSerializer
     from inference.models import KnowledgeBase
     from mcp_integration.client import visible_servers_sync
     from skills.models import Skill

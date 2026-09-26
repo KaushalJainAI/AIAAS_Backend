@@ -37,7 +37,7 @@ def _fake_request(user):
 
 def _install_slug(user, slug: str, *, dry_run: bool = False) -> str:
     """Install one template for one user. Returns installed|already|setup|invalid."""
-    from agents.views.agents import AgentSerializer
+    from agents.config import AgentSerializer
     from agents.views.capabilities import unavailable_grants
 
     if SubAgent.objects.filter(user=user, template_slug=slug).exists():

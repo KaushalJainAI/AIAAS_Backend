@@ -69,14 +69,14 @@ WRITABLE = (
 
 
 def _config_schema(required: list[str]) -> dict:
-    # From the runtime's own tables rather than `agents.views.agents.TOOL_KEYS`,
+    # From the runtime's own tables rather than `agents.config.TOOL_KEYS`,
     # for two reasons. Importing a views module at decoration time pulls in DRF
     # and therefore the app registry, and this module is imported while Django
     # is still starting up. And `TOOL_KEYS` is `GRANT_TOOLS | UNSERVED_GRANTS`
     # — it includes `shell`, which the runtime refuses to serve, so offering it
     # here would let a model grant a capability that can only ever disappoint.
     # `GRANT_TOOLS` alone is exactly the set that does something.
-    from agents.agent.runtime import AUTONOMY_LADDER, GRANT_TOOLS
+    from agents.grants import AUTONOMY_LADDER, GRANT_TOOLS
 
     return {
         "type": "object",
@@ -200,7 +200,7 @@ def _save(user, config: dict, agent_id: int | None) -> dict:
     whole configuration.
     """
     from agents.models import SubAgent
-    from agents.views.agents import AgentSerializer
+    from agents.config import AgentSerializer
     from logs import revisions
 
     if agent_id is not None:

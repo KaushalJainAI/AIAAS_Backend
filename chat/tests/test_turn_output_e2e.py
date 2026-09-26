@@ -301,6 +301,6 @@ class AgentRunOutputTests(TestCase):
     def test_drawing_a_chart_is_not_a_capability_that_can_be_switched_off(self):
         # Same reasoning as `update_todos`: an agent that cannot show its
         # findings is not a safer agent, only a less useful one.
-        from agents.agent.runtime import ALWAYS_AVAILABLE
+        from agents.grants import ALWAYS_AVAILABLE
 
         self.assertIn("render_chart", ALWAYS_AVAILABLE)

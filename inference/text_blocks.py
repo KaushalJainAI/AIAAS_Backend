@@ -1,6 +1,6 @@
 """
-Markdown and plain text as document blocks — the shape `chat/tools/office/
-document.py` renders to .docx and `pdf.py` renders to PDF.
+Markdown and plain text as document blocks — the shape `office/document.py`
+renders to .docx and `office/pdf.py` renders to PDF.
 
 Used by export (a Markdown page saved as PDF or Word) and by import (text
 recovered from an uploaded file becoming an editable document). Deliberately

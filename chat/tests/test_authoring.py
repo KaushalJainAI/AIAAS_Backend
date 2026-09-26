@@ -193,9 +193,7 @@ class ContainmentTests(TestCase):
         the grants it was refused and delegate to it. Depth and budget bounds
         would still hold; permission bounds would not.
         """
-        from agents.agent.runtime import (
-            ALWAYS_AVAILABLE, GRANT_TOOLS, RETRIEVAL_TOOLS,
-        )
+        from agents.grants import ALWAYS_AVAILABLE, GRANT_TOOLS, RETRIEVAL_TOOLS
 
         reachable = {n for names in GRANT_TOOLS.values() for n in names}
         reachable |= set(ALWAYS_AVAILABLE) | set(RETRIEVAL_TOOLS)

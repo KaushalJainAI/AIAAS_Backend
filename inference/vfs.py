@@ -1078,7 +1078,7 @@ def edit_document(scope: FileScope, path: str, ops: list) -> dict:
     """Change a Word file block by block: insert, replace or delete blocks by
     index, or find/replace text. Saves a version and asks first (sensitive),
     like `edit_file` one format up."""
-    from chat.tools.office.spec import SpecError
+    from office.spec import SpecError
 
     from . import office_edit
     from .office_edit import EditError
@@ -1193,7 +1193,7 @@ def _text_targets(block: dict):
 def edit_deck(scope: FileScope, path: str, ops: list) -> dict:
     """Change a deck slide by slide: add, remove, move or duplicate slides,
     or set fields. Saves a version and asks first, like `edit_file`."""
-    from chat.tools.office.spec import SpecError
+    from office.spec import SpecError
 
     from . import office_edit
     from .office_edit import EditError

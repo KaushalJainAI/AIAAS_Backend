@@ -109,7 +109,7 @@ def _recipient_allowed(to: str, allowed: list[str]) -> bool:
 
 
 def _unattended(context: Dict) -> bool:
-    from agents.agent.runtime import UNATTENDED_CALLERS
+    from agents.grants import UNATTENDED_CALLERS
 
     return context.get('caller') in UNATTENDED_CALLERS
 

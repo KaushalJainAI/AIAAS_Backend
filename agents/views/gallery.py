@@ -54,7 +54,8 @@ from agents.models import SharedAgent, SubAgent
 from agents.triggers import zone_is_valid
 from agents.views.capabilities import unavailable_grants
 from workflow_backend.thresholds import PUBLIC_CATALOGUE_LIMIT
-from agents.views.agents import AgentSerializer, _with_stats
+from agents.config import AgentSerializer
+from agents.views.agents import _with_stats
 
 logger = logging.getLogger(__name__)
 

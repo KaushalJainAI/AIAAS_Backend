@@ -13,10 +13,10 @@ them, schedules them, pauses them for approval, and lets people share them.
 ## Read in this order
 
 1. `models.py` → `SubAgent`: what an agent is.
-2. `agent/runtime.py` → `GRANT_TOOLS` (top of the file): which tools each grant unlocks.
+2. `grants.py` → `GRANT_TOOLS`: which tools each grant unlocks.
 3. `agent/runtime.py` → `start_agent_run` and `run_agent`: how a run starts and executes.
 4. `views/runs.py` → `agent_execute`: the HTTP door that calls them.
-   `views/agents.py` → `AgentSerializer`: how an agent is validated and saved.
+   `config.py` → `AgentSerializer`: how an agent is validated and saved.
 5. `agent/stream.py`: how a run is recorded while it happens.
 
 ## Data (`models.py`)
@@ -36,13 +36,15 @@ The records of *what a run did* live in the `logs` app, not here.
 
 | File | What it does |
 |---|---|
-| `agent/runtime.py` | **The runtime.** Grants, autonomy levels, the toolbox an agent gets, `start_agent_run` / `run_agent`. Every run from every source starts here |
+| `grants.py` | **The permissions tables.** `GRANT_TOOLS` (which tools each grant unlocks), `ALWAYS_AVAILABLE`, the autonomy levels, who may start a run. Plain data, so other apps read it without importing the runtime |
+| `config.py` | `AgentSerializer`: the **only** way an agent is saved. The builder, templates, packs, chat (`chat/tools/authoring.py`), publishing, the benchmark and revision restore all use it, so every save gets the same checks |
+| `agent/runtime.py` | **The runtime.** The toolbox an agent gets, guardrails, `start_agent_run` / `run_agent`. Every run from every source starts here |
 | `agent/stream.py` | Saves each turn and tool call as it happens and sends live updates |
 | `agent/orchestrator.py` | One agent handing work to others ("delegation"), with limits on depth, budget and result size |
 | `agent/hitl.py` | Opens and closes `HITLRequest` rows when a run pauses for approval |
 | `agent/tasks.py` | The coding lead starting workers without waiting for them |
 | `views/` | HTTP endpoints, one file per area: `agents` (CRUD), `runs`, `triggers`, `hitl`, `gallery` (Explore), `builder` (the builder chat), `capabilities`, `wizard` |
-| `views/agents.py` → `AgentSerializer` | The **only** way an agent is saved. The builder, templates and chat (`chat/tools/authoring.py`) all use it, so every save gets the same checks |
+| `views/agents.py` | The agents API around `AgentSerializer`: ownership, unique names, run statistics, revisions |
 | `serializers.py` | The approval-request serializer (`HITLRequestSerializer`) and the agent-name guard |
 | `gallery/` | The installable templates: one file per pack, plus `standalone.py`. `__init__.py` joins them and explains the rules |
 | `publishing.py` | Turning your agent into a shareable copy, with your private ids removed |
@@ -68,7 +70,9 @@ The records of *what a run did* live in the `logs` app, not here.
 
 ## Management commands
 
-- `run_due_triggers`: fire due schedules once (for when Celery isn't running).
+- `run_due_triggers`: fire due schedules once, by hand. You rarely need it:
+  schedules already fire from a loop inside the server process (`scheduler.py`),
+  with no Celery or crontab needed.
 - `recover_runs`: clean up runs orphaned by a restart.
 - `install_packs`: install template packs into an account.
 

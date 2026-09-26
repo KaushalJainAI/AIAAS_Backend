@@ -266,7 +266,7 @@ SUITE = {
 # ─────────────────────────────────────────────── reference outputs
 
 def _ideal_workbook() -> bytes:
-    from chat.tools.office import workbook
+    from office import workbook
 
     spec = workbook.validate({'sheets': [{
         'name': 'Summary',
@@ -280,7 +280,7 @@ def _ideal_workbook() -> bytes:
 
 
 def _ideal_deck() -> bytes:
-    from chat.tools.office import deck
+    from office import deck
 
     rev = METRICS['revenue_crore']
     spec = deck.validate({'title': 'Q3 board update', 'slides': [
@@ -299,7 +299,7 @@ def _ideal_deck() -> bytes:
 
 
 def _ideal_memo() -> bytes:
-    from chat.tools.office import document
+    from office import document
 
     rows = [[line[:16], line[17:]] for line in INCIDENT_LOG.strip().splitlines()]
     spec = document.validate({'title': 'Checkout outage, 12 September', 'blocks': [

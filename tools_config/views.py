@@ -252,7 +252,7 @@ def _display_name(tool_name: str) -> str:
 
 
 def _grant_for_tool(tool_name: str) -> str | None:
-    from agents.agent.runtime import ALWAYS_AVAILABLE
+    from agents.grants import ALWAYS_AVAILABLE
     from chat.tools.registry import connector_of
     if tool_name in ALWAYS_AVAILABLE:
         return 'system'
@@ -268,7 +268,7 @@ def _grant_for_tool(tool_name: str) -> str | None:
 
 
 def _build_catalogue(user_id: int | None):
-    from agents.agent.runtime import ALWAYS_AVAILABLE, UNSERVED_GRANTS
+    from agents.grants import ALWAYS_AVAILABLE, UNSERVED_GRANTS
     from chat.tools.registry import all_tools
     from chat.tools import AVAILABLE_TOOLS  # noqa: F401 - import populates registry
 
@@ -429,7 +429,7 @@ def tool_usage(request):
     Counts only agent grants (GRANT_TOOLS keys + system), not chat-only.
     """
     from agents.models import SubAgent
-    from agents.agent.runtime import GRANT_TOOLS
+    from agents.grants import GRANT_TOOLS
 
     grant_keys = [k for k in GRANT_TOOLS if k != 'system']
     counts: dict[str, int] = {k: 0 for k in GRANT_META}

@@ -328,13 +328,9 @@ class OllamaNode(BaseNodeHandler):
                     } if output_schema or response_format == "json_object" else {}),
                 }
 
-                # Setup tools if requested either via internal config or node UI toggle
+                # Tools come from the caller, never from a lookup here (see
+                # `OpenAICompatibleLLMNode._tools_for`).
                 tools_payload: list | None = list(config.get("tools") or [])
-                enable_tools_ui = config.get("enable_tools", False)
-                if enable_tools_ui:
-                    from chat.tools import get_available_tools as _get_tools
-                    tools_payload = await _get_tools(context.user_id)
-
                 if tools_payload:
                     req_payload["tools"] = tools_payload
 

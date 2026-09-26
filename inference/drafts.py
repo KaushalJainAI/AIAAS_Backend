@@ -224,8 +224,8 @@ def _render(doc: Document, draft: dict) -> None:
 
 def _apply_grid(doc: Document, grid: dict, stamp: str | None = None) -> None:
     """A workbook draft's sheets onto the stored file, sheet by sheet."""
-    from chat.tools.office import edit as office_edit_tool
-    from chat.tools.office.spec import SpecError
+    from office import edit as office_edit_tool
+    from office.spec import SpecError
 
     from . import office_edit
 
@@ -253,7 +253,9 @@ def _apply_grid(doc: Document, grid: dict, stamp: str | None = None) -> None:
 
 def _apply_snapshot(doc: Document, snapshot: dict, stamp: str | None = None) -> None:
     """A Univer snapshot onto the stored workbook, through `sheets.py`."""
-    from . import office_edit, sheets
+    from office import sheets
+
+    from . import office_edit
     from .utils import extract_xlsx_text
 
     try:

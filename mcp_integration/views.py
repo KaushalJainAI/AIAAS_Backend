@@ -300,7 +300,7 @@ class MCPServerViewSet(viewsets.ModelViewSet):
         """None when allowed, else the reason it is not."""
         from urllib.parse import urlparse
 
-        from credentials.views import ALLOWED_REDIRECT_ORIGINS
+        from credentials.oauth import ALLOWED_REDIRECT_ORIGINS
 
         if not redirect_uri:
             return "redirect_uri is required."

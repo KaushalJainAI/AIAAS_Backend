@@ -47,7 +47,7 @@ class CatalogueIntegrityTests(APITestCase):
         gains rules: a new validation lands here as a failing test rather than
         as a 400 the first user to click Install discovers.
         """
-        from agents.views.agents import AgentSerializer
+        from agents.config import AgentSerializer
 
         user = User.objects.create_user('cat', 'cat@example.com', 'pw')
         kb = KnowledgeBase.objects.create(user=user, name='Corpus')
@@ -153,7 +153,7 @@ class InstallTests(APITestCase):
         """An absent key must read as denied, never as "unset"."""
         response = self.install('deep-research')
         agent = SubAgent.objects.get(id=response.data['id'])
-        from agents.views.agents import TOOL_KEYS
+        from agents.config import TOOL_KEYS
 
         self.assertEqual(set(agent.tool_grants), TOOL_KEYS)
         self.assertTrue(agent.tool_grants['webSearch'])

@@ -43,11 +43,11 @@ def _present(d: Dashboard) -> dict:
 
 def _validate_payload(data: dict, *, partial: bool = False) -> dict:
     """Validate create/update body through the same rules as the tool."""
-    from chat.tools.dashboards import _validate_spec
+    from .dashboards import validate_spec
 
     out: dict = {}
     if not partial or 'title' in data or 'tiles' in data:
-        spec = _validate_spec({
+        spec = validate_spec({
             'title': data.get('title', ''),
             'tiles': data.get('tiles', []),
         })

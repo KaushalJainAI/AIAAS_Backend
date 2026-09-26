@@ -12,7 +12,7 @@ from __future__ import annotations
 from django.test import SimpleTestCase
 
 from chat.sources.attachments import classify_file, extract_text
-from chat.tools.office import deck, document, workbook
+from office import deck, document, workbook
 
 
 def a_workbook() -> bytes:

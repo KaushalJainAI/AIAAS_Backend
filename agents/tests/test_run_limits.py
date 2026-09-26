@@ -409,7 +409,7 @@ class RunLimitRoundTripTests(TestCase):
         # The mistake `spendCapRupees` made for months: the UI wrote one thing
         # and the guardrail read another, so the knob moved nothing. One read,
         # through `budget.limit_for`, serves both.
-        from agents.views.agents import AgentSerializer
+        from agents.config import AgentSerializer
 
         agent = SubAgent.objects.create(
             user=self.user, name='A', guardrails={'maxRunSeconds': 900},
@@ -420,7 +420,7 @@ class RunLimitRoundTripTests(TestCase):
     def test_the_retired_knobs_are_gone_from_the_wire(self):
         # They were saved and never read, behind a badge admitting it. Leaving
         # them accepted-but-ignored would keep the same lie one layer down.
-        from agents.views.agents import AgentSerializer
+        from agents.config import AgentSerializer
 
         fields = AgentSerializer().fields
         self.assertNotIn('cpu', fields)

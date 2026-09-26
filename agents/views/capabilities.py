@@ -14,7 +14,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from agents.agent.runtime import GRANT_TOOLS, UNSERVED_GRANTS
+from agents.grants import GRANT_TOOLS, UNSERVED_GRANTS
 
 #: Grant -> the `agent_context` field naming *which* rows or hosts it may use.
 #: None means the grant needs no scope: whether is the whole question.

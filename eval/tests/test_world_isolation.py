@@ -181,7 +181,7 @@ class HiddenKbPickerTests(TestCase):
         self.assertEqual(names, {'Mine'})
 
     def test_agent_cannot_be_attached_to_a_world_corpus(self):
-        from agents.views.agents import AgentSerializer
+        from agents.config import AgentSerializer
         from rest_framework.exceptions import ValidationError
 
         ser = AgentSerializer(context={'request': type('R', (), {'user': self.user})()})

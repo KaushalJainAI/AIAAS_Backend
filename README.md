@@ -23,15 +23,16 @@ Django (ASGI) + LangGraph + Celery + Redis, with the frontend in
 
 | Capability | How |
 |---|---|
-| **Chat assistant** | Streaming tool-calling agent: web search, knowledge-base search, Python sandbox, charts, files, connected apps |
-| **Agents** | An agent is a *configuration* (prompt, model, granted tools, guardrails), not code. Built in a UI, from a template, or by describing it in chat |
-| **Human in the loop** | Five autonomy levels (`plan → review → ask → auto → full`). Sensitive calls pause the run; the user approves once, for the session, or always, from chat or an Inbox |
+| **Chat assistant** | The *manager*. A streaming tool-calling agent that reads (web, knowledge bases, files, connected apps), runs Python, draws charts and plans. Anything that writes, sends or spends is handed to an agent |
+| **Agents** | The *workers*. An agent is a *configuration* (prompt, model, granted tools, guardrails), not code. Built in a UI, from a template, or by describing it in chat |
+| **Human in the loop** | Five autonomy levels (`plan → review → ask → auto → full`). Sensitive calls pause the run; the user approves once, for the session, or always, from chat or an Inbox. An agent can also pause to ask a question |
+| **Office files** | Agents write real `.pptx`, `.xlsx`, `.docx` and `.pdf` files, which open in the in-browser Docs, Sheets and Slides apps, with version history and export |
 | **Schedules & webhooks** | Cron schedules evaluated in the user's timezone (DST handled), webhook triggers, overlap policies |
 | **Delegation** | An agent can fan work out to other agents, bounded by depth, budget and result size |
 | **Connected apps** | Gmail, Drive, Sheets, Calendar and MCP servers, with credentials AES-encrypted at rest and injected at call time |
 | **Knowledge & files** | Per-user file system, hierarchical RAG, document extraction |
 | **Observability** | Every run is recorded as run → turn (with full model reasoning) → tool step, pinned to the agent revision it ran under |
-| **Evaluation** | Test suites with graders, plus human review that measures how often the graders were right |
+| **Evaluation** | Test suites with graders, plus human review that measures how often the graders were right. Tests can run inside fake "worlds" with simulated mail, calendar and files, so they never touch real data |
 
 ## Architecture
 
@@ -41,14 +42,15 @@ flowchart LR
     UI -- WebSocket --> API
     API --> RT[Agent runtime<br/>LangGraph turn loop]
     RT --> LLM[llm/access.py<br/>one funnel for every model call]
-    LLM --> P[(OpenRouter / OpenAI /<br/>NVIDIA / Ollama)]
+    LLM --> P[(OpenRouter / OpenAI /<br/>NVIDIA / Ollama /<br/>OpenCode Zen)]
     RT --> T[Tool registry<br/>chat/tools]
     T --> SB[Sandbox sidecar<br/>no network, no secrets]
-    T --> MCP[Connectors<br/>memory-budgeted]
+    T --> MCP[Connectors<br/>native Google + Notion,<br/>MCP servers]
     T --> KB[(Files + RAG)]
     RT --> CK[(Checkpoints<br/>durable run state)]
     RT --> LOG[(Run / turn / step logs)]
-    BEAT[Celery beat] --> SW[Sweeps: schedules,<br/>HITL reminders, run recovery,<br/>recycle bin]
+    SCH[In-process scheduler] --> RT
+    BEAT[Celery beat or<br/>manage.py commands] --> SW[Sweeps: HITL reminders,<br/>run recovery, recycle bin]
     SW --> RT
 ```
 
@@ -73,14 +75,14 @@ python manage.py migrate
 python manage.py runserver 0.0.0.0:8000
 ```
 
-Redis and Celery are optional in development: every background sweep is also a
-management command (`run_due_triggers`, `send_hitl_reminders`, `recover_runs`,
-`purge_recycle_bin`).
+Redis and Celery are optional in development. Schedules fire from a loop inside
+the server process, and every other background sweep is also a management
+command (`send_hitl_reminders`, `recover_runs`, `purge_recycle_bin`).
 
 ## Tests
 
 ```bash
-python -m pytest            # ~3,250 tests (about 12 min), no network, Redis or database server needed
+python -m pytest            # ~3,650 tests (about 12 min), no network, Redis or database server needed
 ```
 
 Tests live in `<app>/tests/`. Several are end-to-end: they drive the real
@@ -102,7 +104,7 @@ was caught.
 
 | App | Responsibility |
 |---|---|
-| `agents/` | Agents, runtime, delegation, schedules, HITL, templates, publishing (Django label `orchestrator`) |
+| `agents/` | Agents, runtime, delegation, schedules, HITL, templates, publishing (Django label `orchestrator`). The permission tables are `agents/grants.py`, the save path `agents/config.py` |
 | `chat/` | Chat turn pipeline, tool registry, steering, context curation, vision |
 | `llm/` | Provider handlers, model catalogue, credits, effort levels, context budget |
 | `mcp_integration/` | Connector client, memory supervisor, tool catalogue cache |
@@ -112,6 +114,23 @@ was caught.
 | `eval/` | Graders, suites, sweeps, human review |
 | `notifications/` | Notifications and the HITL reminder ladder |
 | `sandbox/` + `sandbox_service/` | Python execution in a hardened sidecar container |
+| `office/` | Not a Django app: the library that builds and reads `.pptx`, `.xlsx`, `.docx`, PDF, diagrams and charts |
+| `core/` | Users, login, API keys, user memory, rate limits, input safety checks |
+| Everything else | `datasources/`, `messaging/`, `browsing/`, `missions/`, `workspaces/`, `imagine/`, `skills/`, `tools_config/`, `streaming/`, `esign/`, `voice/`. The full map, in plain words, is section 7 of [`../START_HERE.md`](../START_HERE.md) |
+
+## Layers
+
+Lower apps may read another app's *models*, but never import the agent
+runtime (`agents.agent`), the chat engine (`chat.turn`), the tool library
+(`chat.tools`), `eval`, or another app's *views*. `office/` imports nothing
+but `workflow_backend.thresholds`, and `llm/` never imports the product apps.
+The rules live in [`.importlinter`](.importlinter), each exception with its
+reason, and `workflow_backend/tests/test_import_contracts.py` fails CI when one
+breaks:
+
+```bash
+lint-imports        # full report, from Backend/
+```
 
 Detailed design docs are in [`docs/`](docs/); [`docs/README.md`](docs/README.md)
 sorts them into current reference and old plans. Start with

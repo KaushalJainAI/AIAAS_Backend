@@ -11,7 +11,7 @@ the office tools render with, and the ones a user's Office would agree with.
 **Formulas are evaluated, not trusted and not skipped.** xlsxwriter writes
 formulas without cached values, so a grader reading `data_only` values sees
 nothing, and one reading the formula text learns only that *some* formula is
-there. `evaluate` (re-exported from `inference/formulas.py`, which grew from
+there. `evaluate` (re-exported from `office/formulas.py`, which grew from
 what was here) computes the common subset, and anything outside it is reported
 as not evaluable rather than guessed. It evaluates a model-written string
 inside this process, so the expression is parsed to an AST and every node is
@@ -126,7 +126,7 @@ def docx_table_rows(data: bytes) -> list[int]:
 
 # ---------------------------------------------------------------- xlsx
 #
-# The evaluator lives in `inference/formulas.py` — grown from what was here,
+# The evaluator lives in `office/formulas.py` — grown from what was here,
 # so the benchmark grades with the same values the app shows. It is re-exported
 # lazily (module `__getattr__`, below) rather than imported at module scope:
 # nothing in `eval/` imports a sibling app at module scope, so no cycle is
@@ -139,7 +139,7 @@ _EVALUATOR_NAMES = frozenset({
 
 def __getattr__(name: str):
     if name in _EVALUATOR_NAMES:
-        from inference import formulas
+        from office import formulas
 
         return getattr(formulas, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

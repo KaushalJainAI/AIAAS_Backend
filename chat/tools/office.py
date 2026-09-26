@@ -34,12 +34,12 @@ from typing import Any, Dict
 
 from asgiref.sync import sync_to_async
 
-from ..charts import render_chart as _register_chart  # noqa: F401 — schema reused below
-from ..registry import get as _registered
-from ..registry import tool
-from . import deck, diagram, document, edit, pdf, workbook
-from .spec import SpecError
-from .themes import THEME_NAMES
+from .charts import render_chart as _register_chart  # noqa: F401 — schema reused below
+from .registry import get as _registered
+from .registry import tool
+from office import deck, diagram, document, edit, pdf, workbook
+from office.spec import SpecError
+from office.themes import THEME_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -730,7 +730,7 @@ def _read_sheet(data: bytes, sheet: Any, cell_range: Any) -> dict:
     """One sheet's cells as values plus formulas, optionally clipped to a range."""
     import re
 
-    from inference import formulas
+    from office import formulas
 
     wb = formulas.workbook(data)
     try:

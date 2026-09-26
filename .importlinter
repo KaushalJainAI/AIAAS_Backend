@@ -1,0 +1,201 @@
+# Import contracts: which parts of the backend may import which.
+#
+# Checked by `lint-imports` (run from Backend/) and by the test
+# `workflow_backend/tests/test_import_contracts.py`, so CI fails when a change
+# breaks one. See "Layers" in Backend/README.md for the picture.
+#
+# Two rules apply to every contract below:
+#
+# * Only *direct* imports are checked (`allow_indirect_imports = True`). Most
+#   cross-app imports here are deferred into function bodies, so nearly every
+#   app reaches every other one through some chain. A direct import is the
+#   thing a person writes and a reviewer can refuse, so that is the line held.
+# * Tests are exempt (`<app>.tests.** -> **`). A test legitimately wires apps
+#   together to check the seam between them.
+#
+# Every exception is listed with its reason. To add one, write the reason; to
+# remove one, fix the import and delete the line. The list should only shrink.
+
+[importlinter]
+root_packages =
+    agents
+    browsing
+    chat
+    core
+    credentials
+    datasources
+    esign
+    eval
+    imagine
+    inference
+    llm
+    logs
+    mcp_integration
+    messaging
+    missions
+    notifications
+    office
+    sandbox
+    skills
+    streaming
+    templates
+    tools_config
+    voice
+    workflow_backend
+    workspaces
+include_external_packages = False
+
+
+[importlinter:contract:office-standalone]
+name = office/ is a standalone library (only workflow_backend.thresholds)
+type = forbidden
+source_modules =
+    office
+forbidden_modules =
+    agents
+    browsing
+    chat
+    core
+    credentials
+    datasources
+    esign
+    eval
+    imagine
+    inference
+    llm
+    logs
+    mcp_integration
+    messaging
+    missions
+    notifications
+    sandbox
+    skills
+    streaming
+    templates
+    tools_config
+    voice
+    workspaces
+allow_indirect_imports = True
+
+
+[importlinter:contract:llm-below-product]
+name = llm/ (the provider layer) never imports chat, agents or eval
+type = forbidden
+source_modules =
+    llm
+forbidden_modules =
+    chat
+    agents
+    eval
+    missions
+allow_indirect_imports = True
+ignore_imports =
+    llm.tests.** -> **
+    # A report after a catalogue refresh: "which agents still use a model that
+    # was just retired?" One read of `SubAgent`, inside the function.
+    llm.catalog_refresh -> agents.models
+
+
+[importlinter:contract:lower-layers]
+name = Lower layers never reach the agent runtime, the chat engine, the tool library or eval
+type = forbidden
+source_modules =
+    browsing
+    core
+    credentials
+    datasources
+    esign
+    inference
+    llm
+    logs
+    notifications
+    office
+    sandbox
+    skills
+    streaming
+    voice
+forbidden_modules =
+    agents.agent
+    agents.views
+    chat.commands
+    chat.tools
+    chat.turn
+    eval
+    missions
+allow_indirect_imports = True
+ignore_imports =
+    browsing.tests.** -> **
+    core.tests.** -> **
+    credentials.tests.** -> **
+    datasources.tests.** -> **
+    esign.tests.** -> **
+    inference.tests.** -> **
+    llm.tests.** -> **
+    logs.tests.** -> **
+    notifications.tests.** -> **
+    sandbox.tests.** -> **
+    skills.tests.** -> **
+    streaming.tests.** -> **
+    # `MAX_DELEGATION_DEPTH`, one constant. `agents/agent/orchestrator.py`
+    # imports only the standard library, so this pulls in nothing else.
+    logs.queries -> agents.agent.orchestrator
+
+
+[importlinter:contract:views-are-not-a-library]
+name = Another app's views are not a library (move shared code out of views/)
+type = forbidden
+source_modules =
+    agents.agent
+    agents.config
+    browsing
+    chat
+    core
+    credentials
+    datasources
+    eval
+    imagine
+    inference
+    llm
+    logs
+    mcp_integration
+    messaging
+    missions
+    notifications
+    office
+    skills
+    streaming
+    tools_config
+    workspaces
+forbidden_modules =
+    agents.views
+    chat.views
+    chat.commands.views
+    core.views
+    credentials.views
+    inference.views
+    logs.views
+    eval.views
+allow_indirect_imports = True
+ignore_imports =
+    chat.tests.** -> **
+    core.tests.** -> **
+    credentials.tests.** -> **
+    eval.tests.** -> **
+    inference.tests.** -> **
+    logs.tests.** -> **
+    mcp_integration.tests.** -> **
+    agents.tests.** -> **
+    # An app's own views may import each other.
+    chat.** -> chat.views
+    chat.** -> chat.commands.views
+    core.** -> core.views
+    credentials.** -> credentials.views
+    inference.** -> inference.views
+    logs.** -> logs.views
+    eval.** -> eval.views
+    # `/schedule` from chat creates a trigger through the Schedules API's own
+    # serializer and arming step. Known debt: both belong in agents/triggers.py.
+    chat.commands.library -> agents.views.triggers
+    # The mission routes are served by the command views (P10 shipped the
+    # mission API there); missions/urls.py only mounts them.
+    missions.urls -> chat.commands.views

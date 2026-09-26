@@ -16,19 +16,18 @@ from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from agents.agent.runtime import (
-    GRANT_TOOLS,
-    UNSERVED_GRANTS,
     AgentRunRefused,
     AgentToolbox,
     build_system_prompt,
     check_guardrails,
     sensitive_tools_for,
 )
+from agents.grants import GRANT_TOOLS, UNSERVED_GRANTS
 from agents.models import SubAgent
 
 
 def toolbox(_file_scope=None, **grants) -> AgentToolbox:
-    from agents.views.agents import TOOL_KEYS
+    from agents.config import TOOL_KEYS
 
     full = {k: bool(grants.get(k, False)) for k in TOOL_KEYS}
     return AgentToolbox(grants=full, user_id=1, file_scope=_file_scope)
@@ -39,7 +38,7 @@ class GrantMappingTests(SimpleTestCase):
         # A grant the runtime maps but the API rejects would be dead code; a
         # grant the API accepts but the runtime ignores is worse — the
         # permissions screen would show a capability nothing implements.
-        from agents.views.agents import TOOL_KEYS
+        from agents.config import TOOL_KEYS
 
         self.assertEqual(set(GRANT_TOOLS) | UNSERVED_GRANTS, TOOL_KEYS)
 

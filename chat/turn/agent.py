@@ -1509,23 +1509,46 @@ def _refusal_text(name: str, reason: str) -> str:
     )
 
 
-async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-    """Execute every tool the last assistant turn asked for."""
-    from chat.tools import permissions
-    from chat.tools import tool_output
-    from chat import tools as tool_registry
+@dataclass
+class _Batch:
+    """Everything one `tools_node` call shares across its four passes.
 
-    turn = _context(config)
-    last = state["messages"][-1]
-    if not isinstance(last, AIMessage) or not last.tool_calls:
-        return {"messages": [], "metadata": dict(state.get("metadata", {}))}
+    One object rather than a dozen arguments, because the passes really do
+    share it: pass 1 adds to `rejected` (an eval blocking a call), pass 2 pops
+    from it (a manager's decision taking the refusal over), and pass 4 reads
+    what is left. Built once per batch by `tools_node` and never stored.
+    """
 
-    meta = dict(state.get("metadata", {}))
-    trace = list(state.get("tool_trace", []))
-    iteration = _turn_number(state["messages"])
-    reasoning = (state.get("thinking") or "").strip()[-150:]
-    results: list[ToolMessage] = []
+    turn: TurnContext
+    calls: list[ToolCall]
+    meta: dict[str, Any]
+    trace: list[dict[str, Any]]
+    iteration: int
+    reasoning: str
+    #: What every dispatched tool is handed, before its per-call fields.
+    tool_context: dict[str, Any]
+    #: Names that pause on sight, and the policy judging everything else.
+    sensitive: frozenset
+    policy: Any
+    dispatch: Any
+    #: call id -> why it will not run (the user declined, or an eval blocked it).
+    rejected: dict[str, str]
+    #: call ids the user already approved; never re-judged.
+    approved: set[str]
+    #: call id -> the person's answer to an `ask_user` card.
+    answers: dict[str, Any]
+    #: call id -> (decision, reason) the person gave on an `answer_subagent` card.
+    decided: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: (call, arguments) for every call that will be dispatched, in call order.
+    planned: list[tuple[ToolCall, dict]] = field(default_factory=list)
+    #: call id -> (output, status, duration_ms).
+    outcomes: dict[str, tuple[str, str, int]] = field(default_factory=dict)
+    #: call id -> the companion image-strip task started beside a web search.
+    companions: dict[str, asyncio.Task] = field(default_factory=dict)
 
+
+def _tool_context(turn: TurnContext, state: AgentState) -> dict[str, Any]:
+    """The context dict every tool call in this batch is dispatched with."""
     tool_context = {
         "user_id": turn.user_id,
         "session_id": turn.session_id,
@@ -1603,16 +1626,19 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         (name for name, text in tool_texts if provenance.instruction_shaped(text)),
         None,
     )
-    # Per-call, filled in just before dispatch below. A tool that starts other
-    # runs (`invoke_subagent`, `run_agent`) needs to name the step that invoked
-    # it, so the worker's log can point back at the exact tool call — and
-    # through it at the reasoning that chose to delegate.
+    return tool_context
+
+
+def _approval_rules(turn: TurnContext) -> tuple[frozenset, Any]:
+    """(names that pause on sight, policy for the rest) for this batch."""
+    from chat.tools import permissions
+    from chat import tools as tool_registry
+
     sensitive = (
         turn.sensitive_tools
         if turn.sensitive_tools is not None
         else frozenset(tool_registry.SENSITIVE_TOOLS)
     )
-    dispatch = turn.tool_dispatch or tool_registry.execute_chat_tool
     policy = turn.approval_policy or permissions.default_policy
 
     # A user watching the run may have loosened (or tightened) how much it asks
@@ -1635,42 +1661,102 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     if turn.tool_permissions:
         sensitive = permissions.apply_tool_permission_overrides(
             sensitive, turn.tool_permissions)
+    return sensitive, policy
 
-    calls = [
-        ToolCall(id=raw["id"], name=raw["name"], arguments=dict(raw.get("args") or {}))
-        for raw in last.tool_calls
-    ]
-    rejected: dict[str, str] = dict(meta.get("rejected_tool_calls", {}) or {})
 
-    # ── Pass 1: settle permission for every call before dispatching any ──
-    #
-    # This runs as its own pass rather than inline with dispatch because
-    # `interrupt()` discards the node's writes and re-runs it from the top on
-    # resume. Interleaved, a batch of [safe, sensitive] would dispatch the safe
-    # call, pause on the sensitive one, and then dispatch the safe one *a
-    # second time* when the user approved — sending the email twice, writing a
-    # second `AgentStep` row, and re-firing the UI side effects. Graph
-    # state is rolled back by the interrupt; the outside world is not.
-    #
-    # Settling every permission first makes the node's re-run idempotent: the
-    # only work before the pause is asking, and the answers persist in
-    # `metadata` (written by `approve_tool_call` / `reject_tool_call` from
-    # outside the node, so they survive the rollback).
-    #
-    # The gates are *decided* concurrently and *acted on* in call order. Under
-    # chat `auto` a policy is a model call (~1.5 s), and awaiting them one at
-    # a time made a batch of four writes a six-second silence; every policy is
-    # a pure read, so overlapping them changes nothing but the wait. A call
-    # the user already approved is not re-judged: the resumed node re-runs
-    # this pass for the whole batch, and asking the policy again could turn
-    # an answer the user just gave into a second approval card.
-    approved = set(meta.get("approved_tool_calls", []) or [])
-    answers = dict(meta.get("question_answers", {}) or {})
+def _audit(batch: _Batch, name: str, arguments: dict) -> dict | None:
+    """What the `auto` reviewer decided about this call, if it was asked.
+
+    Read off the policy pass 1 actually consulted — a mid-run switch may have
+    replaced the turn's own — never the turn's, which may be neither. Never
+    raises: an audit must not break the plan or the record.
+    """
+    try:
+        from .reviewer import audit_for
+
+        return audit_for(batch.policy, name, arguments)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Execute every tool the last assistant turn asked for, in four passes.
+
+    1. `_settle_gates`: every approval and question, before anything runs.
+    2. `_plan_calls`: arguments and trace entries, in call order.
+    3. `_dispatch_calls`: the safe calls together, the rest one by one.
+    4. `_record_results`: observe, apply side effects and answer, in call order.
+
+    The order is the design. Settling first makes a resumed node idempotent;
+    planning and recording in call order keep the transcript, the step rows and
+    the UI identical whichever tool finishes first. Each pass says why.
+    """
+    from chat import tools as tool_registry
+
+    turn = _context(config)
+    last = state["messages"][-1]
+    if not isinstance(last, AIMessage) or not last.tool_calls:
+        return {"messages": [], "metadata": dict(state.get("metadata", {}))}
+
+    meta = dict(state.get("metadata", {}))
+    sensitive, policy = _approval_rules(turn)
+    batch = _Batch(
+        turn=turn,
+        calls=[
+            ToolCall(id=raw["id"], name=raw["name"], arguments=dict(raw.get("args") or {}))
+            for raw in last.tool_calls
+        ],
+        meta=meta,
+        trace=list(state.get("tool_trace", [])),
+        iteration=_turn_number(state["messages"]),
+        reasoning=(state.get("thinking") or "").strip()[-150:],
+        tool_context=_tool_context(turn, state),
+        sensitive=sensitive,
+        policy=policy,
+        dispatch=turn.tool_dispatch or tool_registry.execute_chat_tool,
+        rejected=dict(meta.get("rejected_tool_calls", {}) or {}),
+        approved=set(meta.get("approved_tool_calls", []) or []),
+        answers=dict(meta.get("question_answers", {}) or {}),
+    )
+
+    await _settle_gates(batch)
+    await _plan_calls(batch)
+    await _dispatch_calls(batch)
+    results = await _record_results(batch)
+    return {"messages": results, "metadata": batch.meta, "tool_trace": batch.trace}
+
+
+async def _settle_gates(batch: _Batch) -> None:
+    """Pass 1: settle permission for every call before dispatching any.
+
+    This runs as its own pass rather than inline with dispatch because
+    `interrupt()` discards the node's writes and re-runs it from the top on
+    resume. Interleaved, a batch of [safe, sensitive] would dispatch the safe
+    call, pause on the sensitive one, and then dispatch the safe one *a
+    second time* when the user approved — sending the email twice, writing a
+    second `AgentStep` row, and re-firing the UI side effects. Graph
+    state is rolled back by the interrupt; the outside world is not.
+
+    Settling every permission first makes the node's re-run idempotent: the
+    only work before the pause is asking, and the answers persist in
+    `metadata` (written by `approve_tool_call` / `reject_tool_call` from
+    outside the node, so they survive the rollback).
+
+    The gates are *decided* concurrently and *acted on* in call order. Under
+    chat `auto` a policy is a model call (~1.5 s), and awaiting them one at
+    a time made a batch of four writes a six-second silence; every policy is
+    a pure read, so overlapping them changes nothing but the wait. A call
+    the user already approved is not re-judged: the resumed node re-runs
+    this pass for the whole batch, and asking the policy again could turn
+    an answer the user just gave into a second approval card.
+    """
     from chat.tools.ask import QUESTION_TOOLS, question_spec
     from chat.tools.agents import SUBAGENT_ANSWER_TOOL, subagent_answer_needs_user
 
+    turn = batch.turn
+
     async def _gated(call: ToolCall) -> bool:
-        if call.id in rejected or call.id in approved:
+        if call.id in batch.rejected or call.id in batch.approved:
             return False
         # A question is not an approval: it pauses below on its own terms, in
         # every mode, and asking permission to ask would be two cards for one.
@@ -1679,23 +1765,23 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # A manager answering its worker: questions and refusals are its own
         # call in any mode; only letting the worker *act* can need the boss.
         if call.name == SUBAGENT_ANSWER_TOOL and not await subagent_answer_needs_user(
-                call.arguments, tool_context):
+                call.arguments, batch.tool_context):
             return False
         # Two gates, checked cheapest first. The name list carries reasoning
         # about tools we wrote; the policy inspects calls nobody could have
         # listed in advance. Either one is enough to pause. The call id and
         # the live plan ride along so the `auto` reviewer can cache its
         # verdict per call and judge against the plan as it now stands.
-        return call.name in sensitive or await policy(
+        return call.name in batch.sensitive or await batch.policy(
             call.name, call.arguments,
-            {**tool_context, "call_id": call.id,
-             "todos": list(meta.get("todos") or [])},
+            {**batch.tool_context, "call_id": call.id,
+             "todos": list(batch.meta.get("todos") or [])},
         )
 
-    gates = await asyncio.gather(*(_gated(call) for call in calls))
-    for call, gated in zip(calls, gates):
-        if (call.name in QUESTION_TOOLS and call.id not in answers
-                and call.id not in rejected and turn.can_ask
+    gates = await asyncio.gather(*(_gated(call) for call in batch.calls))
+    for call, gated in zip(batch.calls, gates):
+        if (call.name in QUESTION_TOOLS and call.id not in batch.answers
+                and call.id not in batch.rejected and turn.can_ask
                 and not turn.record_intents):
             spec, _problem = question_spec(call.arguments)
             # A malformed question is not drawn: the tool answers with the
@@ -1706,191 +1792,200 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             continue
         if gated:
             if turn.record_intents:
-                await _record_approval_intent(call, meta, iteration)
+                await _record_approval_intent(call, batch.meta, batch.iteration)
                 if turn.record_intents == "block":
-                    rejected[call.id] = (
+                    batch.rejected[call.id] = (
                         "This is an evaluation run: the call would have waited "
                         "for approval, so it was recorded and not run."
                     )
                 continue
-            await _require_approval(call, turn, meta)
+            await _require_approval(call, turn, batch.meta)
 
-    # ── Pass 2: plan every call, in call order ──
-    #
-    # Arguments, trace entries and the AGENT_TRACE frames are all built here,
-    # before anything is dispatched, so what the UI is told never depends on
-    # which tool happens to finish first.
+
+async def _plan_calls(batch: _Batch) -> None:
+    """Pass 2: plan every call, in call order.
+
+    Arguments, trace entries and the AGENT_TRACE frames are all built here,
+    before anything is dispatched, so what the UI is told never depends on
+    which tool happens to finish first.
+    """
+    from chat.tools.agents import SUBAGENT_ANSWER_TOOL
+
     # When the person answered a manager's `answer_subagent` card, their answer
     # *is* the decision, whatever the model proposed: Approve lets the worker
     # act, Deny refuses it. A denied card is therefore still dispatched — as a
     # refusal — because a worker left waiting on an unanswered question pauses
     # for ever.
-    decided: dict[str, tuple[str, str]] = {}
-    for call in calls:
+    for call in batch.calls:
         if call.name != SUBAGENT_ANSWER_TOOL:
             continue
-        if call.id in rejected:
-            decided[call.id] = ("reject", rejected.pop(call.id) or "The user declined.")
-        elif call.id in approved:
-            decided[call.id] = ("approve", "")
+        if call.id in batch.rejected:
+            batch.decided[call.id] = (
+                "reject", batch.rejected.pop(call.id) or "The user declined.")
+        elif call.id in batch.approved:
+            batch.decided[call.id] = ("approve", "")
 
-    planned: list[tuple[Any, dict]] = []
-    for call in calls:
-        refusal = rejected.get(call.id)
+    for call in batch.calls:
+        refusal = batch.rejected.get(call.id)
         if refusal is not None:
             # A declined call still owes the model a `tool` message: the
             # assistant turn requested it by id, and a transcript with a
             # dangling `tool_call_id` is malformed. Answering with the refusal
             # is also what lets the model adapt — before this, a rejection left
             # the graph paused for ever, because nothing ever resumed it.
-            trace.append({"tool": call.name, "args": call.arguments,
-                          "iteration": iteration, "thought": reasoning,
-                          "summary": "declined by user", "call_id": call.id,
-                          "status": "rejected"})
+            batch.trace.append({"tool": call.name, "args": call.arguments,
+                                "iteration": batch.iteration, "thought": batch.reasoning,
+                                "summary": "declined by user", "call_id": call.id,
+                                "status": "rejected"})
             continue
 
         # web_search with no query is the one omission worth repairing rather
         # than bouncing back — the user's own message is always the right query.
         arguments = dict(call.arguments)
         if call.name == "web_search" and not arguments.get("query"):
-            arguments["query"] = turn.user_text
-        if call.id in decided:
-            decision, reason = decided[call.id]
+            arguments["query"] = batch.turn.user_text
+        if call.id in batch.decided:
+            decision, reason = batch.decided[call.id]
             arguments["decision"] = decision
             if reason:
                 arguments["reason"] = reason
 
-        entry = {"tool": call.name, "args": arguments, "iteration": iteration,
-                 "thought": reasoning, "summary": reasoning, "call_id": call.id}
+        entry = {"tool": call.name, "args": arguments, "iteration": batch.iteration,
+                 "thought": batch.reasoning, "summary": batch.reasoning,
+                 "call_id": call.id}
         # An `auto` reviewer that let this through (or asked about it) leaves
         # its audit on the trace entry, so the run stays auditable afterwards.
-        # Read off the policy pass 1 actually consulted — a mid-run switch may
-        # have replaced the turn's own — never the turn's, which may be neither.
-        try:
-            from .reviewer import audit_for as _audit_for
+        if (approval := _audit(batch, call.name, arguments)) is not None:
+            entry["approval"] = approval
+        batch.trace.append(entry)
+        await batch.turn.sink(Event.AGENT_TRACE, {"sub_type": "tool", **entry})
+        batch.planned.append((call, arguments))
 
-            _audit = _audit_for(policy, call.name, arguments)
-        except Exception:  # noqa: BLE001 — audit must not break the plan
-            _audit = None
-        if _audit is not None:
-            entry["approval"] = _audit
-        trace.append(entry)
-        await turn.sink(Event.AGENT_TRACE, {"sub_type": "tool", **entry})
-        planned.append((call, arguments))
 
-    async def _dispatch_one(call, arguments) -> tuple[str, str, int]:
-        """Run one call. Returns (output, status, duration_ms); never raises."""
-        # Its own copy of the context. `call_id` used to be written onto the
-        # single shared dict immediately before each dispatch, which is exactly
-        # the field a concurrent sibling would overwrite — and
-        # `invoke_subagent` reads it to record which tool call spawned a
-        # worker, so a race there misattributes whole runs.
-        ctx = {**tool_context, "call_id": call.id,
-               # The person's answer to an `ask_user` card, and whether a
-               # manager's decision about its worker came from the person.
-               "answered": call.id in answers,
-               "user_answer": answers.get(call.id),
-               "decided_by_user": call.id in decided}
-        started = time.monotonic()
-        try:
-            async with asyncio.timeout(TOOL_CALL_TIMEOUT):
-                output = await dispatch(call.name, arguments, ctx)
-            status = "completed"
-        except asyncio.TimeoutError:
-            status = "failed"
-            output = f"Error: {call.name} timed out after {TOOL_CALL_TIMEOUT}s."
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("[Tools] %s raised", call.name)
-            status = "failed"
-            output = f"Error running {call.name}: {exc}"
-        return output, status, int((time.monotonic() - started) * 1000)
+async def _dispatch_one(batch: _Batch, call: ToolCall, arguments: dict) -> tuple[str, str, int]:
+    """Run one call. Returns (output, status, duration_ms); never raises."""
+    # Its own copy of the context. `call_id` used to be written onto the
+    # single shared dict immediately before each dispatch, which is exactly
+    # the field a concurrent sibling would overwrite — and
+    # `invoke_subagent` reads it to record which tool call spawned a
+    # worker, so a race there misattributes whole runs.
+    ctx = {**batch.tool_context, "call_id": call.id,
+           # The person's answer to an `ask_user` card, and whether a
+           # manager's decision about its worker came from the person.
+           "answered": call.id in batch.answers,
+           "user_answer": batch.answers.get(call.id),
+           "decided_by_user": call.id in batch.decided}
+    started = time.monotonic()
+    try:
+        async with asyncio.timeout(TOOL_CALL_TIMEOUT):
+            output = await batch.dispatch(call.name, arguments, ctx)
+        status = "completed"
+    except asyncio.TimeoutError:
+        status = "failed"
+        output = f"Error: {call.name} timed out after {TOOL_CALL_TIMEOUT}s."
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[Tools] %s raised", call.name)
+        status = "failed"
+        output = f"Error running {call.name}: {exc}"
+    return output, status, int((time.monotonic() - started) * 1000)
 
-    # ── Pass 3: dispatch — the read-only calls together, the rest one by one ──
-    #
-    # A model issues every call in a turn before seeing any result, so nothing
-    # in this batch can depend on anything else in it and overlapping is safe
-    # by construction. Sensitive calls are excluded whatever else is true,
-    # because a tool worth pausing a human for is a tool with a side effect,
-    # and two of those in one turn may well be ordered.
-    #
-    # Two ways in, and the difference between them is who is making the claim.
-    # A built-in declares `parallel=True` on `@tool()` — a statement by whoever
-    # wrote it. An MCP tool cannot declare anything: its name is minted at
-    # runtime by a third party, which is why `PARALLEL_TOOLS` alone left every
-    # connector call serial, and three read calls to one server cost three
-    # round trips end to end.
-    #
-    # `mcp_reads_only` is the second way in, and it is a *guess from the name*,
-    # which needs justifying because the docs elsewhere say unknown means
-    # serial. The justification is that this codebase already trusts exactly
-    # this guess for a strictly stronger decision — `default_policy` uses it to
-    # decide whether a credentialed call is gated at all, and the connector
-    # `read` scope uses it to decide which tools an agent is even offered. What
-    # a wrong guess costs here is far less than what it costs there: mis-reading
-    # a destructive name means an unapproved deletion when it decides gating,
-    # but only means that a deletion already issued in this turn overlapped a
-    # sibling when it decides scheduling. No name can cause a call the model
-    # did not make.
+
+async def _dispatch_calls(batch: _Batch) -> None:
+    """Pass 3: dispatch — the read-only calls together, the rest one by one.
+
+    A model issues every call in a turn before seeing any result, so nothing
+    in this batch can depend on anything else in it and overlapping is safe
+    by construction. Sensitive calls are excluded whatever else is true,
+    because a tool worth pausing a human for is a tool with a side effect,
+    and two of those in one turn may well be ordered.
+
+    Two ways in, and the difference between them is who is making the claim.
+    A built-in declares `parallel=True` on `@tool()` — a statement by whoever
+    wrote it. An MCP tool cannot declare anything: its name is minted at
+    runtime by a third party, which is why `PARALLEL_TOOLS` alone left every
+    connector call serial, and three read calls to one server cost three
+    round trips end to end.
+
+    `mcp_reads_only` is the second way in, and it is a *guess from the name*,
+    which needs justifying because the docs elsewhere say unknown means
+    serial. The justification is that this codebase already trusts exactly
+    this guess for a strictly stronger decision — `default_policy` uses it to
+    decide whether a credentialed call is gated at all, and the connector
+    `read` scope uses it to decide which tools an agent is even offered. What
+    a wrong guess costs here is far less than what it costs there: mis-reading
+    a destructive name means an unapproved deletion when it decides gating,
+    but only means that a deletion already issued in this turn overlapped a
+    sibling when it decides scheduling. No name can cause a call the model
+    did not make.
+    """
+    from chat.tools import permissions
+    from chat import tools as tool_registry
+
     def _may_overlap(call) -> bool:
-        if call.name in sensitive:
+        if call.name in batch.sensitive:
             return False
         if call.name in tool_registry.PARALLEL_TOOLS:
             return True
         return permissions.mcp_reads_only(call.name)
 
-    concurrent = [(c, a) for c, a in planned if _may_overlap(c)]
-    serial = [(c, a) for c, a in planned if not _may_overlap(c)]
+    concurrent = [(c, a) for c, a in batch.planned if _may_overlap(c)]
+    serial = [(c, a) for c, a in batch.planned if not _may_overlap(c)]
 
     # Companion image strips start here, alongside the searches they belong
     # to, rather than after every dispatch has finished (see
     # `_fetch_companion_images`). The query is known at plan time, the strip
     # is an independent network round trip, and the strip is only ever read
-    # in Pass 4 below — which writes `meta` and persists it — so nothing here
+    # in pass 4 — which writes `meta` and persists it — so nothing here
     # outlives the turn the way a detached background task would. Skipped
     # when the model already asked for images itself: `_on_image_search`
     # fills the same panel, and a second query for it would be pure spend.
-    companions: dict[str, asyncio.Task] = {}
-    if not any(c.name == "image_search" for c, _ in planned):
-        for call, arguments in planned:
+    if not any(c.name == "image_search" for c, _ in batch.planned):
+        for call, arguments in batch.planned:
             if call.name == "web_search" and arguments.get("query"):
-                companions[call.id] = asyncio.create_task(
+                batch.companions[call.id] = asyncio.create_task(
                     _fetch_companion_images(arguments["query"])
                 )
 
-    outcomes: dict[str, tuple[str, str, int]] = {}
     try:
         if len(concurrent) > 1:
             logger.info("[Tools] iter=%d dispatching %d calls in parallel: %s",
-                        iteration, len(concurrent), [c.name for c, _ in concurrent])
+                        batch.iteration, len(concurrent), [c.name for c, _ in concurrent])
             gathered = await asyncio.gather(
-                *(_dispatch_one(c, a) for c, a in concurrent)
+                *(_dispatch_one(batch, c, a) for c, a in concurrent)
             )
-            outcomes.update({c.id: o for (c, _), o in zip(concurrent, gathered)})
+            batch.outcomes.update({c.id: o for (c, _), o in zip(concurrent, gathered)})
         else:
             serial = concurrent + serial      # a lone call gains nothing from gather
 
         for call, arguments in serial:
-            logger.info("[Tools] iter=%d %s(%s)", iteration, call.name, sorted(arguments))
-            outcomes[call.id] = await _dispatch_one(call, arguments)
+            logger.info("[Tools] iter=%d %s(%s)", batch.iteration, call.name, sorted(arguments))
+            batch.outcomes[call.id] = await _dispatch_one(batch, call, arguments)
     finally:
-        # Never leave a companion running past the dispatches: Pass 4 awaits
-        # each one it needs below, and anything unneeded (a declined call, a
+        # Never leave a companion running past the dispatches: pass 4 awaits
+        # each one it needs, and anything unneeded (a declined call, a
         # non-search result) is cancelled here rather than writing into a
         # `meta` nobody will persist.
-        for call_id, task in companions.items():
-            if call_id not in outcomes and not task.done():
+        for call_id, task in batch.companions.items():
+            if call_id not in batch.outcomes and not task.done():
                 task.cancel()
 
-    # ── Pass 4: observe and record, in call order ──
-    #
-    # Deliberately not inside the dispatch above. `_apply_side_effects` does a
-    # read-modify-write on the shared `meta` (see `_collect_media`), and the
-    # observer writes one `AgentStep` row per call — doing either in completion
-    # order would make the transcript, the step rows and the UI's search
-    # results reshuffle between runs of the same turn.
-    args_by_id = {call.id: arguments for call, arguments in planned}
-    for call in calls:
-        refusal = rejected.get(call.id)
+
+async def _record_results(batch: _Batch) -> list[ToolMessage]:
+    """Pass 4: observe and record, in call order.
+
+    Deliberately not inside the dispatch. `_apply_side_effects` does a
+    read-modify-write on the shared `meta` (see `_collect_media`), and the
+    observer writes one `AgentStep` row per call — doing either in completion
+    order would make the transcript, the step rows and the UI's search
+    results reshuffle between runs of the same turn.
+    """
+    from chat.tools import tool_output
+
+    turn = batch.turn
+    results: list[ToolMessage] = []
+    args_by_id = {call.id: arguments for call, arguments in batch.planned}
+    for call in batch.calls:
+        refusal = batch.rejected.get(call.id)
         if refusal is not None:
             results.append(ToolMessage(
                 content=_refusal_text(call.name, refusal),
@@ -1898,34 +1993,27 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             ))
             continue
 
-        output, status, duration_ms = outcomes[call.id]
+        output, status, duration_ms = batch.outcomes[call.id]
         arguments = args_by_id[call.id]
 
         if turn.on_tool_result is not None:
             # Never let an observer break a tool call that already succeeded —
             # it exists to watch the run, not to take part in it.
             try:
-                _approval = None
-                try:
-                    from .reviewer import audit_for as _audit_for2
-
-                    _approval = _audit_for2(policy, call.name, arguments)
-                except Exception:  # noqa: BLE001
-                    _approval = None
                 await turn.on_tool_result(
                     call_id=call.id, name=call.name, args=arguments,
                     output=output, status=status, duration_ms=duration_ms,
-                    iteration=iteration, thought=reasoning,
-                    approval=_approval,
+                    iteration=batch.iteration, thought=batch.reasoning,
+                    approval=_audit(batch, call.name, arguments),
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("[Tools] on_tool_result observer raised")
 
-        # The companion has been running since Pass 3, alongside the search
+        # The companion has been running since pass 3, alongside the search
         # itself — by now it is usually already done, so this await costs
         # nothing and the strip lands in the same `meta` write as the sources.
         companion_images: list | None = None
-        if (task := companions.get(call.id)) is not None:
+        if (task := batch.companions.get(call.id)) is not None:
             try:
                 async with asyncio.timeout(15):
                     companion_images = await task
@@ -1935,7 +2023,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
                 companion_images = []
 
         await _apply_side_effects(
-            call.name, arguments, output, meta, turn.sink,
+            call.name, arguments, output, batch.meta, turn.sink,
             companion_images=companion_images,
         )
 
@@ -1945,12 +2033,11 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         # left is the model — which is the one that has to pay for every
         # character. Anything trimmed is stored and named in what comes back.
         model_output = await tool_output.bound(
-            call.name, output, {**tool_context, "call_id": call.id})
+            call.name, output, {**batch.tool_context, "call_id": call.id})
         results.append(
             ToolMessage(content=model_output, tool_call_id=call.id, name=call.name)
         )
-
-    return {"messages": results, "metadata": meta, "tool_trace": trace}
+    return results
 
 
 async def steering_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:

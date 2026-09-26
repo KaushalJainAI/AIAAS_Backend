@@ -111,7 +111,7 @@ def validate_agent_config(key: str, overrides: dict | None = None, *, user=None)
     `user` is needed only by agents with connectors: the serializer checks that
     every connection id is one the caller may name.
     """
-    from agents.views.agents import AgentSerializer
+    from agents.config import AgentSerializer
 
     config = {**bench_agents.AGENTS[key], **(overrides or {})}
     if '{TOOL_CATALOGUE}' in (config.get('brief') or ''):
@@ -141,7 +141,7 @@ def benchmark_model() -> tuple[str, str]:
 def upsert_agent(user, key: str, *, provider: str = '', model: str = ''):
     """Create or update one benchmark agent. Returns (agent, created)."""
     from agents.models import SubAgent
-    from agents.views.agents import AgentSerializer
+    from agents.config import AgentSerializer
     from logs import revisions
 
     # The benchmark's agents run on `agents.BENCHMARK_MODEL` unless this call

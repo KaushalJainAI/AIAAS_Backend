@@ -22,8 +22,9 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from pptx import Presentation
 
 from chat.tools import execute_tool, get_available_tools
-from chat.tools.office import OFFICE_TOOLS, _CHART_SCHEMA, deck, document, workbook
-from chat.tools.office.spec import SpecError
+from chat.tools.office import OFFICE_TOOLS, _CHART_SCHEMA
+from office import deck, document, workbook
+from office.spec import SpecError
 from chat.tools.registry import get as registered
 
 User = get_user_model()
@@ -396,7 +397,8 @@ class OfficeAvailabilityTests(SimpleTestCase):
                     self.assertEqual(tool.sensitive, name == 'edit_workbook')
 
     def test_the_office_grant_unlocks_them_and_needs_a_scope(self):
-        from agents.agent.runtime import GRANT_TOOLS, AgentToolbox
+        from agents.agent.runtime import AgentToolbox
+        from agents.grants import GRANT_TOOLS
 
         self.assertEqual(set(GRANT_TOOLS['office']), set(OFFICE_TOOLS))
         without = AgentToolbox(grants={'office': True}, user_id=1).allowed_names

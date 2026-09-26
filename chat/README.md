@@ -1,6 +1,6 @@
 # `chat/`: the assistant, the AI loop, and every tool
 
-The biggest app (~30k lines). It holds three different things:
+The biggest app (about 33,000 lines). It holds three different things:
 
 1. **The chat feature**: sessions, messages, attachments.
 2. **The AI loop** (`turn/`), which saved agents also use.
@@ -47,16 +47,17 @@ Full design: [`docs/CHAT_AGENT.md`](../docs/CHAT_AGENT.md).
 | `knowledge.py` | Searching your knowledge bases |
 | `files.py` | Reading and writing your files (`inference/vfs.py`): versions, restore, export, block/slide edits |
 | `sandbox.py` | Running Python (`execute_python`, `run_python_on_files`) |
-| `office/` | Making `.pptx`, `.xlsx`, `.docx`, `.pdf` and diagrams from a description; reading and editing workbooks (`read_workbook`, `edit_workbook`) |
-| `charts.py`, `artifacts.py`, `dashboards.py`, `publish.py` | Drawing charts, HTML snippets, dashboards, shareable pages |
+| `office.py` | The tools for making `.pptx`, `.xlsx`, `.docx`, `.pdf` and diagrams, and reading and editing workbooks (`read_workbook`, `edit_workbook`). The rendering itself is the separate [`office/`](../office/README.md) library |
+| `charts.py`, `artifacts.py`, `dashboards.py`, `publish.py` | Drawing charts, HTML snippets, dashboards, shareable pages. The chart spec is `office/charts.py` and the dashboard spec `inference/dashboards.py`, because other apps check them too |
 | `google/`, `notion.py` | Gmail, Drive, Sheets, Calendar, Docs, Notion |
 | `messaging/`, `talk.py` | Slack, WhatsApp, Teams, SMS, Telegram |
 | `data.py`, `apicaller.py` | Your databases and your own APIs |
-| `agents.py`, `authoring.py`, `tasks.py` | Running agents, creating agents by description, the coding team's task dispatch |
+| `agents.py`, `authoring.py`, `tasks.py` | Running agents, creating agents by description, the coding team's task dispatch. When a worker agent pauses, `answer_subagent` in `agents.py` lets the chat assistant (its manager) answer it; approving a risky action still goes through your normal approval rules |
+| `ask.py` | `ask_user`: the AI asks you a question (a choice, a number or free text) and the run **pauses** until you answer on a `QuestionCard`. In schedules and evals nobody is there to answer, so it writes the question down and carries on with the assumption it stated |
 | `memory.py`, `conversation.py`, `planning.py` | What the assistant remembers about you, searching this chat, the run's todo list |
 | `media.py`, `voice.py`, `vision.py`, `docs.py` | Images, speech, questions about an image, reading scanned documents |
 | `code.py`, `compute.py` | Coding and compute tools. Hidden until a workspace engine exists |
-| `workspace.py`, `runs.py`, `missions.py`, `esign.py`, `ask.py`, `eval_manager.py`, `internal.py`, `clock.py` | Smaller single-purpose tools |
+| `workspace.py`, `runs.py`, `missions.py`, `esign.py`, `eval_manager.py`, `internal.py`, `clock.py` | Smaller single-purpose tools |
 | `permissions.py` | Decides which call needs approval |
 | `describe.py` | Turns a tool call into a sentence a person can read on an approval card |
 | `tool_output.py` | Caps huge tool results and stores the rest |
@@ -67,7 +68,7 @@ Full design: [`docs/CHAT_AGENT.md`](../docs/CHAT_AGENT.md).
 See "Common jobs" in [`START_HERE.md`](../../START_HERE.md#9-common-jobs-step-by-step).
 In short: `@tool({...})` on an `async def f(args, context) -> str`, import the
 file in `tools/__init__.py`, and add the name to `GRANT_TOOLS` in
-`agents/agent/runtime.py` if agents should get it. Chat only gets tools with
+`agents/grants.py` if agents should get it. Chat only gets tools with
 `effect="read"`: anything that writes, sends or spends is an agent's job.
 
 ## Watch out for
@@ -80,3 +81,7 @@ file in `tools/__init__.py`, and add the name to `GRANT_TOOLS` in
   Put them in the context update message instead, or the provider's prompt
   cache stops working.
 - **Tests that fake the model patch `llm.access.stream`.**
+- **`turn/agent.py::tools_node` runs a batch of tool calls in four passes**, one
+  function each: `_settle_gates` (every approval first), `_plan_calls`,
+  `_dispatch_calls` (safe calls in parallel) and `_record_results`. Read them in
+  that order; each docstring says why its pass is separate.

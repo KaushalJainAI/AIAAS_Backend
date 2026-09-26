@@ -346,11 +346,12 @@ class OpenAICompatibleLLMNode(BaseNodeHandler):
 
     @staticmethod
     def _tools_for(config: dict[str, Any]) -> list | None:
-        tools = config.get("tools")
-        if not tools and config.get("enable_tools", False):
-            import chat.tools as shared_tools
-            tools = shared_tools.AVAILABLE_TOOLS
-        return tools or None
+        # The caller decides which tools a call may use and passes them in.
+        # A provider handler never looks them up itself: the tool library sits
+        # above this layer, and an `enable_tools` switch that fetched "every
+        # tool" from here (a leftover of the workflow editor, set by nothing)
+        # was the only thing that made `llm` import `chat`.
+        return config.get("tools") or None
 
     def effective_prompt(self, prompt: str, config: dict[str, Any]) -> str:
         """Append structured-output instructions the user configured.

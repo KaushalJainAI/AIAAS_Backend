@@ -110,7 +110,7 @@ class RunsTests(TestCase):
     def test_runs_and_alignment_validate_and_render(self):
         import docx
 
-        from chat.tools.office import document, pdf
+        from office import document, pdf
 
         spec = document.validate({
             'title': 'Runs', 'blocks': [
@@ -140,7 +140,7 @@ class RunsTests(TestCase):
         self.assertIn('[us](https://example.com)', text)
 
     def test_marker_text_still_validates(self):
-        from chat.tools.office import document
+        from office import document
 
         spec = document.validate({'title': 't', 'blocks': [
             {'type': 'paragraph', 'text': 'a **b** word'}]})
@@ -149,7 +149,7 @@ class RunsTests(TestCase):
 
 class DocxImportTests(ImportCase):
     def test_an_upload_converts_and_keeps_version_one(self):
-        from chat.tools.office import document
+        from office import document
 
         data = _uploaded_docx()
         doc = self.store('Report.docx', 'docx', data)

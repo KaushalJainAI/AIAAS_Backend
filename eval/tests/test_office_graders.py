@@ -11,7 +11,7 @@ from __future__ import annotations
 from asgiref.sync import async_to_sync
 from django.test import SimpleTestCase
 
-from chat.tools.office import deck, document, workbook
+from office import deck, document, workbook
 from eval import graders, office_files
 
 
@@ -68,7 +68,7 @@ class XlsxValueTests(SimpleTestCase):
 
     def test_the_grown_language_evaluates(self):
         # VLOOKUP and text used to be refused with the rest; they are part of
-        # the language now (`inference/formulas.py`), so they evaluate.
+        # the language now (`office/formulas.py`), so they evaluate.
         wb = office_files.workbook(book([['North', 10]]))
         self.assertEqual(office_files.evaluate(wb, 'Summary', '="text"'), 'text')
         self.assertEqual(

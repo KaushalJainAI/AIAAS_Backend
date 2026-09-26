@@ -30,7 +30,7 @@ def docx_to_spec(data: bytes, title: str) -> tuple[dict, dict[str, bytes], list[
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 
-    from chat.tools.office.document import DOC_THEMES
+    from office.document import DOC_THEMES
 
     import io
 
@@ -407,8 +407,8 @@ def import_upload(doc) -> dict:
     images beside the document, and re-renders the real file from the spec.
     Returns {'converted': True, 'warnings': [...]}.
     """
-    from chat.tools.office import deck, document
-    from chat.tools.office.spec import SpecError
+    from office import deck, document
+    from office.spec import SpecError
 
     from . import office_edit, versions
 

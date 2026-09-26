@@ -448,7 +448,7 @@ def _allowed_tools_for(agent) -> list[str] | None:
     if agent is None:
         return None
     try:
-        from agents.agent.runtime import ALWAYS_AVAILABLE, GRANT_TOOLS, RETRIEVAL_TOOLS
+        from agents.grants import ALWAYS_AVAILABLE, GRANT_TOOLS, RETRIEVAL_TOOLS
     except Exception:  # noqa: BLE001
         return None
     names = set(ALWAYS_AVAILABLE) | set(RETRIEVAL_TOOLS)

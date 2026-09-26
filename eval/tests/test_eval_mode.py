@@ -17,7 +17,8 @@ from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
-from agents.agent.runtime import ALWAYS_AVAILABLE, collect_intents
+from agents.agent.runtime import collect_intents
+from agents.grants import ALWAYS_AVAILABLE
 from chat.tests.test_parallel_tools import DispatchRecorder, make_turn, run_tools
 from eval import graders
 from eval.generator import DRAFT_TAG, _mix, case_from_log, clean_case

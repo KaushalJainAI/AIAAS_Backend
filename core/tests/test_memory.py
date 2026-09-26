@@ -234,7 +234,7 @@ class PromptWiringTests(TestCase):
         and not in `ALWAYS_AVAILABLE`, so an unattended run cannot quietly
         change what the platform believes about someone.
         """
-        from agents.agent.runtime import ALWAYS_AVAILABLE, GRANT_TOOLS
+        from agents.grants import ALWAYS_AVAILABLE, GRANT_TOOLS
 
         granted = {n for names in GRANT_TOOLS.values() for n in names}
         granted |= set(ALWAYS_AVAILABLE)

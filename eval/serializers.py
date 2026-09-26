@@ -1,7 +1,7 @@
 """
 Wire contracts for `/api/eval/`.
 
-`ModelSerializer` throughout, unlike `agents/views/agents.py`: there is no flat
+`ModelSerializer` throughout, unlike `agents/config.py`: there is no flat
 camelCase builder shape to translate to here, so a hand-written mapping would be
 a second copy of the columns with nothing to gain.
 

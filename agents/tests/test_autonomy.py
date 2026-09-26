@@ -15,12 +15,12 @@ from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from agents.agent.runtime import (
-    AUTONOMY_LADDER,
     AgentToolbox,
     approval_policy_for,
     sensitive_tools_for,
     switchable_modes,
 )
+from agents.grants import AUTONOMY_LADDER
 from agents.models import SubAgent
 from chat.tools import READ_ONLY_TOOLS, SENSITIVE_TOOLS, all_tools, effect_of
 from chat.turn import steering
@@ -34,7 +34,7 @@ FILE_SCOPE = object()
 
 
 def toolbox(read_only=False, file_scope=FILE_SCOPE, **grants) -> AgentToolbox:
-    from agents.views.agents import TOOL_KEYS
+    from agents.config import TOOL_KEYS
 
     full = {k: bool(grants.get(k, False)) for k in TOOL_KEYS}
     return AgentToolbox(grants=full, user_id=1, file_scope=file_scope,

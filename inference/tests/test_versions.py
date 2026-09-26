@@ -147,7 +147,7 @@ class AgentOverwriteTests(VersionCase):
 
     def test_overwriting_a_binary_keeps_its_id_and_a_version(self):
         doc = self.new('Budget.xlsx')
-        from chat.tools.office import workbook
+        from office import workbook
 
         spec = workbook.validate({'sheets': [{'name': 'S', 'columns': ['A'], 'rows': [['x']]}]})
         data, _ = workbook.render(spec)

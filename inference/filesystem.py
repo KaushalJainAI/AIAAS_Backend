@@ -128,7 +128,7 @@ def resolve_folder(user, folder_id, *, include_trashed: bool = False) -> Folder 
 
 def resolve_folders(user, ids: Iterable, *, include_trashed: bool = False) -> list[Folder]:
     """Bulk `resolve_folder`. Any id that does not resolve fails the whole
-    call, naming the missing set — the `agents/views/agents.py::_owned_ids`
+    call, naming the missing set — the `agents/config.py::AgentSerializer._owned_ids`
     shape, so a partially-applied bulk operation is impossible."""
     wanted = _clean_id_batch(ids, 'folder')
     if not wanted:

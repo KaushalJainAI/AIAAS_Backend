@@ -20,7 +20,7 @@ Design: [`docs/CREDENTIALS_AND_SECURITY.md`](../docs/CREDENTIALS_AND_SECURITY.md
 | `manager.py` | `CredentialManager`: **the one way to read a credential**. Decrypts, caches for 5 minutes, refreshes OAuth tokens |
 | `resolution.py` | "Which key do we use to call provider X for user Y?" |
 | `refs.py` | Secret references: a tool argument can *name* a credential (`{"secret_ref": "slug.field"}`) instead of containing it |
-| `oauth.py` | `GoogleOAuthProvider`: the Google sign-in flow for connecting an account |
+| `oauth.py` | `GoogleOAuthProvider`: the Google sign-in flow for connecting an account. Also `ALLOWED_REDIRECT_ORIGINS`, which remote-MCP OAuth reuses |
 | `verification.py` | `CredentialVerifier`: testing a credential actually works |
 | `views.py`, `urls.py`, `serializers.py` | `/api/credentials/`. Secrets are never sent back to the browser |
 | `browser_utils.py` | Logging into a site with a headless browser and collecting its auth tokens |

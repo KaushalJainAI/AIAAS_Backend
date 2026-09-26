@@ -1,5 +1,5 @@
 """
-The shared formula evaluator (`inference/formulas.py`).
+The shared formula evaluator (`office/formulas.py`).
 
 Checked as a table of expected results — one workbook, every function — plus
 the properties that make it safe to run model-written strings: anything
@@ -13,7 +13,7 @@ import datetime
 
 from django.test import SimpleTestCase
 
-from inference import formulas
+from office import formulas
 
 
 def _book():
