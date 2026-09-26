@@ -56,6 +56,14 @@ def publish(user, *, title: str, kind: str, body, visibility: str):
             f'That is {len(body):,} characters; the limit for one page is '
             f'{PUBLISHED_PAGE_BODY_CHARS:,}. Split it or shorten it.'
         )
+    # A page can be public, so the platform's content floor applies to what is
+    # published here the same as to what is asked for in chat — for the API
+    # and the tool alike, since this is their one write path.
+    from core.safety.content_policy import check_text
+
+    refused = check_text(f'{title}\n{body}', where='published page')
+    if refused is not None:
+        raise PublishError(refused.message)
 
     page = PublishedPage(owner=user, slug=mint_slug(title), title=title, kind=kind,
                          body=body, visibility=visibility, is_listed=True)

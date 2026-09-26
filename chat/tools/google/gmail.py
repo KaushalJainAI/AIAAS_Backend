@@ -377,6 +377,16 @@ async def gmail_create_draft(args: Dict, context: Dict) -> str:
 }, sensitive=True, effect="irreversible", connector=CONNECTOR)
 @handles_google_errors
 async def gmail_send_message(args: Dict, context: Dict) -> str:
+    # The same floor every channel meets (`core/safety/outbound.py`): content
+    # policy, the account's daily cap, and a disclosure on unreviewed mail.
+    from asgiref.sync import sync_to_async
+
+    from core.safety import outbound
+
+    refused = await sync_to_async(outbound.check)(context.get("user_id"), args.get("body") or "")
+    if refused:
+        return json.dumps({"status": "error", "error": refused})
+    args = {**args, "body": outbound.disclose(args.get("body") or "", context)}
     message = await _compose(args, context)
     sent = await send_json(context, "POST", f"{API}/messages/send", json=message)
     return json.dumps({

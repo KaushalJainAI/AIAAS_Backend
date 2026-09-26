@@ -185,3 +185,59 @@ class GraphIntegrationTests(SimpleTestCase):
         source = inspect.getsource(agent_mod.agent_node)
         self.assertIn("todos.render", source)
         self.assertIn('history.append', source)
+
+
+class TransparencyTests(SimpleTestCase):
+    """What the person watching needs: reasons, revisions, and which step did what."""
+
+    def test_a_note_rides_along_and_is_capped(self):
+        out = todos.normalize([{"text": "a", "status": "blocked", "note": "x" * 500}])
+        self.assertEqual(len(out[0]["note"]), todos.MAX_NOTE_CHARS)
+        self.assertEqual(todos.normalize([{"text": "a", "status": "blocked",
+                                           "reason": "no key"}])[0]["note"], "no key")
+
+    def test_a_blocked_note_reaches_the_model(self):
+        text = todos.render([{"text": "pay", "status": "blocked", "note": "no card"}])
+        self.assertIn("pay (blocked: no card)", text)
+
+    def test_a_blocked_item_without_a_reason_is_accepted_but_named(self):
+        out = json.loads(async_to_sync(update_todos)(
+            {"todos": [{"text": "pay", "status": "blocked"}]}, {}))
+        self.assertEqual(out["todos"][0]["status"], "blocked")
+        self.assertIn("Blocked without a reason: pay", out["note"])
+
+    def test_revisions_are_recorded_once_each(self):
+        meta: dict = {}
+        self.assertEqual(todos.record_revision(meta, _plan(("a", "open"))), 1)
+        self.assertIsNone(todos.record_revision(meta, _plan(("a", "open"))))
+        self.assertEqual(todos.record_revision(meta, _plan(("a", "done"))), 2)
+        self.assertEqual([r["n"] for r in meta["todo_history"]], [1, 2])
+
+    def test_trimming_keeps_the_original_plan(self):
+        meta: dict = {}
+        for i in range(todos.MAX_REVISIONS + 5):
+            todos.record_revision(meta, _plan((f"s{i}", "open")))
+        history = meta["todo_history"]
+        self.assertEqual(len(history), todos.MAX_REVISIONS)
+        self.assertEqual(history[0]["todos"], _plan(("s0", "open")))
+        self.assertEqual(history[-1]["n"], todos.MAX_REVISIONS + 5)
+
+    def test_the_side_effect_records_history_and_sends_the_revision(self):
+        from chat.turn.agent import _SIDE_EFFECTS
+
+        meta: dict = {}
+        seen: list = []
+
+        async def sink(event, payload):
+            seen.append(payload)
+
+        for plan in (_plan(("a", "doing")), _plan(("a", "done"))):
+            async_to_sync(_SIDE_EFFECTS["update_todos"])(
+                {"type": "todos", "todos": plan}, {}, meta, sink)
+        self.assertEqual(len(meta["todo_history"]), 2)
+        self.assertEqual([p["revision"] for p in seen], [1, 2])
+
+    def test_current_step_is_the_first_in_progress(self):
+        self.assertEqual(todos.current_step(_plan(("a", "done"), ("b", "doing"),
+                                                  ("c", "doing"))), "b")
+        self.assertEqual(todos.current_step(_plan(("a", "open"))), "")

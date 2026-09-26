@@ -196,6 +196,12 @@ def _persist_one(generation, output_url: str, index: int, total: int) -> Optiona
                 return None
 
         ext = _ext_for(mime, kind)
+        if kind == "image":
+            # Marked as synthetic on the picture and in the file before it
+            # lands anywhere a person can download and share it from.
+            from core.safety.labels import label_image
+
+            file_bytes = label_image(file_bytes, ext, model=generation.model or "")
         slug = _sanitize_slug(generation.prompt or kind)
         # Filename must be unique enough but human-readable: <slug>-<id>-<ts>.<ext>
         ts = int(time.time())

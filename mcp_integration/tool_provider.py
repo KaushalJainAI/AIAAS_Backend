@@ -172,6 +172,13 @@ class MCPToolProvider:
             except Exception as e:  # noqa: BLE001
                 logger.warning("Failed to list tools for MCP server %s: %s", server.name, e)
                 return []
+            # A third party writes these descriptions, so only tools the user
+            # trusts *in their current form* reach the model: new ones whose
+            # text addresses an AI, and ones changed since, are held on
+            # Connections for review (`pinning.py`).
+            from .pinning import filter_tools
+
+            tools = await filter_tools(server, user, tools)
             return [_build_openai_descriptor(server, t) for t in tools
                     if _keep(server.id, t)]
 
@@ -214,6 +221,16 @@ class MCPToolProvider:
             binding = await MCPToolProvider._resolve_binding(name, user)
             if binding is None:
                 return json.dumps({"error": f"Unknown or unavailable MCP tool '{name}'.", "code": "tool_not_found"})
+            from .pinning import is_allowed
+
+            if not await is_allowed(binding.server_id, user, binding.original_tool_name):
+                return json.dumps({
+                    "error": (f"'{binding.original_tool_name}' is held for review: its "
+                              "definition is new-and-suspicious or changed since the user "
+                              "approved it. Do not retry; tell the user to review it on "
+                              "the Connections page."),
+                    "code": "tool_held",
+                })
             manager = MCPClientManager(binding.server_id, user=user)
             result = await manager.call_tool(binding.original_tool_name, arguments or {})
         except PermissionDenied:

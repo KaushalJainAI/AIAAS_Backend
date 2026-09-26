@@ -158,6 +158,20 @@ def run_generation(generation: Generation) -> Generation:
     """
     _broadcast_started(generation)
 
+    # The platform's own floor, before any provider sees the prompt or any
+    # money is spent — the same check the `generate_image` tool runs.
+    from core.safety.content_policy import check_image_prompt, check_text
+
+    refused = (check_image_prompt(generation.prompt or '')
+               if generation.type in ('image', 'video')
+               else check_text(generation.prompt or '', where='audio prompt'))
+    if refused is not None:
+        generation.status = "failed"
+        generation.error_message = refused.message
+        generation.save()
+        broadcast_generation(generation, "generation.failed")
+        return generation
+
     try:
         service = OpenRouterService.for_user(generation.user)
     except MissingOpenRouterCredentialError as e:

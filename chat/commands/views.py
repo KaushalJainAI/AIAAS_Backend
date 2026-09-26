@@ -310,12 +310,34 @@ async def mission_list_create(request):
     return Response(payload, status=status.HTTP_201_CREATED)
 
 
-@async_api_view(["GET"])
+@async_api_view(["GET", "DELETE"])
 @permission_classes([IsAuthenticated])
 async def mission_detail(request, mission_id: int):
     from asgiref.sync import sync_to_async
 
     from missions.models import Mission
+
+    if request.method == "DELETE":
+        # Cancel-first, like run deletion stops-first: an advancing mission
+        # must be stopped before it is removed. Past runs keep their rows —
+        # their `mission` FK is SET_NULL — so history survives the mission.
+        def _remove():
+            row = Mission.objects.filter(id=mission_id, user=request.user).first()
+            if row is None:
+                return None
+            if row.status in ("active", "waiting"):
+                return row.status
+            row.delete()
+            return True
+
+        outcome = await sync_to_async(_remove)()
+        if outcome is None:
+            return Response({"error": "Mission not found"}, status=404)
+        if outcome is not True:
+            return Response(
+                {"error": f"Cancel the mission first — it is still {outcome}."},
+                status=409)
+        return Response(status=204)
 
     row = await sync_to_async(
         lambda: Mission.objects.filter(id=mission_id, user=request.user)

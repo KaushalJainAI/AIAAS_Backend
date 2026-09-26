@@ -32,7 +32,10 @@ logger = logging.getLogger(__name__)
             "the reason if you cannot complete it. Do not use it for a task "
             "you can finish in one or two steps. Your open items are shown "
             "back to you every turn, so this is how you remember what you were "
-            "doing on a long job."
+            "doing on a long job. The user watches this list and sees every "
+            "revision: a step you remove without finishing is shown to them as "
+            "dropped, so mark it blocked with a note instead if it could not "
+            "be done."
         ),
         "parameters": {
             "type": "object",
@@ -53,7 +56,15 @@ logger = logging.getLogger(__name__)
                                 "description": (
                                     "open = not started, doing = in progress, "
                                     "done = finished, blocked = cannot be done "
-                                    "(say why in the text)."
+                                    "(say why in note)."
+                                ),
+                            },
+                            "note": {
+                                "type": "string",
+                                "description": (
+                                    "Required for blocked items: one short "
+                                    "sentence saying why, which the user sees. "
+                                    "Optional otherwise."
                                 ),
                             },
                         },
@@ -100,9 +111,19 @@ async def update_todos(args: Dict, context: Dict) -> str:
         "todos": items,
         "open": len(todo_state.unfinished(items)),
     }
+    notes = []
     if sent > len(items):
-        payload["note"] = (
+        notes.append(
             f"{sent - len(items)} item(s) were dropped: the limit is "
             f"{cap} steps. Track the work in fewer, larger steps."
         )
+    if unexplained := todo_state.missing_notes(items):
+        # Accepted, not refused — a refusal leaves the old list standing — but
+        # said, so the next update carries the reason the user is waiting for.
+        notes.append(
+            "Blocked without a reason: " + "; ".join(unexplained)
+            + ". Add a note saying why on your next update_todos."
+        )
+    if notes:
+        payload["note"] = " ".join(notes)
     return json.dumps(payload)

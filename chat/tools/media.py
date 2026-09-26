@@ -160,6 +160,13 @@ def _prepare(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_CHARS):
         raise MediaError('Describe the image in `prompt`.')
     if len(prompt) > prompt_cap:
         raise MediaError(f'The prompt is {len(prompt)} characters; keep it under {prompt_cap}.')
+    # Before any money is spent or any provider sees it: some images the
+    # platform itself must not make (`core/safety/content_policy.py`).
+    from core.safety.content_policy import check_image_prompt
+
+    refused = check_image_prompt(prompt)
+    if refused is not None:
+        raise MediaError(f'{refused.message} Do not retry with different wording.')
 
     try:
         service = OpenRouterService.for_user(user)
@@ -199,6 +206,11 @@ async def _generate(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_
 
     data, ext = await sync_to_async(_image_bytes, thread_sensitive=False)(
         result.get('url') or '')
+    # Marked as synthetic on the picture and in the file (IT Rules 2026, EU AI
+    # Act Art. 50) before it is saved anywhere a person can share it from.
+    from core.safety.labels import label_image
+
+    data = await sync_to_async(label_image, thread_sensitive=False)(data, ext, model=model_id)
     path = f'{raw_path or "images/" + _slug(prompt)}.{ext}'
     if not path.startswith('/') and scope.write_prefix:
         # A relative path lands in the scope's own write folder, the only
@@ -209,7 +221,8 @@ async def _generate(scope, user, args: Dict[str, Any], prompt_cap: int = PROMPT_
     cost = Decimal(str(reported)) if reported is not None else IMAGE_COST_ESTIMATE_USD
     out = await sync_to_async(write_binary)(
         scope, path, data, text=f'Generated image: {prompt}',
-        spec={'kind': 'image', 'prompt': prompt, 'model': model_id},
+        spec={'kind': 'image', 'prompt': prompt, 'model': model_id,
+              'ai_generated': True},
     )
     out.update({
         'model': model_id,

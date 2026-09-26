@@ -113,6 +113,20 @@ def live_count(parent_thread: str) -> int:
                if t.status in ('running', 'paused'))
 
 
+def iter_live():
+    """Every not-done task record, whatever the lead.
+
+    The Activity live feed reads this: a worker's run is a real run with its
+    own trace, and the lead's panel is not where someone looks for "what is
+    running". Yields `(parent_thread, record)`; callers map execution ids to
+    owners themselves, since a record carries no user.
+    """
+    for parent_thread, bucket in _tasks.items():
+        for record in bucket.values():
+            if record.status in ('running', 'paused'):
+                yield parent_thread, record
+
+
 def prune(parent_thread: str) -> None:
     """Drop terminal records older than the TTL."""
     import time

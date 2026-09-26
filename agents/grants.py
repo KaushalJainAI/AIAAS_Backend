@@ -42,6 +42,7 @@ GRANT_TOOLS: dict[str, tuple[str, ...]] = {
     # scope says "which files".
     'fileOps': ('list_files', 'find_files', 'read_file', 'write_file',
                 'edit_file', 'make_directory', 'delete_file',
+                'move_file', 'copy_file',
                 'file_versions', 'restore_file_version', 'export_file',
                 'edit_document', 'edit_deck'),
     # Decks, workbooks and Word files rendered from a spec (`chat/tools/office`).

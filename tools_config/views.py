@@ -198,7 +198,8 @@ LIBRARY_GROUPS: dict[str, tuple[str, ...]] = {
     'compute': ('workspace_exec', 'start_job', 'job_status', 'job_logs',
                 'cancel_job', 'sync_files'),
     'fileOps': ('list_files', 'find_files', 'read_file', 'write_file',
-                'edit_file', 'make_directory', 'delete_file'),
+                'edit_file', 'make_directory', 'delete_file',
+                'move_file', 'copy_file'),
     # `run_agent` / `get_agent_run` are deliberately absent: GRANT_TOOLS only
     # unlocks search_agents + invoke_subagent, and the library must not imply
     # a grant unlocks tools the runtime never serves through it. Both still

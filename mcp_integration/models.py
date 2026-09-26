@@ -397,3 +397,52 @@ class MCPToolCatalogue(models.Model):
 
     def __str__(self):
         return f"{len(self.tools or [])} tools for server {self.server_id}"
+
+
+class MCPToolPin(models.Model):
+    """What one third-party tool looked like when it was trusted.
+
+    Defence against MCP **tool poisoning** and the **rug pull** (a server
+    changing a tool after the user connected it): a tool's name, description
+    and input schema reach the model verbatim, so a description is a prompt
+    written by a third party. The pin is a sha256 of those three, taken on
+    first sight. See `mcp_integration/pinning.py` for the rules; in short, a
+    tool whose description is addressed to an AI starts `quarantined`, a tool
+    whose digest later changes becomes `changed`, and neither is offered to a
+    model or dispatched until the user approves it on Connections.
+
+    Per user, not per server: approving a change is a person's decision about
+    their own account, and a curated row is shared by everyone.
+    """
+
+    STATUS_CHOICES = [
+        ('trusted', 'Trusted'),
+        ('changed', 'Changed since approved'),
+        ('quarantined', 'Held for review'),
+    ]
+
+    server = models.ForeignKey(MCPServer, on_delete=models.CASCADE, related_name='tool_pins')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name='mcp_tool_pins')
+    tool_name = models.CharField(max_length=255)
+    #: The digest the user trusts. Empty for a tool quarantined on first sight.
+    digest = models.CharField(max_length=64, blank=True, default='')
+    #: The digest seen now, when it differs from `digest`.
+    pending_digest = models.CharField(max_length=64, blank=True, default='')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='trusted')
+    #: Why it is held, in a sentence for the Connections page.
+    reason = models.CharField(max_length=300, blank=True, default='')
+    #: The description as it is now, so the user reads what they approve.
+    description = models.TextField(blank=True, default='')
+    first_seen = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['server', 'user', 'tool_name'],
+                                    name='uniq_mcp_tool_pin'),
+        ]
+        indexes = [models.Index(fields=['server', 'user'])]
+
+    def __str__(self):
+        return f"{self.tool_name} on {self.server_id}: {self.status}"

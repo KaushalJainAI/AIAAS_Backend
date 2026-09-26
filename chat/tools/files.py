@@ -45,6 +45,25 @@ def _no_scope() -> str:
     })
 
 
+#: Shared by write_file and edit_file: the optimistic-concurrency check.
+_EXPECTED_VERSION = {
+    "type": "string",
+    "description": (
+        "The `version` from your last read of this file. If given and the file "
+        "changed since, the write is refused instead of overwriting someone "
+        "else's change. Recommended when other agents share the folder."
+    ),
+}
+
+
+def _int(value: Any) -> int:
+    """A model-supplied integer, or 0. "20 lines" gets the default, not a crash."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 async def _run(context: Dict, fn, *args, **kwargs) -> str:
     """Call one `vfs` function off the event loop and render it for the model.
 
@@ -77,7 +96,8 @@ async def _run(context: Dict, fn, *args, **kwargs) -> str:
             "List the directories and files at a path in your workspace. Call "
             "this before reading or writing when you are not certain what is "
             "there — paths are case-sensitive and guessing wastes a turn. "
-            "Returns entries directly inside the path only, not recursively."
+            "Returns entries directly inside the path; pass depth (up to 3) to "
+            "also get a `tree` of everything that many levels down."
         ),
         "parameters": {
             "type": "object",
@@ -85,6 +105,10 @@ async def _run(context: Dict, fn, *args, **kwargs) -> str:
                 "path": {
                     "type": "string",
                     "description": "Directory to list, relative to your workspace root. Defaults to the root.",
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "How many levels to include in `tree` (1-3). Defaults to 1: this directory only.",
                 },
             },
             "required": [],
@@ -97,7 +121,8 @@ async def list_files(args: Dict, context: Dict) -> str:
 
     return await _run(
         context, vfs.list_dir, args.get("path") or "/",
-        limit=await alimit(context, "list_files", "maxEntries"))
+        limit=await alimit(context, "list_files", "maxEntries"),
+        depth=_int(args.get("depth")) or 1)
 
 
 @tool({
@@ -107,8 +132,12 @@ async def list_files(args: Dict, context: Dict) -> str:
         "description": (
             "Read the text of one file in your workspace. Long files come back "
             "in windows: if the result says it was truncated, call again with "
-            "the offset it names to continue. Returns the file's text, not a "
-            "summary of it."
+            "the offset it names to continue. Pass start_line/end_line to read "
+            "numbered lines instead — the best way to look at the lines "
+            "find_files pointed to. Returns the file's text, not a summary of "
+            "it, and a `version` you can pass to write_file/edit_file as "
+            "expected_version so your write is refused if someone else changed "
+            "the file after you read it."
         ),
         "parameters": {
             "type": "object",
@@ -121,6 +150,14 @@ async def list_files(args: Dict, context: Dict) -> str:
                     "type": "integer",
                     "description": "Character offset to start from. Use the offset a truncated read names.",
                 },
+                "start_line": {
+                    "type": "integer",
+                    "description": "First line to read (1-based). Switches to numbered-line output.",
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Last line to read, inclusive. Defaults to the end of the file.",
+                },
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -132,8 +169,10 @@ async def read_file(args: Dict, context: Dict) -> str:
 
     return await _run(
         context, vfs.read_file, args.get("path") or "",
-        offset=args.get("offset") or 0,
+        offset=_int(args.get("offset")),
         window=await alimit(context, "read_file", "windowChars"),
+        start_line=_int(args.get("start_line")) or None,
+        end_line=_int(args.get("end_line")) or None,
     )
 
 
@@ -163,6 +202,7 @@ async def read_file(args: Dict, context: Dict) -> str:
                     "type": "boolean",
                     "description": "Append to the file instead of replacing its contents.",
                 },
+                "expected_version": _EXPECTED_VERSION,
             },
             "required": ["path", "content"],
             "additionalProperties": False,
@@ -176,6 +216,7 @@ async def write_file(args: Dict, context: Dict) -> str:
         context, vfs.write_file, args.get("path") or "",
         args.get("content") or "", append=bool(args.get("append")),
         max_chars=await alimit(context, "write_file", "maxChars"),
+        expected_version=args.get("expected_version") or None,
     )
 
 
@@ -217,6 +258,7 @@ async def write_file(args: Dict, context: Dict) -> str:
                         "Use for a rename that runs through the file."
                     ),
                 },
+                "expected_version": _EXPECTED_VERSION,
             },
             "required": ["path", "old_text", "new_text"],
             "additionalProperties": False,
@@ -231,6 +273,7 @@ async def edit_file(args: Dict, context: Dict) -> str:
         args.get("old_text") or "", args.get("new_text") or "",
         replace_all=bool(args.get("replace_all")),
         max_chars=await alimit(context, "edit_file", "maxChars"),
+        expected_version=args.get("expected_version") or None,
     )
 
 
@@ -291,6 +334,63 @@ async def delete_file(args: Dict, context: Dict) -> str:
     return await _run(context, vfs.delete, args.get("path") or "")
 
 
+_MOVE_COPY_PARAMS = {
+    "type": "object",
+    "properties": {
+        "path": {
+            "type": "string",
+            "description": "What to move or copy, relative to your workspace root.",
+        },
+        "to": {
+            "type": "string",
+            "description": "Destination directory, or the new full path including the name.",
+        },
+    },
+    "required": ["path", "to"],
+    "additionalProperties": False,
+}
+
+
+@tool({
+    "type": "function",
+    "function": {
+        "name": "move_file",
+        "description": (
+            "Move or rename a file or directory in your workspace. It keeps its "
+            "identity and version history — use this instead of reading, "
+            "rewriting and deleting. If `to` is an existing directory the item "
+            "goes inside it; otherwise `to` is the new full path (missing "
+            "parent directories are created). Refuses if the destination name "
+            "is already taken."
+        ),
+        "parameters": _MOVE_COPY_PARAMS,
+    },
+}, requires="files", sensitive=True, effect="reversible")
+async def move_file(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    return await _run(context, vfs.move, args.get("path") or "", args.get("to") or "")
+
+
+@tool({
+    "type": "function",
+    "function": {
+        "name": "copy_file",
+        "description": (
+            "Copy one file (including .docx, .xlsx and .pptx) to a new path in "
+            "your workspace. If `to` is an existing directory the copy keeps "
+            "its name; otherwise `to` is the new full path. Refuses if the "
+            "destination name is already taken. Files only, not directories."
+        ),
+        "parameters": _MOVE_COPY_PARAMS,
+    },
+}, requires="files", sensitive=True, effect="reversible")
+async def copy_file(args: Dict, context: Dict) -> str:
+    from inference import vfs
+
+    return await _run(context, vfs.copy, args.get("path") or "", args.get("to") or "")
+
+
 @tool({
     "type": "function",
     "function": {
@@ -301,7 +401,9 @@ async def delete_file(args: Dict, context: Dict) -> str:
             "you know roughly what a file is called or what it says. This is "
             "plain substring matching over your own files — it is not a "
             "knowledge base search and does not rank by relevance, so a match "
-            "means the text is literally there."
+            "means the text is literally there. Each match lists up to three "
+            "`snippets` with line numbers; read around them with "
+            "read_file(start_line=...)."
         ),
         "parameters": {
             "type": "object",

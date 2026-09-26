@@ -15,10 +15,13 @@ Read these in roughly this order.
 | Doc | What it explains |
 |---|---|
 | [CHAT_AGENT.md](CHAT_AGENT.md) | The chat assistant: one message, end to end, and the AI loop |
+| [SLASH_COMMANDS.md](SLASH_COMMANDS.md) | Slash commands in plain language: the three kinds, the pipeline, the full list |
+| [CONTEXT_AND_ATTACHMENTS.md](CONTEXT_AND_ATTACHMENTS.md) | What the model sees each turn, and how attached files reach it |
 | [API.md](API.md) | Every HTTP route: what it does, who may call it, which tables it touches. **Update it whenever you change a route.** |
 | [AGENT_OBSERVABILITY.md](AGENT_OBSERVABILITY.md) | How a run is recorded: run → turns → steps, plus agent revisions |
 | [CONTEXT_LIFECYCLE.md](CONTEXT_LIFECYCLE.md) | How a long run stays inside the model's memory limit |
 | [SANDBOX_EXECUTION.md](SANDBOX_EXECUTION.md) | How the AI's Python code runs safely |
+| [SAFETY_AND_GUARDRAILS.md](SAFETY_AND_GUARDRAILS.md) | Every guardrail on the AI agents in one place: what an agent can reach, who approves, prompt-injection defences, containment, limits, content and legal duties, and the gaps still open |
 | [CREDENTIALS_AND_SECURITY.md](CREDENTIALS_AND_SECURITY.md) | How API keys are stored and used |
 | [MCP_ARCHITECTURE.md](MCP_ARCHITECTURE.md) | How outside tool servers (MCP) are connected. [MCP_INTEGRATION.md](MCP_INTEGRATION.md) is a shorter overview |
 | [RAG_STRATEGY.md](RAG_STRATEGY.md) | How knowledge-base search works |
@@ -51,6 +54,7 @@ Useful for the "why". The code is the source of truth where they differ.
 | [SECURITY_REVIEW_FIX_PLAN.md](SECURITY_REVIEW_FIX_PLAN.md) | Done 2026-09-25: the whole-project security review and its fixes (sign-in takeover, logging out everywhere, hashed API keys, no tokens in URLs). Not deployed yet |
 | [OFFICE_SUITE_PLAN.md](OFFICE_SUITE_PLAN.md) | All six phases built 2026-09-25: Docs, Sheets and Slides as full-screen apps (TipTap, Univer, CodeMirror), autosave and undo, version history, export, previews for every file type |
 | [CONCURRENCY_LAG_FIX_PLAN.md](CONCURRENCY_LAG_FIX_PLAN.md) | Phases 0–5 built 2026-09-24. Phase 5 only helps after the server is resized; Phase 6 depends on measurements |
+| [VFS_HARDENING_PLAN.md](VFS_HARDENING_PLAN.md) | Built 2026-09-26: concurrent-write locks, stale-write guard, move/copy verbs, read/file search upgrades |
 
 ## Plans in progress or not started
 
@@ -60,6 +64,7 @@ Useful for the "why". The code is the source of truth where they differ.
 | [RUN_VISIBILITY_AND_REMINDERS_PLAN.md](RUN_VISIBILITY_AND_REMINDERS_PLAN.md) | Approved, being built |
 | [EVAL_EXPANSION_PLAN.md](EVAL_EXPANSION_PLAN.md) | Eval datasets for every agent |
 | [COMPUTE_ISOLATION_PLAN.md](COMPUTE_ISOLATION_PLAN.md) | For discussion: a private machine per user (needed by the coding agents) |
+| [ACTIVITY_PAGE_PLAN.md](ACTIVITY_PAGE_PLAN.md) | Partly built 2026-09-26: `/api/activity/` live + recent-files endpoints, run delete/bulk-delete/mark-failed routes, Activity frontend components started; missions/schedules sections still open |
 | [PRODUCTIVITY_SUITE_PLAN.md](PRODUCTIVITY_SUITE_PLAN.md) | Proposed: in-browser office apps |
 | [ORCHESTRATOR_LATENCY_OPTIMIZATION_PLAN.md](ORCHESTRATOR_LATENCY_OPTIMIZATION_PLAN.md) | Ideas for faster responses; its "current state" numbers are estimates |
 

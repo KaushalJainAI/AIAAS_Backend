@@ -195,6 +195,28 @@ class InputSanitizationMiddleware(HybridMiddleware):
             if field in body and isinstance(body[field], str):
                 violations.extend(sanitizer.sanitize(body[field]).violations)
 
+        # The platform's own content floor (`core/safety/content_policy.py`):
+        # requests for sexual content involving minors, sexual deepfakes of
+        # real people, or mass-casualty weapons. Refused the same way as an
+        # injection — before the view, never saved — with its own code so the
+        # client can say why.
+        from core.safety.content_policy import check_text
+
+        for field in self.SANITIZE_FIELDS:
+            if field in body and isinstance(body[field], str):
+                refused = check_text(body[field], where=f'request {field}')
+                if refused is not None:
+                    request._blocked_violations = [SecurityViolation(
+                        pattern_name=f'content_policy:{refused.category}',
+                        matched_text='', severity='critical', action_taken='blocked')]
+                    return JsonResponse({
+                        'error': refused.message,
+                        'message': refused.message,
+                        'code': 'CONTENT_POLICY',
+                        'category': refused.category,
+                        'saved': False,
+                    }, status=400)
+
         blocked = [v for v in violations if v.action_taken == 'blocked']
 
         if blocked and self.BLOCK_ON_VIOLATION:

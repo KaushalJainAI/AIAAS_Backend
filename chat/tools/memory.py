@@ -86,6 +86,29 @@ async def remember_about_user(args: Dict, context: Dict) -> str:
     if not text:
         return json.dumps({"error": "Give the fact to remember."})
 
+    # Memory poisoning (OWASP ASI06): a stored fact rides in every future
+    # system prompt, so one planted by a web page or an email would steer
+    # every later conversation. Two refusals, neither of which a real
+    # preference ever trips. A turn that has read instruction-shaped text
+    # (`tools_node` sets `tainted_by`) may not write memory at all — the user
+    # can repeat the fact in a clean turn — and a "fact" that is itself an
+    # instruction to an AI is never a fact about the person.
+    from core.safety.provenance import instruction_shaped
+
+    if context.get("tainted_by"):
+        return json.dumps({
+            "error": (
+                f"Not stored: a {context['tainted_by']} result in this turn "
+                "contained text addressed to an AI, so memory is read-only for "
+                "the rest of the turn. If the user wants this remembered, they "
+                "can say it again in a new message."
+            ),
+        })
+    if instruction_shaped(text):
+        return json.dumps({
+            "error": "Not stored: that reads as an instruction, not a fact about the user.",
+        })
+
     row, created = await sync_to_async(user_memory.remember)(
         user, text, (args.get("category") or "context").strip().lower(),
     )

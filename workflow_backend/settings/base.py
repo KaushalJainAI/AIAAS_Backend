@@ -436,6 +436,10 @@ AGENT_CHECKPOINT_DSN = os.environ.get('AGENT_CHECKPOINT_DSN', '')
 RUN_RECOVERY_SWEEP_SECONDS = int(
     os.environ.get('RUN_RECOVERY_SWEEP_SECONDS', '600')
 )
+# How often the run-detail retention sweep runs (daily; retention is in days).
+RUN_DETAIL_RETENTION_SWEEP_SECONDS = int(
+    os.environ.get('RUN_DETAIL_RETENTION_SWEEP_SECONDS', '86400')
+)
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -683,7 +687,24 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'missions.sweep_missions',
         'schedule': 300,
     },
+    # Daily: reasoning and tool payloads of finished runs age out after
+    # RUN_DETAIL_RETENTION_DAYS (storage limitation, DPDP/GDPR). Also runnable
+    # as `manage.py purge_run_detail` — see logs/retention.py.
+    'redact-old-run-detail': {
+        'task': 'logs.redact_old_run_detail',
+        'schedule': RUN_DETAIL_RETENTION_SWEEP_SECONDS,
+    },
 }
+
+# ── Safety and guardrails (Backend/docs/SAFETY_AND_GUARDRAILS.md) ──
+# How long a finished run keeps its reasoning and tool payloads. 180 days is
+# the EU AI Act's six-month log floor; the run row itself is kept.
+RUN_DETAIL_RETENTION_DAYS = int(os.environ.get('RUN_DETAIL_RETENTION_DAYS', '180'))
+# Messages an account's agents may send in 24 hours, across every channel.
+OUTBOUND_DAILY_CAP = int(os.environ.get('OUTBOUND_DAILY_CAP', '100'))
+# When an outbound message says it was sent by an AI: `unattended` (no person
+# reviewed it), `always`, or `never`. See core/safety/outbound.py.
+OUTBOUND_AI_DISCLOSURE = os.environ.get('OUTBOUND_AI_DISCLOSURE', 'unattended')
 
 # How long a trashed folder or document stays restorable before the sweep
 # purges it for good. Policy, not a shape cap, so it lives here and is

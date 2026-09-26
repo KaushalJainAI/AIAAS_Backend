@@ -30,11 +30,13 @@ Full design: [`docs/AGENT_OBSERVABILITY.md`](../docs/AGENT_OBSERVABILITY.md).
 |---|---|
 | `models.py` | The tables above |
 | `queries.py` | **Every** database read behind `/api/logs/`. Views stay thin |
-| `views.py`, `urls.py` | `/api/logs/`: insights, run history, revisions |
+| `views.py`, `urls.py` | `/api/logs/`: insights, run history, revisions. Run cleanup lives here too: delete one run, delete many, mark a stuck run failed |
+| `activity.py`, `activity_urls.py` | `/api/activity/`: everything live + recent file activity for the Activity page (read-only unions over logs/eval/chat/inference rows) |
 | `revisions.py` | Saving a new revision only when settings really changed |
 | `costs.py` | The only writer of `CostEntry` |
 | `failures.py` | One-word reasons a run failed |
 | `signals_api.py` | Recording implicit quality signals |
+| `retention.py`, `tasks.py` | After 180 days, clears a finished run's reasoning and tool data, but keeps the run itself (`manage.py purge_run_detail`) |
 
 **Who writes the run records?** Not this app. `agents/agent/runtime.py`
 creates the `ExecutionLog` when a run opens, and `agents/agent/stream.py`
@@ -43,4 +45,5 @@ writes each `AgentTurn` and `AgentStep` while the run happens.
 ## Tests
 
 `logs/tests/`: `test_turns.py`, `test_delegation.py`, `test_revisions.py`,
-`test_ledger.py`, `test_checkpoints.py`.
+`test_ledger.py`, `test_checkpoints.py`, `test_run_delete.py`,
+`test_retention.py`, `test_activity_live.py`.

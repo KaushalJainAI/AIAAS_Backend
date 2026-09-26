@@ -67,3 +67,30 @@ class RevisionListFilterSerializer(serializers.Serializer):
         default=20, min_value=1, max_value=REVISION_TIMELINE_LIMIT
     )
     cursor = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+
+
+class BulkDeleteSerializer(serializers.Serializer):
+    """One of `{ids}` or `{status, older_than_days}` — never neither.
+
+    `ids` are execution UUIDs as strings (validated as UUIDs here so a typo
+    400s rather than silently matching nothing). `status` is limited to
+    terminal failure states: deleting finished work in bulk is for clearing
+    failures and old noise, not for wiping successes by accident.
+    """
+
+    ids = serializers.ListField(
+        child=serializers.UUIDField(), max_length=200, required=False,
+    )
+    status = serializers.ChoiceField(
+        choices=['failed', 'cancelled', 'timeout'], required=False,
+    )
+    older_than_days = serializers.IntegerField(
+        min_value=1, max_value=365, required=False,
+    )
+
+    def validate(self, data):
+        if not data.get('ids') and not data.get('status'):
+            raise serializers.ValidationError(
+                'Pass `ids` or `status` (with optional `older_than_days`).'
+            )
+        return data

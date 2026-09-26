@@ -88,6 +88,8 @@ _BUILTIN_PHRASES = {
     'edit_file': 'Edit a file',
     'delete_file': 'Delete a file',
     'make_directory': 'Create a folder',
+    'move_file': 'Move or rename a file',
+    'copy_file': 'Copy a file',
     'run_agent': 'Hand this work to another agent',
     'invoke_subagent': 'Hand this work to another agent',
     'create_agent': 'Create a new agent',

@@ -139,6 +139,13 @@ ignore_imports =
     # `MAX_DELEGATION_DEPTH`, one constant. `agents/agent/orchestrator.py`
     # imports only the standard library, so this pulls in nothing else.
     logs.queries -> agents.agent.orchestrator
+    # `/api/activity/` unions live rows for one page. All three are
+    # function-level reads of registries/models, never the runtimes:
+    # the in-process code-task registry, the in-process chat-turn
+    # registry, and eval's sweep/world rows.
+    logs.activity -> agents.agent.tasks
+    logs.activity -> chat.turn.runs
+    logs.activity -> eval.models
 
 
 [importlinter:contract:views-are-not-a-library]

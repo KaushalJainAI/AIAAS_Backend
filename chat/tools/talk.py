@@ -403,6 +403,14 @@ async def message_send(args: Dict, context: Dict) -> str:
         await alimit(context, 'message_send', 'maxPerRecipient'))
     if refused:
         return json.dumps({'error': refused})
+    # One floor across every channel and every run: content policy, a daily
+    # cap per account, and an AI disclosure on unreviewed messages.
+    from core.safety import outbound
+
+    refused = await sync_to_async(outbound.check)(user_id, body)
+    if refused:
+        return json.dumps({'error': refused})
+    body = outbound.disclose(body, context)
 
     try:
         account = await _account(user_id, channel)

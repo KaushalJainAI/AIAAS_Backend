@@ -211,6 +211,13 @@ async def _prune_chat_checkpoints():
     return await prune_chat_checkpoints()
 
 
+async def _run_detail_retention():
+    # Storage limitation: a finished run's reasoning and tool payloads age out
+    # after RUN_DETAIL_RETENTION_DAYS; the run record stays. `logs/retention.py`.
+    from logs.retention import run_retention_sweep
+    return await sync_to_async(run_retention_sweep)()
+
+
 PERIODIC_JOBS: tuple[PeriodicJob, ...] = (
     PeriodicJob('notifications.sweep_scheduled', 'SCHEDULED_SWEEP_SECONDS',
                 _scheduled_notifications),
@@ -220,6 +227,8 @@ PERIODIC_JOBS: tuple[PeriodicJob, ...] = (
     PeriodicJob('orchestrator.recover_runs', 'RUN_RECOVERY_SWEEP_SECONDS', _recover_runs),
     PeriodicJob('orchestrator.prune_chat_checkpoints', 'RUN_RECOVERY_SWEEP_SECONDS',
                 _prune_chat_checkpoints),
+    PeriodicJob('logs.redact_old_run_detail', 'RUN_DETAIL_RETENTION_SWEEP_SECONDS',
+                _run_detail_retention),
 )
 
 #: Beat entries this loop deliberately does not run, and why.

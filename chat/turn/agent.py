@@ -1166,7 +1166,11 @@ async def _on_todos(
     if not isinstance(items, list):
         return
     meta["todos"] = items
-    await sink(Event.TODOS_UPDATE, {"todos": items})
+    # Every revision is kept for the person watching, because the list is
+    # replaced wholesale and a step dropped unfinished would otherwise look
+    # exactly like progress (`todos.record_revision`).
+    revision = todos.record_revision(meta, items)
+    await sink(Event.TODOS_UPDATE, {"todos": items, "revision": revision})
 
 
 #: How much of one edit's before/after text a file card keeps. The card shows a
@@ -1853,6 +1857,13 @@ async def _plan_calls(batch: _Batch) -> None:
         entry = {"tool": call.name, "args": arguments, "iteration": batch.iteration,
                  "thought": batch.reasoning, "summary": batch.reasoning,
                  "call_id": call.id}
+        # Filed under the plan step in progress when the call was made, so the
+        # plan can show what each step actually did. The plan as it stood at
+        # the start of this batch: an `update_todos` in the same batch applies
+        # after, and it is not itself work on a step.
+        if call.name != "update_todos" and (
+                step := todos.current_step(batch.meta.get("todos") or [])):
+            entry["step"] = step
         # An `auto` reviewer that let this through (or asked about it) leaves
         # its audit on the trace entry, so the run stays auditable afterwards.
         if (approval := _audit(batch, call.name, arguments)) is not None:

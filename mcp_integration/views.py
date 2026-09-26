@@ -217,6 +217,42 @@ class MCPServerViewSet(viewsets.ModelViewSet):
             return Response(self.get_serializer(server).data)
         return self._write_preference(server, enabled)
 
+    # ---- Pinned tool definitions (tool poisoning / rug pull) ----
+
+    @action(detail=False, methods=["get"], url_path="held-tools")
+    def held_tools(self, request):
+        """Every tool withheld until the user reviews it, grouped by
+        connection: new ones whose description addresses an AI, and ones a
+        server changed after the user connected it. One request for the whole
+        Connections page. See `pinning.py`."""
+        from .models import MCPToolPin
+        from .pinning import held
+
+        server_ids = (MCPToolPin.objects.filter(user=request.user)
+                      .exclude(status='trusted')
+                      .values_list('server_id', flat=True).distinct())
+        servers = {s.id: s.name for s in self.get_queryset().filter(id__in=list(server_ids))}
+        return Response({"servers": [
+            {"server_id": sid, "server_name": name, "tools": held(sid, request.user.id)}
+            for sid, name in servers.items()
+        ]})
+
+    @action(detail=True, methods=["post"], url_path="held-tools/approve")
+    def approve_held_tool(self, request, pk=None):
+        """Trust one held tool in its current form."""
+        from .pinning import approve, held
+
+        server = self.get_object()
+        name = str(request.data.get("tool_name") or "").strip()
+        if not name:
+            return Response({"tool_name": "Required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not approve(server.id, request.user.id, name):
+            return Response({"error": "Nothing is held under that name."},
+                            status=status.HTTP_404_NOT_FOUND)
+        # The next turn should see it: drop the cached listing.
+        async_to_sync(MCPToolCache.invalidate)(server.id, request.user.id)
+        return Response({"approved": name, "held": held(server.id, request.user.id)})
+
     # ---- Tool discovery / credential diagnostics ----
 
     @action(detail=True, methods=["get"])

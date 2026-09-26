@@ -345,6 +345,25 @@ def child_by_name(user, parent: Folder | None, name: str) -> Folder | None:
     return Folder.objects.filter(user=user, parent=parent, name=name).first()
 
 
+def other_case_children(user, parent: Folder | None, name: str, *, limit: int = 2) -> list[str]:
+    """Names of live child folders equal to `name` ignoring case, but not exactly.
+
+    For `vfs`'s "did you mean" hint and its reuse of `Reports/` for
+    `reports/`. Still a parent/child edge from a resolved folder, like
+    `child_by_name`; only the comparison is looser.
+    """
+    return list(
+        Folder.objects.filter(user=user, parent=parent, name__iexact=name)
+        .exclude(name=name).values_list('name', flat=True)[:limit]
+    )
+
+
+def folder_name_taken(user, parent: Folder | None, name: str, *, exclude_pk=None) -> bool:
+    """Whether a live child of `parent` is already called `name`."""
+    return Folder.objects.filter(user=user, parent=parent, name=name) \
+        .exclude(pk=exclude_pk).exists()
+
+
 def ensure_folder(user, name: str, parent: Folder | None) -> Folder:
     """`child_by_name`, creating the folder if it is not there yet.
 

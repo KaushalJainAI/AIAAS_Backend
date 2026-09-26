@@ -28,6 +28,7 @@ Design: [`docs/MCP_ARCHITECTURE.md`](../docs/MCP_ARCHITECTURE.md).
 | `client.py` | Opens connections to MCP servers, keeps a small pool of them, lists and calls tools |
 | `tool_provider.py` | Turns MCP tools into tools the AI loop can call |
 | `tool_cache.py` | Caches tool lists: Redis first, then the database, then asking the server |
+| `pinning.py` | Remembers what each tool looked like when you connected it. A tool that later changes, or whose description tries to instruct the AI, is held until you allow it on Connections |
 | `credential_injector.py` | Fills in the user's credentials when a server starts (env vars, headers or a temp file) |
 | `supervisor.py` | A memory budget for local MCP processes, so they can't crash the server |
 | `launch.py` | How a local server process is started |

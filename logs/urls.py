@@ -19,7 +19,11 @@ urlpatterns = [
 
     # Execution history
     path('executions/', views.execution_list, name='execution_list'),
+    # Before `<str:execution_id>/`: the converter would swallow this segment.
+    path('executions/bulk-delete/', views.execution_bulk_delete, name='execution_bulk_delete'),
     path('executions/<str:execution_id>/', views.execution_detail, name='execution_detail'),
+    path('executions/<str:execution_id>/mark-failed/', views.execution_mark_failed,
+         name='execution_mark_failed'),
 
     # Judgement — explicit thumbs and implicit signals.
     path('feedback/', views.feedback, name='feedback'),

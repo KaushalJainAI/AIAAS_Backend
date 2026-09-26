@@ -64,6 +64,11 @@ urlpatterns = [
     
     # Logs (insights, audit, executions)
     path('api/logs/', include('logs.urls')),
+
+    # Activity (live processes, recent file activity) — read-only unions over
+    # logs/eval/chat/inference rows for the Activity page. Lives in logs/ as
+    # the lowest layer that can read these models.
+    path('api/activity/', include('logs.activity_urls')),
     
     # Inference (documents, RAG)
     path('api/inference/', include('inference.urls')),
