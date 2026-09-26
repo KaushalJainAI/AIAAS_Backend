@@ -20,3 +20,10 @@ the Activity page in the web app (`src/pages/Runs.tsx`, through
 `src/api/missions.ts`). `/missions` redirects to `/runs`.
 
 Management command: `run_missions`.
+
+> **Known gap (2026-09-26):** nothing runs the mission sweep in production.
+> The in-process scheduler runs every other periodic job, but this one waits
+> for each run to finish (`start_agent_run_and_wait`), which would hold a
+> web-server thread for up to two hours. Until `sweep.py` starts runs detached
+> (like `agents/scheduler.py::launch`), a mission starts its first run and does
+> not advance. See `NOT_IN_PROCESS` in `agents/scheduler.py`.

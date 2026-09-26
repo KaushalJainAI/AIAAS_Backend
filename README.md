@@ -49,8 +49,8 @@ flowchart LR
     T --> KB[(Files + RAG)]
     RT --> CK[(Checkpoints<br/>durable run state)]
     RT --> LOG[(Run / turn / step logs)]
-    SCH[In-process scheduler] --> RT
-    BEAT[Celery beat or<br/>manage.py commands] --> SW[Sweeps: HITL reminders,<br/>run recovery, recycle bin]
+    SCH[In-process scheduler<br/>one lease, every periodic job] --> RT
+    SCH --> SW[Sweeps: reminders, run recovery,<br/>recycle bin, checkpoint pruning]
     SW --> RT
 ```
 
@@ -75,9 +75,11 @@ python manage.py migrate
 python manage.py runserver 0.0.0.0:8000
 ```
 
-Redis and Celery are optional in development. Schedules fire from a loop inside
-the server process, and every other background sweep is also a management
-command (`send_hitl_reminders`, `recover_runs`, `purge_recycle_bin`).
+Redis and Celery are optional, in development and in production. One loop
+inside the server process (`agents/scheduler.py`) fires schedules and runs every
+other periodic job: reminders, run recovery, the recycle-bin purge. Each is
+also a management command (`send_hitl_reminders`, `recover_runs`,
+`purge_recycle_bin`) for running by hand.
 
 ## Tests
 
@@ -97,7 +99,8 @@ was caught.
 | Error reporting | Sentry, enabled by `SENTRY_DSN` (`workflow_backend/observability.py`) |
 | Backups | `pg_dump -Fc` from the database container before every deploy; `python manage.py backup_db` for SQLite installs (online snapshot, gzip, retention, optional S3 upload) |
 | Health check | `GET /api/health/` |
-| Crashed runs | `recover_runs` resumes or closes runs orphaned by a restart |
+| Crashed runs | Run recovery (every 10 min, in-process) resumes or closes runs orphaned by a restart |
+| Restarts | `manage.py boot` then `exec daphne`: ~11 s from start to serving, 1.3 s to stop (see `learning/16_deploy_downtime_and_background_work.md`) |
 | Cost control | Per-user credits on the platform key (`llm/credits.py`); per-agent monthly spend caps |
 
 ## Project layout

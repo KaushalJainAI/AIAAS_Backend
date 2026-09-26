@@ -51,7 +51,8 @@ The records of *what a run did* live in the `logs` app, not here.
 | `contracts.py` | Output shapes an agent can be required to return (`output_schema`) |
 | `connector_scope.py` | Which connections, and which of their tools, an agent may use |
 | `triggers.py` | Cron parsing, "when does this fire next", and describing a schedule in words |
-| `scheduler.py`, `sweep.py`, `tasks.py` | Firing due schedules (in-process loop, shared logic, Celery entry) |
+| `scheduler.py` | **The in-process loop.** Every 30 s, in the one process holding the lease: fire due schedules, then start any other periodic job that is due (`PERIODIC_JOBS`: reminders, run recovery, recycle-bin purge, checkpoint pruning). `NOT_IN_PROCESS` lists the jobs it skips and why |
+| `sweep.py`, `tasks.py` | The shared schedule-firing rules, and the Celery entry points (for deployments that run Celery beat instead) |
 | `recovery.py` | Finding runs whose process died, and resuming or closing them |
 | `admission.py`, `budget.py`, `spend.py` | Limits: how many runs at once, how long, how much money |
 | `stock.py` | Built-in agent configs |
@@ -73,7 +74,8 @@ The records of *what a run did* live in the `logs` app, not here.
 - `run_due_triggers`: fire due schedules once, by hand. You rarely need it:
   schedules already fire from a loop inside the server process (`scheduler.py`),
   with no Celery or crontab needed.
-- `recover_runs`: clean up runs orphaned by a restart.
+- `recover_runs`: clean up runs orphaned by a restart. The loop already does
+  this every 10 minutes; use the command to look (`--dry-run`) or to force it.
 - `install_packs`: install template packs into an account.
 
 ## Tests

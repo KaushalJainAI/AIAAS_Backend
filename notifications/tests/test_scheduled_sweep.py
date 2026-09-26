@@ -112,3 +112,36 @@ class ScheduledSweepTests(TestCase):
         self.assertEqual(result, {'sent': 1})
         self.assertEqual(
             ScheduledNotification.objects.filter(active=True).count(), 1)
+
+    def test_two_sweeps_at_once_send_a_reminder_only_once(self):
+        # A deploy can leave the old cron job and the in-process scheduler
+        # sweeping in the same minute. The second sweep runs *during* the
+        # first one's delivery — the worst moment — and must find nothing.
+        self._reminder()
+        from notifications import utils
+
+        real_create = utils.create_notification
+        inner: dict = {}
+
+        def deliver_and_race(*args, **kwargs):
+            inner.setdefault('result', run_scheduled_sweep())
+            return real_create(*args, **kwargs)
+
+        with patch('notifications.utils.create_notification', side_effect=deliver_and_race):
+            outer = run_scheduled_sweep()
+        self.assertEqual(outer, {'sent': 1})
+        self.assertEqual(inner['result'], {'sent': 0})
+        self.assertEqual(Notification.objects.count(), 1)
+
+    def test_a_failed_firing_is_handed_back_intact(self):
+        due = timezone.now() - timedelta(minutes=5)
+        row = self._reminder(repeat='hourly', next_run_at=due)
+        with patch('notifications.utils.create_notification', side_effect=Exception('down')):
+            self.assertEqual(run_scheduled_sweep(), {'sent': 0})
+        row.refresh_from_db()
+        # Exactly as it was: still due, not counted, so the next sweep retries.
+        self.assertTrue(row.active)
+        self.assertEqual(row.next_run_at, due)
+        self.assertEqual(row.times_sent, 0)
+        self.assertIsNone(row.last_sent_at)
+        self.assertEqual(run_scheduled_sweep(), {'sent': 1})

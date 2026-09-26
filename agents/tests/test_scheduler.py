@@ -354,3 +354,101 @@ class SchedulerHealthTests(APITestCase):
             beat_at=now, expires_at=now + timedelta(seconds=90))
         response = self.client.get(self.url)
         self.assertTrue(response.data['running'])
+
+
+class _FakeTask:
+    """Stands in for a spawned job: done or not, on demand."""
+
+    def __init__(self):
+        self.finished = False
+
+    def done(self):
+        return self.finished
+
+
+class PeriodicJobTests(TestCase):
+    """The loop also runs the app's other periodic jobs (2026-09-26).
+
+    Production runs no Celery, so a beat entry nothing else runs simply never
+    happens there: run recovery, the recycle-bin purge and checkpoint pruning
+    ran nowhere, and the notification sweeps ran from cron as extra Django
+    processes inside the backend's memory limit.
+    """
+
+    def setUp(self):
+        scheduler._last_started.clear()
+        scheduler._running.clear()
+        self.spawned: list = []
+
+        def fake_spawn(coro, *, name=None):
+            coro.close()  # never awaited in these tests
+            task = _FakeTask()
+            self.spawned.append((name, task))
+            return task
+
+        patcher = patch.object(scheduler, 'spawn', side_effect=fake_spawn)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(scheduler._last_started.clear)
+        self.addCleanup(scheduler._running.clear)
+
+    def test_every_beat_entry_runs_in_process_or_says_why_not(self):
+        from django.conf import settings
+
+        beat = {entry['task']: entry['schedule']
+                for entry in settings.CELERY_BEAT_SCHEDULE.values()}
+        in_process = {job.task for job in scheduler.PERIODIC_JOBS}
+        self.assertEqual(
+            set(beat), in_process | set(scheduler.NOT_IN_PROCESS),
+            'A periodic job is in CELERY_BEAT_SCHEDULE but not in '
+            'agents/scheduler.py (or the reverse). Production runs no Celery, '
+            'so a beat entry alone never runs there: add it to PERIODIC_JOBS, '
+            'or to NOT_IN_PROCESS with the reason it must not run in-process.')
+        self.assertFalse(in_process & set(scheduler.NOT_IN_PROCESS))
+        for job in scheduler.PERIODIC_JOBS:
+            # Same interval beat would use, read from the same setting.
+            self.assertEqual(int(getattr(settings, job.every_setting)), beat[job.task],
+                             job.task)
+
+    def test_all_jobs_start_on_the_first_tick(self):
+        started = scheduler.start_due_jobs(now_monotonic=1000.0)
+        self.assertEqual(started, [job.task for job in scheduler.PERIODIC_JOBS])
+
+    def test_a_job_waits_for_its_interval(self):
+        from django.conf import settings
+
+        scheduler.start_due_jobs(now_monotonic=1000.0)
+        for _, task in self.spawned:
+            task.finished = True
+        self.assertEqual(scheduler.start_due_jobs(now_monotonic=1030.0), [])
+        # The scheduled-notification sweep is the fastest (a minute); only it
+        # is due again after one interval.
+        later = 1000.0 + settings.SCHEDULED_SWEEP_SECONDS
+        self.assertEqual(scheduler.start_due_jobs(now_monotonic=later),
+                         ['notifications.sweep_scheduled'])
+
+    def test_a_job_still_running_is_not_started_twice(self):
+        scheduler.start_due_jobs(now_monotonic=1000.0)
+        # Nothing finished; hours later, every job is due but still running.
+        self.assertEqual(scheduler.start_due_jobs(now_monotonic=1000.0 + 86400), [])
+
+    def test_jobs_run_only_while_this_process_holds_the_lease(self):
+        async def one_tick():
+            with patch.object(scheduler, 'sweep_once') as sweep,                  patch.object(scheduler, 'start_due_jobs') as jobs,                  patch.object(scheduler, 'try_acquire', return_value=False),                  patch.object(scheduler.asyncio, 'sleep', side_effect=RuntimeError('stop')):
+                try:
+                    await scheduler.run_forever()
+                except RuntimeError:
+                    pass
+            return sweep.called, jobs.called
+
+        self.assertEqual(async_to_sync(one_tick)(), (False, False))
+
+
+class PeriodicJobsRunForRealTests(TestCase):
+    """Each job, run for real on an empty database: no import typo, no crash."""
+
+    def test_each_job_runs_and_reports(self):
+        for job in scheduler.PERIODIC_JOBS:
+            with self.subTest(job.task):
+                result = async_to_sync(job.run)()
+                self.assertIsInstance(result, dict, job.task)

@@ -55,22 +55,33 @@ COPY . .
 
 RUN mkdir -p /app/data /app/media /app/staticfiles
 
+# Static files (the Django admin and DRF CSS/JS) are part of the image, so they
+# are collected here, once, rather than on every start: at boot this step was
+# 18 of the 44 seconds a restart spent returning 502s. The settings module
+# refuses to load without these two values; nothing here uses them, and they
+# exist only for this build step (never in the running container). With
+# USE_S3=True, static files belong in the bucket instead — collect them there
+# from a deploy step, not from a build.
+RUN SECRET_KEY=build-only CREDENTIAL_ENCRYPTION_KEY=build-only USE_S3=False \
+    python manage.py collectstatic --noinput --clear
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
     CMD curl --fail http://localhost:8000/api/health/ || exit 1
 
-# collectstatic at boot: regenerates the small Django admin + DRF CSS/JS.
-# If AWS_STORAGE_BUCKET_NAME is set, settings.py routes it to S3.
-# Otherwise it lands in /app/staticfiles and is served locally.
-# migrate at boot, then re-sync the model catalogue (`populate_models` only
-# upserts: existing rows get the seed's prices and effort rungs, hand-added
-# rows survive). Without this the catalogue freezes at whatever the database
-# carried when it was created — which is how production served an empty
-# `effort_levels` on every reasoning model months after the effort feature
-# shipped, and every picker explained that the model "has no setting".
+# `boot` (core/management/commands/boot.py) migrates, then re-syncs the model
+# catalogue once per container (`populate_models` only upserts: existing rows
+# get the seed's prices and effort rungs, hand-added rows survive). Without the
+# re-sync the catalogue freezes at whatever the database carried when it was
+# created — which is how production served an empty `effort_levels` on every
+# reasoning model months after the effort feature shipped. One process, so
+# Django loads once; a crash restart skips the seed and serves in seconds.
+# `exec` makes daphne the container's main process, so `docker stop` reaches
+# it: under `sh -c` without exec the shell ignored SIGTERM and every deploy
+# waited out Docker's 10 s grace, then killed the server mid-request.
 # Serve with daphne, not runserver: runserver enables StatReloader (a file
 # watcher that can restart the process mid-stream, aborting SSE/WS) and is a
 # single-threaded dev server. DJANGO_SETTINGS_MODULE comes from the ENV above
 # (asgi.py only setdefaults it), so this boots deployment settings.
-CMD ["sh", "-c", "python manage.py collectstatic --noinput --clear && python manage.py migrate --noinput && python manage.py shell -c 'import populate_models; populate_models.populate()' && daphne -b 0.0.0.0 -p 8000 workflow_backend.asgi:application"]
+CMD ["sh", "-c", "python manage.py boot && exec daphne -b 0.0.0.0 -p 8000 workflow_backend.asgi:application"]

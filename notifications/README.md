@@ -41,8 +41,14 @@ scheduled reminders a user asks for are the other exception.
 
 ## Management commands
 
-`send_hitl_reminders` (same sweep as Celery, for running without Redis),
-`send_scheduled_notifications`, `generate_vapid_keys` (keys for browser push).
+The two sweeps run inside the server, on the scheduler loop
+(`agents/scheduler.py`); no cron is needed. `send_hitl_reminders` and
+`send_scheduled_notifications` run the same sweeps by hand.
+`generate_vapid_keys` makes the keys for browser push.
+
+The scheduled sweep **claims each firing before sending it**, so two sweeps
+running at once (say the loop and a manual run) never send a reminder twice.
+If sending fails, the claim is handed back and the next sweep retries.
 
 ## Tests
 

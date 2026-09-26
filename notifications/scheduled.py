@@ -140,7 +140,20 @@ def run_scheduled_sweep(now: datetime | None = None) -> dict[str, int]:
     One-shot reminders go quiet after firing; repeating ones advance from the
     previous due time so a late sweep cannot shift the heartbeat. Each firing
     is independent — one bad row logs and the sweep moves on.
+
+    **Claim, then send.** Each firing is taken with one conditional UPDATE
+    (still active, still due at the time we read) before anything is
+    delivered, so two sweeps running at once — the in-process scheduler and a
+    leftover `manage.py send_scheduled_notifications`, say, during a deploy —
+    can never send the same reminder twice: the second finds the row already
+    advanced and skips it. A delivery that *fails* hands its claim back, so
+    the next sweep retries it exactly as before. What this gives up is the
+    rare crash between claim and send, which now drops that one firing
+    rather than repeating it; for an in-app reminder a duplicate is the more
+    visible failure (see `learning/16_deploy_downtime_and_background_work.md`).
     """
+    from django.db.models import F
+
     from .models import ScheduledNotification
 
     now = now or timezone.now()
@@ -151,24 +164,29 @@ def run_scheduled_sweep(now: datetime | None = None) -> dict[str, int]:
         .order_by('next_run_at')[:SWEEP_BATCH])
     sent = 0
     for reminder in due:
+        was_due, was_sent = reminder.next_run_at, reminder.last_sent_at
+        offset = ScheduledNotification.REPEAT_OFFSETS.get(reminder.repeat)
+        # A repeat advances from its due time; a one-shot goes quiet.
+        next_run = was_due + timedelta(seconds=offset) if offset else None
+        claimed = ScheduledNotification.objects.filter(
+            pk=reminder.pk, active=True, next_run_at=was_due,
+        ).update(
+            next_run_at=next_run, active=bool(offset), last_sent_at=now,
+            times_sent=F('times_sent') + 1, updated_at=now,
+        )
+        if not claimed:
+            continue  # another sweep took this firing, or it was cancelled
         try:
             _deliver(reminder, now)
-            offset = ScheduledNotification.REPEAT_OFFSETS.get(reminder.repeat)
-            if offset:
-                reminder.next_run_at = reminder.next_run_at + timedelta(seconds=offset)
-                reminder.last_sent_at = now
-                reminder.times_sent += 1
-                reminder.save(update_fields=[
-                    'next_run_at', 'last_sent_at', 'times_sent', 'updated_at'])
-            else:
-                reminder.active = False
-                reminder.next_run_at = None
-                reminder.last_sent_at = now
-                reminder.times_sent += 1
-                reminder.save(update_fields=[
-                    'active', 'next_run_at', 'last_sent_at', 'times_sent',
-                    'updated_at'])
             sent += 1
         except Exception:
             logger.exception('[Scheduled] firing reminder %s failed', reminder.id)
+            # Hand the claim back so the next sweep retries it. Conditional on
+            # still holding what we wrote, so a cancel in between is kept.
+            ScheduledNotification.objects.filter(
+                pk=reminder.pk, active=bool(offset), next_run_at=next_run,
+            ).update(
+                next_run_at=was_due, active=True, last_sent_at=was_sent,
+                times_sent=F('times_sent') - 1, updated_at=now,
+            )
     return {'sent': sent}
